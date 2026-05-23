@@ -16,7 +16,7 @@ use serialport::{available_ports, SerialPortInfo, SerialPortType};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Mutex;
 use tokio::time::timeout;
-use tokio_serial::{SerialPortBuilderExt, SerialStream};
+use tokio_serial::{ClearBuffer, SerialPort, SerialPortBuilderExt, SerialStream};
 use uuid::Uuid;
 
 use crate::error::{Result, SerialError};
@@ -214,6 +214,57 @@ impl SerialConnection {
                 Err(_elapsed) => Err(SerialError::ReadTimeout),
             },
             None => Ok(stream.read(dst).await?),
+        }
+    }
+
+    /// Discard data buffered in the OS for the input, output, or both
+    /// directions of this port.
+    pub async fn flush_buffers(&self, target: FlushTarget) -> Result<()> {
+        let stream = self.stream.lock().await;
+        stream.clear(target.into()).map_err(SerialError::from)
+    }
+
+    /// Drive the DTR and RTS control lines. Common use case: pulse DTR low
+    /// to soft-reset an Arduino, or hold both low to enter the ESP32
+    /// bootloader.
+    pub async fn set_dtr_rts(&self, dtr: bool, rts: bool) -> Result<()> {
+        let mut stream = self.stream.lock().await;
+        stream.write_data_terminal_ready(dtr)?;
+        stream.write_request_to_send(rts)?;
+        Ok(())
+    }
+
+    /// Assert the BREAK condition on the TX line for `duration_ms`
+    /// milliseconds, then release it.
+    pub async fn send_break(&self, duration_ms: u64) -> Result<()> {
+        let stream = self.stream.lock().await;
+        stream.set_break()?;
+        drop(stream);
+        tokio::time::sleep(Duration::from_millis(duration_ms)).await;
+        let stream = self.stream.lock().await;
+        stream.clear_break()?;
+        Ok(())
+    }
+}
+
+/// Which OS-side buffer(s) a flush should clear.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum FlushTarget {
+    /// Bytes the OS has received from the device but the app has not yet read.
+    Input,
+    /// Bytes the app has queued but the OS has not yet sent to the device.
+    Output,
+    /// Both input and output buffers.
+    Both,
+}
+
+impl From<FlushTarget> for ClearBuffer {
+    fn from(value: FlushTarget) -> Self {
+        match value {
+            FlushTarget::Input => ClearBuffer::Input,
+            FlushTarget::Output => ClearBuffer::Output,
+            FlushTarget::Both => ClearBuffer::All,
         }
     }
 }

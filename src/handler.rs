@@ -19,8 +19,8 @@ use tracing::{debug, error, info};
 use crate::codec::{self, Encoding};
 use crate::error::SerialError;
 use crate::serial::{
-    ConnectionConfig, ConnectionManager, DataBits, FlowControl, Parity, PortInfo, SerialConnection,
-    StopBits,
+    ConnectionConfig, ConnectionManager, DataBits, FlowControl, FlushTarget, Parity, PortInfo,
+    SerialConnection, StopBits,
 };
 
 /// Default read timeout used in the response when the caller did not specify one.
@@ -66,12 +66,35 @@ pub struct ReadArgs {
     pub encoding: String,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct FlushArgs {
+    pub connection_id: String,
+    #[serde(default = "default_flush_target")]
+    pub target: FlushTarget,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SetDtrRtsArgs {
+    pub connection_id: String,
+    pub dtr: bool,
+    pub rts: bool,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SendBreakArgs {
+    pub connection_id: String,
+    #[serde(default = "default_break_duration_ms")]
+    pub duration_ms: u64,
+}
+
 fn default_data_bits() -> String { "8".into() }
 fn default_stop_bits() -> String { "1".into() }
 fn default_parity() -> String { "none".into() }
 fn default_flow_control() -> String { "none".into() }
 fn default_encoding() -> String { "utf8".into() }
 fn default_max_bytes() -> usize { 1024 }
+fn default_flush_target() -> FlushTarget { FlushTarget::Both }
+fn default_break_duration_ms() -> u64 { 250 }
 
 // ---- Tool response structs --------------------------------------------------
 
@@ -108,6 +131,25 @@ pub struct ReadResult {
     pub data: String,
     pub timed_out: bool,
     pub timeout_ms: u64,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct FlushResult {
+    pub connection_id: String,
+    pub target: FlushTarget,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct SetDtrRtsResult {
+    pub connection_id: String,
+    pub dtr: bool,
+    pub rts: bool,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct SendBreakResult {
+    pub connection_id: String,
+    pub duration_ms: u64,
 }
 
 // ---- Handler ---------------------------------------------------------------
@@ -206,6 +248,73 @@ impl SerialHandler {
         let connection = self.lookup_connection(&args.connection_id).await?;
         let outcome = read_bytes(&connection, args.max_bytes, args.timeout_ms).await?;
         build_read_result(outcome, args.connection_id, encoding, args.timeout_ms)
+    }
+
+    #[tool(
+        description = "Discard buffered serial data. target=input clears OS read buffer (data the device sent that the app hasn't consumed); target=output clears the OS write queue; target=both clears both."
+    )]
+    async fn flush(
+        &self,
+        Parameters(args): Parameters<FlushArgs>,
+    ) -> Result<Json<FlushResult>, String> {
+        debug!("Flush {} target={:?}", args.connection_id, args.target);
+        let connection = self.lookup_connection(&args.connection_id).await?;
+        connection.flush_buffers(args.target).await.map_err(|e| {
+            log_tool_err(
+                "flush",
+                &format!("Failed to flush {}", args.connection_id),
+                e,
+            )
+        })?;
+        info!("Flushed {} ({:?})", args.connection_id, args.target);
+        Ok(Json(FlushResult { connection_id: args.connection_id, target: args.target }))
+    }
+
+    #[tool(
+        description = "Set the DTR and RTS modem-control lines. Common patterns: pulse DTR low for Arduino auto-reset; hold both low to enter ESP32 bootloader."
+    )]
+    async fn set_dtr_rts(
+        &self,
+        Parameters(args): Parameters<SetDtrRtsArgs>,
+    ) -> Result<Json<SetDtrRtsResult>, String> {
+        debug!("set_dtr_rts {} dtr={} rts={}", args.connection_id, args.dtr, args.rts);
+        let connection = self.lookup_connection(&args.connection_id).await?;
+        connection.set_dtr_rts(args.dtr, args.rts).await.map_err(|e| {
+            log_tool_err(
+                "set_dtr_rts",
+                &format!("Failed to set control lines on {}", args.connection_id),
+                e,
+            )
+        })?;
+        info!("Control lines on {} set to dtr={} rts={}", args.connection_id, args.dtr, args.rts);
+        Ok(Json(SetDtrRtsResult {
+            connection_id: args.connection_id,
+            dtr: args.dtr,
+            rts: args.rts,
+        }))
+    }
+
+    #[tool(
+        description = "Assert a BREAK condition on the TX line for duration_ms milliseconds (default 250ms), then release it. Used to signal attention on some legacy serial protocols."
+    )]
+    async fn send_break(
+        &self,
+        Parameters(args): Parameters<SendBreakArgs>,
+    ) -> Result<Json<SendBreakResult>, String> {
+        debug!("send_break {} duration={}ms", args.connection_id, args.duration_ms);
+        let connection = self.lookup_connection(&args.connection_id).await?;
+        connection.send_break(args.duration_ms).await.map_err(|e| {
+            log_tool_err(
+                "send_break",
+                &format!("Failed to send break on {}", args.connection_id),
+                e,
+            )
+        })?;
+        info!("Sent break on {} for {}ms", args.connection_id, args.duration_ms);
+        Ok(Json(SendBreakResult {
+            connection_id: args.connection_id,
+            duration_ms: args.duration_ms,
+        }))
     }
 }
 
