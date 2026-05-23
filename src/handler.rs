@@ -129,10 +129,10 @@ impl SerialHandler {
     }
 
     #[tool(description = "List all available serial ports on the system")]
-    async fn list_ports(&self) -> Result<Json<ListPortsResult>, McpError> {
+    async fn list_ports(&self) -> Result<Json<ListPortsResult>, String> {
         debug!("Listing serial ports");
         let ports = PortInfo::list_available()
-            .map_err(|e| log_and_internal_err("list_ports", "Failed to list ports", e))?;
+            .map_err(|e| log_tool_err("list_ports", "Failed to list ports", e))?;
         info!("Found {} serial ports", ports.len());
         Ok(Json(ListPortsResult { count: ports.len(), ports }))
     }
@@ -141,14 +141,14 @@ impl SerialHandler {
     async fn open(
         &self,
         Parameters(args): Parameters<OpenArgs>,
-    ) -> Result<Json<OpenResult>, McpError> {
-        let config = parse_open_args(args).map_err(internal_err)?;
+    ) -> Result<Json<OpenResult>, String> {
+        let config = parse_open_args(args)?;
         let port = config.port.clone();
         let baud_rate = config.baud_rate;
         debug!("Opening {} @ {}", port, baud_rate);
 
         let connection_id = self.connections.open(config).await.map_err(|e| {
-            log_and_internal_err("open", &format!("Failed to open port {}", port), e)
+            log_tool_err("open", &format!("Failed to open port {}", port), e)
         })?;
         info!("Opened connection {} -> {}", connection_id, port);
         Ok(Json(OpenResult { connection_id, port, baud_rate }))
@@ -158,10 +158,10 @@ impl SerialHandler {
     async fn close(
         &self,
         Parameters(args): Parameters<CloseArgs>,
-    ) -> Result<Json<CloseResult>, McpError> {
+    ) -> Result<Json<CloseResult>, String> {
         debug!("Closing {}", args.connection_id);
         self.connections.close(&args.connection_id).await.map_err(|e| {
-            log_and_internal_err(
+            log_tool_err(
                 "close",
                 &format!("Failed to close connection {}", args.connection_id),
                 e,
@@ -175,14 +175,14 @@ impl SerialHandler {
     async fn write(
         &self,
         Parameters(args): Parameters<WriteArgs>,
-    ) -> Result<Json<WriteResult>, McpError> {
+    ) -> Result<Json<WriteResult>, String> {
         debug!("Write to {} ({})", args.connection_id, args.encoding);
         let encoding = parse_encoding(&args.encoding)?;
         let connection = self.lookup_connection(&args.connection_id).await?;
         let bytes = codec::decode(encoding, &args.data)
-            .map_err(|e| internal_err(format!("Data decoding failed - {}", e)))?;
+            .map_err(|e| format!("Data decoding failed - {}", e))?;
         let bytes_written = connection.write(&bytes).await.map_err(|e| {
-            log_and_internal_err(
+            log_tool_err(
                 "write",
                 &format!("Data sending failed on {}", args.connection_id),
                 e,
@@ -200,7 +200,7 @@ impl SerialHandler {
     async fn read(
         &self,
         Parameters(args): Parameters<ReadArgs>,
-    ) -> Result<Json<ReadResult>, McpError> {
+    ) -> Result<Json<ReadResult>, String> {
         debug!("Read from {} (timeout {:?})", args.connection_id, args.timeout_ms);
         let encoding = parse_encoding(&args.encoding)?;
         let connection = self.lookup_connection(&args.connection_id).await?;
@@ -212,11 +212,11 @@ impl SerialHandler {
 // Lookup is split out so the macro-generated tool methods stay focused.
 impl SerialHandler {
     /// Resolve an MCP connection id into a live [`SerialConnection`].
-    async fn lookup_connection(&self, id: &str) -> Result<Arc<SerialConnection>, McpError> {
+    async fn lookup_connection(&self, id: &str) -> Result<Arc<SerialConnection>, String> {
         self.connections
             .get(id)
             .await
-            .map_err(|_| internal_err(format!("Connection ID {} not found", id)))
+            .map_err(|_| format!("Connection ID {} not found", id))
     }
 }
 
@@ -233,7 +233,7 @@ async fn read_bytes(
     connection: &SerialConnection,
     max_bytes: usize,
     timeout_ms: Option<u64>,
-) -> Result<ReadOutcome, McpError> {
+) -> Result<ReadOutcome, String> {
     let mut buf = vec![0u8; max_bytes];
     match connection.read(&mut buf, timeout_ms).await {
         Ok(n) => {
@@ -241,7 +241,7 @@ async fn read_bytes(
             Ok(ReadOutcome { bytes: buf, timed_out: n == 0 })
         }
         Err(SerialError::ReadTimeout) => Ok(ReadOutcome { bytes: Vec::new(), timed_out: true }),
-        Err(e) => Err(log_and_internal_err("read", "Data reading failed", e)),
+        Err(e) => Err(log_tool_err("read", "Data reading failed", e)),
     }
 }
 
@@ -250,7 +250,7 @@ fn build_read_result(
     connection_id: String,
     encoding: Encoding,
     requested_timeout_ms: Option<u64>,
-) -> Result<Json<ReadResult>, McpError> {
+) -> Result<Json<ReadResult>, String> {
     let timeout_ms = requested_timeout_ms.unwrap_or(DEFAULT_READ_TIMEOUT_MS);
     if outcome.timed_out {
         return Ok(Json(ReadResult {
@@ -264,7 +264,7 @@ fn build_read_result(
     }
     let bytes_read = outcome.bytes.len();
     let data = codec::encode(encoding, &outcome.bytes)
-        .map_err(|e| internal_err(format!("Data encoding failed - {}", e)))?;
+        .map_err(|e| format!("Data encoding failed - {}", e))?;
     Ok(Json(ReadResult {
         connection_id,
         bytes_read,
@@ -275,9 +275,9 @@ fn build_read_result(
     }))
 }
 
-fn parse_encoding(raw: &str) -> Result<Encoding, McpError> {
+fn parse_encoding(raw: &str) -> Result<Encoding, String> {
     raw.parse::<Encoding>()
-        .map_err(|e| internal_err(format!("Unsupported encoding - {}", e)))
+        .map_err(|e| format!("Unsupported encoding - {}", e))
 }
 
 /// Strictly parse [`OpenArgs`] into a [`ConnectionConfig`]. An unrecognised
@@ -334,13 +334,11 @@ fn parse_flow_control(raw: &str) -> Result<FlowControl, String> {
 
 // ---- Tiny error builders ----------------------------------------------------
 
-fn internal_err<M: Into<String>>(message: M) -> McpError {
-    McpError::internal_error(format!("Error: {}", message.into()), None)
-}
-
-fn log_and_internal_err<E: std::fmt::Display>(op: &str, context: &str, err: E) -> McpError {
+/// Log a tool-level failure and format a user-visible error string that the
+/// rmcp router will surface as a `CallToolResult { isError: true, ... }`.
+fn log_tool_err<E: std::fmt::Display>(op: &str, context: &str, err: E) -> String {
     error!("{} failed: {}", op, err);
-    internal_err(format!("{} - {}", context, err))
+    format!("{} - {}", context, err)
 }
 
 // ---- ServerHandler boilerplate ----------------------------------------------
