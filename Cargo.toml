@@ -41,3 +41,11 @@ path = "src/bin/http.rs"
 [lib]
 name = "serial_mcp_server"
 path = "src/lib.rs"
+
+[dev-dependencies]
+rmcp = { version = "1.7", features = ["client", "transport-streamable-http-client", "transport-streamable-http-client-reqwest"] }
+tokio = { version = "1.41", features = ["process", "fs"] }
+anyhow = "1.0"
+
+[target.'cfg(unix)'.dev-dependencies]
+nix = { version = "0.29", features = ["term", "fs"] }

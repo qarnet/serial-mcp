@@ -371,11 +371,13 @@ impl ConnectionManager {
         Ok(id)
     }
 
-    /// Test-only: insert an already-built [`SerialConnection`] (typically
-    /// one backed by an in-memory loopback) into the registry. Honors the
-    /// same port-uniqueness invariant as [`Self::open`].
-    #[cfg(test)]
-    pub(crate) async fn insert_for_test(&self, connection: SerialConnection) -> Result<String> {
+    /// Insert an already-built [`SerialConnection`] (typically one backed
+    /// by an in-memory loopback) into the registry. Honours the same
+    /// port-uniqueness invariant as [`Self::open`].
+    ///
+    /// Exposed for integration tests that want to drive the MCP surface
+    /// against a fake connection without going through the OS serial layer.
+    pub async fn insert(&self, connection: SerialConnection) -> Result<String> {
         let mut connections = self.connections.lock().await;
         if is_port_in_use(&connections, connection.port()) {
             return Err(SerialError::ConnectionExists(connection.port().to_string()));
@@ -434,10 +436,12 @@ fn is_port_in_use(connections: &HashMap<String, Arc<SerialConnection>>, port: &s
 
 // ---- Test support ----------------------------------------------------------
 
-/// In-memory implementations of [`SerialIo`] used by the crate's unit tests
-/// and by `handler.rs` tests that need a fake connection.
-#[cfg(test)]
-pub(crate) mod test_support {
+/// In-memory implementations of [`SerialIo`] used by unit and integration
+/// tests that need a fake connection. The module is `pub` so that
+/// integration tests in `tests/` can build a [`SerialConnection`] backed
+/// by a [`tokio::io::DuplexStream`] without going through the OS serial
+/// layer.
+pub mod test_support {
     use std::pin::Pin;
     use std::task::{Context, Poll};
 
@@ -447,7 +451,7 @@ pub(crate) mod test_support {
 
     /// Wraps a [`DuplexStream`] half so it satisfies the [`SerialIo`] trait.
     /// All control-line operations are no-ops.
-    pub(crate) struct LoopbackIo(DuplexStream);
+    pub struct LoopbackIo(DuplexStream);
 
     impl AsyncRead for LoopbackIo {
         fn poll_read(
@@ -495,7 +499,7 @@ pub(crate) mod test_support {
     /// Build an in-memory connection plus the peer end of the duplex.
     /// The peer can be driven directly by the test to push bytes into the
     /// connection's read side or to consume bytes the connection writes.
-    pub(crate) fn loopback_connection(port: &str) -> (SerialConnection, DuplexStream) {
+    pub fn loopback_connection(port: &str) -> (SerialConnection, DuplexStream) {
         let (a, b) = tokio::io::duplex(4096);
         let conn = SerialConnection::from_io(port.to_string(), Box::new(LoopbackIo(a)));
         (conn, b)
@@ -571,9 +575,9 @@ mod tests {
     async fn manager_rejects_duplicate_port() {
         let mgr = ConnectionManager::new();
         let (c1, _p1) = loopback_connection("port-a");
-        mgr.insert_for_test(c1).await.unwrap();
+        mgr.insert(c1).await.unwrap();
         let (c2, _p2) = loopback_connection("port-a");
-        let err = mgr.insert_for_test(c2).await.unwrap_err();
+        let err = mgr.insert(c2).await.unwrap_err();
         assert!(matches!(err, SerialError::ConnectionExists(_)));
     }
 
@@ -581,7 +585,7 @@ mod tests {
     async fn manager_close_then_get_returns_invalid_connection() {
         let mgr = ConnectionManager::new();
         let (c, _p) = loopback_connection("port-z");
-        let id = mgr.insert_for_test(c).await.unwrap();
+        let id = mgr.insert(c).await.unwrap();
         mgr.close(&id).await.unwrap();
         let err = mgr.get(&id).await.unwrap_err();
         assert!(matches!(err, SerialError::InvalidConnection(_)));

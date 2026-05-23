@@ -288,8 +288,17 @@ impl Drop for StreamHandle {
 #[tool_router]
 impl SerialHandler {
     pub fn new() -> Self {
+        Self::with_manager(Arc::new(ConnectionManager::new()))
+    }
+
+    /// Construct a handler with a caller-supplied [`ConnectionManager`].
+    ///
+    /// Used by integration tests that want to pre-populate the registry
+    /// with a fake (in-memory) connection before exposing the handler over
+    /// MCP, instead of going through the OS-level `open` path.
+    pub fn with_manager(connections: Arc<ConnectionManager>) -> Self {
         Self {
-            connections: Arc::new(ConnectionManager::new()),
+            connections,
             streams: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             processor: Arc::new(tokio::sync::Mutex::new(OperationProcessor::new())),
             tool_router: Self::tool_router(),
@@ -982,7 +991,10 @@ impl ServerHandler for SerialHandler {
                 .enable_logging()
                 .build(),
         )
-        .with_server_info(Implementation::from_build_env())
+        .with_server_info(Implementation::new(
+            env!("CARGO_PKG_NAME"),
+            env!("CARGO_PKG_VERSION"),
+        ))
         .with_protocol_version(ProtocolVersion::V_2024_11_05)
         .with_instructions(
             "A serial port communication MCP server. Use list_ports to discover available serial ports, then open connections to communicate with serial devices. Resources: serial://ports, serial://connections, serial://connections/{id}. Prompts: diagnose_port, interactive_terminal. Subscribe to live RX bytes with the subscribe tool; the server emits notifications/message events with logger=\"serial:<connection_id>\"."
