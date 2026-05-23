@@ -226,10 +226,18 @@ cargo test
 cargo clippy --all-targets -- -D warnings
 ```
 
-36 unit tests cover the codec, baud-rate validation, connection
-manager invariants, the wait_for accumulator (using an in-memory
-duplex backend — no hardware needed), URI parsing, and prompt
-router wiring.
+The test suite is layered:
+
+| Layer | File | Count | What it covers | Runs on |
+|---|---|---|---|---|
+| 1 — unit | `src/*.rs` | 36 | Codec, baud-rate validation, manager invariants, `wait_for` accumulator over an in-memory `DuplexStream`, URI parsing, prompt-router wiring. | every push, all platforms |
+| 2 — HTTP integration (in-memory) | `tests/http_integration.rs` | 14 | Real `rmcp` HTTP client → `axum`-hosted `SerialHandler` → injected loopback connection. Covers the full MCP surface (tools / resources / prompts / notifications) over the wire. | every push, all platforms |
+| 3 — HTTP integration (real PTY) | `tests/serial_pty.rs` | 6 | Same harness as Layer 2 but the server opens a real Linux PTY slave (`/dev/pts/N`) via `tokio_serial::SerialStream`. Exercises the production serial code path end-to-end. | every push, Linux only (`#[cfg(target_os = "linux")]`) |
+| 4 — hardware-in-the-loop | `tests/hardware_loopback.rs` | 2 (ignored) | Real USB-Serial adapter with TX→RX jumper. Confirms behaviour on physical hardware. | manual: `SERIAL_MCP_TEST_PORT=/dev/ttyUSB0 cargo test -- --ignored` |
+
+Layer 4 needs a USB-Serial dongle plugged in with its TX and RX pins
+jumpered together (a single wire across the two pins). Without that,
+`hw_loopback_write_then_read_roundtrip` will read no data and fail.
 
 ## STM32 demo
 
