@@ -1,7 +1,12 @@
+//! MCP server tool surface for serial communication.
+//!
+//! Each `#[tool]` method below corresponds to one MCP tool. The methods are
+//! kept small by delegating connection lookups, parsing, and response
+//! formatting to helpers further down in the file.
+
 use std::future::Future;
 use std::sync::Arc;
 
-use base64::{engine::general_purpose, Engine as _};
 use rmcp::{
     handler::server::{router::tool::ToolRouter, tool::Parameters},
     model::*,
@@ -12,10 +17,17 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use tracing::{debug, error, info};
 
+use crate::codec::{self, Encoding};
 use crate::error::SerialError;
 use crate::serial::{
-    ConnectionConfig, ConnectionManager, DataBits, FlowControl, Parity, PortInfo, StopBits,
+    ConnectionConfig, ConnectionManager, DataBits, FlowControl, Parity, PortInfo, SerialConnection,
+    StopBits,
 };
+
+/// Default read timeout used in response text when the caller did not specify one.
+const DEFAULT_READ_TIMEOUT_MS: u64 = 1000;
+
+// ---- Tool argument structs --------------------------------------------------
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct OpenArgs {
@@ -30,13 +42,6 @@ pub struct OpenArgs {
     #[serde(default = "default_flow_control")]
     pub flow_control: String,
 }
-
-fn default_data_bits() -> String { "8".into() }
-fn default_stop_bits() -> String { "1".into() }
-fn default_parity() -> String { "none".into() }
-fn default_flow_control() -> String { "none".into() }
-fn default_encoding() -> String { "utf8".into() }
-fn default_max_bytes() -> usize { 1024 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct CloseArgs {
@@ -62,38 +67,14 @@ pub struct ReadArgs {
     pub encoding: String,
 }
 
-impl From<OpenArgs> for ConnectionConfig {
-    fn from(a: OpenArgs) -> Self {
-        let data_bits = match a.data_bits.as_str() {
-            "5" => DataBits::Five,
-            "6" => DataBits::Six,
-            "7" => DataBits::Seven,
-            _ => DataBits::Eight,
-        };
-        let stop_bits = match a.stop_bits.as_str() {
-            "2" => StopBits::Two,
-            _ => StopBits::One,
-        };
-        let parity = match a.parity.to_lowercase().as_str() {
-            "odd" => Parity::Odd,
-            "even" => Parity::Even,
-            _ => Parity::None,
-        };
-        let flow_control = match a.flow_control.to_lowercase().as_str() {
-            "software" => FlowControl::Software,
-            "hardware" => FlowControl::Hardware,
-            _ => FlowControl::None,
-        };
-        ConnectionConfig {
-            port: a.port,
-            baud_rate: a.baud_rate,
-            data_bits,
-            stop_bits,
-            parity,
-            flow_control,
-        }
-    }
-}
+fn default_data_bits() -> String { "8".into() }
+fn default_stop_bits() -> String { "1".into() }
+fn default_parity() -> String { "none".into() }
+fn default_flow_control() -> String { "none".into() }
+fn default_encoding() -> String { "utf8".into() }
+fn default_max_bytes() -> usize { 1024 }
+
+// ---- Handler ---------------------------------------------------------------
 
 #[derive(Clone)]
 pub struct SerialHandler {
@@ -113,133 +94,254 @@ impl SerialHandler {
     #[tool(description = "List all available serial ports on the system")]
     async fn list_ports(&self) -> Result<CallToolResult, McpError> {
         debug!("Listing serial ports");
-        let ports = PortInfo::list().map_err(|e| {
-            error!("list_ports failed: {}", e);
-            McpError::internal_error(format!("Failed to list ports: {}", e), None)
-        })?;
+        let ports = PortInfo::list_available()
+            .map_err(|e| log_and_internal_err("list_ports", "Failed to list ports", e))?;
         info!("Found {} serial ports", ports.len());
-
-        let msg = if ports.is_empty() {
-            "No serial ports found on the system".to_string()
-        } else {
-            let lines: Vec<String> = ports
-                .iter()
-                .map(|p| match &p.hardware_id {
-                    Some(hw) => format!("- {}: {} ({})", p.name, p.description, hw),
-                    None => format!("- {}: {}", p.name, p.description),
-                })
-                .collect();
-            format!("Found {} serial ports:\n{}", ports.len(), lines.join("\n"))
-        };
-        Ok(CallToolResult::success(vec![Content::text(msg)]))
+        Ok(success(format_port_list(&ports)))
     }
 
     #[tool(description = "Open a serial port connection with specified configuration")]
-    async fn open(&self, Parameters(args): Parameters<OpenArgs>) -> Result<CallToolResult, McpError> {
-        let config: ConnectionConfig = args.into();
+    async fn open(
+        &self,
+        Parameters(args): Parameters<OpenArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let config = parse_open_args(args).map_err(internal_err)?;
         let port = config.port.clone();
-        let baud = config.baud_rate;
-        debug!("Opening {} @ {}", port, baud);
+        let baud_rate = config.baud_rate;
+        debug!("Opening {} @ {}", port, baud_rate);
 
         let id = self.connections.open(config).await.map_err(|e| {
-            error!("open {} failed: {}", port, e);
-            McpError::internal_error(format!("Error: Failed to open port {} - {}", port, e), None)
+            log_and_internal_err("open", &format!("Failed to open port {}", port), e)
         })?;
         info!("Opened connection {} -> {}", id, port);
-        Ok(CallToolResult::success(vec![Content::text(format!(
-            "Serial connection opened\nConnection ID: {}\nPort: {}\nBaud rate: {}",
-            id, port, baud
-        ))]))
+        Ok(success(format_open_result(&id, &port, baud_rate)))
     }
 
     #[tool(description = "Close an open serial port connection")]
-    async fn close(&self, Parameters(args): Parameters<CloseArgs>) -> Result<CallToolResult, McpError> {
+    async fn close(
+        &self,
+        Parameters(args): Parameters<CloseArgs>,
+    ) -> Result<CallToolResult, McpError> {
         debug!("Closing {}", args.connection_id);
         self.connections.close(&args.connection_id).await.map_err(|e| {
-            error!("close {} failed: {}", args.connection_id, e);
-            McpError::internal_error(
-                format!("Error: Failed to close connection {} - {}", args.connection_id, e),
-                None,
+            log_and_internal_err(
+                "close",
+                &format!("Failed to close connection {}", args.connection_id),
+                e,
             )
         })?;
         info!("Closed connection {}", args.connection_id);
-        Ok(CallToolResult::success(vec![Content::text(format!(
-            "Serial connection closed\nConnection ID: {}",
-            args.connection_id
-        ))]))
+        Ok(success(format_close_result(&args.connection_id)))
     }
 
     #[tool(description = "Write data to a serial port connection")]
-    async fn write(&self, Parameters(args): Parameters<WriteArgs>) -> Result<CallToolResult, McpError> {
+    async fn write(
+        &self,
+        Parameters(args): Parameters<WriteArgs>,
+    ) -> Result<CallToolResult, McpError> {
         debug!("Write to {} ({})", args.connection_id, args.encoding);
-        let conn = self.connections.get(&args.connection_id).await.map_err(|_| {
-            McpError::internal_error(
-                format!("Error: Connection ID {} not found", args.connection_id),
-                None,
+        let encoding = parse_encoding(&args.encoding)?;
+        let connection = self.lookup_connection(&args.connection_id).await?;
+        let bytes = codec::decode(encoding, &args.data)
+            .map_err(|e| internal_err(format!("Data decoding failed - {}", e)))?;
+        let written = connection.write(&bytes).await.map_err(|e| {
+            log_and_internal_err(
+                "write",
+                &format!("Data sending failed on {}", args.connection_id),
+                e,
             )
         })?;
-        let bytes = decode_data(&args.data, &args.encoding)
-            .map_err(|e| McpError::internal_error(format!("Error: Data decoding failed - {}", e), None))?;
-
-        let n = conn.write(&bytes).await.map_err(|e| {
-            error!("write to {} failed: {}", args.connection_id, e);
-            McpError::internal_error(format!("Error: Data sending failed - {}", e), None)
-        })?;
-        debug!("Wrote {} bytes to {}", n, args.connection_id);
-        Ok(CallToolResult::success(vec![Content::text(format!(
-            "Data sent successfully\nConnection ID: {}\nBytes written: {}\nData: {:?}",
-            args.connection_id, n, args.data
-        ))]))
+        debug!("Wrote {} bytes to {}", written, args.connection_id);
+        Ok(success(format_write_result(&args.connection_id, written, &args.data)))
     }
 
     #[tool(description = "Read data from a serial port connection")]
-    async fn read(&self, Parameters(args): Parameters<ReadArgs>) -> Result<CallToolResult, McpError> {
+    async fn read(
+        &self,
+        Parameters(args): Parameters<ReadArgs>,
+    ) -> Result<CallToolResult, McpError> {
         debug!("Read from {} (timeout {:?})", args.connection_id, args.timeout_ms);
-        let conn = self.connections.get(&args.connection_id).await.map_err(|_| {
-            McpError::internal_error(
-                format!("Error: Connection ID {} not found", args.connection_id),
-                None,
-            )
-        })?;
-
-        let mut buf = vec![0u8; args.max_bytes];
-        match conn.read(&mut buf, args.timeout_ms).await {
-            Ok(n) => {
-                buf.truncate(n);
-                let encoded = encode_data(&buf, &args.encoding).map_err(|e| {
-                    McpError::internal_error(format!("Error: Data encoding failed - {}", e), None)
-                })?;
-                let msg = if n > 0 {
-                    format!(
-                        "Data read successfully\nConnection ID: {}\nBytes read: {}\nData: {:?}",
-                        args.connection_id, n, encoded
-                    )
-                } else {
-                    format!(
-                        "Read timeout\nConnection ID: {}\nTimeout: {}ms\nBytes read: 0",
-                        args.connection_id,
-                        args.timeout_ms.unwrap_or(1000)
-                    )
-                };
-                Ok(CallToolResult::success(vec![Content::text(msg)]))
-            }
-            Err(SerialError::ReadTimeout) => Ok(CallToolResult::success(vec![Content::text(
-                format!(
-                    "Read timeout\nConnection ID: {}\nTimeout: {}ms\nBytes read: 0",
-                    args.connection_id,
-                    args.timeout_ms.unwrap_or(1000)
-                ),
-            )])),
-            Err(e) => {
-                error!("read from {} failed: {}", args.connection_id, e);
-                Err(McpError::internal_error(
-                    format!("Error: Data reading failed - {}", e),
-                    None,
-                ))
-            }
-        }
+        let encoding = parse_encoding(&args.encoding)?;
+        let connection = self.lookup_connection(&args.connection_id).await?;
+        let outcome = read_bytes(&connection, args.max_bytes, args.timeout_ms).await?;
+        format_read_outcome(outcome, &args.connection_id, encoding, args.timeout_ms)
     }
 }
+
+// Lookup is split out so the macro-generated tool methods stay focused.
+impl SerialHandler {
+    /// Resolve an MCP connection id into a live [`SerialConnection`].
+    async fn lookup_connection(&self, id: &str) -> Result<Arc<SerialConnection>, McpError> {
+        self.connections
+            .get(id)
+            .await
+            .map_err(|_| internal_err(format!("Connection ID {} not found", id)))
+    }
+}
+
+// ---- Tool helpers (free fns) ------------------------------------------------
+
+/// Outcome of a successful read call, distinguishing actual data from an
+/// empty buffer (which serial ports report on timeout when no `timeout_ms`
+/// was set or when the OS reports EOF).
+struct ReadOutcome {
+    bytes: Vec<u8>,
+    timed_out: bool,
+}
+
+async fn read_bytes(
+    connection: &SerialConnection,
+    max_bytes: usize,
+    timeout_ms: Option<u64>,
+) -> Result<ReadOutcome, McpError> {
+    let mut buf = vec![0u8; max_bytes];
+    match connection.read(&mut buf, timeout_ms).await {
+        Ok(n) => {
+            buf.truncate(n);
+            Ok(ReadOutcome { bytes: buf, timed_out: n == 0 })
+        }
+        Err(SerialError::ReadTimeout) => Ok(ReadOutcome { bytes: Vec::new(), timed_out: true }),
+        Err(e) => Err(log_and_internal_err("read", "Data reading failed", e)),
+    }
+}
+
+fn format_read_outcome(
+    outcome: ReadOutcome,
+    connection_id: &str,
+    encoding: Encoding,
+    timeout_ms: Option<u64>,
+) -> Result<CallToolResult, McpError> {
+    if outcome.timed_out {
+        return Ok(success(format_read_timeout(connection_id, timeout_ms)));
+    }
+    let encoded = codec::encode(encoding, &outcome.bytes)
+        .map_err(|e| internal_err(format!("Data encoding failed - {}", e)))?;
+    Ok(success(format_read_ok(connection_id, outcome.bytes.len(), &encoded)))
+}
+
+fn parse_encoding(raw: &str) -> Result<Encoding, McpError> {
+    raw.parse::<Encoding>()
+        .map_err(|e| internal_err(format!("Unsupported encoding - {}", e)))
+}
+
+/// Strictly parse [`OpenArgs`] into a [`ConnectionConfig`]. Unlike the
+/// previous silent-fallback version, an unrecognised value here is an error.
+fn parse_open_args(args: OpenArgs) -> Result<ConnectionConfig, String> {
+    Ok(ConnectionConfig {
+        port: args.port,
+        baud_rate: args.baud_rate,
+        data_bits: parse_data_bits(&args.data_bits)?,
+        stop_bits: parse_stop_bits(&args.stop_bits)?,
+        parity: parse_parity(&args.parity)?,
+        flow_control: parse_flow_control(&args.flow_control)?,
+    })
+}
+
+fn parse_data_bits(raw: &str) -> Result<DataBits, String> {
+    match raw {
+        "5" => Ok(DataBits::Five),
+        "6" => Ok(DataBits::Six),
+        "7" => Ok(DataBits::Seven),
+        "8" => Ok(DataBits::Eight),
+        other => Err(format!("Invalid data_bits {:?} (expected 5/6/7/8)", other)),
+    }
+}
+
+fn parse_stop_bits(raw: &str) -> Result<StopBits, String> {
+    match raw {
+        "1" => Ok(StopBits::One),
+        "2" => Ok(StopBits::Two),
+        other => Err(format!("Invalid stop_bits {:?} (expected 1/2)", other)),
+    }
+}
+
+fn parse_parity(raw: &str) -> Result<Parity, String> {
+    match raw.to_lowercase().as_str() {
+        "none" => Ok(Parity::None),
+        "odd" => Ok(Parity::Odd),
+        "even" => Ok(Parity::Even),
+        other => Err(format!("Invalid parity {:?} (expected none/odd/even)", other)),
+    }
+}
+
+fn parse_flow_control(raw: &str) -> Result<FlowControl, String> {
+    match raw.to_lowercase().as_str() {
+        "none" => Ok(FlowControl::None),
+        "software" => Ok(FlowControl::Software),
+        "hardware" => Ok(FlowControl::Hardware),
+        other => Err(format!(
+            "Invalid flow_control {:?} (expected none/software/hardware)",
+            other
+        )),
+    }
+}
+
+// ---- Response formatting (pure) --------------------------------------------
+
+fn format_port_list(ports: &[PortInfo]) -> String {
+    if ports.is_empty() {
+        return "No serial ports found on the system".to_string();
+    }
+    let lines: Vec<String> = ports.iter().map(format_port_line).collect();
+    format!("Found {} serial ports:\n{}", ports.len(), lines.join("\n"))
+}
+
+fn format_port_line(port: &PortInfo) -> String {
+    match &port.hardware_id {
+        Some(hw) => format!("- {}: {} ({})", port.name, port.description, hw),
+        None => format!("- {}: {}", port.name, port.description),
+    }
+}
+
+fn format_open_result(id: &str, port: &str, baud_rate: u32) -> String {
+    format!(
+        "Serial connection opened\nConnection ID: {}\nPort: {}\nBaud rate: {}",
+        id, port, baud_rate
+    )
+}
+
+fn format_close_result(id: &str) -> String {
+    format!("Serial connection closed\nConnection ID: {}", id)
+}
+
+fn format_write_result(id: &str, bytes_written: usize, original_data: &str) -> String {
+    format!(
+        "Data sent successfully\nConnection ID: {}\nBytes written: {}\nData: {:?}",
+        id, bytes_written, original_data
+    )
+}
+
+fn format_read_ok(id: &str, bytes_read: usize, encoded: &str) -> String {
+    format!(
+        "Data read successfully\nConnection ID: {}\nBytes read: {}\nData: {:?}",
+        id, bytes_read, encoded
+    )
+}
+
+fn format_read_timeout(id: &str, timeout_ms: Option<u64>) -> String {
+    format!(
+        "Read timeout\nConnection ID: {}\nTimeout: {}ms\nBytes read: 0",
+        id,
+        timeout_ms.unwrap_or(DEFAULT_READ_TIMEOUT_MS)
+    )
+}
+
+// ---- Tiny error / result builders -------------------------------------------
+
+fn success(text: String) -> CallToolResult {
+    CallToolResult::success(vec![Content::text(text)])
+}
+
+fn internal_err<M: Into<String>>(message: M) -> McpError {
+    McpError::internal_error(format!("Error: {}", message.into()), None)
+}
+
+fn log_and_internal_err<E: std::fmt::Display>(op: &str, context: &str, err: E) -> McpError {
+    error!("{} failed: {}", op, err);
+    internal_err(format!("{} - {}", context, err))
+}
+
+// ---- ServerHandler boilerplate ----------------------------------------------
 
 impl Default for SerialHandler {
     fn default() -> Self {
@@ -270,78 +372,90 @@ impl ServerHandler for SerialHandler {
     }
 }
 
-fn decode_data(data: &str, encoding: &str) -> Result<Vec<u8>, String> {
-    match encoding.to_lowercase().as_str() {
-        "utf8" | "utf-8" => Ok(data.as_bytes().to_vec()),
-        "hex" => {
-            let s = data.trim().replace(' ', "");
-            if !s.len().is_multiple_of(2) {
-                return Err("Hex string must have even length".into());
-            }
-            hex::decode(&s).map_err(|e| format!("Invalid hex: {}", e))
-        }
-        "base64" => general_purpose::STANDARD
-            .decode(data.trim())
-            .or_else(|_| general_purpose::URL_SAFE_NO_PAD.decode(data.trim()))
-            .map_err(|e| format!("Invalid base64: {}", e)),
-        _ => Err(format!("Unsupported encoding: {}", encoding)),
-    }
-}
-
-fn encode_data(data: &[u8], encoding: &str) -> Result<String, String> {
-    match encoding.to_lowercase().as_str() {
-        "utf8" | "utf-8" => {
-            String::from_utf8(data.to_vec()).map_err(|e| format!("Invalid UTF-8: {}", e))
-        }
-        "hex" => Ok(data.iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" ")),
-        "base64" => Ok(general_purpose::STANDARD.encode(data)),
-        _ => Err(format!("Unsupported encoding: {}", encoding)),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn utf8_roundtrip() {
-        let bytes = decode_data("Hello, 世界!", "utf8").unwrap();
-        assert_eq!(encode_data(&bytes, "utf8").unwrap(), "Hello, 世界!");
+    fn open_args_parsed_strictly() {
+        let args = OpenArgs {
+            port: "/dev/ttyUSB0".into(),
+            baud_rate: 115200,
+            data_bits: "8".into(),
+            stop_bits: "1".into(),
+            parity: "none".into(),
+            flow_control: "none".into(),
+        };
+        let config = parse_open_args(args).unwrap();
+        assert_eq!(config.port, "/dev/ttyUSB0");
+        assert_eq!(config.baud_rate, 115200);
     }
 
     #[test]
-    fn hex_roundtrip() {
-        assert_eq!(decode_data("48656c6c6f", "hex").unwrap(), b"Hello");
-        assert_eq!(decode_data("48 65 6c 6c 6f", "hex").unwrap(), b"Hello");
-        assert_eq!(decode_data("48656C6C6F", "hex").unwrap(), b"Hello");
-        assert_eq!(encode_data(b"Hello", "hex").unwrap(), "48 65 6c 6c 6f");
+    fn open_args_reject_invalid_data_bits() {
+        let args = OpenArgs {
+            port: "X".into(),
+            baud_rate: 9600,
+            data_bits: "9".into(),
+            stop_bits: "1".into(),
+            parity: "none".into(),
+            flow_control: "none".into(),
+        };
+        let err = parse_open_args(args).unwrap_err();
+        assert!(err.contains("data_bits"));
     }
 
     #[test]
-    fn hex_invalid() {
-        assert!(decode_data("48656c6c6", "hex").is_err());
-        assert!(decode_data("48656cXY", "hex").is_err());
+    fn open_args_reject_invalid_parity() {
+        assert!(parse_parity("weird").is_err());
+        assert!(parse_parity("none").is_ok());
+        assert!(parse_parity("Even").is_ok());
     }
 
     #[test]
-    fn base64_roundtrip() {
-        assert_eq!(decode_data("SGVsbG8gV29ybGQ=", "base64").unwrap(), b"Hello World");
-        assert_eq!(decode_data("SGVsbG8gV29ybGQ", "base64").unwrap(), b"Hello World");
-        assert_eq!(encode_data(b"Hello World", "base64").unwrap(), "SGVsbG8gV29ybGQ=");
+    fn format_port_list_empty() {
+        assert_eq!(
+            format_port_list(&[]),
+            "No serial ports found on the system"
+        );
     }
 
     #[test]
-    fn unsupported_encoding() {
-        assert!(decode_data("test", "unknown").is_err());
-        assert!(encode_data(b"test", "unknown").is_err());
+    fn format_port_list_with_entries() {
+        let ports = vec![
+            PortInfo {
+                name: "COM1".into(),
+                description: "Serial Port".into(),
+                hardware_id: None,
+            },
+            PortInfo {
+                name: "COM3".into(),
+                description: "USB Serial Device".into(),
+                hardware_id: Some("USB VID:1234 PID:5678".into()),
+            },
+        ];
+        let rendered = format_port_list(&ports);
+        assert!(rendered.starts_with("Found 2 serial ports:\n"));
+        assert!(rendered.contains("- COM1: Serial Port"));
+        assert!(rendered.contains("- COM3: USB Serial Device (USB VID:1234 PID:5678)"));
     }
 
     #[test]
-    fn binary_roundtrip() {
-        let data = b"Hello, World! 123 \x00\xFF";
-        let hex = encode_data(data, "hex").unwrap();
-        assert_eq!(decode_data(&hex, "hex").unwrap(), data);
-        let b64 = encode_data(data, "base64").unwrap();
-        assert_eq!(decode_data(&b64, "base64").unwrap(), data);
+    fn format_read_timeout_uses_default_when_unset() {
+        let text = format_read_timeout("conn-123", None);
+        assert!(text.contains(&format!("{}ms", DEFAULT_READ_TIMEOUT_MS)));
+        assert!(text.contains("conn-123"));
+    }
+
+    #[test]
+    fn format_read_timeout_uses_supplied_value() {
+        let text = format_read_timeout("conn-123", Some(50));
+        assert!(text.contains("50ms"));
+    }
+
+    #[test]
+    fn parse_encoding_rejects_garbage() {
+        assert!(parse_encoding("rot13").is_err());
+        assert!(parse_encoding("utf-8").is_ok());
     }
 }
