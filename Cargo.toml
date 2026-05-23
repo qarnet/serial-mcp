@@ -11,7 +11,7 @@ keywords = ["mcp", "serial", "communication", "embedded", "protocol"]
 categories = ["development-tools", "embedded"]
 
 [dependencies]
-rmcp = { version = "0.3.2", features = ["server", "macros", "transport-io"] }
+rmcp = { version = "1.7", features = ["server", "macros", "transport-io", "schemars"] }
 serialport = "4.5"
 tokio = { version = "1.41", features = ["macros", "rt-multi-thread", "sync", "time", "io-util"] }
 tokio-serial = "5.4"

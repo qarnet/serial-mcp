@@ -4,11 +4,10 @@
 //! kept small by delegating connection lookups, parsing, and response
 //! formatting to helpers further down in the file.
 
-use std::future::Future;
 use std::sync::Arc;
 
 use rmcp::{
-    handler::server::{router::tool::ToolRouter, tool::Parameters},
+    handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::*,
     service::RequestContext,
     tool, tool_handler, tool_router, ErrorData as McpError, RoleServer, ServerHandler,
@@ -79,6 +78,7 @@ fn default_max_bytes() -> usize { 1024 }
 #[derive(Clone)]
 pub struct SerialHandler {
     connections: Arc<ConnectionManager>,
+    #[allow(dead_code)]
     tool_router: ToolRouter<SerialHandler>,
 }
 
@@ -352,19 +352,18 @@ impl Default for SerialHandler {
 #[tool_handler]
 impl ServerHandler for SerialHandler {
     fn get_info(&self) -> ServerInfo {
-        ServerInfo {
-            protocol_version: ProtocolVersion::V_2024_11_05,
-            capabilities: ServerCapabilities::builder().enable_tools().build(),
-            server_info: Implementation::from_build_env(),
-            instructions: Some(
-                "A serial port communication MCP server. Use list_ports to discover available serial ports, then open connections to communicate with serial devices.".into(),
-            ),
-        }
+        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+            .with_server_info(Implementation::from_build_env())
+            .with_protocol_version(ProtocolVersion::V_2024_11_05)
+            .with_instructions(
+                "A serial port communication MCP server. Use list_ports to discover available serial ports, then open connections to communicate with serial devices."
+                    .to_string(),
+            )
     }
 
     async fn initialize(
         &self,
-        _req: InitializeRequestParam,
+        _req: InitializeRequestParams,
         _ctx: RequestContext<RoleServer>,
     ) -> Result<InitializeResult, McpError> {
         info!("Serial MCP server initialized");
