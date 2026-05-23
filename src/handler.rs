@@ -5,6 +5,7 @@
 //! instead of parsing free-form text.
 
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
@@ -87,6 +88,21 @@ pub struct SendBreakArgs {
     pub duration_ms: u64,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct WaitForArgs {
+    pub connection_id: String,
+    /// Byte pattern to wait for, in the encoding given by `pattern_encoding`.
+    pub pattern: String,
+    #[serde(default = "default_encoding")]
+    pub pattern_encoding: String,
+    #[serde(default = "default_wait_timeout_ms")]
+    pub timeout_ms: u64,
+    #[serde(default = "default_wait_max_bytes")]
+    pub max_bytes: usize,
+    #[serde(default = "default_encoding")]
+    pub response_encoding: String,
+}
+
 fn default_data_bits() -> String { "8".into() }
 fn default_stop_bits() -> String { "1".into() }
 fn default_parity() -> String { "none".into() }
@@ -95,6 +111,8 @@ fn default_encoding() -> String { "utf8".into() }
 fn default_max_bytes() -> usize { 1024 }
 fn default_flush_target() -> FlushTarget { FlushTarget::Both }
 fn default_break_duration_ms() -> u64 { 250 }
+fn default_wait_timeout_ms() -> u64 { 5000 }
+fn default_wait_max_bytes() -> usize { 4096 }
 
 // ---- Tool response structs --------------------------------------------------
 
@@ -150,6 +168,23 @@ pub struct SetDtrRtsResult {
 pub struct SendBreakResult {
     pub connection_id: String,
     pub duration_ms: u64,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct WaitForResult {
+    pub connection_id: String,
+    pub matched: bool,
+    pub timed_out: bool,
+    /// All bytes accumulated up to and including the match (when matched).
+    /// Encoded with `response_encoding` from the request.
+    pub data: String,
+    pub bytes_read: usize,
+    /// Byte offset of the start of the matched pattern within the response
+    /// buffer, when matched.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub match_index: Option<usize>,
+    pub timeout_ms: u64,
+    pub response_encoding: String,
 }
 
 // ---- Handler ---------------------------------------------------------------
@@ -316,6 +351,43 @@ impl SerialHandler {
             duration_ms: args.duration_ms,
         }))
     }
+
+    #[tool(
+        description = "Read bytes from a connection until a pattern matches or timeout. Pattern is interpreted with pattern_encoding (utf8/hex/base64). Returns the accumulated bytes (re-encoded with response_encoding) and the byte offset where the match started. Use for prompt/response interactions, e.g. send 'reset\\r\\n' then wait_for pattern='OK>'."
+    )]
+    async fn wait_for(
+        &self,
+        Parameters(args): Parameters<WaitForArgs>,
+    ) -> Result<Json<WaitForResult>, String> {
+        debug!(
+            "wait_for {} pattern_encoding={} timeout={}ms max_bytes={}",
+            args.connection_id, args.pattern_encoding, args.timeout_ms, args.max_bytes
+        );
+        let pattern_encoding = parse_encoding(&args.pattern_encoding)?;
+        let response_encoding = parse_encoding(&args.response_encoding)?;
+        let pattern = codec::decode(pattern_encoding, &args.pattern)
+            .map_err(|e| format!("Pattern decoding failed - {}", e))?;
+        if pattern.is_empty() {
+            return Err("Pattern must not be empty".into());
+        }
+
+        let connection = self.lookup_connection(&args.connection_id).await?;
+        let outcome =
+            read_until_pattern(&connection, &pattern, args.timeout_ms, args.max_bytes).await?;
+        let bytes_read = outcome.bytes.len();
+        let data = codec::encode(response_encoding, &outcome.bytes)
+            .map_err(|e| format!("Response encoding failed - {}", e))?;
+        Ok(Json(WaitForResult {
+            connection_id: args.connection_id,
+            matched: outcome.match_index.is_some(),
+            timed_out: outcome.timed_out,
+            data,
+            bytes_read,
+            match_index: outcome.match_index,
+            timeout_ms: args.timeout_ms,
+            response_encoding: response_encoding.to_string(),
+        }))
+    }
 }
 
 // Lookup is split out so the macro-generated tool methods stay focused.
@@ -352,6 +424,67 @@ async fn read_bytes(
         Err(SerialError::ReadTimeout) => Ok(ReadOutcome { bytes: Vec::new(), timed_out: true }),
         Err(e) => Err(log_tool_err("read", "Data reading failed", e)),
     }
+}
+
+/// Read incrementally from `connection` until `pattern` appears in the
+/// accumulated buffer, `max_bytes` are buffered without a match, or
+/// `timeout_ms` elapses since this call began.
+async fn read_until_pattern(
+    connection: &SerialConnection,
+    pattern: &[u8],
+    timeout_ms: u64,
+    max_bytes: usize,
+) -> Result<WaitOutcome, String> {
+    const CHUNK_CAPACITY: usize = 256;
+    let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+    let mut accumulated: Vec<u8> = Vec::with_capacity(CHUNK_CAPACITY.min(max_bytes));
+
+    loop {
+        if let Some(idx) = find_subslice(&accumulated, pattern) {
+            return Ok(WaitOutcome {
+                bytes: accumulated,
+                match_index: Some(idx),
+                timed_out: false,
+            });
+        }
+        if accumulated.len() >= max_bytes {
+            return Ok(WaitOutcome { bytes: accumulated, match_index: None, timed_out: false });
+        }
+        let now = Instant::now();
+        if now >= deadline {
+            return Ok(WaitOutcome { bytes: accumulated, match_index: None, timed_out: true });
+        }
+
+        let remaining_ms = (deadline - now).as_millis() as u64;
+        let room = (max_bytes - accumulated.len()).min(CHUNK_CAPACITY);
+        let mut chunk = vec![0u8; room];
+        match connection.read(&mut chunk, Some(remaining_ms)).await {
+            Ok(0) => continue,
+            Ok(n) => {
+                chunk.truncate(n);
+                accumulated.extend_from_slice(&chunk);
+            }
+            Err(SerialError::ReadTimeout) => {
+                return Ok(WaitOutcome { bytes: accumulated, match_index: None, timed_out: true });
+            }
+            Err(e) => return Err(log_tool_err("wait_for", "Read failed during wait", e)),
+        }
+    }
+}
+
+struct WaitOutcome {
+    bytes: Vec<u8>,
+    match_index: Option<usize>,
+    timed_out: bool,
+}
+
+/// Find the first byte offset where `needle` appears in `haystack`. Returns
+/// `None` if `needle` is empty or absent.
+fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() || haystack.len() < needle.len() {
+        return None;
+    }
+    haystack.windows(needle.len()).position(|window| window == needle)
 }
 
 fn build_read_result(
@@ -554,5 +687,28 @@ mod tests {
         assert_eq!(result.bytes_read, 2);
         assert_eq!(result.encoding, "hex");
         assert_eq!(result.data, "48 69");
+    }
+
+    #[test]
+    fn find_subslice_locates_pattern() {
+        assert_eq!(find_subslice(b"hello OK> world", b"OK>"), Some(6));
+        assert_eq!(find_subslice(b"OK>at-start", b"OK>"), Some(0));
+        assert_eq!(find_subslice(b"trailing OK>", b"OK>"), Some(9));
+    }
+
+    #[test]
+    fn find_subslice_missing_returns_none() {
+        assert_eq!(find_subslice(b"hello world", b"OK>"), None);
+        assert_eq!(find_subslice(b"", b"x"), None);
+    }
+
+    #[test]
+    fn find_subslice_empty_needle_returns_none() {
+        assert_eq!(find_subslice(b"hello", b""), None);
+    }
+
+    #[test]
+    fn find_subslice_needle_longer_than_haystack() {
+        assert_eq!(find_subslice(b"hi", b"hello"), None);
     }
 }
