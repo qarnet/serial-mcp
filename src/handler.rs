@@ -821,9 +821,7 @@ fn parse_parity(raw: &str) -> Result<Parity, String> {
         "none" => Ok(Parity::None),
         "odd" => Ok(Parity::Odd),
         "even" => Ok(Parity::Even),
-        other => Err(format!(
-            "Invalid parity {other:?} (expected none/odd/even)"
-        )),
+        other => Err(format!("Invalid parity {other:?} (expected none/odd/even)")),
     }
 }
 
