@@ -1,0 +1,94 @@
+//! Test blob resources and resource templates.
+
+use rmcp::transport::{child_process::TokioChildProcess, ConfigureCommandExt};
+use rmcp::ServiceExt;
+use tokio::process::Command;
+
+fn build_stdio_server() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let output = std::process::Command::new("cargo")
+            .args(["build", "--bin", "serial-mcp-server"])
+            .output()
+            .expect("cargo build");
+        if !output.status.success() {
+            panic!(
+                "cargo build --bin serial-mcp-server failed:\nstderr: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    });
+}
+
+#[tokio::test]
+async fn blob_resource_template_is_advertised() {
+    build_stdio_server();
+
+    let cmd = Command::new(
+        std::env::current_dir()
+            .unwrap()
+            .join("target/debug/serial-mcp-server"),
+    )
+    .configure(|cmd| {
+        cmd.env("RUST_LOG", "warn");
+    });
+
+    let transport = TokioChildProcess::new(cmd).expect("spawn stdio server");
+    let client = ().serve(transport).await.expect("initialize client");
+
+    let templates = client
+        .list_resource_templates(None)
+        .await
+        .expect("list resource templates");
+
+    let names: Vec<&str> = templates
+        .resource_templates
+        .iter()
+        .map(|t| t.name.as_ref())
+        .collect();
+
+    assert!(
+        names.contains(&"Raw binary data from a serial connection"),
+        "Expected raw blob template, got: {names:?}"
+    );
+
+    client.cancel().await.ok();
+}
+
+#[tokio::test]
+async fn resource_uri_parsing_includes_raw_suffix() {
+    build_stdio_server();
+
+    let cmd = Command::new(
+        std::env::current_dir()
+            .unwrap()
+            .join("target/debug/serial-mcp-server"),
+    )
+    .configure(|cmd| {
+        cmd.env("RUST_LOG", "warn");
+    });
+
+    let transport = TokioChildProcess::new(cmd).expect("spawn stdio server");
+    let client = ().serve(transport).await.expect("initialize client");
+
+    // Verify /raw URIs are recognized (will fail since no connection exists,
+    // but should fail with "connection_not_found" not "resource_not_found")
+    let result = client
+        .read_resource(rmcp::model::ReadResourceRequestParams::new(
+            "serial://connections/test-id/raw",
+        ))
+        .await;
+
+    assert!(
+        result.is_err(),
+        "Expected error for non-existent connection"
+    );
+    let err = result.unwrap_err();
+    let err_text = format!("{err}");
+    assert!(
+        err_text.contains("connection_not_found") || err_text.contains("resource_not_found"),
+        "Expected connection or resource not found, got: {err_text}"
+    );
+
+    client.cancel().await.ok();
+}

@@ -301,6 +301,15 @@ impl SerialConnection {
         }
     }
 
+    /// Read up to `max_bytes` with a brief timeout (100ms) to capture any
+    /// immediately available data without blocking long.
+    pub async fn read_latest(&self, max_bytes: usize) -> Result<Vec<u8>> {
+        let mut buf = vec![0u8; max_bytes];
+        let n = self.read(&mut buf, Some(100)).await?;
+        buf.truncate(n);
+        Ok(buf)
+    }
+
     /// Discard data buffered in the OS for the input, output, or both
     /// directions of this port.
     pub async fn flush_buffers(&self, target: FlushTarget) -> Result<()> {
@@ -442,6 +451,7 @@ impl ConnectionManager {
             .map(|c| ConnectionSummary {
                 connection_id: c.id().to_string(),
                 port: c.port().to_string(),
+                latest_read: None,
             })
             .collect()
     }
@@ -452,6 +462,9 @@ impl ConnectionManager {
 pub struct ConnectionSummary {
     pub connection_id: String,
     pub port: String,
+    /// Base64-encoded bytes from the most recent read, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latest_read: Option<String>,
 }
 
 fn is_port_in_use(connections: &HashMap<String, Arc<SerialConnection>>, port: &str) -> bool {

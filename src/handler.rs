@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use base64::Engine as _;
 use glob::Pattern;
 use rmcp::{
     handler::server::{
@@ -275,6 +276,8 @@ pub struct SerialHandler {
     prompt_router: PromptRouter<SerialHandler>,
     /// Port allowlist patterns. If empty, all ports are allowed.
     allowlist: Vec<Pattern>,
+    /// Active resource subscribers by URI.
+    subscribers: Arc<tokio::sync::Mutex<HashMap<String, ()>>>,
 }
 
 /// RAII wrapper around a streaming task. Aborts the task on drop.
@@ -308,6 +311,7 @@ impl SerialHandler {
             tool_router: Self::tool_router(),
             prompt_router: Self::prompt_router(),
             allowlist,
+            subscribers: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         }
     }
 
@@ -355,6 +359,24 @@ impl SerialHandler {
             debug!("Failed to notify resource list changed: {}", e);
         }
 
+        // Notify subscribers to the specific connection resource
+        let conn_uri = format!("{}{}", URI_CONNECTION_PREFIX, connection_id);
+        let subs = self.subscribers.lock().await;
+        if subs.contains_key(&conn_uri) {
+            drop(subs);
+            if let Err(e) = ctx
+                .peer
+                .notify_resource_updated(rmcp::model::ResourceUpdatedNotificationParam::new(
+                    conn_uri,
+                ))
+                .await
+            {
+                debug!("Failed to notify resource updated: {}", e);
+            }
+        } else {
+            drop(subs);
+        }
+
         Ok(Json(OpenResult {
             connection_id,
             port,
@@ -384,6 +406,24 @@ impl SerialHandler {
         // Notify clients that the resource list has changed
         if let Err(e) = ctx.peer.notify_resource_list_changed().await {
             debug!("Failed to notify resource list changed: {}", e);
+        }
+
+        // Notify subscribers to the specific connection resource
+        let conn_uri = format!("{}{}", URI_CONNECTION_PREFIX, args.connection_id);
+        let subs = self.subscribers.lock().await;
+        if subs.contains_key(&conn_uri) {
+            drop(subs);
+            if let Err(e) = ctx
+                .peer
+                .notify_resource_updated(rmcp::model::ResourceUpdatedNotificationParam::new(
+                    conn_uri,
+                ))
+                .await
+            {
+                debug!("Failed to notify resource updated: {}", e);
+            }
+        } else {
+            drop(subs);
         }
 
         Ok(Json(CloseResult {
@@ -1091,8 +1131,10 @@ impl ServerHandler for SerialHandler {
         ServerInfo::new(
             ServerCapabilities::builder()
                 .enable_tools()
+                .enable_tool_list_changed()
                 .enable_resources()
                 .enable_resources_list_changed()
+                .enable_resources_subscribe()
                 .enable_prompts()
                 .enable_logging()
                 .build(),
@@ -1149,16 +1191,28 @@ impl ServerHandler for SerialHandler {
         _ctx: RequestContext<RoleServer>,
     ) -> Result<ListResourceTemplatesResult, McpError> {
         Ok(ListResourceTemplatesResult {
-            resource_templates: vec![RawResourceTemplate::new(
-                URI_CONNECTION_TEMPLATE,
-                "Open serial connection by id",
-            )
-            .with_description(
-                "Per-connection state. Substitute {id} with a connection_id returned by the open tool."
-                    .to_string(),
-            )
-            .with_mime_type("application/json".to_string())
-            .no_annotation()],
+            resource_templates: vec![
+                RawResourceTemplate::new(
+                    URI_CONNECTION_TEMPLATE,
+                    "Open serial connection by id",
+                )
+                .with_description(
+                    "Per-connection state. Substitute {id} with a connection_id returned by the open tool."
+                        .to_string(),
+                )
+                .with_mime_type("application/json".to_string())
+                .no_annotation(),
+                RawResourceTemplate::new(
+                    URI_CONNECTION_RAW_TEMPLATE,
+                    "Raw binary data from a serial connection",
+                )
+                .with_description(
+                    "Base64-encoded bytes recently read from the connection. Substitute {id} with a connection_id."
+                        .to_string(),
+                )
+                .with_mime_type("application/octet-stream".to_string())
+                .no_annotation(),
+            ],
             next_cursor: None,
             meta: None,
         })
@@ -1204,21 +1258,59 @@ impl ServerHandler for SerialHandler {
                         Some(serde_json::json!({ "uri": uri, "connection_id": id })),
                     )
                 })?;
-                let body = serde_json::to_string_pretty(&ConnectionSummary {
-                    connection_id: conn.id().to_string(),
-                    port: conn.port().to_string(),
-                })
-                .map_err(|e| McpError::internal_error(format!("serialize: {e}"), None))?;
-                Ok(ReadResourceResult::new(vec![ResourceContents::text(
-                    body, uri,
-                )
-                .with_mime_type("application/json")]))
+
+                // Check if requesting raw binary data
+                if uri.ends_with("/raw") {
+                    let raw_bytes = conn.read_latest(256).await.map_err(|e| {
+                        McpError::internal_error(format!("Failed to read: {e}"), None)
+                    })?;
+                    let b64 = base64::engine::general_purpose::STANDARD.encode(&raw_bytes);
+                    Ok(ReadResourceResult::new(vec![ResourceContents::blob(
+                        b64, uri,
+                    )
+                    .with_mime_type("application/octet-stream")]))
+                } else {
+                    let body = serde_json::to_string_pretty(&ConnectionSummary {
+                        connection_id: conn.id().to_string(),
+                        port: conn.port().to_string(),
+                        latest_read: None,
+                    })
+                    .map_err(|e| McpError::internal_error(format!("serialize: {e}"), None))?;
+                    Ok(ReadResourceResult::new(vec![ResourceContents::text(
+                        body, uri,
+                    )
+                    .with_mime_type("application/json")]))
+                }
             }
             ResourceUriKind::Unknown => Err(McpError::resource_not_found(
                 "resource_not_found",
                 Some(serde_json::json!({ "uri": uri })),
             )),
         }
+    }
+
+    async fn subscribe(
+        &self,
+        request: SubscribeRequestParams,
+        _ctx: RequestContext<RoleServer>,
+    ) -> Result<(), McpError> {
+        let uri = request.uri;
+        let mut subscribers = self.subscribers.lock().await;
+        subscribers.insert(uri.clone(), ());
+        debug!("Client subscribed to resource {}", uri);
+        Ok(())
+    }
+
+    async fn unsubscribe(
+        &self,
+        request: UnsubscribeRequestParams,
+        _ctx: RequestContext<RoleServer>,
+    ) -> Result<(), McpError> {
+        let uri = request.uri;
+        let mut subscribers = self.subscribers.lock().await;
+        subscribers.remove(&uri);
+        debug!("Client unsubscribed from resource {}", uri);
+        Ok(())
     }
 }
 
@@ -1228,6 +1320,7 @@ const URI_PORTS: &str = "serial://ports";
 const URI_CONNECTIONS: &str = "serial://connections";
 const URI_CONNECTION_PREFIX: &str = "serial://connections/";
 const URI_CONNECTION_TEMPLATE: &str = "serial://connections/{id}";
+const URI_CONNECTION_RAW_TEMPLATE: &str = "serial://connections/{id}/raw";
 
 #[derive(Debug, PartialEq, Eq)]
 enum ResourceUriKind {

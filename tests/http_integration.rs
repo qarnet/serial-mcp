@@ -99,7 +99,10 @@ async fn list_resource_templates_returns_connection_template() {
         .iter()
         .map(|t| t.uri_template.as_str())
         .collect();
-    assert_eq!(uris, vec!["serial://connections/{id}"]);
+    assert_eq!(
+        uris,
+        vec!["serial://connections/{id}", "serial://connections/{id}/raw"]
+    );
     client.cancel().await.ok();
 }
 

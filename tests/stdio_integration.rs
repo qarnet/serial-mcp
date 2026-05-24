@@ -90,7 +90,7 @@ async fn stdio_list_tools_returns_all_eleven_tools() {
 }
 
 #[tokio::test]
-async fn stdio_list_resources_returns_statics_and_template() {
+async fn stdio_list_resources_returns_statics_and_templates() {
     let client = start_stdio_client().await;
 
     let resources = client
@@ -105,8 +105,8 @@ async fn stdio_list_resources_returns_statics_and_template() {
         .unwrap();
     assert_eq!(
         templates.resource_templates.len(),
-        1,
-        "expected 1 resource template"
+        2,
+        "expected 2 resource templates (connection + raw)"
     );
 
     client.cancel().await.ok();
