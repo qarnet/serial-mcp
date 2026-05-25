@@ -3,10 +3,10 @@
 ## Build / Test / Lint Commands
 
 ```bash
-# Full test suite (all 6 layers, ~62 tests)
+# Full test suite (all 6 test layers, ~70 tests)
 cargo test
 
-# Run a single test
+# Run a single test by name
 cargo test --test http_integration list_tools_returns_all_eleven_tools
 cargo test --test serial_pty pty_wait_for_matches_real_serial_pattern
 
@@ -20,6 +20,12 @@ cargo fmt --all -- --check
 # Build all targets including tests
 cargo build --all-targets
 ```
+
+## Prerequisites
+
+- Rust stable toolchain with clippy and rustfmt components
+- `libudev-dev` and `pkg-config` packages (on Ubuntu/Debian) for `serialport`
+- CI sets `RUSTFLAGS="-D warnings"` — all warnings are treated as errors
 
 ## Code Style
 

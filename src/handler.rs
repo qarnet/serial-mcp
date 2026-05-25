@@ -23,239 +23,22 @@ use rmcp::{
     tool, tool_handler, tool_router, ErrorData as McpError, Json, RoleServer, ServerHandler,
 };
 use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use tracing::{debug, error, info};
 
 use crate::codec::{self, Encoding};
 use crate::error::SerialError;
 use crate::serial::{
-    ConnectionConfig, ConnectionManager, ConnectionSummary, DataBits, FlowControl, FlushTarget,
-    Parity, PortInfo, SerialConnection, StopBits,
+    ConnectionConfig, ConnectionManager, ConnectionSummary, DataBits, FlowControl, Parity,
+    PortInfo, SerialConnection, StopBits,
 };
 
 /// Default read timeout used in the response when the caller did not specify one.
 const DEFAULT_READ_TIMEOUT_MS: u64 = 1000;
 
-// ---- Tool argument structs --------------------------------------------------
-
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct OpenArgs {
-    pub port: String,
-    pub baud_rate: u32,
-    #[serde(default = "default_data_bits")]
-    pub data_bits: String,
-    #[serde(default = "default_stop_bits")]
-    pub stop_bits: String,
-    #[serde(default = "default_parity")]
-    pub parity: String,
-    #[serde(default = "default_flow_control")]
-    pub flow_control: String,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct CloseArgs {
-    pub connection_id: String,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct WriteArgs {
-    pub connection_id: String,
-    pub data: String,
-    #[serde(default = "default_encoding")]
-    pub encoding: String,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct ReadArgs {
-    pub connection_id: String,
-    #[serde(default)]
-    pub timeout_ms: Option<u64>,
-    #[serde(default = "default_max_bytes")]
-    pub max_bytes: usize,
-    #[serde(default = "default_encoding")]
-    pub encoding: String,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct FlushArgs {
-    pub connection_id: String,
-    #[serde(default = "default_flush_target")]
-    pub target: FlushTarget,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct SetDtrRtsArgs {
-    pub connection_id: String,
-    pub dtr: bool,
-    pub rts: bool,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct SendBreakArgs {
-    pub connection_id: String,
-    #[serde(default = "default_break_duration_ms")]
-    pub duration_ms: u64,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct SubscribeArgs {
-    pub connection_id: String,
-    #[serde(default = "default_encoding")]
-    pub encoding: String,
-    #[serde(default = "default_subscribe_chunk_bytes")]
-    pub max_chunk_bytes: usize,
-    #[serde(default = "default_subscribe_poll_ms")]
-    pub poll_interval_ms: u64,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct UnsubscribeArgs {
-    pub connection_id: String,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct WaitForArgs {
-    pub connection_id: String,
-    /// Byte pattern to wait for, in the encoding given by `pattern_encoding`.
-    pub pattern: String,
-    #[serde(default = "default_encoding")]
-    pub pattern_encoding: String,
-    #[serde(default = "default_wait_timeout_ms")]
-    pub timeout_ms: u64,
-    #[serde(default = "default_wait_max_bytes")]
-    pub max_bytes: usize,
-    #[serde(default = "default_encoding")]
-    pub response_encoding: String,
-}
-
-fn default_data_bits() -> String {
-    "8".into()
-}
-fn default_stop_bits() -> String {
-    "1".into()
-}
-fn default_parity() -> String {
-    "none".into()
-}
-fn default_flow_control() -> String {
-    "none".into()
-}
-fn default_encoding() -> String {
-    "utf8".into()
-}
-fn default_max_bytes() -> usize {
-    1024
-}
-fn default_flush_target() -> FlushTarget {
-    FlushTarget::Both
-}
-fn default_break_duration_ms() -> u64 {
-    250
-}
-fn default_wait_timeout_ms() -> u64 {
-    5000
-}
-fn default_wait_max_bytes() -> usize {
-    4096
-}
-fn default_subscribe_chunk_bytes() -> usize {
-    1024
-}
-fn default_subscribe_poll_ms() -> u64 {
-    200
-}
-
-// ---- Tool response structs --------------------------------------------------
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct ListPortsResult {
-    pub count: usize,
-    pub ports: Vec<PortInfo>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct OpenResult {
-    pub connection_id: String,
-    pub port: String,
-    pub baud_rate: u32,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct CloseResult {
-    pub connection_id: String,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct WriteResult {
-    pub connection_id: String,
-    pub bytes_written: usize,
-    pub encoding: String,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct ReadResult {
-    pub connection_id: String,
-    pub bytes_read: usize,
-    pub encoding: String,
-    pub data: String,
-    pub timed_out: bool,
-    pub timeout_ms: u64,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct FlushResult {
-    pub connection_id: String,
-    pub target: FlushTarget,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct SetDtrRtsResult {
-    pub connection_id: String,
-    pub dtr: bool,
-    pub rts: bool,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct SendBreakResult {
-    pub connection_id: String,
-    pub duration_ms: u64,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct SubscribeResult {
-    pub connection_id: String,
-    pub encoding: String,
-    pub max_chunk_bytes: usize,
-    pub poll_interval_ms: u64,
-    /// True if a prior subscription was active for this connection and has
-    /// been replaced by the new one.
-    pub replaced_previous: bool,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct UnsubscribeResult {
-    pub connection_id: String,
-    /// True if a subscription was active and has now been cancelled. False
-    /// if no subscription existed.
-    pub was_active: bool,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct WaitForResult {
-    pub connection_id: String,
-    pub matched: bool,
-    pub timed_out: bool,
-    /// All bytes accumulated up to and including the match (when matched).
-    /// Encoded with `response_encoding` from the request.
-    pub data: String,
-    pub bytes_read: usize,
-    /// Byte offset of the start of the matched pattern within the response
-    /// buffer, when matched.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub match_index: Option<usize>,
-    pub timeout_ms: u64,
-    pub response_encoding: String,
-}
+use crate::prompts::types::*;
+use crate::prompts::{diagnose, interactive};
+use crate::tools::types::*;
 
 // ---- Handler ---------------------------------------------------------------
 
@@ -951,29 +734,6 @@ impl Default for SerialHandler {
 
 // ---- Prompt templates ------------------------------------------------------
 
-#[derive(Debug, Serialize, Deserialize, JsonSchema)]
-pub struct DiagnosePortArgs {
-    /// OS-level port name to probe (e.g. "COM3", "/dev/ttyUSB0").
-    pub port: String,
-    /// Optional baud rate to try first. Defaults are tried otherwise.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub baud_rate: Option<u32>,
-}
-
-#[derive(Debug, Serialize, Deserialize, JsonSchema)]
-pub struct InteractiveTerminalArgs {
-    /// Existing connection_id returned by the `open` tool.
-    pub connection_id: String,
-    /// Optional line ending to append when writing user-typed lines.
-    /// Defaults to `\r\n`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub line_ending: Option<String>,
-    /// Optional prompt the device emits at the end of each response
-    /// (e.g. "OK>", "$ "). Used by `wait_for` between commands.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub device_prompt: Option<String>,
-}
-
 // ---- Allowlist helpers ------------------------------------------------------
 
 impl SerialHandler {
@@ -1066,38 +826,7 @@ impl SerialHandler {
         Parameters(args): Parameters<DiagnosePortArgs>,
         _ctx: RequestContext<RoleServer>,
     ) -> Result<GetPromptResult, McpError> {
-        let starting = args
-            .baud_rate
-            .map(|b| b.to_string())
-            .unwrap_or_else(|| "115200".into());
-        let user = format!(
-            "Diagnose what's on serial port `{port}`. Use the serial MCP tools.\n\
-\n\
-Plan:\n\
-1. Call `list_ports` and confirm `{port}` is present; if not, stop and report.\n\
-2. Open the port with `open(port=\"{port}\", baud_rate={starting})`. If it fails, try \
-9600, 38400, 115200, 230400, 460800 in turn until one succeeds.\n\
-3. Call `read(connection_id, timeout_ms=500, max_bytes=512)` to sample unsolicited \
-output. Many devices print a banner on boot or when DTR toggles.\n\
-4. If silent, toggle DTR with `set_dtr_rts(connection_id, dtr=false, rts=false)` then \
-`set_dtr_rts(connection_id, dtr=true, rts=true)` to soft-reset Arduino-style boards, \
-and re-read.\n\
-5. If still silent, send a benign probe via `write(connection_id, data=\"AT\\r\\n\", \
-encoding=\"utf8\")` then `wait_for(connection_id, pattern=\"OK\", timeout_ms=1000)`. \
-Try `?\\r\\n`, `help\\r\\n`, `\\r\\n` as alternatives.\n\
-6. From the captured bytes, characterise the device: BOM/banner string, presence of \
-ANSI escapes, hex-only output, line-ending convention.\n\
-7. Close the connection cleanly with `close(connection_id)` before reporting.\n\
-\n\
-Report: device identification (vendor, role, protocol), the working serial parameters \
-(baud rate + framing), the prompt string (if any), and any anomalies.",
-            port = args.port,
-            starting = starting
-        );
-        Ok(
-            GetPromptResult::new(vec![PromptMessage::new_text(PromptMessageRole::User, user)])
-                .with_description(format!("Diagnosis plan for port {}", args.port)),
-        )
+        Ok(diagnose::build_diagnose_prompt(args))
     }
 
     /// Guide an interactive serial REPL session against an already-open
@@ -1112,40 +841,7 @@ Report: device identification (vendor, role, protocol), the working serial param
         Parameters(args): Parameters<InteractiveTerminalArgs>,
         _ctx: RequestContext<RoleServer>,
     ) -> Result<GetPromptResult, McpError> {
-        let line_ending = args.line_ending.as_deref().unwrap_or("\\r\\n");
-        let device_prompt = args
-            .device_prompt
-            .as_deref()
-            .map(|p| format!("`{p}`"))
-            .unwrap_or_else(|| "the device's prompt string (e.g. `OK>`, `$ `)".to_string());
-        let user = format!(
-            "Act as a serial terminal client against connection `{id}`. Use the serial \
-MCP tools. Conventions:\n\
-\n\
-- Append `{line_ending}` to every line the user wants to send.\n\
-- After each `write`, call `wait_for(connection_id=\"{id}\", pattern={prompt}, \
-timeout_ms=2000)` to read the response up to {prompt}.\n\
-- If `wait_for` reports `timed_out=true`, surface the partial buffer and ask the user \
-how to proceed instead of retrying blindly.\n\
-- Decode the response data as UTF-8 unless it contains bytes the codec rejects, in \
-which case fall back to hex and tell the user.\n\
-- Never call `close` unless the user explicitly says so.\n\
-- If the connection vanishes (tool returns Connection ID not found), tell the user \
-and stop; do not silently reopen.\n\
-\n\
-Begin by sending an empty line (write `{line_ending}` then wait_for) to surface the \
-current prompt, then report back and wait for the user's first command.",
-            id = args.connection_id,
-            line_ending = line_ending,
-            prompt = device_prompt
-        );
-        Ok(
-            GetPromptResult::new(vec![PromptMessage::new_text(PromptMessageRole::User, user)])
-                .with_description(format!(
-                    "Interactive REPL session over connection {}",
-                    args.connection_id
-                )),
-        )
+        Ok(interactive::build_interactive_prompt(args))
     }
 }
 
