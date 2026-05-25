@@ -31,7 +31,7 @@ use crate::prompts::types::*;
 use crate::prompts::{diagnose, interactive};
 use crate::tools::helpers::*;
 use crate::tools::types::*;
-use crate::tools::{io_ops, port_ops};
+use crate::tools::{control_ops, io_ops, port_ops};
 
 // ---- Handler ---------------------------------------------------------------
 
@@ -156,30 +156,7 @@ impl SerialHandler {
         &self,
         Parameters(args): Parameters<SetDtrRtsArgs>,
     ) -> Result<Json<SetDtrRtsResult>, String> {
-        debug!(
-            "set_dtr_rts {} dtr={} rts={}",
-            args.connection_id, args.dtr, args.rts
-        );
-        let connection = self.lookup_connection(&args.connection_id).await?;
-        connection
-            .set_dtr_rts(args.dtr, args.rts)
-            .await
-            .map_err(|e| {
-                log_tool_err(
-                    "set_dtr_rts",
-                    &format!("Failed to set control lines on {}", args.connection_id),
-                    e,
-                )
-            })?;
-        info!(
-            "Control lines on {} set to dtr={} rts={}",
-            args.connection_id, args.dtr, args.rts
-        );
-        Ok(Json(SetDtrRtsResult {
-            connection_id: args.connection_id,
-            dtr: args.dtr,
-            rts: args.rts,
-        }))
+        control_ops::set_dtr_rts(&self.connections, args).await
     }
 
     #[tool(
@@ -190,26 +167,7 @@ impl SerialHandler {
         &self,
         Parameters(args): Parameters<SendBreakArgs>,
     ) -> Result<Json<SendBreakResult>, String> {
-        debug!(
-            "send_break {} duration={}ms",
-            args.connection_id, args.duration_ms
-        );
-        let connection = self.lookup_connection(&args.connection_id).await?;
-        connection.send_break(args.duration_ms).await.map_err(|e| {
-            log_tool_err(
-                "send_break",
-                &format!("Failed to send break on {}", args.connection_id),
-                e,
-            )
-        })?;
-        info!(
-            "Sent break on {} for {}ms",
-            args.connection_id, args.duration_ms
-        );
-        Ok(Json(SendBreakResult {
-            connection_id: args.connection_id,
-            duration_ms: args.duration_ms,
-        }))
+        control_ops::send_break(&self.connections, args).await
     }
 
     #[tool(
