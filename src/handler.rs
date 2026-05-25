@@ -15,16 +15,15 @@ use rmcp::{
     },
     model::*,
     prompt, prompt_handler, prompt_router,
-    service::{Peer, RequestContext},
+    service::RequestContext,
     task_handler,
     task_manager::OperationProcessor,
     tool, tool_handler, tool_router, ErrorData as McpError, Json, RoleServer, ServerHandler,
 };
 
-use tracing::{debug, error, info};
+use tracing::{debug, info};
 
-use crate::codec::{self, Encoding};
-use crate::error::SerialError;
+use crate::codec;
 use crate::security::SecurityManager;
 use crate::serial::{ConnectionManager, ConnectionSummary, PortInfo, SerialConnection};
 
@@ -37,7 +36,7 @@ use crate::tools::types::*;
 
 #[derive(Clone)]
 pub struct SerialHandler {
-    connections: Arc<ConnectionManager>,
+    pub(crate) connections: Arc<ConnectionManager>,
     /// Per-connection background RX-streaming tasks, indexed by connection id.
     /// Dropping a handle aborts the task.
     streams: Arc<tokio::sync::Mutex<HashMap<String, StreamHandle>>>,
@@ -51,8 +50,8 @@ pub struct SerialHandler {
     #[allow(dead_code)]
     prompt_router: PromptRouter<SerialHandler>,
     security: SecurityManager,
-    /// Active resource subscribers by URI.
-    subscribers: Arc<tokio::sync::Mutex<HashMap<String, ()>>>,
+    /// Active resource subscribers by URI (simple reference count).
+    subscribers: Arc<tokio::sync::Mutex<HashMap<String, usize>>>,
 }
 
 /// RAII wrapper around a streaming task. Aborts the task on drop.
@@ -137,8 +136,9 @@ impl SerialHandler {
         // Notify subscribers to the specific connection resource
         let conn_uri = format!("{URI_CONNECTION_PREFIX}{connection_id}");
         let subs = self.subscribers.lock().await;
-        if subs.contains_key(&conn_uri) {
-            drop(subs);
+        let should_notify = subs.get(&conn_uri).is_some_and(|count| *count > 0);
+        drop(subs);
+        if should_notify {
             if let Err(e) = ctx
                 .peer
                 .notify_resource_updated(rmcp::model::ResourceUpdatedNotificationParam::new(
@@ -148,8 +148,6 @@ impl SerialHandler {
             {
                 debug!("Failed to notify resource updated: {}", e);
             }
-        } else {
-            drop(subs);
         }
 
         Ok(Json(OpenResult {
@@ -186,8 +184,9 @@ impl SerialHandler {
         // Notify subscribers to the specific connection resource
         let conn_uri = format!("{URI_CONNECTION_PREFIX}{}", args.connection_id);
         let subs = self.subscribers.lock().await;
-        if subs.contains_key(&conn_uri) {
-            drop(subs);
+        let should_notify = subs.get(&conn_uri).is_some_and(|count| *count > 0);
+        drop(subs);
+        if should_notify {
             if let Err(e) = ctx
                 .peer
                 .notify_resource_updated(rmcp::model::ResourceUpdatedNotificationParam::new(
@@ -197,8 +196,6 @@ impl SerialHandler {
             {
                 debug!("Failed to notify resource updated: {}", e);
             }
-        } else {
-            drop(subs);
         }
 
         Ok(Json(CloseResult {
@@ -702,7 +699,7 @@ impl ServerHandler for SerialHandler {
     ) -> Result<(), McpError> {
         let uri = request.uri;
         let mut subscribers = self.subscribers.lock().await;
-        subscribers.insert(uri.clone(), ());
+        *subscribers.entry(uri.clone()).or_insert(0) += 1;
         debug!("Client subscribed to resource {}", uri);
         Ok(())
     }
@@ -714,7 +711,12 @@ impl ServerHandler for SerialHandler {
     ) -> Result<(), McpError> {
         let uri = request.uri;
         let mut subscribers = self.subscribers.lock().await;
-        subscribers.remove(&uri);
+        if let Some(count) = subscribers.get_mut(&uri) {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                subscribers.remove(&uri);
+            }
+        }
         debug!("Client unsubscribed from resource {}", uri);
         Ok(())
     }

@@ -6,10 +6,26 @@ use tracing::error;
 
 use crate::codec::{self, Encoding};
 use crate::error::SerialError;
-use crate::serial::{ConnectionConfig, DataBits, FlowControl, Parity, SerialConnection, StopBits};
+use crate::serial::{
+    ConnectionConfig, ConnectionManager, DataBits, FlowControl, Parity, SerialConnection, StopBits,
+};
 use crate::tools::types::*;
 
 pub(crate) const DEFAULT_READ_TIMEOUT_MS: u64 = 1000;
+
+// ------------------------------------------------------------------
+// Connection lookup
+// ------------------------------------------------------------------
+
+pub async fn lookup_connection(
+    connections: &Arc<ConnectionManager>,
+    id: &str,
+) -> Result<Arc<SerialConnection>, String> {
+    connections
+        .get(id)
+        .await
+        .map_err(|_| format!("Connection ID {id} not found"))
+}
 
 // ------------------------------------------------------------------
 // Read helpers
