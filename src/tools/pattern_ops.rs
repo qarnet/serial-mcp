@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use rmcp::Json;
+use rmcp::{model::Meta, Json, Peer, RoleServer};
 use tracing::debug;
 
 use crate::codec;
@@ -10,6 +10,9 @@ use crate::tools::types::{WaitForArgs, WaitForResult};
 
 pub async fn wait_for(
     connections: &Arc<ConnectionManager>,
+    meta: Meta,
+    ct: tokio_util::sync::CancellationToken,
+    peer: Peer<RoleServer>,
     args: WaitForArgs,
 ) -> Result<Json<WaitForResult>, String> {
     debug!(
@@ -27,8 +30,17 @@ pub async fn wait_for(
     }
 
     let connection = lookup_connection(connections, &args.connection_id).await?;
-    let outcome =
-        read_until_pattern(&connection, &pattern, args.timeout_ms, args.max_bytes).await?;
+    let progress_token = meta.get_progress_token();
+    let outcome = read_until_pattern(
+        &connection,
+        &pattern,
+        args.timeout_ms,
+        args.max_bytes,
+        &ct,
+        progress_token,
+        Some(&peer),
+    )
+    .await?;
 
     let bytes_read = outcome.bytes.len();
     let data = codec::encode(response_encoding, &outcome.bytes)

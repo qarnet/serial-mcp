@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use rmcp::Json;
+use rmcp::{model::Meta, Json, Peer, RoleServer};
 use tracing::{debug, info};
 
 use crate::codec::{self, Encoding};
@@ -38,6 +38,9 @@ pub async fn write(
 
 pub async fn read(
     connections: &Arc<ConnectionManager>,
+    meta: Meta,
+    ct: tokio_util::sync::CancellationToken,
+    peer: Peer<RoleServer>,
     args: ReadArgs,
 ) -> Result<Json<ReadResult>, String> {
     debug!(
@@ -47,7 +50,16 @@ pub async fn read(
 
     let encoding = parse_encoding(&args.encoding)?;
     let connection = lookup_connection(connections, &args.connection_id).await?;
-    let outcome = read_bytes(&connection, args.max_bytes, args.timeout_ms).await?;
+    let progress_token = meta.get_progress_token();
+    let outcome = read_bytes(
+        &connection,
+        args.max_bytes,
+        args.timeout_ms,
+        &ct,
+        progress_token,
+        Some(&peer),
+    )
+    .await?;
     build_read_result(outcome, args.connection_id, encoding, args.timeout_ms)
 }
 

@@ -325,16 +325,18 @@ impl SerialConnection {
         io.set_dtr_rts(dtr, rts).map_err(SerialError::from)
     }
 
+    /// Set the BREAK condition on the TX line.
+    pub async fn set_break_state(&self, enabled: bool) -> Result<()> {
+        let io = self.io.lock().await;
+        io.set_break_state(enabled).map_err(SerialError::from)
+    }
+
     /// Assert the BREAK condition on the TX line for `duration_ms`
     /// milliseconds, then release it.
     pub async fn send_break(&self, duration_ms: u64) -> Result<()> {
-        {
-            let io = self.io.lock().await;
-            io.set_break_state(true).map_err(SerialError::from)?;
-        }
+        self.set_break_state(true).await?;
         tokio::time::sleep(Duration::from_millis(duration_ms)).await;
-        let io = self.io.lock().await;
-        io.set_break_state(false).map_err(SerialError::from)
+        self.set_break_state(false).await
     }
 }
 

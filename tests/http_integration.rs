@@ -12,16 +12,20 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use rmcp::model::{
-    CallToolRequestParams, GetPromptRequestParams, PaginatedRequestParams,
-    ReadResourceRequestParams,
+    CallToolRequestParams, ClientRequest, GetPromptRequestParams, PaginatedRequestParams,
+    ReadResourceRequestParams, Request,
 };
+use rmcp::service::PeerRequestOptions;
 use serde_json::json;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use serial_mcp_server::serial::{test_support::loopback_connection, ConnectionManager};
 
 mod common;
-use common::{args_object, connect_client, next_notification, tool_request, TestServer};
+use common::{
+    args_object, connect_client, connect_client_with_progress, next_notification, tool_request,
+    TestServer,
+};
 
 const EXPECTED_TOOLS: &[&str] = &[
     "list_ports",
@@ -43,6 +47,46 @@ async fn initialize_handshake_succeeds() {
     let (client, _rx) = connect_client(&server).await.unwrap();
     let info = client.peer().peer_info().expect("peer_info");
     assert_eq!(info.server_info.name, "serial-mcp-server");
+    client.cancel().await.ok();
+}
+
+#[tokio::test]
+async fn progress_notifications_emitted_for_wait_for() {
+    let manager = Arc::new(ConnectionManager::new());
+    let (conn, _peer) = loopback_connection("loop-progress");
+    let connection_id = manager.insert(conn).await.unwrap();
+
+    let server = TestServer::start_with(manager).await;
+    let (client, _log_rx, mut progress_rx) = connect_client_with_progress(&server).await.unwrap();
+
+    let request = tool_request(
+        "wait_for",
+        json!({
+            "connection_id": connection_id,
+            "pattern": "NEVER_MATCH",
+            "timeout_ms": 600,
+            "max_bytes": 128,
+        }),
+    );
+
+    let handle = client
+        .send_cancellable_request(
+            ClientRequest::CallToolRequest(Request::new(request)),
+            PeerRequestOptions::no_options(),
+        )
+        .await
+        .unwrap();
+    let token = handle.progress_token.clone();
+
+    let first_progress = tokio::time::timeout(Duration::from_secs(2), progress_rx.recv())
+        .await
+        .expect("progress timeout")
+        .expect("progress channel closed");
+    assert_eq!(first_progress.progress_token, token);
+
+    let _response = handle.await_response().await.unwrap();
+
+    // The request should complete (we mainly care that progress notifications are emitted).
     client.cancel().await.ok();
 }
 

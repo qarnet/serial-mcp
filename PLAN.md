@@ -142,7 +142,7 @@ SERIAL_MCP_ALLOWLIST="/dev/ttyACM0,/dev/ttyUSB*,COM3"
 
 ### 4.1 Progress Notifications for Long-Running Tools
 **Priority:** Medium
-**Status:** NOT STARTED
+**Status:** COMPLETE
 
 **Tools affected:** `wait_for`, `read` (with timeout), `send_break`
 

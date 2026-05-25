@@ -15,7 +15,9 @@ use std::time::Duration;
 
 use anyhow::Result;
 use rmcp::handler::client::ClientHandler;
-use rmcp::model::{CallToolRequestParams, LoggingMessageNotificationParam};
+use rmcp::model::{
+    CallToolRequestParams, LoggingMessageNotificationParam, ProgressNotificationParam,
+};
 use rmcp::service::{NotificationContext, RoleClient, RunningService};
 use rmcp::transport::streamable_http_server::{
     session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
@@ -122,6 +124,54 @@ pub async fn connect_client(
     let transport = StreamableHttpClientTransport::from_uri(server.url.as_str());
     let client = handler.serve(transport).await?;
     Ok((client, rx))
+}
+
+#[derive(Clone)]
+pub struct ProgressNotificationCollector {
+    log_tx: mpsc::UnboundedSender<LoggingMessageNotificationParam>,
+    progress_tx: mpsc::UnboundedSender<ProgressNotificationParam>,
+}
+
+impl ClientHandler for ProgressNotificationCollector {
+    fn on_logging_message(
+        &self,
+        params: LoggingMessageNotificationParam,
+        _ctx: NotificationContext<RoleClient>,
+    ) -> impl Future<Output = ()> + Send + '_ {
+        let tx = self.log_tx.clone();
+        async move {
+            let _ = tx.send(params);
+        }
+    }
+
+    fn on_progress(
+        &self,
+        params: ProgressNotificationParam,
+        _ctx: NotificationContext<RoleClient>,
+    ) -> impl Future<Output = ()> + Send + '_ {
+        let tx = self.progress_tx.clone();
+        async move {
+            let _ = tx.send(params);
+        }
+    }
+}
+
+pub async fn connect_client_with_progress(
+    server: &TestServer,
+) -> Result<(
+    RunningService<RoleClient, ProgressNotificationCollector>,
+    mpsc::UnboundedReceiver<LoggingMessageNotificationParam>,
+    mpsc::UnboundedReceiver<ProgressNotificationParam>,
+)> {
+    let (log_tx, log_rx) = mpsc::unbounded_channel();
+    let (progress_tx, progress_rx) = mpsc::unbounded_channel();
+    let handler = ProgressNotificationCollector {
+        log_tx,
+        progress_tx,
+    };
+    let transport = StreamableHttpClientTransport::from_uri(server.url.as_str());
+    let client = handler.serve(transport).await?;
+    Ok((client, log_rx, progress_rx))
 }
 
 /// Build a `CallToolRequestParams::arguments` JSON object from a

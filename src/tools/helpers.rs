@@ -1,7 +1,13 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use rmcp::{model::LoggingLevel, model::LoggingMessageNotificationParam, service::Peer, Json};
+use rmcp::{
+    model::{
+        LoggingLevel, LoggingMessageNotificationParam, ProgressNotificationParam, ProgressToken,
+    },
+    service::Peer,
+    Json, RoleServer,
+};
 use tracing::error;
 
 use crate::codec::{self, Encoding};
@@ -42,6 +48,9 @@ pub async fn read_bytes(
     connection: &SerialConnection,
     max_bytes: usize,
     timeout_ms: Option<u64>,
+    ct: &tokio_util::sync::CancellationToken,
+    progress_token: Option<ProgressToken>,
+    peer: Option<&Peer<RoleServer>>,
 ) -> Result<ReadOutcome, String> {
     const SETTLE_MS: u64 = 50;
 
@@ -49,16 +58,58 @@ pub async fn read_bytes(
     let deadline = Instant::now() + Duration::from_millis(effective_timeout);
     let mut buf = vec![0u8; max_bytes];
 
-    let first_n = match connection.read(&mut buf, Some(effective_timeout)).await {
-        Ok(n) => n,
-        Err(SerialError::ReadTimeout) => {
+    let mut last_progress = Instant::now();
+
+    // Read until at least one byte arrives or we time out.
+    let first_n = loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
             return Ok(ReadOutcome {
                 bytes: Vec::new(),
                 timed_out: true,
-            })
+            });
         }
-        Err(e) => return Err(log_tool_err("read", "Data reading failed", e)),
+
+        let poll_ms = remaining.as_millis() as u64;
+        let poll_ms = poll_ms.clamp(1, 250);
+
+        match tokio::select! {
+            _ = ct.cancelled() => return Err("Cancelled".into()),
+            res = connection.read(&mut buf, Some(poll_ms)) => res,
+        } {
+            Ok(n) if n > 0 => break n,
+            Ok(_) => {}
+            Err(SerialError::ReadTimeout) => {}
+            Err(e) => return Err(log_tool_err("read", "Data reading failed", e)),
+        }
+
+        if let (Some(token), Some(peer)) = (progress_token.clone(), peer) {
+            if last_progress.elapsed() >= Duration::from_millis(250) {
+                last_progress = Instant::now();
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                let elapsed_ms = effective_timeout.saturating_sub(remaining.as_millis() as u64);
+                let _ = peer
+                    .notify_progress(ProgressNotificationParam {
+                        progress_token: token,
+                        progress: elapsed_ms as f64,
+                        total: Some(effective_timeout as f64),
+                        message: Some("waiting for data".into()),
+                    })
+                    .await;
+            }
+        }
     };
+
+    if let (Some(token), Some(peer)) = (progress_token.clone(), peer) {
+        let _ = peer
+            .notify_progress(ProgressNotificationParam {
+                progress_token: token,
+                progress: 0.0,
+                total: Some(effective_timeout as f64),
+                message: Some("read started".to_string()),
+            })
+            .await;
+    }
 
     let mut total = first_n;
     while total < max_bytes {
@@ -69,8 +120,29 @@ pub async fn read_bytes(
         if settle == 0 {
             break;
         }
-        match connection.read(&mut buf[total..], Some(settle)).await {
-            Ok(n) if n > 0 => total += n,
+        let res = tokio::select! {
+            _ = ct.cancelled() => return Err("Cancelled".into()),
+            res = connection.read(&mut buf[total..], Some(settle)) => res,
+        };
+        match res {
+            Ok(n) if n > 0 => {
+                total += n;
+                if let (Some(token), Some(peer)) = (progress_token.clone(), peer) {
+                    let remaining = deadline.saturating_duration_since(Instant::now());
+                    let elapsed_ms = effective_timeout.saturating_sub(remaining.as_millis() as u64);
+                    if last_progress.elapsed() >= Duration::from_millis(250) {
+                        last_progress = Instant::now();
+                        let _ = peer
+                            .notify_progress(ProgressNotificationParam {
+                                progress_token: token,
+                                progress: elapsed_ms as f64,
+                                total: Some(effective_timeout as f64),
+                                message: Some(format!("read {total} bytes")),
+                            })
+                            .await;
+                    }
+                }
+            }
             _ => break,
         }
     }
@@ -93,12 +165,31 @@ pub async fn read_until_pattern(
     pattern: &[u8],
     timeout_ms: u64,
     max_bytes: usize,
+    ct: &tokio_util::sync::CancellationToken,
+    progress_token: Option<ProgressToken>,
+    peer: Option<&Peer<RoleServer>>,
 ) -> Result<WaitOutcome, String> {
     const CHUNK_CAPACITY: usize = 256;
     let deadline = Instant::now() + Duration::from_millis(timeout_ms);
     let mut accumulated: Vec<u8> = Vec::with_capacity(CHUNK_CAPACITY.min(max_bytes));
 
+    let mut last_progress = Instant::now();
+
+    if let (Some(token), Some(peer)) = (progress_token.clone(), peer) {
+        let _ = peer
+            .notify_progress(ProgressNotificationParam {
+                progress_token: token,
+                progress: 0.0,
+                total: Some(timeout_ms as f64),
+                message: Some("wait_for started".to_string()),
+            })
+            .await;
+    }
+
     loop {
+        if ct.is_cancelled() {
+            return Err("Cancelled".into());
+        }
         if let Some(idx) = find_subslice(&accumulated, pattern) {
             return Ok(WaitOutcome {
                 bytes: accumulated,
@@ -122,21 +213,40 @@ pub async fn read_until_pattern(
             });
         }
 
+        if let (Some(token), Some(peer)) = (progress_token.clone(), peer) {
+            if last_progress.elapsed() >= Duration::from_millis(250) {
+                last_progress = Instant::now();
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                let elapsed_ms = timeout_ms.saturating_sub(remaining.as_millis() as u64);
+                let _ = peer
+                    .notify_progress(ProgressNotificationParam {
+                        progress_token: token,
+                        progress: elapsed_ms as f64,
+                        total: Some(timeout_ms as f64),
+                        message: Some(format!("wait_for {} bytes", accumulated.len())),
+                    })
+                    .await;
+            }
+        }
+
         let remaining_ms = (deadline - now).as_millis() as u64;
+        // Poll in short slices so we can emit progress updates even with no data.
+        let remaining_ms = remaining_ms.clamp(1, 250);
         let room = (max_bytes - accumulated.len()).min(CHUNK_CAPACITY);
         let mut chunk = vec![0u8; room];
-        match connection.read(&mut chunk, Some(remaining_ms)).await {
+        match tokio::select! {
+            _ = ct.cancelled() => return Err("Cancelled".into()),
+            res = connection.read(&mut chunk, Some(remaining_ms)) => res,
+        } {
             Ok(0) => continue,
             Ok(n) => {
                 chunk.truncate(n);
                 accumulated.extend_from_slice(&chunk);
             }
             Err(SerialError::ReadTimeout) => {
-                return Ok(WaitOutcome {
-                    bytes: accumulated,
-                    match_index: None,
-                    timed_out: true,
-                });
+                // No data arrived during this poll slice; keep waiting until the
+                // overall deadline is reached.
+                continue;
             }
             Err(e) => return Err(log_tool_err("wait_for", "Read failed during wait", e)),
         }
@@ -417,7 +527,8 @@ mod tests {
         let writer = tokio::spawn(async move {
             peer.write_all(b"junk before OK> and tail").await.unwrap();
         });
-        let outcome = read_until_pattern(&conn, b"OK>", 1_000, 1024)
+        let ct = tokio_util::sync::CancellationToken::new();
+        let outcome = read_until_pattern(&conn, b"OK>", 1_000, 1024, &ct, None, None)
             .await
             .unwrap();
         writer.await.unwrap();
@@ -430,7 +541,10 @@ mod tests {
     async fn read_until_pattern_times_out_with_no_match() {
         let (conn, mut peer) = loopback_connection("test");
         peer.write_all(b"only noise here").await.unwrap();
-        let outcome = read_until_pattern(&conn, b"OK>", 60, 1024).await.unwrap();
+        let ct = tokio_util::sync::CancellationToken::new();
+        let outcome = read_until_pattern(&conn, b"OK>", 60, 1024, &ct, None, None)
+            .await
+            .unwrap();
         assert!(outcome.timed_out);
         assert!(outcome.match_index.is_none());
         assert!(outcome.bytes.windows(3).all(|w| w != b"OK>"));
@@ -441,7 +555,10 @@ mod tests {
         let (conn, mut peer) = loopback_connection("test");
         let blob = vec![b'.'; 600];
         peer.write_all(&blob).await.unwrap();
-        let outcome = read_until_pattern(&conn, b"OK>", 1_000, 256).await.unwrap();
+        let ct = tokio_util::sync::CancellationToken::new();
+        let outcome = read_until_pattern(&conn, b"OK>", 1_000, 256, &ct, None, None)
+            .await
+            .unwrap();
         assert!(!outcome.timed_out);
         assert!(outcome.match_index.is_none());
         assert_eq!(outcome.bytes.len(), 256);

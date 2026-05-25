@@ -1,10 +1,12 @@
 use std::sync::Arc;
 
-use rmcp::Json;
+use rmcp::{model::Meta, Json, Peer, RoleServer};
+use tokio::time::{Duration, Instant};
 use tracing::{debug, info};
 
-use crate::serial::ConnectionManager;
-use crate::tools::helpers::{log_tool_err, lookup_connection};
+use crate::serial::{ConnectionManager, SerialConnection};
+use crate::tools::helpers::log_tool_err;
+use crate::tools::helpers::lookup_connection;
 use crate::tools::types::{SendBreakArgs, SendBreakResult, SetDtrRtsArgs, SetDtrRtsResult};
 
 pub async fn set_dtr_rts(
@@ -42,6 +44,9 @@ pub async fn set_dtr_rts(
 
 pub async fn send_break(
     connections: &Arc<ConnectionManager>,
+    meta: Meta,
+    ct: tokio_util::sync::CancellationToken,
+    peer: Peer<RoleServer>,
     args: SendBreakArgs,
 ) -> Result<Json<SendBreakResult>, String> {
     debug!(
@@ -50,18 +55,84 @@ pub async fn send_break(
     );
 
     let connection = lookup_connection(connections, &args.connection_id).await?;
-    connection.send_break(args.duration_ms).await.map_err(|e| {
-        log_tool_err(
-            "send_break",
-            &format!("Failed to send break on {}", args.connection_id),
-            e,
-        )
-    })?;
+
+    struct BreakResetGuard {
+        connection: Arc<SerialConnection>,
+    }
+
+    impl Drop for BreakResetGuard {
+        fn drop(&mut self) {
+            let connection = Arc::clone(&self.connection);
+            tokio::spawn(async move {
+                let _ = connection.set_break_state(false).await;
+            });
+        }
+    }
+
+    connection
+        .set_break_state(true)
+        .await
+        .map_err(|e| log_tool_err("send_break", "Failed to assert BREAK", e))?;
+    let _guard = BreakResetGuard {
+        connection: Arc::clone(&connection),
+    };
+
+    let progress_token = meta.get_progress_token();
+    if let Some(token) = progress_token.clone() {
+        let _ = peer
+            .notify_progress(rmcp::model::ProgressNotificationParam {
+                progress_token: token,
+                progress: 0.0,
+                total: Some(args.duration_ms as f64),
+                message: Some("break asserted".into()),
+            })
+            .await;
+    }
+
+    let start = Instant::now();
+    let mut ticker = tokio::time::interval(Duration::from_millis(250));
+    loop {
+        tokio::select! {
+            _ = ct.cancelled() => return Err("Cancelled".into()),
+            _ = ticker.tick() => {
+                let elapsed = start.elapsed().as_millis() as u64;
+                if elapsed >= args.duration_ms {
+                    break;
+                }
+                if let Some(token) = progress_token.clone() {
+                    let _ = peer
+                        .notify_progress(rmcp::model::ProgressNotificationParam {
+                            progress_token: token,
+                            progress: elapsed as f64,
+                            total: Some(args.duration_ms as f64),
+                            message: Some("holding break".into()),
+                        })
+                        .await;
+                }
+            }
+        }
+    }
+
+    connection
+        .set_break_state(false)
+        .await
+        .map_err(|e| log_tool_err("send_break", "Failed to release BREAK", e))?;
 
     info!(
         "Sent break on {} for {}ms",
         args.connection_id, args.duration_ms
     );
+
+    if let Some(token) = progress_token {
+        let _ = peer
+            .notify_progress(rmcp::model::ProgressNotificationParam {
+                progress_token: token,
+                progress: args.duration_ms as f64,
+                total: Some(args.duration_ms as f64),
+                message: Some("break released".into()),
+            })
+            .await;
+    }
 
     Ok(Json(SendBreakResult {
         connection_id: args.connection_id,

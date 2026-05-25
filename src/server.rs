@@ -139,9 +139,12 @@ impl SerialHandler {
     )]
     async fn read(
         &self,
+        meta: Meta,
+        ct: tokio_util::sync::CancellationToken,
+        peer: rmcp::Peer<RoleServer>,
         Parameters(args): Parameters<ReadArgs>,
     ) -> Result<Json<ReadResult>, String> {
-        io_ops::read(&self.connections, args).await
+        io_ops::read(&self.connections, meta, ct, peer, args).await
     }
 
     #[tool(
@@ -180,9 +183,12 @@ impl SerialHandler {
     )]
     async fn send_break(
         &self,
+        meta: Meta,
+        ct: tokio_util::sync::CancellationToken,
+        peer: rmcp::Peer<RoleServer>,
         Parameters(args): Parameters<SendBreakArgs>,
     ) -> Result<Json<SendBreakResult>, String> {
-        control_ops::send_break(&self.connections, args).await
+        control_ops::send_break(&self.connections, meta, ct, peer, args).await
     }
 
     #[tool(
@@ -226,9 +232,12 @@ impl SerialHandler {
     )]
     async fn wait_for(
         &self,
+        meta: Meta,
+        ct: tokio_util::sync::CancellationToken,
+        peer: rmcp::Peer<RoleServer>,
         Parameters(args): Parameters<WaitForArgs>,
     ) -> Result<Json<WaitForResult>, String> {
-        pattern_ops::wait_for(&self.connections, args).await
+        pattern_ops::wait_for(&self.connections, meta, ct, peer, args).await
     }
 }
 

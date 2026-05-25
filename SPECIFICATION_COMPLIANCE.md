@@ -76,7 +76,7 @@ This server implements all **core MCP 2025-11-25 features** required for product
 | Notification | Status | Notes |
 |---------------|--------|-------|
 | `notifications/cancelled` | ❌ | Not sent |
-| `notifications/progress` | ❌ | Not sent (progressToken not extracted) |
+| `notifications/progress` | ✅ | Sent when request provides a progress token |
 | `notifications/message` | ✅ | RX data streaming |
 | `notifications/resources/list_changed` | ✅ | Fires on open/close |
 | `notifications/resources/updated` | ✅ | Fires to subscribers |
@@ -93,7 +93,7 @@ This server implements all **core MCP 2025-11-25 features** required for product
 | Notification | Status | Notes |
 |--------------|--------|-------|
 | `notifications/initialized` | ✅ | rmcp handles |
-| `notifications/cancelled` | ❌ | Not handled |
+| `notifications/cancelled` | ⚠️ | Cooperative cancellation via request CancellationToken; explicit notification handling not implemented |
 | `notifications/roots/list_changed` | 🚫 | Deprecated |
 
 **Score:** 1/2 active notifications
@@ -178,7 +178,7 @@ This server implements all **core MCP 2025-11-25 features** required for product
 | Version negotiation | ✅ | V_2025_11_25 |
 | Capability negotiation | ✅ | Full exchange |
 | `_meta` fields | ⚠️ | Reserved keys handled by rmcp |
-| `progressToken` | ❌ | Not extracted from requests |
+| `progressToken` | ✅ | Extracted for long-running tools (read/wait_for/send_break) |
 | Timeouts | ❌ | Not configured |
 | Cancellation tokens | ❌ | Not wired |
 
