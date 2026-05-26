@@ -458,7 +458,6 @@ impl ConnectionManager {
             .map(|c| ConnectionSummary {
                 connection_id: c.id().to_string(),
                 port: c.port().to_string(),
-                latest_read: None,
             })
             .collect()
     }
@@ -469,9 +468,6 @@ impl ConnectionManager {
 pub struct ConnectionSummary {
     pub connection_id: String,
     pub port: String,
-    /// Base64-encoded bytes from the most recent read, if any.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub latest_read: Option<String>,
 }
 
 fn is_port_in_use(connections: &HashMap<String, Arc<SerialConnection>>, port: &str) -> bool {

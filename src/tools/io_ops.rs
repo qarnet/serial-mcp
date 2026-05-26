@@ -3,7 +3,7 @@ use std::sync::Arc;
 use rmcp::{model::Meta, Json, Peer, RoleServer};
 use tracing::{debug, info};
 
-use crate::codec::{self, Encoding};
+use crate::codec;
 use crate::serial::ConnectionManager;
 use crate::tools::helpers::{
     build_read_result, clamp_or_err, clamp_timeout_or_err, log_tool_err, lookup_connection,
@@ -89,8 +89,4 @@ pub async fn flush(
         connection_id: args.connection_id,
         target: args.target,
     }))
-}
-
-pub fn encoding_from_str(raw: &str) -> Result<Encoding, String> {
-    parse_encoding(raw)
 }

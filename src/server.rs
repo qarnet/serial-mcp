@@ -508,7 +508,6 @@ impl ServerHandler for SerialHandler {
                 let body = serde_json::to_string_pretty(&ConnectionSummary {
                     connection_id: conn.id().to_string(),
                     port: conn.port().to_string(),
-                    latest_read: None,
                 })
                 .map_err(|e| McpError::internal_error(format!("serialize: {e}"), None))?;
                 Ok(ReadResourceResult::new(vec![ResourceContents::text(
