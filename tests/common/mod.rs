@@ -9,6 +9,7 @@
 
 #![allow(dead_code)]
 
+use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
@@ -30,6 +31,7 @@ use tokio_util::sync::CancellationToken;
 
 use serial_mcp_server::security::SecurityManager;
 use serial_mcp_server::serial::ConnectionManager;
+use serial_mcp_server::server::StreamRegistry;
 use serial_mcp_server::SerialHandler;
 
 /// In-process HTTP MCP server bound to `127.0.0.1` on an OS-assigned
@@ -66,13 +68,16 @@ impl TestServer {
         let url = format!("http://{addr}/mcp");
         let shutdown = CancellationToken::new();
 
+        let streams: StreamRegistry = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
         let manager_for_service = Arc::clone(&manager);
+        let streams_for_service = Arc::clone(&streams);
         let shutdown_for_service = shutdown.child_token();
         let service = StreamableHttpService::new(
             move || {
-                Ok(SerialHandler::with_manager_and_security(
+                Ok(SerialHandler::with_manager_security_and_streams(
                     Arc::clone(&manager_for_service),
                     security.clone(),
+                    Arc::clone(&streams_for_service),
                 ))
             },
             LocalSessionManager::default().into(),

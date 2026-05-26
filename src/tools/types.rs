@@ -41,10 +41,10 @@ pub struct WriteArgs {
 pub struct ReadArgs {
     pub connection_id: String,
     #[serde(default)]
-    #[schemars(schema_with = "crate::schema_helpers::option_uint_schema")]
+    #[schemars(schema_with = "crate::schema_helpers::option_timeout_ms_schema")]
     pub timeout_ms: Option<u64>,
     #[serde(default = "default_max_bytes")]
-    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    #[schemars(schema_with = "crate::schema_helpers::read_max_bytes_schema")]
     pub max_bytes: usize,
     #[serde(default = "default_encoding")]
     pub encoding: String,
@@ -68,7 +68,7 @@ pub struct SetDtrRtsArgs {
 pub struct SendBreakArgs {
     pub connection_id: String,
     #[serde(default = "default_break_duration_ms")]
-    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    #[schemars(schema_with = "crate::schema_helpers::timeout_ms_schema")]
     pub duration_ms: u64,
 }
 
@@ -78,10 +78,10 @@ pub struct SubscribeArgs {
     #[serde(default = "default_encoding")]
     pub encoding: String,
     #[serde(default = "default_subscribe_chunk_bytes")]
-    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    #[schemars(schema_with = "crate::schema_helpers::stream_chunk_bytes_schema")]
     pub max_chunk_bytes: usize,
     #[serde(default = "default_subscribe_poll_ms")]
-    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    #[schemars(schema_with = "crate::schema_helpers::poll_interval_ms_schema")]
     pub poll_interval_ms: u64,
 }
 
@@ -97,10 +97,10 @@ pub struct WaitForArgs {
     #[serde(default = "default_encoding")]
     pub pattern_encoding: String,
     #[serde(default = "default_wait_timeout_ms")]
-    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    #[schemars(schema_with = "crate::schema_helpers::timeout_ms_schema")]
     pub timeout_ms: u64,
     #[serde(default = "default_wait_max_bytes")]
-    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    #[schemars(schema_with = "crate::schema_helpers::wait_max_bytes_schema")]
     pub max_bytes: usize,
     #[serde(default = "default_encoding")]
     pub response_encoding: String,

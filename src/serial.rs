@@ -6,7 +6,7 @@
 //! - [`ConnectionManager`] holds a set of open connections indexed by id and
 //!   rejects double-opens of the same port.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -386,7 +386,13 @@ fn build_stream(config: &ConnectionConfig) -> Result<SerialStream> {
 /// connection id. Rejects opening the same port twice.
 #[derive(Debug, Default)]
 pub struct ConnectionManager {
-    connections: Mutex<HashMap<String, Arc<SerialConnection>>>,
+    state: Mutex<ConnectionRegistry>,
+}
+
+#[derive(Debug, Default)]
+struct ConnectionRegistry {
+    connections: HashMap<String, Arc<SerialConnection>>,
+    opening_ports: HashSet<String>,
 }
 
 impl ConnectionManager {
@@ -396,13 +402,21 @@ impl ConnectionManager {
 
     /// Open a new connection and store it. Returns the new connection id.
     pub async fn open(&self, config: ConnectionConfig) -> Result<String> {
-        let mut connections = self.connections.lock().await;
-        if is_port_in_use(&connections, &config.port) {
-            return Err(SerialError::PortAlreadyOpen(config.port));
+        let port = config.port.clone();
+        {
+            let mut state = self.state.lock().await;
+            if is_port_in_use(&state.connections, &port) || state.opening_ports.contains(&port) {
+                return Err(SerialError::PortAlreadyOpen(port));
+            }
+            state.opening_ports.insert(port.clone());
         }
-        let connection = Arc::new(SerialConnection::open(config).await?);
+
+        let opened = SerialConnection::open(config).await;
+        let mut state = self.state.lock().await;
+        state.opening_ports.remove(&port);
+        let connection = Arc::new(opened?);
         let id = connection.id().to_string();
-        connections.insert(id.clone(), connection);
+        state.connections.insert(id.clone(), connection);
         Ok(id)
     }
 
@@ -413,21 +427,24 @@ impl ConnectionManager {
     /// Exposed for integration tests that want to drive the MCP surface
     /// against a fake connection without going through the OS serial layer.
     pub async fn insert(&self, connection: SerialConnection) -> Result<String> {
-        let mut connections = self.connections.lock().await;
-        if is_port_in_use(&connections, connection.port()) {
+        let mut state = self.state.lock().await;
+        if is_port_in_use(&state.connections, connection.port())
+            || state.opening_ports.contains(connection.port())
+        {
             return Err(SerialError::PortAlreadyOpen(connection.port().to_string()));
         }
         let id = connection.id().to_string();
-        connections.insert(id.clone(), Arc::new(connection));
+        state.connections.insert(id.clone(), Arc::new(connection));
         Ok(id)
     }
 
     /// Remove a connection. The serial port is closed when the last [`Arc`]
     /// reference is dropped, which happens here if no caller still holds one.
     pub async fn close(&self, id: &str) -> Result<()> {
-        self.connections
+        self.state
             .lock()
             .await
+            .connections
             .remove(id)
             .ok_or_else(|| SerialError::ConnectionNotFound(id.to_string()))?;
         Ok(())
@@ -435,9 +452,10 @@ impl ConnectionManager {
 
     /// Look up an existing connection by id.
     pub async fn get(&self, id: &str) -> Result<Arc<SerialConnection>> {
-        self.connections
+        self.state
             .lock()
             .await
+            .connections
             .get(id)
             .cloned()
             .ok_or_else(|| SerialError::ConnectionNotFound(id.to_string()))
@@ -445,15 +463,16 @@ impl ConnectionManager {
 
     /// Number of currently open connections.
     pub async fn count(&self) -> usize {
-        self.connections.lock().await.len()
+        self.state.lock().await.connections.len()
     }
 
     /// Lightweight snapshot of all currently-open connections. Cheap because
     /// it only clones the id + port pair, not the underlying IO.
     pub async fn list_open(&self) -> Vec<ConnectionSummary> {
-        self.connections
+        self.state
             .lock()
             .await
+            .connections
             .values()
             .map(|c| ConnectionSummary {
                 connection_id: c.id().to_string(),

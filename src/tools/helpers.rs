@@ -17,19 +17,24 @@ use crate::serial::{
 };
 use crate::tools::types::*;
 
-pub(crate) const DEFAULT_READ_TIMEOUT_MS: u64 = 1000;
+pub use crate::limits::{
+    MAX_READ_BYTES, MAX_STREAM_CHUNK_BYTES, MAX_TIMEOUT_MS, MAX_WAIT_BYTES, MAX_WRITE_BYTES,
+    MIN_POLL_INTERVAL_MS, MIN_READ_BYTES, MIN_STREAM_CHUNK_BYTES, MIN_WAIT_BYTES,
+};
 
-// Input validation limits
-pub const MAX_READ_BYTES: usize = 1024 * 1024; // 1 MiB
-pub const MAX_WAIT_BYTES: usize = 1024 * 1024; // 1 MiB
-pub const MAX_STREAM_CHUNK_BYTES: usize = 64 * 1024; // 64 KiB
-pub const MAX_TIMEOUT_MS: u64 = 5 * 60 * 1000; // 5 min
-pub const MIN_POLL_INTERVAL_MS: u64 = 10;
-pub const MAX_WRITE_BYTES: usize = 1024 * 1024; // 1 MiB
+pub(crate) const DEFAULT_READ_TIMEOUT_MS: u64 = 1000;
 
 pub fn clamp_or_err(name: &str, value: usize, max: usize) -> Result<usize, String> {
     if value > max {
         Err(format!("{name}={value} exceeds maximum {max}"))
+    } else {
+        Ok(value)
+    }
+}
+
+pub fn require_min_or_err(name: &str, value: usize, min: usize) -> Result<usize, String> {
+    if value < min {
+        Err(format!("{name}={value} is below minimum {min}"))
     } else {
         Ok(value)
     }
@@ -326,7 +331,10 @@ pub async fn stream_rx(
                             logger: Some(logger.clone()),
                             data: payload,
                         };
-                        let _ = peer.notify_logging_message(param).await;
+                        if let Err(e) = peer.notify_logging_message(param).await {
+                            error!("RX stream peer disconnected: {}", e);
+                            break;
+                        }
                         continue;
                     }
                 };
@@ -619,6 +627,12 @@ mod tests {
         assert!(clamp_or_err("test.max_bytes", 1024 * 1024, MAX_READ_BYTES).is_ok());
         assert!(clamp_or_err("test.max_bytes", 1024 * 1024 + 1, MAX_READ_BYTES).is_err());
         assert!(clamp_or_err("test.max_bytes", usize::MAX, MAX_WRITE_BYTES).is_err());
+    }
+
+    #[test]
+    fn require_min_or_err_rejects_undersized_values() {
+        assert!(require_min_or_err("test.max_bytes", 1, MIN_READ_BYTES).is_ok());
+        assert!(require_min_or_err("test.max_bytes", 0, MIN_READ_BYTES).is_err());
     }
 
     #[test]

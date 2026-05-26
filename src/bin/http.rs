@@ -11,9 +11,12 @@ use rmcp::transport::streamable_http_server::{
 use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
+use serial_mcp_server::security::SecurityManager;
 use serial_mcp_server::serial::ConnectionManager;
+use serial_mcp_server::server::StreamRegistry;
 use serial_mcp_server::SerialHandler;
 
 const DEFAULT_BIND: &str = "127.0.0.1:8000";
@@ -43,13 +46,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Share a single ConnectionManager across HTTP sessions so that two
     // clients cannot independently open the same physical port.
     let manager = Arc::new(ConnectionManager::new());
+    let streams: StreamRegistry = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+    let security = SecurityManager::from_env();
     let manager_for_service = Arc::clone(&manager);
+    let streams_for_service = Arc::clone(&streams);
 
     let service = StreamableHttpService::new(
         move || {
-            Ok(SerialHandler::with_manager(Arc::clone(
-                &manager_for_service,
-            )))
+            Ok(SerialHandler::with_manager_security_and_streams(
+                Arc::clone(&manager_for_service),
+                security.clone(),
+                Arc::clone(&streams_for_service),
+            ))
         },
         LocalSessionManager::default().into(),
         StreamableHttpServerConfig::default().with_cancellation_token(shutdown.child_token()),

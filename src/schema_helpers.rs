@@ -3,6 +3,11 @@
 
 use schemars::{json_schema, Schema, SchemaGenerator};
 
+use crate::limits::{
+    MAX_READ_BYTES, MAX_STREAM_CHUNK_BYTES, MAX_TIMEOUT_MS, MAX_WAIT_BYTES, MIN_POLL_INTERVAL_MS,
+    MIN_READ_BYTES, MIN_STREAM_CHUNK_BYTES, MIN_WAIT_BYTES,
+};
+
 /// Schema for unsigned integer fields without the non-standard `format` keyword.
 /// Emits `{"type": "integer", "minimum": 0}`.
 pub fn uint_schema(_gen: &mut SchemaGenerator) -> Schema {
@@ -21,5 +26,53 @@ pub fn option_uint_schema(_gen: &mut SchemaGenerator) -> Schema {
             {"type": "null"},
             {"type": "integer", "minimum": 0}
         ]
+    })
+}
+
+pub fn option_timeout_ms_schema(_gen: &mut SchemaGenerator) -> Schema {
+    json_schema!({
+        "anyOf": [
+            {"type": "null"},
+            {"type": "integer", "minimum": 0, "maximum": MAX_TIMEOUT_MS}
+        ]
+    })
+}
+
+pub fn timeout_ms_schema(_gen: &mut SchemaGenerator) -> Schema {
+    json_schema!({
+        "type": "integer",
+        "minimum": 0,
+        "maximum": MAX_TIMEOUT_MS
+    })
+}
+
+pub fn read_max_bytes_schema(_gen: &mut SchemaGenerator) -> Schema {
+    json_schema!({
+        "type": "integer",
+        "minimum": MIN_READ_BYTES,
+        "maximum": MAX_READ_BYTES
+    })
+}
+
+pub fn wait_max_bytes_schema(_gen: &mut SchemaGenerator) -> Schema {
+    json_schema!({
+        "type": "integer",
+        "minimum": MIN_WAIT_BYTES,
+        "maximum": MAX_WAIT_BYTES
+    })
+}
+
+pub fn stream_chunk_bytes_schema(_gen: &mut SchemaGenerator) -> Schema {
+    json_schema!({
+        "type": "integer",
+        "minimum": MIN_STREAM_CHUNK_BYTES,
+        "maximum": MAX_STREAM_CHUNK_BYTES
+    })
+}
+
+pub fn poll_interval_ms_schema(_gen: &mut SchemaGenerator) -> Schema {
+    json_schema!({
+        "type": "integer",
+        "minimum": MIN_POLL_INTERVAL_MS
     })
 }

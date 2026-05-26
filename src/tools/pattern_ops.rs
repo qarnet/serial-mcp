@@ -7,7 +7,7 @@ use crate::codec;
 use crate::serial::ConnectionManager;
 use crate::tools::helpers::{
     clamp_or_err, clamp_timeout_or_err, lookup_connection, parse_encoding, read_until_pattern,
-    MAX_TIMEOUT_MS, MAX_WAIT_BYTES,
+    require_min_or_err, MAX_TIMEOUT_MS, MAX_WAIT_BYTES, MIN_WAIT_BYTES,
 };
 use crate::tools::types::{WaitForArgs, WaitForResult};
 
@@ -32,7 +32,8 @@ pub async fn wait_for(
         return Err("Pattern must not be empty".into());
     }
 
-    let max_bytes = clamp_or_err("wait_for.max_bytes", args.max_bytes, MAX_WAIT_BYTES)?;
+    let max_bytes = require_min_or_err("wait_for.max_bytes", args.max_bytes, MIN_WAIT_BYTES)?;
+    let max_bytes = clamp_or_err("wait_for.max_bytes", max_bytes, MAX_WAIT_BYTES)?;
     clamp_timeout_or_err("wait_for.timeout_ms", args.timeout_ms, MAX_TIMEOUT_MS)?;
 
     let connection = lookup_connection(connections, &args.connection_id).await?;

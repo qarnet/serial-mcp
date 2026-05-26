@@ -19,6 +19,9 @@ use rmcp::service::PeerRequestOptions;
 use serde_json::json;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+use serial_mcp_server::limits::{
+    MAX_READ_BYTES, MAX_STREAM_CHUNK_BYTES, MAX_TIMEOUT_MS, MAX_WAIT_BYTES, MAX_WRITE_BYTES,
+};
 use serial_mcp_server::serial::{test_support::loopback_connection, ConnectionManager};
 
 mod common;
@@ -387,6 +390,129 @@ async fn subscribe_then_peer_write_pushes_notification() {
         serde_json::Value::String(connection_id.clone())
     );
     assert_eq!(data["data"], serde_json::Value::String("streaming!".into()));
+    client.cancel().await.ok();
+}
+
+#[tokio::test]
+async fn subscribe_closed_from_other_session_stops_streaming_task() {
+    let manager = Arc::new(ConnectionManager::new());
+    let (conn, mut peer) = loopback_connection("loop-cross-session-close");
+    let connection_id = manager.insert(conn).await.unwrap();
+
+    let server = TestServer::start_with(manager).await;
+    let (client_a, mut rx_a) = connect_client(&server).await.unwrap();
+    let (client_b, _rx_b) = connect_client(&server).await.unwrap();
+
+    let subscribe_result = client_a
+        .peer()
+        .call_tool(tool_request(
+            "subscribe",
+            json!({
+                "connection_id": connection_id,
+                "poll_interval_ms": 50,
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_ne!(
+        subscribe_result.is_error,
+        Some(true),
+        "{subscribe_result:?}"
+    );
+
+    let close_result = client_b
+        .peer()
+        .call_tool(tool_request(
+            "close",
+            json!({ "connection_id": connection_id }),
+        ))
+        .await
+        .unwrap();
+    assert_ne!(close_result.is_error, Some(true), "{close_result:?}");
+
+    let _ = peer.write_all(b"should not stream after close").await;
+    let maybe_event = tokio::time::timeout(Duration::from_millis(250), rx_a.recv()).await;
+    assert!(
+        maybe_event.is_err(),
+        "received unexpected stream event after close"
+    );
+
+    client_a.cancel().await.ok();
+    client_b.cancel().await.ok();
+}
+
+#[tokio::test]
+async fn validation_limits_return_tool_errors_over_http() {
+    let manager = Arc::new(ConnectionManager::new());
+    let (conn, _peer) = loopback_connection("loop-validation");
+    let connection_id = manager.insert(conn).await.unwrap();
+
+    let server = TestServer::start_with(manager).await;
+    let (client, _rx) = connect_client(&server).await.unwrap();
+
+    let cases = [
+        tool_request(
+            "read",
+            json!({ "connection_id": connection_id, "max_bytes": 0 }),
+        ),
+        tool_request(
+            "read",
+            json!({ "connection_id": connection_id, "max_bytes": MAX_READ_BYTES + 1 }),
+        ),
+        tool_request(
+            "wait_for",
+            json!({ "connection_id": connection_id, "pattern": "x", "max_bytes": 0 }),
+        ),
+        tool_request(
+            "wait_for",
+            json!({ "connection_id": connection_id, "pattern": "x", "max_bytes": MAX_WAIT_BYTES + 1 }),
+        ),
+        tool_request(
+            "wait_for",
+            json!({ "connection_id": connection_id, "pattern": "x", "timeout_ms": MAX_TIMEOUT_MS + 1 }),
+        ),
+        tool_request(
+            "subscribe",
+            json!({ "connection_id": connection_id, "max_chunk_bytes": 0 }),
+        ),
+        tool_request(
+            "subscribe",
+            json!({ "connection_id": connection_id, "max_chunk_bytes": MAX_STREAM_CHUNK_BYTES + 1 }),
+        ),
+        tool_request(
+            "subscribe",
+            json!({ "connection_id": connection_id, "poll_interval_ms": 0 }),
+        ),
+        tool_request(
+            "send_break",
+            json!({ "connection_id": connection_id, "duration_ms": MAX_TIMEOUT_MS + 1 }),
+        ),
+    ];
+
+    for request in cases {
+        let result = client.peer().call_tool(request).await.unwrap();
+        assert_eq!(
+            result.is_error,
+            Some(true),
+            "expected validation error: {result:?}"
+        );
+    }
+
+    let oversized_payload = "x".repeat(MAX_WRITE_BYTES + 1);
+    let result = client
+        .peer()
+        .call_tool(tool_request(
+            "write",
+            json!({ "connection_id": connection_id, "data": oversized_payload }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        result.is_error,
+        Some(true),
+        "expected write validation error: {result:?}"
+    );
+
     client.cancel().await.ok();
 }
 

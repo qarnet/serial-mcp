@@ -57,10 +57,12 @@ fn paginate<T: Clone>(
 
 // ---- Handler ---------------------------------------------------------------
 
+pub type StreamRegistry = Arc<tokio::sync::Mutex<HashMap<String, stream_ops::StreamHandle>>>;
+
 #[derive(Clone)]
 pub struct SerialHandler {
     pub(crate) connections: Arc<ConnectionManager>,
-    streams: Arc<tokio::sync::Mutex<HashMap<String, stream_ops::StreamHandle>>>,
+    streams: StreamRegistry,
     security: SecurityManager,
     subscribers: Arc<tokio::sync::Mutex<HashMap<String, usize>>>,
 }
@@ -84,9 +86,21 @@ impl SerialHandler {
         connections: Arc<ConnectionManager>,
         security: SecurityManager,
     ) -> Self {
+        Self::with_manager_security_and_streams(
+            connections,
+            security,
+            Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+        )
+    }
+
+    pub fn with_manager_security_and_streams(
+        connections: Arc<ConnectionManager>,
+        security: SecurityManager,
+        streams: StreamRegistry,
+    ) -> Self {
         Self {
             connections,
-            streams: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            streams,
             security,
             subscribers: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         }
@@ -448,7 +462,7 @@ impl ServerHandler for SerialHandler {
                 "Raw binary data from a serial connection",
             )
             .with_description(
-                "Base64-encoded bytes recently read from the connection. Substitute {id} with a connection_id."
+                "Base64-encoded bytes read from the connection. This resource consumes up to 256 pending bytes; substitute {id} with a connection_id."
                     .to_string(),
             )
             .with_mime_type("application/octet-stream".to_string())

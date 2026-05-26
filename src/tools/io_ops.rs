@@ -7,7 +7,8 @@ use crate::codec;
 use crate::serial::ConnectionManager;
 use crate::tools::helpers::{
     build_read_result, clamp_or_err, clamp_timeout_or_err, log_tool_err, lookup_connection,
-    parse_encoding, read_bytes, MAX_READ_BYTES, MAX_TIMEOUT_MS, MAX_WRITE_BYTES,
+    parse_encoding, read_bytes, require_min_or_err, MAX_READ_BYTES, MAX_TIMEOUT_MS,
+    MAX_WRITE_BYTES, MIN_READ_BYTES,
 };
 use crate::tools::types::{FlushArgs, FlushResult, ReadArgs, ReadResult, WriteArgs, WriteResult};
 
@@ -52,7 +53,8 @@ pub async fn read(
 
     let encoding = parse_encoding(&args.encoding)?;
     let connection = lookup_connection(connections, &args.connection_id).await?;
-    let max_bytes = clamp_or_err("read.max_bytes", args.max_bytes, MAX_READ_BYTES)?;
+    let max_bytes = require_min_or_err("read.max_bytes", args.max_bytes, MIN_READ_BYTES)?;
+    let max_bytes = clamp_or_err("read.max_bytes", max_bytes, MAX_READ_BYTES)?;
     if let Some(timeout_ms) = args.timeout_ms {
         clamp_timeout_or_err("read.timeout_ms", timeout_ms, MAX_TIMEOUT_MS)?;
     }

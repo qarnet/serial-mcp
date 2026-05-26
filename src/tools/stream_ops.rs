@@ -6,8 +6,9 @@ use tracing::{debug, info};
 
 use crate::serial::ConnectionManager;
 use crate::tools::helpers::{
-    clamp_or_err, clamp_poll_interval_or_err, lookup_connection, parse_encoding, stream_rx,
-    MAX_STREAM_CHUNK_BYTES, MIN_POLL_INTERVAL_MS,
+    clamp_or_err, clamp_poll_interval_or_err, lookup_connection, parse_encoding,
+    require_min_or_err, stream_rx, MAX_STREAM_CHUNK_BYTES, MIN_POLL_INTERVAL_MS,
+    MIN_STREAM_CHUNK_BYTES,
 };
 use crate::tools::types::{SubscribeArgs, SubscribeResult, UnsubscribeArgs, UnsubscribeResult};
 
@@ -37,9 +38,14 @@ pub async fn subscribe(
     let connection = lookup_connection(connections, &args.connection_id).await?;
     let peer = ctx.peer.clone();
 
-    let chunk_bytes = clamp_or_err(
+    let chunk_bytes = require_min_or_err(
         "subscribe.max_chunk_bytes",
         args.max_chunk_bytes,
+        MIN_STREAM_CHUNK_BYTES,
+    )?;
+    let chunk_bytes = clamp_or_err(
+        "subscribe.max_chunk_bytes",
+        chunk_bytes,
         MAX_STREAM_CHUNK_BYTES,
     )?;
     let poll_ms = clamp_poll_interval_or_err(
