@@ -424,3 +424,209 @@ async fn wait_for_returns_match_index_over_http() {
     assert_eq!(structured["match_index"], json!(6));
     client.cancel().await.ok();
 }
+
+#[tokio::test]
+async fn read_with_no_data_times_out_with_is_error() {
+    let manager = Arc::new(ConnectionManager::new());
+    let (conn, _peer) = loopback_connection("loop-read-timeout");
+    let connection_id = manager.insert(conn).await.unwrap();
+
+    let server = TestServer::start_with(manager).await;
+    let (client, _rx) = connect_client(&server).await.unwrap();
+
+    let result = client
+        .peer()
+        .call_tool(tool_request(
+            "read",
+            json!({
+                "connection_id": connection_id,
+                "timeout_ms": 50,
+                "max_bytes": 64,
+            }),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        result.is_error,
+        Some(true),
+        "read timeout must return isError=true: {result:?}"
+    );
+    let content = result
+        .content
+        .first()
+        .and_then(|c| c.as_text())
+        .map(|t| t.text.as_str())
+        .unwrap_or("");
+    assert!(
+        content.contains("timed out"),
+        "error message must mention timeout. Got: {content}"
+    );
+    assert!(
+        content.contains("50ms"),
+        "error message must include the timeout value. Got: {content}"
+    );
+
+    client.cancel().await.ok();
+}
+
+#[tokio::test]
+async fn wait_for_timeout_returns_is_error() {
+    let manager = Arc::new(ConnectionManager::new());
+    let (conn, _peer) = loopback_connection("loop-waitfor-timeout");
+    let connection_id = manager.insert(conn).await.unwrap();
+
+    let server = TestServer::start_with(manager).await;
+    let (client, _rx) = connect_client(&server).await.unwrap();
+
+    let result = client
+        .peer()
+        .call_tool(tool_request(
+            "wait_for",
+            json!({
+                "connection_id": connection_id,
+                "pattern": "NEVER_MATCH",
+                "timeout_ms": 60,
+                "max_bytes": 128,
+            }),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        result.is_error,
+        Some(true),
+        "wait_for timeout must return isError=true: {result:?}"
+    );
+    let content = result
+        .content
+        .first()
+        .and_then(|c| c.as_text())
+        .map(|t| t.text.as_str())
+        .unwrap_or("");
+    assert!(
+        content.contains("timed out"),
+        "error message must mention timeout. Got: {content}"
+    );
+    assert!(
+        content.contains("60ms"),
+        "error message must include the timeout value. Got: {content}"
+    );
+
+    client.cancel().await.ok();
+}
+
+#[tokio::test]
+async fn read_result_contains_elapsed_ms() {
+    let manager = Arc::new(ConnectionManager::new());
+    let (conn, mut peer) = loopback_connection("loop-read-elapsed");
+    let connection_id = manager.insert(conn).await.unwrap();
+
+    peer.write_all(b"hello").await.unwrap();
+
+    let server = TestServer::start_with(manager).await;
+    let (client, _rx) = connect_client(&server).await.unwrap();
+
+    let result = client
+        .peer()
+        .call_tool(tool_request(
+            "read",
+            json!({
+                "connection_id": connection_id,
+                "timeout_ms": 1000,
+                "max_bytes": 64,
+            }),
+        ))
+        .await
+        .unwrap();
+
+    assert_ne!(result.is_error, Some(true), "{result:?}");
+    let structured = result.structured_content.expect("structured content");
+    assert_eq!(structured["data"], json!("hello"));
+    assert!(structured.get("elapsed_ms").is_some(), "{structured:?}");
+    let elapsed = structured["elapsed_ms"].as_u64().unwrap();
+    assert!(
+        elapsed < 1000,
+        "elapsed_ms {elapsed} should be less than timeout"
+    );
+
+    client.cancel().await.ok();
+}
+
+#[tokio::test]
+async fn wait_for_default_timeout_still_times_out() {
+    let manager = Arc::new(ConnectionManager::new());
+    let (conn, _peer) = loopback_connection("loop-waitfor-default");
+    let connection_id = manager.insert(conn).await.unwrap();
+
+    let server = TestServer::start_with(manager).await;
+    let (client, _rx) = connect_client(&server).await.unwrap();
+
+    let result = client
+        .peer()
+        .call_tool(tool_request(
+            "wait_for",
+            json!({
+                "connection_id": connection_id,
+                "pattern": "NEVER_MATCH",
+                "max_bytes": 128,
+            }),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        result.is_error,
+        Some(true),
+        "wait_for without explicit timeout must still time out: {result:?}"
+    );
+    let content = result
+        .content
+        .first()
+        .and_then(|c| c.as_text())
+        .map(|t| t.text.as_str())
+        .unwrap_or("");
+    assert!(
+        content.contains("2000ms"),
+        "error message must include the default 2000ms timeout. Got: {content}"
+    );
+
+    client.cancel().await.ok();
+}
+
+#[tokio::test]
+async fn send_break_result_includes_actual_duration() {
+    let manager = Arc::new(ConnectionManager::new());
+    let (conn, _peer) = loopback_connection("loop-break");
+    let connection_id = manager.insert(conn).await.unwrap();
+
+    let server = TestServer::start_with(manager).await;
+    let (client, _rx) = connect_client(&server).await.unwrap();
+
+    let result = client
+        .peer()
+        .call_tool(tool_request(
+            "send_break",
+            json!({
+                "connection_id": connection_id,
+                "duration_ms": 80,
+            }),
+        ))
+        .await
+        .unwrap();
+
+    assert_ne!(result.is_error, Some(true), "{result:?}");
+    let structured = result.structured_content.expect("structured content");
+    assert_eq!(structured["duration_ms"], json!(80), "{structured:?}");
+    assert!(
+        structured.get("actual_duration_ms").is_some(),
+        "{structured:?}"
+    );
+    let actual = structured["actual_duration_ms"].as_u64().unwrap();
+    assert!(
+        actual >= 80,
+        "actual_duration_ms {actual} should be >= requested 80. {structured:?}"
+    );
+
+    client.cancel().await.ok();
+}
