@@ -104,24 +104,30 @@ pub async fn send_break(
     }
 
     let start = Instant::now();
-    let mut ticker = tokio::time::interval(Duration::from_millis(250));
+    let deadline = start + Duration::from_millis(args.duration_ms);
+    let mut progress_ticker = tokio::time::interval(Duration::from_millis(250));
+    progress_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut progress_emitted = false;
+
     loop {
         tokio::select! {
             _ = ct.cancelled() => return Err("Cancelled".into()),
-            _ = ticker.tick() => {
+            _ = tokio::time::sleep_until(deadline) => break,
+            _ = progress_ticker.tick() => {
                 let elapsed = start.elapsed().as_millis() as u64;
-                if elapsed >= args.duration_ms {
-                    break;
-                }
                 if let Some(token) = progress_token.clone() {
-                    let _ = peer
-                        .notify_progress(rmcp::model::ProgressNotificationParam {
-                            progress_token: token,
-                            progress: elapsed as f64,
-                            total: Some(args.duration_ms as f64),
-                            message: Some("holding break".into()),
-                        })
-                        .await;
+                    // Skip emitting progress at t=0 (redundant with initial message)
+                    if progress_emitted || elapsed > 0 {
+                        progress_emitted = true;
+                        let _ = peer
+                            .notify_progress(rmcp::model::ProgressNotificationParam {
+                                progress_token: token,
+                                progress: elapsed as f64,
+                                total: Some(args.duration_ms as f64),
+                                message: Some("holding break".into()),
+                            })
+                            .await;
+                    }
                 }
             }
         }

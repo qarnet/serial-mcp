@@ -216,3 +216,45 @@ async fn pty_close_then_use_returns_is_error() {
     assert_eq!(after_close.is_error, Some(true));
     client.cancel().await.ok();
 }
+
+#[tokio::test]
+#[cfg(target_os = "linux")]
+async fn pty_send_break_short_duration_timing() {
+    let (_server, client, _rx, _pty, connection_id) = setup().await;
+
+    // Test that a 50ms BREAK is released within ~100ms, not held until 250ms+
+    let start = std::time::Instant::now();
+    let result = client
+        .peer()
+        .call_tool(tool_request(
+            "send_break",
+            json!({
+                "connection_id": connection_id,
+                "duration_ms": 50u64,
+            }),
+        ))
+        .await
+        .unwrap();
+    let elapsed = start.elapsed().as_millis() as u64;
+
+    assert_ne!(result.is_error, Some(true), "send_break failed: {result:?}");
+    let structured = result
+        .structured_content
+        .expect("send_break must return structured");
+    let actual_duration = structured["actual_duration_ms"]
+        .as_u64()
+        .expect("actual_duration_ms");
+
+    // Should be close to 50ms (allow 40-100ms window)
+    assert!(
+        (40..=100).contains(&actual_duration),
+        "send_break(50ms) took {actual_duration}ms, expected 40-100ms"
+    );
+    // Full round-trip should also be reasonable
+    assert!(
+        elapsed <= 200,
+        "send_break round-trip took {elapsed}ms, expected <200ms"
+    );
+
+    client.cancel().await.ok();
+}
