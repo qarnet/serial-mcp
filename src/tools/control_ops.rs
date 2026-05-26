@@ -1,4 +1,4 @@
-use std::cell::Cell;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use rmcp::{model::Meta, Json, Peer, RoleServer};
@@ -61,24 +61,26 @@ pub async fn send_break(
 
     struct BreakResetGuard {
         connection: Arc<SerialConnection>,
-        disarmed: Cell<bool>,
+        disarmed: AtomicBool,
     }
 
     impl BreakResetGuard {
         fn disarm(&self) {
-            self.disarmed.set(true);
+            self.disarmed.store(true, Ordering::Relaxed);
         }
     }
 
     impl Drop for BreakResetGuard {
         fn drop(&mut self) {
-            if self.disarmed.get() {
+            if self.disarmed.load(Ordering::Relaxed) {
                 return;
             }
             let connection = Arc::clone(&self.connection);
-            tokio::spawn(async move {
-                let _ = connection.set_break_state(false).await;
-            });
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                handle.spawn(async move {
+                    let _ = connection.set_break_state(false).await;
+                });
+            }
         }
     }
 
@@ -88,7 +90,7 @@ pub async fn send_break(
         .map_err(|e| log_tool_err("send_break", "Failed to assert BREAK", e))?;
     let guard = BreakResetGuard {
         connection: Arc::clone(&connection),
-        disarmed: Cell::new(false),
+        disarmed: AtomicBool::new(false),
     };
 
     let progress_token = meta.get_progress_token();
