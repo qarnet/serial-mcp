@@ -146,6 +146,7 @@ pub struct ReadResult {
     pub timed_out: bool,
     #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
     pub timeout_ms: u64,
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
     pub elapsed_ms: u64,
 }
 
@@ -167,6 +168,7 @@ pub struct SendBreakResult {
     pub connection_id: String,
     #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
     pub duration_ms: u64,
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
     pub actual_duration_ms: u64,
 }
 
