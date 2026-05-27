@@ -177,7 +177,6 @@ SERIAL_MCP_TEST_PORT=/dev/ttyACM0 cargo test --test hardware_loopback -- --ignor
 - [CHANGELOG.md](CHANGELOG.md) — Version history
 - [AGENTS.md](AGENTS.md) — Coding guidelines for contributors
 - [REVIEW.md](REVIEW.md) — Code walkthrough and design notes
-- [examples/STM32_demo/](examples/STM32_demo/) — Demo firmware
 
 ## License
 
