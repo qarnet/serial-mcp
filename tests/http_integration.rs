@@ -456,9 +456,18 @@ async fn subscribe_without_timeout_is_fire_and_forget() {
     // Fire-and-forget: data is null; bytes_read/elapsed_ms/timeout_ms also null
     let structured = result.structured_content.expect("structured content");
     assert!(structured["data"].is_null(), "data must be null in FF mode");
-    assert!(structured["bytes_read"].is_null(), "bytes_read must be null");
-    assert!(structured["elapsed_ms"].is_null(), "elapsed_ms must be null");
-    assert!(structured["timeout_ms"].is_null(), "timeout_ms must be null");
+    assert!(
+        structured["bytes_read"].is_null(),
+        "bytes_read must be null"
+    );
+    assert!(
+        structured["elapsed_ms"].is_null(),
+        "elapsed_ms must be null"
+    );
+    assert!(
+        structured["timeout_ms"].is_null(),
+        "timeout_ms must be null"
+    );
 
     // Background stream still runs: write something and it arrives as notification
     peer.write_all(b"post-subscribe").await.unwrap();

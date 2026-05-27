@@ -47,6 +47,11 @@ path = "src/lib.rs"
 rmcp = { version = "1.7", features = ["client", "transport-streamable-http-client", "transport-streamable-http-client-reqwest", "transport-child-process"] }
 tokio = { version = "1.41", features = ["process", "fs"] }
 anyhow = "1.0"
+proptest = "1.6"
+proptest-derive = "0.5"
+libfuzzer-sys = "0.4"
+arbitrary = { version = "1", features = ["derive"] }
+jsonschema = "0.26"
 
 [target.'cfg(unix)'.dev-dependencies]
 nix = { version = "0.29", features = ["term", "fs"] }

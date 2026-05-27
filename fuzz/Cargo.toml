@@ -1,0 +1,39 @@
+[package]
+name = "serial-mcp-server-fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.serial-mcp-server]
+path = ".."
+
+[dependencies.serde_json]
+version = "1.0"
+
+[dependencies.tokio]
+version = "1"
+features = ["rt", "time"]
+
+[[bin]]
+name = "tool_call_json"
+path = "fuzz_targets/tool_call_json.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "codec_roundtrip"
+path = "fuzz_targets/codec_roundtrip.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "clamp_bounds"
+path = "fuzz_targets/clamp_bounds.rs"
+test = false
+doc = false

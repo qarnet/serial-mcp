@@ -9,7 +9,7 @@ use crate::serial::{FlushTarget, PortInfo};
 
 // ---- Argument structs ------------------------------------------------------
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct OpenArgs {
     pub port: String,
     #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
@@ -24,12 +24,12 @@ pub struct OpenArgs {
     pub flow_control: String,
 }
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct CloseArgs {
     pub connection_id: String,
 }
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct WriteArgs {
     pub connection_id: String,
     pub data: String,
@@ -37,7 +37,7 @@ pub struct WriteArgs {
     pub encoding: String,
 }
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct ReadArgs {
     pub connection_id: String,
     #[serde(default)]
@@ -50,21 +50,21 @@ pub struct ReadArgs {
     pub encoding: String,
 }
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct FlushArgs {
     pub connection_id: String,
     #[serde(default = "default_flush_target")]
     pub target: FlushTarget,
 }
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct SetDtrRtsArgs {
     pub connection_id: String,
     pub dtr: bool,
     pub rts: bool,
 }
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct SendBreakArgs {
     pub connection_id: String,
     #[serde(default = "default_break_duration_ms")]
@@ -72,7 +72,7 @@ pub struct SendBreakArgs {
     pub duration_ms: u64,
 }
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct SubscribeArgs {
     pub connection_id: String,
     #[serde(default)]
@@ -88,12 +88,12 @@ pub struct SubscribeArgs {
     pub poll_interval_ms: u64,
 }
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct UnsubscribeArgs {
     pub connection_id: String,
 }
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct WaitForArgs {
     pub connection_id: String,
     pub pattern: String,
@@ -111,14 +111,14 @@ pub struct WaitForArgs {
 
 // ---- Response structs ------------------------------------------------------
 
-#[derive(Debug, Serialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct ListPortsResult {
     #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
     pub count: usize,
     pub ports: Vec<PortInfo>,
 }
 
-#[derive(Debug, Serialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct OpenResult {
     pub connection_id: String,
     pub port: String,
@@ -126,12 +126,12 @@ pub struct OpenResult {
     pub baud_rate: u32,
 }
 
-#[derive(Debug, Serialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct CloseResult {
     pub connection_id: String,
 }
 
-#[derive(Debug, Serialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct WriteResult {
     pub connection_id: String,
     #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
@@ -139,7 +139,7 @@ pub struct WriteResult {
     pub encoding: String,
 }
 
-#[derive(Debug, Serialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct ReadResult {
     pub connection_id: String,
     #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
@@ -152,20 +152,20 @@ pub struct ReadResult {
     pub elapsed_ms: u64,
 }
 
-#[derive(Debug, Serialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct FlushResult {
     pub connection_id: String,
     pub target: FlushTarget,
 }
 
-#[derive(Debug, Serialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct SetDtrRtsResult {
     pub connection_id: String,
     pub dtr: bool,
     pub rts: bool,
 }
 
-#[derive(Debug, Serialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct SendBreakResult {
     pub connection_id: String,
     #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
@@ -174,7 +174,7 @@ pub struct SendBreakResult {
     pub actual_duration_ms: u64,
 }
 
-#[derive(Debug, Serialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct SubscribeResult {
     pub connection_id: String,
     pub encoding: String,
@@ -194,20 +194,19 @@ pub struct SubscribeResult {
     pub timeout_ms: Option<u64>,
 }
 
-#[derive(Debug, Serialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct UnsubscribeResult {
     pub connection_id: String,
     pub was_active: bool,
 }
 
-#[derive(Debug, Serialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct WaitForResult {
     pub connection_id: String,
     pub matched: bool,
     pub data: String,
     #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
     pub bytes_read: usize,
-    #[serde(skip_serializing_if = "Option::is_none")]
     #[schemars(schema_with = "crate::schema_helpers::option_uint_schema")]
     pub match_index: Option<usize>,
     #[schemars(schema_with = "crate::schema_helpers::uint_schema")]

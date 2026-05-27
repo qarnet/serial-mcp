@@ -118,7 +118,7 @@ pub struct ConnectionConfig {
 // ---- Port enumeration --------------------------------------------------------
 
 /// Information about a serial port reported by the OS.
-#[derive(Debug, Serialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct PortInfo {
     pub name: String,
     pub description: String,
