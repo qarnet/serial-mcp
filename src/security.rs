@@ -49,7 +49,6 @@ impl SecurityManager {
                 .join(", ")
         }
     }
-
 }
 
 #[cfg(test)]

@@ -54,7 +54,8 @@ impl TestServer {
     /// Useful when the test wants to insert a loopback connection before
     /// the server is up.
     pub async fn start_with(manager: Arc<ConnectionManager>) -> Self {
-        Self::start_with_and_security(manager, SecurityManager::from_patterns::<[&str; 0]>([])).await
+        Self::start_with_and_security(manager, SecurityManager::from_patterns::<[&str; 0]>([]))
+            .await
     }
 
     /// Start a server with a custom [`ConnectionManager`] and [`SecurityManager`].

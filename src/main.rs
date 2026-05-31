@@ -108,16 +108,14 @@ fn init_tracing() {
 
 async fn run_stdio(security: SecurityManager) -> Result<(), Box<dyn std::error::Error>> {
     info!("Starting Serial MCP Server v{}", env!("CARGO_PKG_VERSION"));
-    let service = SerialHandler::with_manager_and_security(
-        Arc::new(ConnectionManager::new()),
-        security,
-    )
-    .serve(stdio())
-    .await
-    .map_err(|e| {
-        error!("Failed to start server: {:?}", e);
-        e
-    })?;
+    let service =
+        SerialHandler::with_manager_and_security(Arc::new(ConnectionManager::new()), security)
+            .serve(stdio())
+            .await
+            .map_err(|e| {
+                error!("Failed to start server: {:?}", e);
+                e
+            })?;
     info!("Serial MCP Server started");
     service.waiting().await?;
     info!("Serial MCP Server stopped");
