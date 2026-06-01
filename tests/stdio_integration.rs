@@ -15,10 +15,12 @@ use tokio::process::Command;
 
 const EXPECTED_TOOLS: &[&str] = &[
     "list_ports",
+    "get_version",
     "open",
     "close",
     "write",
     "read",
+    "read_line",
     "flush",
     "set_dtr_rts",
     "send_break",
@@ -70,7 +72,7 @@ async fn stdio_initialize_handshake_succeeds() {
 }
 
 #[tokio::test]
-async fn stdio_list_tools_returns_all_eleven_tools() {
+async fn stdio_list_tools_returns_all_thirteen_tools() {
     let client = start_stdio_client().await;
 
     let result = client

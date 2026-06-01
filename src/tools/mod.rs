@@ -18,10 +18,12 @@ mod tests {
     fn verify_all_tool_schemas() {
         let tools = vec![
             ("list_ports", SerialHandler::list_ports_tool_attr()),
+            ("get_version", SerialHandler::get_version_tool_attr()),
             ("open", SerialHandler::open_tool_attr()),
             ("close", SerialHandler::close_tool_attr()),
             ("write", SerialHandler::write_tool_attr()),
             ("read", SerialHandler::read_tool_attr()),
+            ("read_line", SerialHandler::read_line_tool_attr()),
             ("flush", SerialHandler::flush_tool_attr()),
             ("set_dtr_rts", SerialHandler::set_dtr_rts_tool_attr()),
             ("send_break", SerialHandler::send_break_tool_attr()),
@@ -43,10 +45,12 @@ mod tests {
     fn tool_schemas_have_no_nonstandard_uint_formats() {
         let tools = vec![
             SerialHandler::list_ports_tool_attr(),
+            SerialHandler::get_version_tool_attr(),
             SerialHandler::open_tool_attr(),
             SerialHandler::close_tool_attr(),
             SerialHandler::write_tool_attr(),
             SerialHandler::read_tool_attr(),
+            SerialHandler::read_line_tool_attr(),
             SerialHandler::flush_tool_attr(),
             SerialHandler::set_dtr_rts_tool_attr(),
             SerialHandler::send_break_tool_attr(),
@@ -90,5 +94,15 @@ mod tests {
         let schema = schema_for!(ConnectionsResource);
         let json = serde_json::to_string(&schema).unwrap();
         assert!(!json.contains("\"format\":\"uint\""));
+    }
+
+    #[test]
+    fn git_hash_is_embedded_at_build_time() {
+        // Builds inside the git repo must embed the commit hash.
+        // CI and release builds run from the repo root.
+        assert!(
+            option_env!("GIT_HASH").is_some(),
+            "GIT_HASH not set — build.rs did not embed commit hash"
+        );
     }
 }

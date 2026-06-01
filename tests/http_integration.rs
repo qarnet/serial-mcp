@@ -32,10 +32,12 @@ use common::{
 
 const EXPECTED_TOOLS: &[&str] = &[
     "list_ports",
+    "get_version",
     "open",
     "close",
     "write",
     "read",
+    "read_line",
     "flush",
     "set_dtr_rts",
     "send_break",
@@ -94,7 +96,7 @@ async fn progress_notifications_emitted_for_wait_for() {
 }
 
 #[tokio::test]
-async fn list_tools_returns_all_eleven_tools() {
+async fn list_tools_returns_all_thirteen_tools() {
     let server = TestServer::start().await;
     let (client, _rx) = connect_client(&server).await.unwrap();
 

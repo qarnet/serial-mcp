@@ -73,9 +73,15 @@ pub fn decode(encoding: Encoding, input: &str) -> Result<Vec<u8>, CodecError> {
 }
 
 /// Encode raw bytes into a string suitable for an MCP tool response.
+///
+/// When `encoding` is [`Encoding::Utf8`], invalid UTF-8 byte sequences are
+/// replaced with the Unicode replacement character (`\u{FFFD}`) instead of
+/// returning an error. This allows firmware log output that contains
+/// occasional binary framing bytes or corrupted multi-byte sequences to
+/// remain readable without forcing the user to switch to hex encoding.
 pub fn encode(encoding: Encoding, bytes: &[u8]) -> Result<String, CodecError> {
     match encoding {
-        Encoding::Utf8 => Ok(String::from_utf8(bytes.to_vec())?),
+        Encoding::Utf8 => Ok(String::from_utf8_lossy(bytes).into_owned()),
         Encoding::Hex => Ok(encode_hex_spaced(bytes)),
         Encoding::Base64 => Ok(general_purpose::STANDARD.encode(bytes)),
     }
@@ -129,8 +135,25 @@ mod tests {
     }
 
     #[test]
-    fn utf8_encode_rejects_invalid_bytes() {
-        assert!(encode(Encoding::Utf8, &[0xFF, 0xFE]).is_err());
+    fn utf8_encode_replaces_invalid_bytes_with_replacement_char() {
+        let result = encode(Encoding::Utf8, &[0xFF, 0xFE]).unwrap();
+        assert_eq!(result, "\u{FFFD}\u{FFFD}");
+    }
+
+    #[test]
+    fn utf8_encode_ascii_does_not_corrupt() {
+        let data = b"[14341] Hello from RTT! Counter: 14\r\n";
+        let result = encode(Encoding::Utf8, data).unwrap();
+        assert_eq!(result, "[14341] Hello from RTT! Counter: 14\r\n");
+    }
+
+    #[test]
+    fn utf8_encode_mixed_valid_and_invalid() {
+        let data: &[u8] = b"Hello \xFF world";
+        let result = encode(Encoding::Utf8, data).unwrap();
+        assert!(result.contains('\u{FFFD}'));
+        assert!(result.starts_with("Hello "));
+        assert!(result.ends_with(" world"));
     }
 
     #[test]

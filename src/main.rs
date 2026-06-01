@@ -39,6 +39,7 @@ Options:
   --allowlist <patterns>     Comma-separated glob patterns for allowed ports
                              (default: allow all)
   --bind <addr>              HTTP bind address (default: {bind})
+  -v, --version              Print version and exit
   -h, --help                 Print this help
 
 Environment:
@@ -51,6 +52,11 @@ Examples:
             version = env!("CARGO_PKG_VERSION"),
             bind = DEFAULT_HTTP_BIND,
         );
+        std::process::exit(0);
+    }
+
+    if pargs.contains(["-v", "--version"]) {
+        println!("{} {}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
         std::process::exit(0);
     }
 

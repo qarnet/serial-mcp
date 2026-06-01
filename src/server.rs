@@ -122,6 +122,19 @@ impl SerialHandler {
     }
 
     #[tool(
+        description = "Return the server version, package name, and a build-time git commit hash (when available). Use to confirm which version of serial-mcp-server is responding.",
+        title = "Get Server Version",
+        annotations(read_only_hint = true, open_world_hint = false)
+    )]
+    async fn get_version(&self) -> Result<Json<VersionResult>, String> {
+        Ok(Json(VersionResult {
+            name: env!("CARGO_PKG_NAME").to_string(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            commit: option_env!("GIT_HASH").map(|s| s.to_string()),
+        }))
+    }
+
+    #[tool(
         description = "Open a serial port connection with specified configuration",
         title = "Open Serial Port",
         annotations(destructive_hint = false, open_world_hint = false)
@@ -181,6 +194,22 @@ impl SerialHandler {
         Parameters(args): Parameters<ReadArgs>,
     ) -> Result<Json<ReadResult>, String> {
         io_ops::read(&self.connections, meta, ct, peer, args).await
+    }
+
+    #[tool(
+        description = "Read a single line (up to \\n) from a serial port. Strips trailing \\r\\n or \\n. Blocks until newline arrives or timeout. Perfect for reading line-oriented firmware logs and REPL output.",
+        title = "Read Serial Line",
+        annotations(read_only_hint = true, open_world_hint = false),
+        execution(task_support = "optional")
+    )]
+    async fn read_line(
+        &self,
+        meta: Meta,
+        ct: tokio_util::sync::CancellationToken,
+        peer: rmcp::Peer<RoleServer>,
+        Parameters(args): Parameters<ReadLineArgs>,
+    ) -> Result<Json<ReadLineResult>, String> {
+        io_ops::read_line(&self.connections, meta, ct, peer, args).await
     }
 
     #[tool(
@@ -398,7 +427,7 @@ impl ServerHandler for SerialHandler {
         ))
         .with_protocol_version(ProtocolVersion::V_2025_11_25)
         .with_instructions(
-            "A serial port communication MCP server. Use list_ports to discover available serial ports, then open connections to communicate with serial devices. Resources: serial://ports, serial://connections, serial://connections/{id}. Prompts: diagnose_port, interactive_terminal. Subscribe to live RX bytes with the subscribe tool; the server emits notifications/message events with logger=\"serial:<connection_id>\"."
+            "A serial port communication MCP server. Use list_ports to discover available serial ports, then open connections to communicate with serial devices. Resources: serial://ports, serial://connections, serial://connections/{id}. Prompts: diagnose_port, interactive_terminal. Use read_line to read line-delimited firmware logs. Subscribe to live RX bytes with the subscribe tool; the server emits notifications/message events with logger=\"serial:<connection_id>\"."
                 .to_string(),
         )
     }

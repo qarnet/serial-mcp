@@ -1,12 +1,12 @@
 [package]
 name = "serial-mcp-server"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2021"
 authors = [
     "adancurusul <adancurusul@gmail.com>",
     "Thomas Kirschner <thomaskirschner85@yahoo.de>",
 ]
-description = "MCP server for serial port communication. 11 tools (open/read/write/wait_for/subscribe/...), resources, prompts, task cancellation, stdio + streamable-HTTP transports."
+description = "MCP server for serial port communication. 13 tools (open/read/read_line/write/wait_for/subscribe/...), resources, prompts, task cancellation, stdio + streamable-HTTP transports."
 license = "MIT"
 readme = "README.md"
 repository = "https://github.com/qarnet/serial-mcp-server"

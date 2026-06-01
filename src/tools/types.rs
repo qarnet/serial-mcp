@@ -109,6 +109,19 @@ pub struct WaitForArgs {
     pub response_encoding: String,
 }
 
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct ReadLineArgs {
+    pub connection_id: String,
+    #[serde(default)]
+    #[schemars(schema_with = "crate::schema_helpers::option_timeout_ms_schema")]
+    pub timeout_ms: Option<u64>,
+    #[serde(default = "default_read_line_max_bytes")]
+    #[schemars(schema_with = "crate::schema_helpers::wait_max_bytes_schema")]
+    pub max_bytes: usize,
+    #[serde(default = "default_encoding")]
+    pub encoding: String,
+}
+
 // ---- Response structs ------------------------------------------------------
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -116,6 +129,14 @@ pub struct ListPortsResult {
     #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
     pub count: usize,
     pub ports: Vec<PortInfo>,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct VersionResult {
+    pub name: String,
+    pub version: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub commit: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -214,6 +235,19 @@ pub struct WaitForResult {
     pub response_encoding: String,
 }
 
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct ReadLineResult {
+    pub connection_id: String,
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub bytes_read: usize,
+    pub encoding: String,
+    pub line: String,
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub timeout_ms: u64,
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub elapsed_ms: u64,
+}
+
 // ---- Default helpers -------------------------------------------------------
 
 pub fn default_data_bits() -> String {
@@ -251,4 +285,7 @@ pub fn default_subscribe_chunk_bytes() -> usize {
 }
 pub fn default_subscribe_poll_ms() -> u64 {
     200
+}
+pub fn default_read_line_max_bytes() -> usize {
+    4096
 }

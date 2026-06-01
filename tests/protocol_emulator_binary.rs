@@ -62,23 +62,6 @@ fn assert_tool_ok(result: &rmcp::model::CallToolResult, label: &str) {
     assert_ne!(result.is_error, Some(true), "{label} failed: {result:?}");
 }
 
-fn assert_tool_err(result: &rmcp::model::CallToolResult, label: &str) {
-    assert_eq!(
-        result.is_error,
-        Some(true),
-        "expected {label} to fail: {result:?}"
-    );
-}
-
-fn get_text(result: &rmcp::model::CallToolResult) -> String {
-    result
-        .content
-        .first()
-        .and_then(|c| c.as_text())
-        .map(|t| t.text.to_string())
-        .unwrap_or_default()
-}
-
 #[tokio::test]
 async fn protocol_emulator_binary_workflow() {
     // ---- Stage 0: setup ----
@@ -198,7 +181,7 @@ async fn protocol_emulator_binary_workflow() {
         "base64 roundtrip must match original bytes"
     );
 
-    // ---- Stage 3: utf8 encoding must fail on binary data ----
+    // ---- Stage 3: utf8 encoding on binary data uses replacement characters ----
     client
         .peer()
         .call_tool(tool_request(
@@ -234,11 +217,18 @@ async fn protocol_emulator_binary_workflow() {
         ))
         .await
         .unwrap();
-    assert_tool_err(&utf8_result, "utf8_encoding_binary");
-    let err_text = get_text(&utf8_result);
+    assert_tool_ok(&utf8_result, "utf8_encoding_binary_lossy");
+    let utf8_structured = utf8_result.structured_content.expect("structured");
+    let utf8_str = utf8_structured["data"].as_str().unwrap();
+    // Bytes 0x00-0x7F are valid ASCII/UTF-8; bytes 0x80-0xFF are replaced with \u{FFFD}
     assert!(
-        err_text.contains("encoding") || err_text.contains("utf-8") || err_text.contains("invalid"),
-        "error must mention encoding failure: {err_text}"
+        utf8_str.contains('\u{FFFD}'),
+        "lossy utf8 must contain replacement characters for invalid bytes: {utf8_str}"
+    );
+    assert_eq!(
+        utf8_structured["bytes_read"].as_u64().unwrap(),
+        256,
+        "lossy utf8 must report 256 bytes read"
     );
 
     // ---- Stage 4: large payload (>3 KB) via hex read ----
