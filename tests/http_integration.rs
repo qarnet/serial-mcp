@@ -849,3 +849,318 @@ async fn send_break_result_includes_actual_duration() {
 
     client.cancel().await.ok();
 }
+
+#[tokio::test]
+async fn read_line_returns_line_without_cr_lf() {
+    let manager = Arc::new(ConnectionManager::new());
+    let (conn, mut peer) = loopback_connection("loop-readline");
+    let connection_id = manager.insert(conn).await.unwrap();
+
+    let server = TestServer::start_with(manager).await;
+    let (client, _rx) = connect_client(&server).await.unwrap();
+
+    peer.write_all(b"Hello from RTT!\r\n").await.unwrap();
+    peer.flush().await.unwrap();
+
+    let result = client
+        .peer()
+        .call_tool(tool_request(
+            "read_line",
+            json!({
+                "connection_id": connection_id,
+                "timeout_ms": 2000,
+            }),
+        ))
+        .await
+        .unwrap();
+
+    assert_ne!(result.is_error, Some(true), "{result:?}");
+    let structured = result.structured_content.expect("structured content");
+    assert_eq!(structured["line"], json!("Hello from RTT!"));
+    assert!(structured["bytes_read"].as_u64().unwrap() > 0);
+
+    client.cancel().await.ok();
+}
+
+#[tokio::test]
+async fn read_line_strips_cr_from_cr_lf() {
+    let manager = Arc::new(ConnectionManager::new());
+    let (conn, mut peer) = loopback_connection("loop-readline-cr");
+    let connection_id = manager.insert(conn).await.unwrap();
+
+    let server = TestServer::start_with(manager).await;
+    let (client, _rx) = connect_client(&server).await.unwrap();
+
+    peer.write_all(b"line with cr\r\nmore text\n")
+        .await
+        .unwrap();
+    peer.flush().await.unwrap();
+
+    let result = client
+        .peer()
+        .call_tool(tool_request(
+            "read_line",
+            json!({
+                "connection_id": connection_id,
+                "timeout_ms": 2000,
+            }),
+        ))
+        .await
+        .unwrap();
+
+    assert_ne!(result.is_error, Some(true), "{result:?}");
+    let structured = result.structured_content.expect("structured content");
+    assert_eq!(structured["line"], json!("line with cr"));
+
+    client.cancel().await.ok();
+}
+
+#[tokio::test]
+async fn read_line_preserves_following_buffered_lines() {
+    let manager = Arc::new(ConnectionManager::new());
+    let (conn, mut peer) = loopback_connection("loop-readline-buffered");
+    let connection_id = manager.insert(conn).await.unwrap();
+
+    let server = TestServer::start_with(manager).await;
+    let (client, _rx) = connect_client(&server).await.unwrap();
+
+    peer.write_all(b"first\r\nsecond\r\n").await.unwrap();
+    peer.flush().await.unwrap();
+
+    let first = client
+        .peer()
+        .call_tool(tool_request(
+            "read_line",
+            json!({
+                "connection_id": connection_id,
+                "timeout_ms": 2000,
+            }),
+        ))
+        .await
+        .unwrap();
+
+    assert_ne!(first.is_error, Some(true), "{first:?}");
+    let structured = first.structured_content.expect("structured content");
+    assert_eq!(structured["line"], json!("first"));
+
+    let second = client
+        .peer()
+        .call_tool(tool_request(
+            "read_line",
+            json!({
+                "connection_id": connection_id,
+                "timeout_ms": 2000,
+            }),
+        ))
+        .await
+        .unwrap();
+
+    assert_ne!(second.is_error, Some(true), "{second:?}");
+    let structured = second.structured_content.expect("structured content");
+    assert_eq!(structured["line"], json!("second"));
+
+    client.cancel().await.ok();
+}
+
+#[tokio::test]
+async fn read_line_timeout_returns_is_error() {
+    let manager = Arc::new(ConnectionManager::new());
+    let (conn, _peer) = loopback_connection("loop-readline-timeout");
+    let connection_id = manager.insert(conn).await.unwrap();
+
+    let server = TestServer::start_with(manager).await;
+    let (client, _rx) = connect_client(&server).await.unwrap();
+
+    let result = client
+        .peer()
+        .call_tool(tool_request(
+            "read_line",
+            json!({
+                "connection_id": connection_id,
+                "timeout_ms": 50,
+            }),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(result.is_error, Some(true), "{result:?}");
+
+    client.cancel().await.ok();
+}
+
+#[tokio::test]
+async fn read_accepts_stringified_timeout_ms() {
+    let manager = Arc::new(ConnectionManager::new());
+    let (conn, mut peer) = loopback_connection("loop-flex-read");
+    let connection_id = manager.insert(conn).await.unwrap();
+
+    let server = TestServer::start_with(manager).await;
+    let (client, _rx) = connect_client(&server).await.unwrap();
+
+    peer.write_all(b"data").await.unwrap();
+    peer.flush().await.unwrap();
+
+    let result = client
+        .peer()
+        .call_tool(tool_request(
+            "read",
+            json!({
+                "connection_id": connection_id,
+                "timeout_ms": "2000",
+                "max_bytes": "64",
+            }),
+        ))
+        .await
+        .unwrap();
+
+    assert_ne!(result.is_error, Some(true), "{result:?}");
+    let structured = result.structured_content.expect("structured content");
+    assert_eq!(structured["data"], json!("data"));
+
+    client.cancel().await.ok();
+}
+
+#[tokio::test]
+async fn subscribe_accepts_stringified_timeout_ms() {
+    let manager = Arc::new(ConnectionManager::new());
+    let (conn, mut peer) = loopback_connection("loop-flex-sub");
+    let connection_id = manager.insert(conn).await.unwrap();
+
+    let server = TestServer::start_with(manager).await;
+    let (client, _rx) = connect_client(&server).await.unwrap();
+
+    peer.write_all(b"hello-flex").await.unwrap();
+    peer.flush().await.unwrap();
+    drop(peer);
+
+    let result = client
+        .peer()
+        .call_tool(tool_request(
+            "subscribe",
+            json!({
+                "connection_id": connection_id,
+                "timeout_ms": "500",
+                "encoding": "utf8",
+                "max_chunk_bytes": "1024",
+                "poll_interval_ms": "50",
+            }),
+        ))
+        .await
+        .unwrap();
+
+    assert_ne!(result.is_error, Some(true), "{result:?}");
+    let structured = result.structured_content.expect("structured content");
+    assert_eq!(structured["data"], json!("hello-flex"));
+    assert_eq!(structured["timeout_ms"], json!(500));
+
+    client.cancel().await.ok();
+}
+
+#[tokio::test]
+async fn wait_for_accepts_stringified_timeout_ms() {
+    let manager = Arc::new(ConnectionManager::new());
+    let (conn, mut peer) = loopback_connection("loop-flex-waitfor");
+    let connection_id = manager.insert(conn).await.unwrap();
+
+    let server = TestServer::start_with(manager).await;
+    let (client, _rx) = connect_client(&server).await.unwrap();
+
+    let writer = tokio::spawn(async move {
+        peer.write_all(b"noise OK> rest").await.unwrap();
+        peer.flush().await.unwrap();
+    });
+
+    let result = client
+        .peer()
+        .call_tool(tool_request(
+            "wait_for",
+            json!({
+                "connection_id": connection_id,
+                "pattern": "OK>",
+                "timeout_ms": "2000",
+                "max_bytes": "1024",
+            }),
+        ))
+        .await
+        .unwrap();
+    writer.await.unwrap();
+
+    assert_ne!(result.is_error, Some(true), "{result:?}");
+    let structured = result.structured_content.expect("structured content");
+    assert_eq!(structured["matched"], json!(true));
+
+    client.cancel().await.ok();
+}
+
+#[tokio::test]
+async fn read_with_text_encoding_strips_ansi() {
+    let manager = Arc::new(ConnectionManager::new());
+    let (conn, mut peer) = loopback_connection("loop-text-enc");
+    let connection_id = manager.insert(conn).await.unwrap();
+
+    let server = TestServer::start_with(manager).await;
+    let (client, _rx) = connect_client(&server).await.unwrap();
+
+    peer.write_all(b"\x1b[32m<inf> Started\x1b[0m\r\n")
+        .await
+        .unwrap();
+    peer.flush().await.unwrap();
+
+    let result = client
+        .peer()
+        .call_tool(tool_request(
+            "read",
+            json!({
+                "connection_id": connection_id,
+                "timeout_ms": 2000,
+                "encoding": "text",
+            }),
+        ))
+        .await
+        .unwrap();
+
+    assert_ne!(result.is_error, Some(true), "{result:?}");
+    let structured = result.structured_content.expect("structured content");
+    assert_eq!(structured["data"], json!("<inf> Started\r\n"));
+
+    client.cancel().await.ok();
+}
+
+#[tokio::test]
+async fn read_line_with_text_encoding_strips_ansi() {
+    let manager = Arc::new(ConnectionManager::new());
+    let (conn, mut peer) = loopback_connection("loop-text-readline");
+    let connection_id = manager.insert(conn).await.unwrap();
+
+    let server = TestServer::start_with(manager).await;
+    let (client, _rx) = connect_client(&server).await.unwrap();
+
+    peer.write_all(
+        b"\x1b[1;32m\x1b[J[00:00:00.291,625] \x1b[0m<inf> rtt_feedback: Started.\x1b[0m\r\n",
+    )
+    .await
+    .unwrap();
+    peer.flush().await.unwrap();
+
+    let result = client
+        .peer()
+        .call_tool(tool_request(
+            "read_line",
+            json!({
+                "connection_id": connection_id,
+                "timeout_ms": 2000,
+                "encoding": "text",
+            }),
+        ))
+        .await
+        .unwrap();
+
+    assert_ne!(result.is_error, Some(true), "{result:?}");
+    let structured = result.structured_content.expect("structured content");
+    assert_eq!(
+        structured["line"],
+        json!("[00:00:00.291,625] <inf> rtt_feedback: Started.")
+    );
+
+    client.cancel().await.ok();
+}

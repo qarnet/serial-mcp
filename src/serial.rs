@@ -217,7 +217,12 @@ fn io_error_from_serialport(err: serialport::Error) -> std::io::Error {
 pub struct SerialConnection {
     id: String,
     port: String,
-    io: Mutex<Box<dyn SerialIo>>,
+    state: Mutex<SerialState>,
+}
+
+struct SerialState {
+    io: Box<dyn SerialIo>,
+    unread: Vec<u8>,
 }
 
 impl fmt::Debug for SerialConnection {
@@ -243,7 +248,10 @@ impl SerialConnection {
         Self {
             id: Uuid::new_v4().to_string(),
             port,
-            io: Mutex::new(io),
+            state: Mutex::new(SerialState {
+                io,
+                unread: Vec::new(),
+            }),
         }
     }
 
@@ -257,10 +265,21 @@ impl SerialConnection {
 
     /// Write a byte slice, flushing before returning.
     pub async fn write(&self, data: &[u8]) -> Result<usize> {
-        let mut io = self.io.lock().await;
-        let written = io.write(data).await?;
-        io.flush().await?;
+        let mut state = self.state.lock().await;
+        let written = state.io.write(data).await?;
+        state.io.flush().await?;
         Ok(written)
+    }
+
+    fn read_from_unread(state: &mut SerialState, dst: &mut [u8]) -> usize {
+        let to_copy = dst.len().min(state.unread.len());
+        if to_copy == 0 {
+            return 0;
+        }
+
+        dst[..to_copy].copy_from_slice(&state.unread[..to_copy]);
+        state.unread.drain(..to_copy);
+        to_copy
     }
 
     /// Read up to `dst.len()` bytes. Returns [`SerialError::ReadTimeout`] if
@@ -273,8 +292,17 @@ impl SerialConnection {
     /// request/response pattern (`wait_for` + `write`) on CDC-ACM devices.
     pub async fn read(&self, dst: &mut [u8], timeout_ms: Option<u64>) -> Result<usize> {
         const POLL_MS: u64 = 50;
+
+        {
+            let mut state = self.state.lock().await;
+            let unread = Self::read_from_unread(&mut state, dst);
+            if unread > 0 {
+                return Ok(unread);
+            }
+        }
+
         match timeout_ms {
-            None => Ok(self.io.lock().await.read(dst).await?),
+            None => Ok(self.state.lock().await.io.read(dst).await?),
             Some(ms) => {
                 let deadline = Instant::now() + Duration::from_millis(ms);
                 loop {
@@ -284,8 +312,13 @@ impl SerialConnection {
                     }
                     let poll_dur = remaining.min(Duration::from_millis(POLL_MS));
                     {
-                        let mut io = self.io.lock().await;
-                        match timeout(poll_dur, io.read(dst)).await {
+                        let mut state = self.state.lock().await;
+                        let unread = Self::read_from_unread(&mut state, dst);
+                        if unread > 0 {
+                            return Ok(unread);
+                        }
+
+                        match timeout(poll_dur, state.io.read(dst)).await {
                             Ok(Ok(n)) if n > 0 => return Ok(n),
                             Ok(Ok(_)) => {}
                             Ok(Err(e)) => return Err(SerialError::from(e)),
@@ -309,25 +342,37 @@ impl SerialConnection {
         Ok(buf)
     }
 
+    pub async fn unread(&self, data: &[u8]) {
+        if data.is_empty() {
+            return;
+        }
+
+        let mut state = self.state.lock().await;
+        state.unread.extend_from_slice(data);
+    }
+
     /// Discard data buffered in the OS for the input, output, or both
     /// directions of this port.
     pub async fn flush_buffers(&self, target: FlushTarget) -> Result<()> {
-        let io = self.io.lock().await;
-        io.clear_os_buffers(target).map_err(SerialError::from)
+        let mut state = self.state.lock().await;
+        if matches!(target, FlushTarget::Input | FlushTarget::Both) {
+            state.unread.clear();
+        }
+        state.io.clear_os_buffers(target).map_err(SerialError::from)
     }
 
     /// Drive the DTR and RTS control lines. Common use case: pulse DTR low
     /// to soft-reset an Arduino, or hold both low to enter the ESP32
     /// bootloader.
     pub async fn set_dtr_rts(&self, dtr: bool, rts: bool) -> Result<()> {
-        let mut io = self.io.lock().await;
-        io.set_dtr_rts(dtr, rts).map_err(SerialError::from)
+        let mut state = self.state.lock().await;
+        state.io.set_dtr_rts(dtr, rts).map_err(SerialError::from)
     }
 
     /// Set the BREAK condition on the TX line.
     pub async fn set_break_state(&self, enabled: bool) -> Result<()> {
-        let io = self.io.lock().await;
-        io.set_break_state(enabled).map_err(SerialError::from)
+        let state = self.state.lock().await;
+        state.io.set_break_state(enabled).map_err(SerialError::from)
     }
 
     /// Assert the BREAK condition on the TX line for `duration_ms`
@@ -627,6 +672,33 @@ mod tests {
         conn.flush_buffers(FlushTarget::Both).await.unwrap();
         conn.set_dtr_rts(true, false).await.unwrap();
         conn.send_break(15).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn unread_bytes_are_returned_before_os_reads() {
+        let (conn, mut peer) = loopback_connection("test");
+        conn.unread(b"hello").await;
+        peer.write_all(b"world").await.unwrap();
+
+        let mut buf = [0u8; 5];
+        let n = conn.read(&mut buf, Some(100)).await.unwrap();
+        assert_eq!(n, 5);
+        assert_eq!(&buf, b"hello");
+
+        let n = conn.read(&mut buf, Some(100)).await.unwrap();
+        assert_eq!(n, 5);
+        assert_eq!(&buf, b"world");
+    }
+
+    #[tokio::test]
+    async fn flush_input_clears_unread_bytes() {
+        let (conn, _peer) = loopback_connection("test");
+        conn.unread(b"stale").await;
+        conn.flush_buffers(FlushTarget::Input).await.unwrap();
+
+        let mut buf = [0u8; 5];
+        let result = conn.read(&mut buf, Some(40)).await;
+        assert!(matches!(result, Err(SerialError::ReadTimeout)));
     }
 
     #[tokio::test]
