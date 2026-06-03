@@ -6,7 +6,7 @@ use rmcp::{model::Meta, service::RequestContext, Json, Peer, RoleServer};
 use tracing::{debug, info};
 
 use crate::codec;
-use crate::serial::ConnectionManager;
+use crate::serial::{ConnectionManager, SerialConnection, SerialRxLease};
 use crate::tools::helpers::{
     clamp_or_err, clamp_poll_interval_or_err, clamp_timeout_or_err, log_tool_err,
     lookup_connection, parse_encoding, require_min_or_err, stream_rx, MAX_STREAM_CHUNK_BYTES,
@@ -17,6 +17,7 @@ use crate::tools::types::{SubscribeArgs, SubscribeResult, UnsubscribeArgs, Unsub
 /// RAII wrapper around a streaming task. Aborts the task on drop.
 pub struct StreamHandle {
     join: tokio::task::JoinHandle<()>,
+    _rx_lease: SerialRxLease,
 }
 
 impl Drop for StreamHandle {
@@ -38,8 +39,8 @@ pub async fn subscribe(
         "subscribe {} encoding={} chunk={} poll={} timeout={:?}",
         args.connection_id,
         args.encoding,
-        args.max_chunk_bytes,
-        args.poll_interval_ms,
+        args.max_chunk_bytes.0,
+        args.poll_interval_ms.0,
         args.timeout_ms
     );
 
@@ -48,7 +49,7 @@ pub async fn subscribe(
 
     let chunk_bytes = require_min_or_err(
         "subscribe.max_chunk_bytes",
-        args.max_chunk_bytes,
+        args.max_chunk_bytes.0,
         MIN_STREAM_CHUNK_BYTES,
     )?;
     let chunk_bytes = clamp_or_err(
@@ -58,17 +59,21 @@ pub async fn subscribe(
     )?;
     let poll_ms = clamp_poll_interval_or_err(
         "subscribe.poll_interval_ms",
-        args.poll_interval_ms,
+        args.poll_interval_ms.0,
         MIN_POLL_INTERVAL_MS,
     )?;
 
     let id = args.connection_id.clone();
+    let replaced_previous = streams.lock().await.remove(&id).is_some();
+
+    let timeout_ms_opt: Option<u64> = args.timeout_ms.into();
 
     // If timeout_ms is set, run in blocking mode: collect data for the
     // duration and return it inline. Otherwise, fire-and-forget background
     // streaming via logging notifications (original behaviour).
-    if let Some(timeout_ms) = args.timeout_ms {
+    if let Some(timeout_ms) = timeout_ms_opt {
         clamp_timeout_or_err("subscribe.timeout_ms", timeout_ms, MAX_TIMEOUT_MS)?;
+        let _rx_lease = SerialConnection::acquire_rx(&connection, "subscribe")?;
         let progress_token = meta.get_progress_token();
         let start = Instant::now();
         let mut buf = vec![0u8; chunk_bytes];
@@ -118,11 +123,6 @@ pub async fn subscribe(
             id, total, elapsed_ms
         );
 
-        // If a background subscription already existed for this connection,
-        // abort it before returning the inline result.
-        let mut streams = streams.lock().await;
-        let replaced_previous = streams.remove(&id).is_some();
-
         return Ok(Json(SubscribeResult {
             connection_id: id,
             encoding: encoding.to_string(),
@@ -137,6 +137,7 @@ pub async fn subscribe(
     }
 
     // Fire-and-forget mode (original behaviour)
+    let rx_lease = SerialConnection::acquire_rx(&connection, "subscribe")?;
     let join = tokio::spawn(stream_rx(
         ctx.peer.clone(),
         connection,
@@ -146,7 +147,13 @@ pub async fn subscribe(
     ));
 
     let mut streams = streams.lock().await;
-    let replaced_previous = streams.insert(id.clone(), StreamHandle { join }).is_some();
+    streams.insert(
+        id.clone(),
+        StreamHandle {
+            join,
+            _rx_lease: rx_lease,
+        },
+    );
     info!(
         "subscribed RX stream for {} (replaced={})",
         id, replaced_previous

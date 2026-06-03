@@ -8,7 +8,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
 use schemars::JsonSchema;
@@ -217,7 +217,24 @@ fn io_error_from_serialport(err: serialport::Error) -> std::io::Error {
 pub struct SerialConnection {
     id: String,
     port: String,
+    rx_owner: StdMutex<Option<&'static str>>,
     state: Mutex<SerialState>,
+}
+
+#[derive(Debug)]
+pub struct SerialRxLease {
+    connection: Arc<SerialConnection>,
+    owner: &'static str,
+}
+
+impl Drop for SerialRxLease {
+    fn drop(&mut self) {
+        if let Ok(mut current) = self.connection.rx_owner.lock() {
+            if current.as_ref() == Some(&self.owner) {
+                *current = None;
+            }
+        }
+    }
 }
 
 struct SerialState {
@@ -248,6 +265,7 @@ impl SerialConnection {
         Self {
             id: Uuid::new_v4().to_string(),
             port,
+            rx_owner: StdMutex::new(None),
             state: Mutex::new(SerialState {
                 io,
                 unread: Vec::new(),
@@ -261,6 +279,26 @@ impl SerialConnection {
 
     pub fn port(&self) -> &str {
         &self.port
+    }
+
+    pub fn acquire_rx(
+        connection: &Arc<Self>,
+        owner: &'static str,
+    ) -> std::result::Result<SerialRxLease, String> {
+        let mut current = connection
+            .rx_owner
+            .lock()
+            .map_err(|_| format!("Connection busy: failed to inspect RX owner on {}", connection.id))?;
+
+        if let Some(active_owner) = *current {
+            return Err(format!("Connection busy: {active_owner} already owns RX"));
+        }
+
+        *current = Some(owner);
+        Ok(SerialRxLease {
+            connection: Arc::clone(connection),
+            owner,
+        })
     }
 
     /// Write a byte slice, flushing before returning.
@@ -699,6 +737,20 @@ mod tests {
         let mut buf = [0u8; 5];
         let result = conn.read(&mut buf, Some(40)).await;
         assert!(matches!(result, Err(SerialError::ReadTimeout)));
+    }
+
+    #[tokio::test]
+    async fn acquire_rx_reports_owner_and_releases_on_drop() {
+        let (conn, _peer) = loopback_connection("test");
+        let conn = Arc::new(conn);
+
+        let lease = SerialConnection::acquire_rx(&conn, "subscribe").unwrap();
+        let err = SerialConnection::acquire_rx(&conn, "read").unwrap_err();
+        assert_eq!(err, "Connection busy: subscribe already owns RX");
+
+        drop(lease);
+
+        SerialConnection::acquire_rx(&conn, "read").unwrap();
     }
 
     #[tokio::test]

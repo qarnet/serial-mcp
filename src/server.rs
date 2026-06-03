@@ -17,7 +17,7 @@ use rmcp::{
 use tracing::{debug, info};
 
 use crate::security::SecurityManager;
-use crate::serial::{ConnectionManager, ConnectionSummary, PortInfo};
+use crate::serial::{ConnectionManager, ConnectionSummary, PortInfo, SerialConnection};
 
 use crate::prompts::types::*;
 use crate::prompts::{diagnose, interactive};
@@ -575,6 +575,8 @@ impl ServerHandler for SerialHandler {
                         Some(serde_json::json!({ "uri": uri, "connection_id": id })),
                     )
                 })?;
+                let _rx_lease = SerialConnection::acquire_rx(&conn, "resource read")
+                    .map_err(|e| McpError::internal_error(e, None))?;
                 let raw_bytes = conn
                     .read_latest(256)
                     .await

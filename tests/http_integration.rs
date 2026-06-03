@@ -96,6 +96,63 @@ async fn progress_notifications_emitted_for_wait_for() {
 }
 
 #[tokio::test]
+async fn subscribe_blocks_parallel_read_with_owner_name() {
+    let manager = Arc::new(ConnectionManager::new());
+    let (conn, _peer) = loopback_connection("loop-busy-subscribe");
+    let connection_id = manager.insert(conn).await.unwrap();
+
+    let server = TestServer::start_with(manager).await;
+    let (client, _rx) = connect_client(&server).await.unwrap();
+
+    let subscribe = client
+        .peer()
+        .call_tool(tool_request(
+            "subscribe",
+            json!({
+                "connection_id": connection_id,
+                "encoding": "utf8",
+                "max_chunk_bytes": 64,
+                "poll_interval_ms": 50,
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_ne!(subscribe.is_error, Some(true), "{subscribe:?}");
+
+    let read = client
+        .peer()
+        .call_tool(tool_request(
+            "read",
+            json!({
+                "connection_id": connection_id,
+                "timeout_ms": 50,
+                "max_bytes": 16,
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(read.is_error, Some(true), "{read:?}");
+    assert!(
+        format!("{read:?}").contains("Connection busy: subscribe already owns RX"),
+        "{read:?}"
+    );
+
+    let unsubscribe = client
+        .peer()
+        .call_tool(tool_request(
+            "unsubscribe",
+            json!({
+                "connection_id": connection_id,
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_ne!(unsubscribe.is_error, Some(true), "{unsubscribe:?}");
+
+    client.cancel().await.ok();
+}
+
+#[tokio::test]
 async fn list_tools_returns_all_thirteen_tools() {
     let server = TestServer::start().await;
     let (client, _rx) = connect_client(&server).await.unwrap();

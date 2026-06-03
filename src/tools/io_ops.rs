@@ -57,6 +57,7 @@ pub async fn read(
 
     let encoding = parse_encoding(&args.encoding)?;
     let connection = lookup_connection(connections, &args.connection_id).await?;
+    let _rx_lease = crate::serial::SerialConnection::acquire_rx(&connection, "read")?;
     let max_bytes = require_min_or_err("read.max_bytes", args.max_bytes.0, MIN_READ_BYTES)?;
     let max_bytes = clamp_or_err("read.max_bytes", max_bytes, MAX_READ_BYTES)?;
     let timeout_ms: Option<u64> = args.timeout_ms.into();
@@ -112,6 +113,7 @@ pub async fn read_line(
 
     let encoding = parse_encoding(&args.encoding)?;
     let connection = lookup_connection(connections, &args.connection_id).await?;
+    let _rx_lease = crate::serial::SerialConnection::acquire_rx(&connection, "read_line")?;
     let max_bytes = require_min_or_err("read_line.max_bytes", args.max_bytes.0, MIN_READ_BYTES)?;
     let max_bytes = clamp_or_err("read_line.max_bytes", max_bytes, MAX_WAIT_BYTES)?;
     let timeout_ms: u64 =
