@@ -3,7 +3,7 @@
   "mcp": {
     "serial": {
       "type": "local",
-      "command": ["serial-mcp", "--allowlist=/dev/ttyACM*,/dev/ttyUSB*"]
+      "command": ["serial-mcp"]
     }
   }
 }

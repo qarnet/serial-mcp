@@ -55,6 +55,14 @@ Config schemas vary by tool. Where a published JSON schema exists, we provide an
 **Example:** [`example-configs/opencode.json`](../example-configs/opencode.json)
 **Note:** Uses `"mcp"` as the top-level key, not `"mcpServers"`.
 
+## OpenAI Codex
+
+**File:** `~/.codex/config.json` (global) or `.codex/config.json` (project)
+**Docs:** [developers.openai.com/codex](https://developers.openai.com/codex)
+**Schema:** `https://developers.openai.com/codex/config-schema.json`
+**Example:** [`example-configs/codex.json`](../example-configs/codex.json)
+**Note:** Uses `"mcp_servers"` (underscore) as the top-level key. No `type` field — transport inferred from `command` vs `url`.
+
 ## Hermes Agent
 
 **File:** `~/.hermes/config.yaml` or project `.hermes.yaml`
@@ -117,6 +125,7 @@ A [lint script](../lint-examples.sh) validates the example configs against their
 ```
 claude_code_settings = "https://json.schemastore.org/claude-code-settings.json"
 opencode_config     = "https://opencode.ai/config.json"
+codex_config        = "https://developers.openai.com/codex/config-schema.json"
 ```
 
 Run locally: `./lint-examples.sh` — requires `cargo install jsonschema-cli`.

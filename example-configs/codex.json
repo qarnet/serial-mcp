@@ -1,0 +1,7 @@
+{
+  "mcp_servers": {
+    "serial": {
+      "command": "serial-mcp"
+    }
+  }
+}
