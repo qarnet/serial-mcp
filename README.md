@@ -84,10 +84,6 @@ cargo fmt --all -- --check
 - [CHANGELOG.md](CHANGELOG.md)
 - [AGENTS.md](AGENTS.md) — contributor guidelines
 
-## Acknowledgements
-
-serial-mcp evolved from early experimentation with serial-port MCP tooling and has since grown into its own project. Thanks to everyone who contributed ideas, tested on real hardware, and reported bugs.
-
 ## License
 
 MIT. See [LICENSE](LICENSE).
