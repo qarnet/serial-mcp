@@ -42,9 +42,10 @@ Linux users: add yourself to the `dialout` group for port access: `sudo usermod 
 
 ## Wire Up Your Agent
 
-→ **[Agent configuration guide](docs/agent-config.md)** — Claude Code CLI, Claude Desktop, Cursor, VS Code, Zed, opencode, HTTP transport
+→ **[Agent configuration guide](docs/agent-config.md)** — Claude Code, Claude Desktop, Cursor, VS Code, Zed, opencode, Codex, Hermes, HTTP transport
 
-Quick example (Claude Code CLI, Linux/macOS):
+<details>
+<summary>Quick example (Claude Code, Linux/macOS)</summary>
 
 ```json
 {
@@ -57,6 +58,8 @@ Quick example (Claude Code CLI, Linux/macOS):
   }
 }
 ```
+
+</details>
 
 ## Options
 
