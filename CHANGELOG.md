@@ -2,6 +2,7 @@
 
 | Version | Date | Highlights |
 |---|---|---|
+| [0.4.1](#041) | 2026-06-04 | CI/release hardening, schema-validated config examples, docs cleanup |
 | [0.4.0](#040) | 2026-06-04 | Crate rename to `serial-mcp`, `read_line` + `get_version` tools, text encoding, RX guard, flexible args |
 | [0.3.0](#030) | 2026-05-30 | Single binary, CLI args replace env vars, multi-platform builds + crates.io |
 | [0.2.6](#026) | 2026-05-27 | Protocol emulator integration tests (ESP32 workflow, binary payloads) |
@@ -12,6 +13,20 @@
 | [0.2.1](#021) | 2026-05-24 | MCP 2025-11-25, resource change notifications, port allowlist, stdio tests |
 | [0.2.0](#020) | 2026-05-23 | Project reset: rmcp 1.7 rewrite, 6 new tools, resources, prompts, HTTP transport |
 | [0.1.0](#010) | — | Initial release (5 tools, STM32 demo) |
+
+---
+
+## [0.4.1]
+
+Release workflow and docs cleanup.
+
+**Added:** vendored schema validation for config examples via Rust integration tests and a daily upstream schema drift workflow.
+
+**Changed:** release automation now runs after successful `main` CI and builds Linux x86_64, Linux ARM64, macOS x86_64, macOS ARM64, and Windows artifacts.
+
+**Changed:** agent configuration docs now point to schema-backed examples and official docs, with stale examples removed.
+
+**Removed:** shell-based config linting, loopback hardware tests, stale compliance docs, and editor-specific repo files.
 
 ---
 
