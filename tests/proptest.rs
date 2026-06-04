@@ -17,9 +17,7 @@ use schemars::schema_for;
 use serde_json::Value;
 
 use serial_mcp::codec::{self, Encoding};
-use serial_mcp::flex_deserialize::{
-    FlexibleOptionU64, FlexibleU32, FlexibleU64, FlexibleUsize,
-};
+use serial_mcp::flex_deserialize::{FlexibleOptionU64, FlexibleU32, FlexibleU64, FlexibleUsize};
 use serial_mcp::limits::*;
 use serial_mcp::tools::helpers::{
     clamp_or_err, clamp_poll_interval_or_err, clamp_timeout_or_err, parse_data_bits,
@@ -669,8 +667,7 @@ fn run_lifecycle_scenario(op: Op) {
         .unwrap();
     rt.block_on(async {
         let manager = Arc::new(serial_mcp::serial::ConnectionManager::new());
-        let (conn, _peer) =
-            serial_mcp::serial::test_support::loopback_connection("lifecycle");
+        let (conn, _peer) = serial_mcp::serial::test_support::loopback_connection("lifecycle");
         let cid = manager.insert(conn).await.unwrap();
         let conn = manager.get(&cid).await.unwrap();
 
@@ -678,8 +675,7 @@ fn run_lifecycle_scenario(op: Op) {
             Op::OpenWriteCloseRead => {
                 conn.write(b"hello").await.unwrap();
                 manager.close(&cid).await.unwrap();
-                let (conn2, _) =
-                    serial_mcp::serial::test_support::loopback_connection("lifecycle");
+                let (conn2, _) = serial_mcp::serial::test_support::loopback_connection("lifecycle");
                 assert!(manager.insert(conn2).await.is_ok());
             }
             Op::DoubleClose => {
