@@ -12,6 +12,22 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
+  nix-flake:
+    name: nix flake check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@v16
+
+      - name: Cache Nix store
+        uses: DeterminateSystems/magic-nix-cache-action@v8
+
+      - name: nix flake check
+        run: nix flake check --accept-flake-config
+
   build-test:
     name: build / test / clippy (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
