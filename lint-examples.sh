@@ -77,18 +77,6 @@ for name in "${!SCHEMAS[@]}"; do
 done
 
 echo ""
-echo "No published schema — JSON parse check only:"
-for f in "$DIR"/cursor.json "$DIR"/vscode.json "$DIR"/zed.json; do
-    echo "  $f"
-    if python3 -m json.tool "$f" > /dev/null 2>&1; then
-        echo "    valid JSON"
-    else
-        echo "    INVALID JSON"
-        FAIL=1
-    fi
-done
-
-echo ""
 if [ "$FAIL" -eq 0 ]; then
     echo "All example configs valid."
 else

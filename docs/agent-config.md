@@ -2,7 +2,7 @@
 
 Note: `serial-mcp` must be on your `PATH`. If installed via `cargo install`, it should already be available as `serial-mcp`.
 
-Config schemas vary by tool. Where a published JSON schema exists, we use it for validation via [`lint-examples.sh`](../lint-examples.sh). Where none exists, we link the official docs and note the limitation. If a config stops working, check the linked docs — schemas can change.
+Config schemas vary by tool. Where a published JSON schema exists, we provide an example config in [`example-configs/`](../example-configs/) and validate it via [`lint-examples.sh`](../lint-examples.sh). Where none exists, we link the official docs. If a config stops working, check the linked docs — schemas can change.
 
 ## Port names by platform
 
@@ -31,23 +31,20 @@ Config schemas vary by tool. Where a published JSON schema exists, we use it for
 
 **File:** `.cursor/mcp.json` (project) or `~/.cursor/mcp.json` (global)
 **Docs:** [cursor.com/docs/mcp](https://cursor.com/docs/mcp)
-**Schema:** none published for MCP config
-**Example:** [`example-configs/cursor.json`](../example-configs/cursor.json)
+**Schema:** none published — no example provided
 
 ## VS Code (Copilot)
 
 **File:** `.vscode/mcp.json` in your workspace
 **Docs:** [code.visualstudio.com/docs/agents/reference/mcp-configuration](https://code.visualstudio.com/docs/agents/reference/mcp-configuration)
-**Schema:** none published; VS Code has built-in IntelliSense
-**Example:** [`example-configs/vscode.json`](../example-configs/vscode.json)
+**Schema:** none published — VS Code has built-in IntelliSense
 **Note:** Uses `"servers"` as the top-level key, not `"mcpServers"`.
 
 ## Zed
 
 **File:** `~/.config/zed/settings.json` under `"context_servers"`
 **Docs:** [zed.dev/docs/ai/mcp](https://zed.dev/docs/ai/mcp)
-**Schema:** none published
-**Example:** [`example-configs/zed.json`](../example-configs/zed.json)
+**Schema:** none published — no example provided
 **Note:** Uses `"context_servers"` as the top-level key. No `type` field — inferred from `command` vs `url`.
 
 ## opencode

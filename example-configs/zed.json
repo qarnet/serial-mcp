@@ -1,9 +1,0 @@
-{
-  "$comment": "Merge into ~/.config/zed/settings.json under the 'context_servers' key.",
-  "context_servers": {
-    "serial-mcp": {
-      "command": "serial-mcp",
-      "args": ["--allowlist=/dev/ttyACM*,/dev/ttyUSB*"]
-    }
-  }
-}
