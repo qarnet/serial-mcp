@@ -2,8 +2,7 @@
 
 | Version | Date | Highlights |
 |---|---|---|
-| [0.3.2](#032) | 2026-06-04 | `read_line` buffering fix, single-RX-owner guard, exclusivity docs |
-| [0.3.1](#031) | 2026-06-04 | `get_version`, `read_line`, lossy UTF-8/text encoding |
+| [0.4.0](#040) | 2026-06-04 | Crate rename to `serial-mcp`, `read_line` + `get_version` tools, text encoding, RX guard, flexible args |
 | [0.3.0](#030) | 2026-05-30 | Single binary, CLI args replace env vars, multi-platform builds + crates.io |
 | [0.2.6](#026) | 2026-05-27 | Protocol emulator integration tests (ESP32 workflow, binary payloads) |
 | [0.2.5](#025) | 2026-05-27 | Property-based tests (54 strategies), fuzz targets, allowlist tests |
@@ -16,27 +15,25 @@
 
 ---
 
-## [0.3.2]
+## [0.4.0]
 
-Physical-device hardening and operator-facing docs.
+Crate renamed to `serial-mcp`. New tools, new encoding, input hardening, and ownership guard.
 
-**Added:** explicit docs for exclusive serial-port opens and single active RX ownership, including common conflicts with tools like `picocom` and IDE serial monitors.
+**Added:**
+- `get_version` tool for querying package version and build commit
+- `read_line` for line-delimited REPL and firmware-log workflows
+- `text` encoding — like `utf8` but strips ANSI/VT100 escape sequences
+- flexible numeric deserialization — tool args accept both JSON numbers and stringified numbers
+- single-RX-owner guard — concurrent `read`/`read_line`/`wait_for`/`subscribe` on one connection fail fast with owner-specific errors
+- explicit docs for exclusive serial-port opens and RX ownership
 
-**Fixed:** `read_line` now preserves trailing buffered bytes for follow-up line reads instead of dropping them when multiple lines arrive in one burst.
+**Fixed:**
+- `read_line` now preserves trailing buffered bytes for follow-up line reads
+- concurrent RX operations no longer race each other
+- UTF-8/text reads use lossy decoding for invalid byte sequences
 
-**Fixed:** concurrent RX operations on one connection now fail fast with owner-specific errors such as `Connection busy: subscribe already owns RX` instead of racing each other.
-
----
-
-## [0.3.1]
-
-Tooling and encoding improvements.
-
-**Added:** `get_version` tool for querying package version and build commit.
-
-**Added:** `read_line` for line-delimited REPL and firmware-log workflows.
-
-**Fixed:** UTF-8/text reads now use lossy decoding for non-UTF-8 byte streams instead of hard-failing on invalid sequences.
+**Changed:**
+- crate renamed from `serial-mcp-server` to `serial-mcp`
 
 ---
 
