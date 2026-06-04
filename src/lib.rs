@@ -1,5 +1,6 @@
 pub mod codec;
 pub mod error;
+pub mod flex_deserialize;
 pub mod limits;
 pub mod prompts;
 pub mod resources;

@@ -1,10 +1,14 @@
 //! Tool argument and response types for serial MCP tools.
 //!
 //! These structs define the JSON schema for tool requests and responses.
+//! Input integer fields use [`FlexibleU64`], [`FlexibleOptionU64`],
+//! [`FlexibleU32`], and [`FlexibleUsize`] wrappers so MCP clients that
+//! stringify numbers (e.g. `"5000"` instead of `5000`) still work.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use crate::flex_deserialize::{FlexibleOptionU64, FlexibleU32, FlexibleU64, FlexibleUsize};
 use crate::serial::{FlushTarget, PortInfo};
 
 // ---- Argument structs ------------------------------------------------------
@@ -13,7 +17,7 @@ use crate::serial::{FlushTarget, PortInfo};
 pub struct OpenArgs {
     pub port: String,
     #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
-    pub baud_rate: u32,
+    pub baud_rate: FlexibleU32,
     #[serde(default = "default_data_bits")]
     pub data_bits: String,
     #[serde(default = "default_stop_bits")]
@@ -42,10 +46,10 @@ pub struct ReadArgs {
     pub connection_id: String,
     #[serde(default)]
     #[schemars(schema_with = "crate::schema_helpers::option_timeout_ms_schema")]
-    pub timeout_ms: Option<u64>,
+    pub timeout_ms: FlexibleOptionU64,
     #[serde(default = "default_max_bytes")]
     #[schemars(schema_with = "crate::schema_helpers::read_max_bytes_schema")]
-    pub max_bytes: usize,
+    pub max_bytes: FlexibleUsize,
     #[serde(default = "default_encoding")]
     pub encoding: String,
 }
@@ -69,7 +73,7 @@ pub struct SendBreakArgs {
     pub connection_id: String,
     #[serde(default = "default_break_duration_ms")]
     #[schemars(schema_with = "crate::schema_helpers::timeout_ms_schema")]
-    pub duration_ms: u64,
+    pub duration_ms: FlexibleU64,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -77,15 +81,15 @@ pub struct SubscribeArgs {
     pub connection_id: String,
     #[serde(default)]
     #[schemars(schema_with = "crate::schema_helpers::option_timeout_ms_schema")]
-    pub timeout_ms: Option<u64>,
+    pub timeout_ms: FlexibleOptionU64,
     #[serde(default = "default_encoding")]
     pub encoding: String,
     #[serde(default = "default_subscribe_chunk_bytes")]
     #[schemars(schema_with = "crate::schema_helpers::stream_chunk_bytes_schema")]
-    pub max_chunk_bytes: usize,
+    pub max_chunk_bytes: FlexibleUsize,
     #[serde(default = "default_subscribe_poll_ms")]
     #[schemars(schema_with = "crate::schema_helpers::poll_interval_ms_schema")]
-    pub poll_interval_ms: u64,
+    pub poll_interval_ms: FlexibleU64,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -101,10 +105,10 @@ pub struct WaitForArgs {
     pub pattern_encoding: String,
     #[serde(default = "default_wait_timeout_ms")]
     #[schemars(schema_with = "crate::schema_helpers::timeout_ms_schema")]
-    pub timeout_ms: u64,
+    pub timeout_ms: FlexibleU64,
     #[serde(default = "default_wait_max_bytes")]
     #[schemars(schema_with = "crate::schema_helpers::wait_max_bytes_schema")]
-    pub max_bytes: usize,
+    pub max_bytes: FlexibleUsize,
     #[serde(default = "default_encoding")]
     pub response_encoding: String,
 }
@@ -114,10 +118,10 @@ pub struct ReadLineArgs {
     pub connection_id: String,
     #[serde(default)]
     #[schemars(schema_with = "crate::schema_helpers::option_timeout_ms_schema")]
-    pub timeout_ms: Option<u64>,
+    pub timeout_ms: FlexibleOptionU64,
     #[serde(default = "default_read_line_max_bytes")]
     #[schemars(schema_with = "crate::schema_helpers::wait_max_bytes_schema")]
-    pub max_bytes: usize,
+    pub max_bytes: FlexibleUsize,
     #[serde(default = "default_encoding")]
     pub encoding: String,
 }
@@ -265,27 +269,27 @@ pub fn default_flow_control() -> String {
 pub fn default_encoding() -> String {
     "utf8".into()
 }
-pub fn default_max_bytes() -> usize {
-    1024
+pub fn default_max_bytes() -> FlexibleUsize {
+    FlexibleUsize(1024)
 }
 pub fn default_flush_target() -> FlushTarget {
     FlushTarget::Both
 }
-pub fn default_break_duration_ms() -> u64 {
-    250
+pub fn default_break_duration_ms() -> FlexibleU64 {
+    FlexibleU64(250)
 }
-pub fn default_wait_timeout_ms() -> u64 {
-    2000
+pub fn default_wait_timeout_ms() -> FlexibleU64 {
+    FlexibleU64(2000)
 }
-pub fn default_wait_max_bytes() -> usize {
-    4096
+pub fn default_wait_max_bytes() -> FlexibleUsize {
+    FlexibleUsize(4096)
 }
-pub fn default_subscribe_chunk_bytes() -> usize {
-    1024
+pub fn default_subscribe_chunk_bytes() -> FlexibleUsize {
+    FlexibleUsize(1024)
 }
-pub fn default_subscribe_poll_ms() -> u64 {
-    200
+pub fn default_subscribe_poll_ms() -> FlexibleU64 {
+    FlexibleU64(200)
 }
-pub fn default_read_line_max_bytes() -> usize {
-    4096
+pub fn default_read_line_max_bytes() -> FlexibleUsize {
+    FlexibleUsize(4096)
 }

@@ -460,6 +460,18 @@ async fn protocol_emulator_workflow() {
         "notification must contain temp"
     );
 
+    let unsub_after_ff = client
+        .peer()
+        .call_tool(tool_request(
+            "unsubscribe",
+            json!({
+                "connection_id": connection_id,
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_ne!(unsub_after_ff.is_error, Some(true), "{unsub_after_ff:?}");
+
     // ---- Stage 8: read timeout ----
     client
         .peer()

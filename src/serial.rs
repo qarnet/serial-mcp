@@ -285,10 +285,12 @@ impl SerialConnection {
         connection: &Arc<Self>,
         owner: &'static str,
     ) -> std::result::Result<SerialRxLease, String> {
-        let mut current = connection
-            .rx_owner
-            .lock()
-            .map_err(|_| format!("Connection busy: failed to inspect RX owner on {}", connection.id))?;
+        let mut current = connection.rx_owner.lock().map_err(|_| {
+            format!(
+                "Connection busy: failed to inspect RX owner on {}",
+                connection.id
+            )
+        })?;
 
         if let Some(active_owner) = *current {
             return Err(format!("Connection busy: {active_owner} already owns RX"));

@@ -17,6 +17,9 @@ use schemars::schema_for;
 use serde_json::Value;
 
 use serial_mcp_server::codec::{self, Encoding};
+use serial_mcp_server::flex_deserialize::{
+    FlexibleOptionU64, FlexibleU32, FlexibleU64, FlexibleUsize,
+};
 use serial_mcp_server::limits::*;
 use serial_mcp_server::tools::helpers::{
     clamp_or_err, clamp_poll_interval_or_err, clamp_timeout_or_err, parse_data_bits,
@@ -85,6 +88,7 @@ fn valid_encoding() -> impl Strategy<Value = String> {
     prop::sample::select(vec![
         "utf8".to_string(),
         "utf-8".to_string(),
+        "text".to_string(),
         "hex".to_string(),
         "base64".to_string(),
         "b64".to_string(),
@@ -153,7 +157,7 @@ proptest! {
     ) {
         let args = OpenArgs {
             port: port.clone(),
-            baud_rate: baud,
+            baud_rate: FlexibleU32(baud),
             data_bits: db.clone(),
             stop_bits: sb.clone(),
             parity: p.clone(),
@@ -194,7 +198,7 @@ proptest! {
         max_bytes in any_usize(),
         enc in valid_encoding(),
     ) {
-        let args = ReadArgs { connection_id: id, timeout_ms: timeout, max_bytes, encoding: enc };
+        let args = ReadArgs { connection_id: id, timeout_ms: FlexibleOptionU64(timeout), max_bytes: FlexibleUsize(max_bytes), encoding: enc };
         assert_roundtrip!(args);
     }
 
@@ -212,7 +216,7 @@ proptest! {
 
     #[test]
     fn send_break_args_roundtrip(id in opaque_id(), duration in any_u64()) {
-        let args = SendBreakArgs { connection_id: id, duration_ms: duration };
+        let args = SendBreakArgs { connection_id: id, duration_ms: FlexibleU64(duration) };
         assert_roundtrip!(args);
     }
 
@@ -226,10 +230,10 @@ proptest! {
     ) {
         let args = SubscribeArgs {
             connection_id: id,
-            timeout_ms: timeout,
+            timeout_ms: FlexibleOptionU64(timeout),
             encoding: enc,
-            max_chunk_bytes: chunk,
-            poll_interval_ms: poll,
+            max_chunk_bytes: FlexibleUsize(chunk),
+            poll_interval_ms: FlexibleU64(poll),
         };
         assert_roundtrip!(args);
     }
@@ -253,8 +257,8 @@ proptest! {
             connection_id: id,
             pattern,
             pattern_encoding: pat_enc,
-            timeout_ms: timeout,
-            max_bytes,
+            timeout_ms: FlexibleU64(timeout),
+            max_bytes: FlexibleUsize(max_bytes),
             response_encoding: resp_enc,
         };
         assert_roundtrip!(args);
@@ -414,6 +418,7 @@ proptest! {
     fn encoding_from_str_accepts_all_aliases(
         raw in prop::sample::select(vec![
             "utf8", "UTF8", "Utf8", "utf-8", "UTF-8",
+            "text", "TEXT", "Text",
             "hex", "HEX", "Hex",
             "base64", "BASE64", "Base64",
             "b64", "B64",
@@ -425,7 +430,7 @@ proptest! {
 
     #[test]
     fn encoding_from_str_rejects_garbage(raw in "[a-z]{3,20}") {
-        let known = ["utf8", "utf-8", "hex", "base64", "b64"];
+        let known = ["utf8", "utf-8", "text", "hex", "base64", "b64"];
         let lower = raw.to_lowercase();
         if known.iter().any(|k| lower == *k) {
             return Ok(());
@@ -530,7 +535,7 @@ proptest! {
     ) {
         let args = OpenArgs {
             port,
-            baud_rate: 9600,
+            baud_rate: FlexibleU32(9600),
             data_bits: "8".into(),
             stop_bits: "1".into(),
             parity: "none".into(),
@@ -548,8 +553,8 @@ fn wait_for_validates_empty_pattern() {
         connection_id: "test".into(),
         pattern: String::new(),
         pattern_encoding: "utf8".into(),
-        timeout_ms: 1000,
-        max_bytes: 256,
+        timeout_ms: FlexibleU64(1000),
+        max_bytes: FlexibleUsize(256),
         response_encoding: "utf8".into(),
     };
     let json = serde_json::to_string(&args).unwrap();

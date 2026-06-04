@@ -404,7 +404,7 @@ pub fn parse_encoding(raw: &str) -> Result<Encoding, String> {
 pub fn parse_open_args(args: OpenArgs) -> Result<ConnectionConfig, String> {
     Ok(ConnectionConfig {
         port: args.port,
-        baud_rate: args.baud_rate,
+        baud_rate: args.baud_rate.0,
         data_bits: parse_data_bits(&args.data_bits)?,
         stop_bits: parse_stop_bits(&args.stop_bits)?,
         parity: parse_parity(&args.parity)?,
@@ -462,6 +462,7 @@ pub fn log_tool_err<E: std::fmt::Display>(op: &str, context: &str, err: E) -> St
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::flex_deserialize::FlexibleU32;
 
     use tokio::io::AsyncWriteExt;
 
@@ -471,7 +472,7 @@ mod tests {
     fn open_args_parsed_strictly() {
         let args = OpenArgs {
             port: "/dev/ttyUSB0".into(),
-            baud_rate: 115200,
+            baud_rate: FlexibleU32(115200),
             data_bits: "8".into(),
             stop_bits: "1".into(),
             parity: "none".into(),
@@ -486,7 +487,7 @@ mod tests {
     fn open_args_reject_invalid_data_bits() {
         let args = OpenArgs {
             port: "X".into(),
-            baud_rate: 9600,
+            baud_rate: FlexibleU32(9600),
             data_bits: "9".into(),
             stop_bits: "1".into(),
             parity: "none".into(),
