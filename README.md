@@ -97,24 +97,6 @@ serial-mcp [OPTIONS]
 | stdio | default | Desktop agents |
 | HTTP | `--transport=http` | Remote / headless |
 
-## Supported Hardware
-
-- **Boards:** STM32, Arduino (Uno/Nano/Leonardo), ESP32, ESP8266
-- **Chips:** CH340, CP2102, FT232, native USB-CDC
-- **Platforms:** Windows (`COMx`), Linux (`/dev/tty*`), macOS (`/dev/tty.*`)
-
-## Example Agent Flow
-
-```
-1. list_ports → ["/dev/ttyUSB0", "/dev/ttyACM0"]
-2. open(port="/dev/ttyACM0", baud_rate=115200) → { connection_id: "9f..." }
-3. set_dtr_rts(id, dtr=false, rts=false)  # Arduino reset
-   set_dtr_rts(id, dtr=true,  rts=true)
-4. wait_for(id, pattern="OK>", timeout_ms=3000)
-5. write(id, data="status\r\n")
-6. close(id)
-```
-
 ## Exclusivity And Busy States
 
 - Ports are opened exclusively by default. If another program already has `/dev/ttyACM0`, `COM3`, etc. open, `open` should fail instead of sharing the device.
