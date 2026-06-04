@@ -3,7 +3,7 @@
   "mcpServers": {
     "serial": {
       "type": "stdio",
-      "command": "/usr/local/bin/serial-mcp-server",
+      "command": "/usr/local/bin/serial-mcp",
       "args": [
         "--allowlist=/dev/ttyACM*,/dev/ttyUSB*"
       ]
