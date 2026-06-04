@@ -61,30 +61,19 @@ Linux users: add yourself to the `dialout` group for port access: `sudo usermod 
 
 </details>
 
-## Options
-
-```
-serial-mcp [OPTIONS]
-
-  --transport <stdio|http>   Transport to use (default: stdio)
-  --allowlist <patterns>     Comma-separated glob patterns for allowed ports
-  --bind <addr>              HTTP bind address (default: 127.0.0.1:8000)
-  -h, --help                 Print help
-
-  RUST_LOG                   Log level env var (error/warn/info/debug/trace)
-```
-
 ## Transports
 
 | Mode | How to activate | Use case |
 |---|---|---|
 | stdio | default | Desktop agents |
-| HTTP | `--transport=http` | Remote / headless |
+| HTTP | `serial-mcp --transport=http` | Remote debugging, headless |
+
+Run `serial-mcp --help` for all options.
 
 ## Development
 
 ```bash
-cargo test                                          # ~140 tests
+cargo test
 cargo clippy --all-targets -- -D warnings
 cargo fmt --all -- --check
 
