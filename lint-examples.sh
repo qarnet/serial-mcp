@@ -6,6 +6,20 @@ DIR="$ROOT/example-configs"
 CACHE_DIR="$ROOT/.schemas"
 FAIL=0
 
+# Centralized schema URLs — add new schemas here.
+declare -A SCHEMAS=(
+    [claude_code_settings]="https://json.schemastore.org/claude-code-settings.json"
+    [opencode_config]="https://opencode.ai/config.json"
+    [cursor_sandbox]="https://json.schemastore.org/cursor-sandbox.json"
+)
+
+# Map schemas to config files they validate.
+declare -A VALIDATES=(
+    [claude_code_settings]="$DIR/claude_code.json $DIR/claude_desktop.json"
+    [opencode_config]="$DIR/opencode.json"
+    [cursor_sandbox]=""
+)
+
 JS="$HOME/.cargo/bin/jsonschema-cli"
 if ! command -v "$JS" &>/dev/null; then
     echo "jsonschema-cli not found. Install: cargo install jsonschema-cli"
@@ -16,9 +30,9 @@ fetch_schema() {
     local url="$1"
     local name="$2"
     mkdir -p "$CACHE_DIR"
-    local dest="$CACHE_DIR/$name"
+    local dest="$CACHE_DIR/$name.json"
     if [ ! -f "$dest" ]; then
-        echo "    fetching $url"
+        echo "    fetching $url" >&2
         curl -sSL "$url" -o "$dest" || {
             echo "    WARNING: could not fetch schema, skipping"
             return 1
@@ -30,12 +44,8 @@ fetch_schema() {
 validate() {
     local schema="$1"
     local file="$2"
-    local abs_schema
-    local abs_file
-    abs_schema="$(realpath "$schema")"
-    abs_file="$(realpath "$file")"
     echo "  $file"
-    if "$JS" validate "$abs_schema" -i "$abs_file" --errors-only 2>&1; then
+    if "$JS" validate "$schema" -i "$file" --errors-only 2>&1; then
         echo "    valid"
     else
         echo "    INVALID"
@@ -45,20 +55,26 @@ validate() {
 
 echo "=== Example config validation ==="
 
-echo ""
-echo "opencode:"
-SCHEMA=$(fetch_schema "https://opencode.ai/config.json" "opencode.json" || true)
-if [ -n "$SCHEMA" ]; then
-    validate "$SCHEMA" "$DIR/opencode.json"
-fi
+for name in "${!SCHEMAS[@]}"; do
+    url="${SCHEMAS[$name]}"
+    files="${VALIDATES[$name]}"
 
-echo ""
-echo "Claude:"
-SCHEMA=$(fetch_schema "https://json.schemastore.org/claude-code-settings.json" "claude-code.json" || true)
-if [ -n "$SCHEMA" ]; then
-    validate "$SCHEMA" "$DIR/claude_code.json"
-    validate "$SCHEMA" "$DIR/claude_desktop.json"
-fi
+    echo ""
+    echo "$name ($url):"
+    SCHEMA_FILE=$(fetch_schema "$url" "$name" || true)
+    if [ -z "$SCHEMA_FILE" ]; then
+        continue
+    fi
+
+    if [ -z "$files" ]; then
+        echo "  (no config files mapped — schema fetched but not applied)"
+        continue
+    fi
+
+    for f in $files; do
+        validate "$(realpath "$SCHEMA_FILE")" "$(realpath "$f")"
+    done
+done
 
 echo ""
 echo "No published schema — JSON parse check only:"

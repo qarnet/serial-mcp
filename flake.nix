@@ -117,6 +117,7 @@
             cargo-watch
             cargo-edit
             cargo-nextest
+            jsonschema-cli
           ];
 
           env.RUST_SRC_PATH = "${rustToolchain}/lib/rustlib/src/rust/library";
