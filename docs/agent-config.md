@@ -1,7 +1,6 @@
 # Agent Configuration
 
-Replace `command` paths with your actual binary location.
-See [Install](../README.md#install) for how to get the binary.
+Note: `serial-mcp` must be on your `PATH`. If installed via `cargo install`, it should already be available as `serial-mcp`.
 
 ## Port names by platform
 
@@ -19,7 +18,7 @@ Add to `.claude/settings.json` (project) or `~/.claude/settings.json` (global):
 {
   "mcpServers": {
     "serial": {
-      "command": "/usr/local/bin/serial-mcp",
+      "command": "serial-mcp",
       "args": ["--allowlist=/dev/ttyACM*,/dev/ttyUSB*"]
     }
   }
@@ -68,7 +67,7 @@ macOS:
 {
   "mcpServers": {
     "serial": {
-      "command": "/Users/<user>/.cargo/bin/serial-mcp",
+      "command": "serial-mcp",
       "args": ["--allowlist=/dev/tty.usbmodem*,/dev/tty.usbserial-*"]
     }
   }
@@ -97,7 +96,7 @@ Windows:
 {
   "mcpServers": {
     "serial": {
-      "command": "/usr/local/bin/serial-mcp",
+      "command": "serial-mcp",
       "args": ["--allowlist=/dev/ttyACM*,/dev/ttyUSB*"]
     }
   }
@@ -113,7 +112,7 @@ Windows:
   "servers": {
     "serial": {
       "type": "stdio",
-      "command": "/usr/local/bin/serial-mcp",
+      "command": "serial-mcp",
       "args": ["--allowlist=/dev/ttyACM*,/dev/ttyUSB*"]
     }
   }
@@ -146,9 +145,8 @@ Windows:
 {
   "mcpServers": {
     "serial": {
-      "type": "stdio",
-      "command": "/usr/local/bin/serial-mcp",
-      "args": ["--allowlist=/dev/ttyACM*,/dev/ttyUSB*"]
+      "type": "local",
+      "command": ["serial-mcp", "--allowlist=/dev/ttyACM*,/dev/ttyUSB*"]
     }
   }
 }
@@ -186,11 +184,16 @@ Agent config (any client that supports streamable HTTP):
 
 ```json
 {
-  "command": "cargo",
-  "args": [
-    "run", "--quiet", "--manifest-path", "/path/to/serial-mcp/Cargo.toml",
-    "--bin", "serial-mcp", "--",
-    "--allowlist=/dev/ttyACM*"
-  ]
+  "mcpServers": {
+    "serial": {
+      "type": "local",
+      "command": [
+        "cargo", "run", "--quiet",
+        "--manifest-path", "/path/to/serial-mcp/Cargo.toml",
+        "--bin", "serial-mcp", "--",
+        "--allowlist=/dev/ttyACM*"
+      ]
+    }
+  }
 }
 ```
