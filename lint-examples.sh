@@ -10,14 +10,12 @@ FAIL=0
 declare -A SCHEMAS=(
     [claude_code_settings]="https://json.schemastore.org/claude-code-settings.json"
     [opencode_config]="https://opencode.ai/config.json"
-    [cursor_sandbox]="https://json.schemastore.org/cursor-sandbox.json"
 )
 
 # Map schemas to config files they validate.
 declare -A VALIDATES=(
     [claude_code_settings]="$DIR/claude_code.json"
     [opencode_config]="$DIR/opencode.json"
-    [cursor_sandbox]=""
 )
 
 JS="$HOME/.cargo/bin/jsonschema-cli"
