@@ -24,50 +24,71 @@ Config schemas vary by tool. Where a published JSON schema exists, we provide an
   - Windows: `%APPDATA%\Claude\claude_desktop_config.json`
 
 **Docs:** [code.claude.com/docs/en/mcp](https://code.claude.com/docs/en/mcp)
+
 **Schema:** `https://json.schemastore.org/claude-code-settings.json`
+
 **Example:** [`example-configs/claude_code.json`](../example-configs/claude_code.json)
 
 ## Cursor
 
 **File:** `.cursor/mcp.json` (project) or `~/.cursor/mcp.json` (global)
+
 **Docs:** [cursor.com/docs/mcp](https://cursor.com/docs/mcp)
+
 **Schema:** none published — no example provided
 
 ## VS Code (Copilot)
 
 **File:** `.vscode/mcp.json` in your workspace
+
 **Docs:** [code.visualstudio.com/docs/agents/reference/mcp-configuration](https://code.visualstudio.com/docs/agents/reference/mcp-configuration)
+
 **Schema:** none published — VS Code has built-in IntelliSense
+
 **Note:** Uses `"servers"` as the top-level key, not `"mcpServers"`.
 
 ## Zed
 
 **File:** `~/.config/zed/settings.json` under `"context_servers"`
+
 **Docs:** [zed.dev/docs/ai/mcp](https://zed.dev/docs/ai/mcp)
+
 **Schema:** none published — no example provided
+
 **Note:** Uses `"context_servers"` as the top-level key. No `type` field — inferred from `command` vs `url`.
 
 ## opencode
 
 **File:** `opencode.json` / `opencode.jsonc` (project) or `~/.config/opencode/opencode.json`
+
 **Docs:** [opencode.ai/config.json](https://opencode.ai/config.json) (the schema is the docs)
+
 **Schema:** `https://opencode.ai/config.json`
+
 **Example:** [`example-configs/opencode.json`](../example-configs/opencode.json)
+
 **Note:** Uses `"mcp"` as the top-level key, not `"mcpServers"`.
 
 ## OpenAI Codex
 
 **File:** `~/.codex/config.json` (global) or `.codex/config.json` (project)
+
 **Docs:** [developers.openai.com/codex](https://developers.openai.com/codex)
+
 **Schema:** `https://developers.openai.com/codex/config-schema.json`
+
 **Example:** [`example-configs/codex.json`](../example-configs/codex.json)
+
 **Note:** Uses `"mcp_servers"` (underscore) as the top-level key. No `type` field — transport inferred from `command` vs `url`.
 
 ## Hermes Agent
 
 **File:** `~/.hermes/config.yaml` or project `.hermes.yaml`
+
 **Docs:** [hermes-agent.nousresearch.com/docs/user-guide/features/mcp](https://hermes-agent.nousresearch.com/docs/user-guide/features/mcp/)
+
 **Schema:** none published
+
 **Example:** not provided — Hermes uses YAML, not JSON. See the [MCP feature docs](https://hermes-agent.nousresearch.com/docs/user-guide/features/mcp/) for the YAML config format.
 
 ---
