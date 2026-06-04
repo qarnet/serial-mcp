@@ -19,10 +19,10 @@ use rmcp::service::PeerRequestOptions;
 use serde_json::json;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use serial_mcp_server::limits::{
+use serial_mcp::limits::{
     MAX_READ_BYTES, MAX_STREAM_CHUNK_BYTES, MAX_TIMEOUT_MS, MAX_WAIT_BYTES, MAX_WRITE_BYTES,
 };
-use serial_mcp_server::serial::{test_support::loopback_connection, ConnectionManager};
+use serial_mcp::serial::{test_support::loopback_connection, ConnectionManager};
 
 mod common;
 use common::{
@@ -51,7 +51,7 @@ async fn initialize_handshake_succeeds() {
     let server = TestServer::start().await;
     let (client, _rx) = connect_client(&server).await.unwrap();
     let info = client.peer().peer_info().expect("peer_info");
-    assert_eq!(info.server_info.name, "serial-mcp-server");
+    assert_eq!(info.server_info.name, "serial-mcp");
     client.cancel().await.ok();
 }
 

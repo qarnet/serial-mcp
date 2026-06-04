@@ -1,6 +1,6 @@
 # MCP 2025-11-25 Specification Compliance Report
 
-**Project:** serial-mcp-server  
+**Project:** serial-mcp  
 **Protocol Version:** 2025-11-25  
 **Last Updated:** 2026-06-04  
 **Compliance Score:** ~90% (47/52 features implemented)

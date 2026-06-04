@@ -16,16 +16,16 @@ use proptest::prelude::*;
 use schemars::schema_for;
 use serde_json::Value;
 
-use serial_mcp_server::codec::{self, Encoding};
-use serial_mcp_server::flex_deserialize::{
+use serial_mcp::codec::{self, Encoding};
+use serial_mcp::flex_deserialize::{
     FlexibleOptionU64, FlexibleU32, FlexibleU64, FlexibleUsize,
 };
-use serial_mcp_server::limits::*;
-use serial_mcp_server::tools::helpers::{
+use serial_mcp::limits::*;
+use serial_mcp::tools::helpers::{
     clamp_or_err, clamp_poll_interval_or_err, clamp_timeout_or_err, parse_data_bits,
     parse_flow_control, parse_open_args, parse_parity, parse_stop_bits, require_min_or_err,
 };
-use serial_mcp_server::tools::types::{
+use serial_mcp::tools::types::{
     CloseArgs, CloseResult, FlushArgs, FlushResult, OpenArgs, OpenResult, ReadArgs, ReadResult,
     SendBreakArgs, SendBreakResult, SetDtrRtsArgs, SetDtrRtsResult, SubscribeArgs, SubscribeResult,
     UnsubscribeArgs, UnsubscribeResult, WaitForArgs, WaitForResult, WriteArgs, WriteResult,
@@ -303,7 +303,7 @@ proptest! {
 
     #[test]
     fn flush_result_schema_valid(id in opaque_id(), target in valid_flush_target()) {
-        let t: serial_mcp_server::serial::FlushTarget = serde_json::from_value(serde_json::json!(target)).unwrap();
+        let t: serial_mcp::serial::FlushTarget = serde_json::from_value(serde_json::json!(target)).unwrap();
         let r = FlushResult { connection_id: id, target: t };
         let v = serde_json::to_value(&r).unwrap();
         assert_schema_valid!(FlushResult, v);
@@ -668,9 +668,9 @@ fn run_lifecycle_scenario(op: Op) {
         .build()
         .unwrap();
     rt.block_on(async {
-        let manager = Arc::new(serial_mcp_server::serial::ConnectionManager::new());
+        let manager = Arc::new(serial_mcp::serial::ConnectionManager::new());
         let (conn, _peer) =
-            serial_mcp_server::serial::test_support::loopback_connection("lifecycle");
+            serial_mcp::serial::test_support::loopback_connection("lifecycle");
         let cid = manager.insert(conn).await.unwrap();
         let conn = manager.get(&cid).await.unwrap();
 
@@ -679,7 +679,7 @@ fn run_lifecycle_scenario(op: Op) {
                 conn.write(b"hello").await.unwrap();
                 manager.close(&cid).await.unwrap();
                 let (conn2, _) =
-                    serial_mcp_server::serial::test_support::loopback_connection("lifecycle");
+                    serial_mcp::serial::test_support::loopback_connection("lifecycle");
                 assert!(manager.insert(conn2).await.is_ok());
             }
             Op::DoubleClose => {
@@ -735,8 +735,8 @@ fn lifecycle_unsubscribe_noop_does_not_panic() {
         .build()
         .unwrap();
     rt.block_on(async {
-        let manager = Arc::new(serial_mcp_server::serial::ConnectionManager::new());
-        let (conn, _) = serial_mcp_server::serial::test_support::loopback_connection("unsub-noop");
+        let manager = Arc::new(serial_mcp::serial::ConnectionManager::new());
+        let (conn, _) = serial_mcp::serial::test_support::loopback_connection("unsub-noop");
         let cid = manager.insert(conn).await.unwrap();
 
         let streams: Arc<tokio::sync::Mutex<std::collections::HashMap<String, ()>>> =

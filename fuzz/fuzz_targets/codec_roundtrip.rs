@@ -1,7 +1,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use serial_mcp_server::codec::{decode, encode, Encoding};
+use serial_mcp::codec::{decode, encode, Encoding};
 
 fuzz_target!(|data: &[u8]| {
     // Hex roundtrip

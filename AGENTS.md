@@ -1,4 +1,4 @@
-# AGENTS.md — Coding Guidelines for serial-mcp-server
+# AGENTS.md — Coding Guidelines for serial-mcp
 
 ## Build / Test / Lint Commands
 

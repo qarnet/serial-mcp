@@ -2,10 +2,10 @@ use rmcp::transport::streamable_http_server::{
     session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
 };
 use rmcp::{transport::stdio, ServiceExt};
-use serial_mcp_server::security::SecurityManager;
-use serial_mcp_server::serial::ConnectionManager;
-use serial_mcp_server::server::StreamRegistry;
-use serial_mcp_server::SerialHandler;
+use serial_mcp::security::SecurityManager;
+use serial_mcp::serial::ConnectionManager;
+use serial_mcp::server::StreamRegistry;
+use serial_mcp::SerialHandler;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::{error, info};
@@ -30,9 +30,9 @@ fn parse_args() -> Result<Args, pico_args::Error> {
 
     if pargs.contains(["-h", "--help"]) {
         print!(
-            "serial-mcp-server {version}
+            "serial-mcp {version}
 
-Usage: serial-mcp-server [OPTIONS]
+Usage: serial-mcp [OPTIONS]
 
 Options:
   --transport <stdio|http>   Transport to use (default: stdio)
@@ -46,8 +46,8 @@ Environment:
   RUST_LOG                   Log level (error/warn/info/debug/trace)
 
 Examples:
-  serial-mcp-server --allowlist=/dev/ttyACM*,/dev/ttyUSB*
-  serial-mcp-server --transport=http --bind=0.0.0.0:8000
+  serial-mcp --allowlist=/dev/ttyACM*,/dev/ttyUSB*
+  serial-mcp --transport=http --bind=0.0.0.0:8000
 ",
             version = env!("CARGO_PKG_VERSION"),
             bind = DEFAULT_HTTP_BIND,

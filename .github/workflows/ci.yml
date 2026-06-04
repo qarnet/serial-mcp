@@ -103,4 +103,4 @@ jobs:
           gh release create "$V" \
             --title "$V" \
             --generate-notes \
-            target/release/serial-mcp-server
+            target/release/serial-mcp

@@ -316,7 +316,7 @@ async fn protocol_emulator_workflow() {
     let hex_structured = hex_read.structured_content.expect("structured");
     let hex_data = hex_structured["data"].as_str().unwrap();
     let decoded =
-        serial_mcp_server::codec::decode(serial_mcp_server::codec::Encoding::Hex, hex_data)
+        serial_mcp::codec::decode(serial_mcp::codec::Encoding::Hex, hex_data)
             .expect("hex decode");
     let decoded_str = String::from_utf8(decoded).expect("utf8");
     assert!(

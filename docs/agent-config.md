@@ -19,7 +19,7 @@ Add to `.claude/settings.json` (project) or `~/.claude/settings.json` (global):
 {
   "mcpServers": {
     "serial": {
-      "command": "/usr/local/bin/serial-mcp-server",
+      "command": "/usr/local/bin/serial-mcp",
       "args": ["--allowlist=/dev/ttyACM*,/dev/ttyUSB*"]
     }
   }
@@ -33,7 +33,7 @@ Add to `.claude/settings.json` (project) or `~/.claude/settings.json` (global):
 {
   "mcpServers": {
     "serial": {
-      "command": "C:\\Users\\<user>\\.cargo\\bin\\serial-mcp-server.exe",
+      "command": "C:\\Users\\<user>\\.cargo\\bin\\serial-mcp.exe",
       "args": ["--allowlist=COM3,COM4"]
     }
   }
@@ -53,7 +53,7 @@ Config file location:
 {
   "mcpServers": {
     "serial": {
-      "command": "/usr/local/bin/serial-mcp-server",
+      "command": "/usr/local/bin/serial-mcp",
       "args": ["--allowlist=/dev/ttyACM0"]
     }
   }
@@ -68,7 +68,7 @@ macOS:
 {
   "mcpServers": {
     "serial": {
-      "command": "/Users/<user>/.cargo/bin/serial-mcp-server",
+      "command": "/Users/<user>/.cargo/bin/serial-mcp",
       "args": ["--allowlist=/dev/tty.usbmodem*,/dev/tty.usbserial-*"]
     }
   }
@@ -80,7 +80,7 @@ Windows:
 {
   "mcpServers": {
     "serial": {
-      "command": "C:\\Users\\<user>\\.cargo\\bin\\serial-mcp-server.exe",
+      "command": "C:\\Users\\<user>\\.cargo\\bin\\serial-mcp.exe",
       "args": ["--allowlist=COM3,COM4"]
     }
   }
@@ -97,7 +97,7 @@ Windows:
 {
   "mcpServers": {
     "serial": {
-      "command": "/usr/local/bin/serial-mcp-server",
+      "command": "/usr/local/bin/serial-mcp",
       "args": ["--allowlist=/dev/ttyACM*,/dev/ttyUSB*"]
     }
   }
@@ -113,7 +113,7 @@ Windows:
   "servers": {
     "serial": {
       "type": "stdio",
-      "command": "/usr/local/bin/serial-mcp-server",
+      "command": "/usr/local/bin/serial-mcp",
       "args": ["--allowlist=/dev/ttyACM*,/dev/ttyUSB*"]
     }
   }
@@ -127,9 +127,9 @@ Windows:
 ```json
 {
   "context_servers": {
-    "serial-mcp-server": {
+    "serial-mcp": {
       "command": {
-        "path": "/usr/local/bin/serial-mcp-server",
+        "path": "/usr/local/bin/serial-mcp",
         "args": ["--allowlist=/dev/ttyACM*,/dev/ttyUSB*"]
       },
       "settings": {}
@@ -147,7 +147,7 @@ Windows:
   "mcpServers": {
     "serial": {
       "type": "stdio",
-      "command": "/usr/local/bin/serial-mcp-server",
+      "command": "/usr/local/bin/serial-mcp",
       "args": ["--allowlist=/dev/ttyACM*,/dev/ttyUSB*"]
     }
   }
@@ -159,9 +159,9 @@ Windows:
 Start the server with `--transport=http` on the target machine:
 
 ```bash
-serial-mcp-server --transport=http
+serial-mcp --transport=http
 # custom bind address:
-serial-mcp-server --transport=http --bind=0.0.0.0:8000
+serial-mcp --transport=http --bind=0.0.0.0:8000
 ```
 
 Agent config (any client that supports streamable HTTP):
@@ -179,7 +179,7 @@ Agent config (any client that supports streamable HTTP):
 
 ## Troubleshooting
 
-- `Failed to open port` or `Unable to acquire exclusive lock on serial port`: another program already owns the device. Close tools like `picocom`, `screen`, `minicom`, serial monitors, or another `serial-mcp-server` instance.
+- `Failed to open port` or `Unable to acquire exclusive lock on serial port`: another program already owns the device. Close tools like `picocom`, `screen`, `minicom`, serial monitors, or another `serial-mcp` instance.
 - `Connection busy: ... already owns RX`: one receive-side MCP operation is already active on that connection. Finish or unsubscribe the current `read`, `read_line`, `wait_for`, or `subscribe` operation before starting another.
 
 ## Dev one-liner (no install, cargo run from source)
@@ -188,8 +188,8 @@ Agent config (any client that supports streamable HTTP):
 {
   "command": "cargo",
   "args": [
-    "run", "--quiet", "--manifest-path", "/path/to/serial-mcp-server/Cargo.toml",
-    "--bin", "serial-mcp-server", "--",
+    "run", "--quiet", "--manifest-path", "/path/to/serial-mcp/Cargo.toml",
+    "--bin", "serial-mcp", "--",
     "--allowlist=/dev/ttyACM*"
   ]
 }

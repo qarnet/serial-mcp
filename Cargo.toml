@@ -1,5 +1,5 @@
 [package]
-name = "serial-mcp-server"
+name = "serial-mcp"
 version = "0.3.2"
 edition = "2021"
 authors = [
@@ -32,11 +32,11 @@ glob = "0.3"
 pico-args = { version = "0.5.0", features = ["eq-separator"] }
 
 [[bin]]
-name = "serial-mcp-server"
+name = "serial-mcp"
 path = "src/main.rs"
 
 [lib]
-name = "serial_mcp_server"
+name = "serial_mcp"
 path = "src/lib.rs"
 
 [dev-dependencies]

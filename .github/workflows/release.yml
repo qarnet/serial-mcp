@@ -22,28 +22,28 @@ jobs:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            artifact: serial-mcp-server
+            artifact: serial-mcp
             artifact_name_suffix: x86_64-linux
             install: sudo apt-get update && sudo apt-get install -y libudev-dev pkg-config
             strip: strip
 
           - os: macos-14
             target: aarch64-apple-darwin
-            artifact: serial-mcp-server
+            artifact: serial-mcp
             artifact_name_suffix: aarch64-macos
             install: ""
             strip: strip
 
           - os: macos-13
             target: x86_64-apple-darwin
-            artifact: serial-mcp-server
+            artifact: serial-mcp
             artifact_name_suffix: x86_64-macos
             install: ""
             strip: strip
 
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-            artifact: serial-mcp-server.exe
+            artifact: serial-mcp.exe
             artifact_name_suffix: x86_64-windows
             install: ""
             strip: ""
@@ -72,15 +72,15 @@ jobs:
         shell: bash
         run: |
           VERSION=${GITHUB_REF_NAME#v}
-          EXT="${{ matrix.artifact == 'serial-mcp-server.exe' && '.exe' || '' }}"
+          EXT="${{ matrix.artifact == 'serial-mcp.exe' && '.exe' || '' }}"
           cp "target/${{ matrix.target }}/release/${{ matrix.artifact }}" \
-             "serial-mcp-server-${VERSION}-${{ matrix.artifact_name_suffix }}${EXT}"
+             "serial-mcp-${VERSION}-${{ matrix.artifact_name_suffix }}${EXT}"
 
       - name: Upload to release
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
-          files: serial-mcp-server-*
+          files: serial-mcp-*
 
   publish-crate:
     name: Publish to crates.io

@@ -1,5 +1,5 @@
 #!/bin/bash
-# Run all cargo-fuzz targets against serial-mcp-server.
+# Run all cargo-fuzz targets against serial-mcp.
 #
 # Usage:
 #   ./fuzz/run.sh               # 30 seconds per target (default)

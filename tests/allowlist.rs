@@ -8,8 +8,8 @@ use std::sync::Arc;
 
 use serde_json::json;
 
-use serial_mcp_server::security::SecurityManager;
-use serial_mcp_server::serial::ConnectionManager;
+use serial_mcp::security::SecurityManager;
+use serial_mcp::serial::ConnectionManager;
 
 mod common;
 use common::{connect_client, tool_request, TestServer};

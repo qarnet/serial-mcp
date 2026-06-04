@@ -1,5 +1,5 @@
 {
-  description = "serial-mcp-server dev shell";
+  description = "serial-mcp dev shell";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -11,8 +11,17 @@
     flake-utils.url = "github:numtide/flake-utils";
   };
 
-  outputs = { self, nixpkgs, rust-overlay, crane, flake-utils, ... }:
-    flake-utils.lib.eachDefaultSystem (system:
+  outputs =
+    {
+      self,
+      nixpkgs,
+      rust-overlay,
+      crane,
+      flake-utils,
+      ...
+    }:
+    flake-utils.lib.eachDefaultSystem (
+      system:
       let
         overlays = [ (import rust-overlay) ];
         pkgs = import nixpkgs { inherit system overlays; };
@@ -29,7 +38,10 @@
           strictDeps = true;
 
           nativeBuildInputs = with pkgs; [ pkg-config ];
-          buildInputs = with pkgs; [ udev openssl ];
+          buildInputs = with pkgs; [
+            udev
+            openssl
+          ];
         };
 
         # Build *just* the dependencies. This output gets cached and reused
@@ -37,9 +49,12 @@
         # only rebuild your own crate.
         cargoArtifacts = craneLib.buildDepsOnly commonArgs;
 
-        serial-mcp-server = craneLib.buildPackage (commonArgs // {
-          inherit cargoArtifacts;
-        });
+        serial-mcp = craneLib.buildPackage (
+          commonArgs
+          // {
+            inherit cargoArtifacts;
+          }
+        );
 
         # ─── Cross-compilation: aarch64-unknown-linux-gnu ──────────────────
         # Only meaningful when building from x86_64-linux.
@@ -50,7 +65,7 @@
 
         craneLibCross = (crane.mkLib pkgsCross).overrideToolchain rustToolchain;
 
-        serial-mcp-server-aarch64 = craneLibCross.buildPackage {
+        serial-mcp-aarch64 = craneLibCross.buildPackage {
           src = craneLib.cleanCargoSource ./.;
           strictDeps = true;
 
@@ -59,11 +74,13 @@
           depsBuildBuild = [ pkgsCross.stdenv.cc ];
 
           # Libraries linked into the TARGET binary (aarch64).
-          buildInputs = with pkgsCross; [ udev openssl ];
+          buildInputs = with pkgsCross; [
+            udev
+            openssl
+          ];
 
           CARGO_BUILD_TARGET = "aarch64-unknown-linux-gnu";
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER =
-            "${pkgsCross.stdenv.cc.targetPrefix}cc";
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER = "${pkgsCross.stdenv.cc.targetPrefix}cc";
 
           # pkg-config must look in the cross sysroot, not the host one.
           PKG_CONFIG_PATH = "${pkgsCross.udev.dev}/lib/pkgconfig";
@@ -73,27 +90,27 @@
       {
         # `nix build`, `nix run github:qarnet/serial-mcp-server`
         packages = {
-          default = serial-mcp-server;
-          serial-mcp-server = serial-mcp-server;
-          serial-mcp-server-aarch64 = serial-mcp-server-aarch64;
+          default = serial-mcp;
+          serial-mcp = serial-mcp;
+          serial-mcp-aarch64 = serial-mcp-aarch64;
         };
 
         # `nix run .#<name>` — entry points for each binary.
         apps = {
           default = flake-utils.lib.mkApp {
-            drv = serial-mcp-server;
-            name = "serial-mcp-server";
+            drv = serial-mcp;
+            name = "serial-mcp";
           };
-          serial-mcp-server-http = flake-utils.lib.mkApp {
-            drv = serial-mcp-server;
-            name = "serial-mcp-server-http";
+          serial-mcp-http = flake-utils.lib.mkApp {
+            drv = serial-mcp;
+            name = "serial-mcp-http";
           };
         };
 
         # `nix develop`
         devShells.default = craneLib.devShell {
           # Inherit nativeBuildInputs/buildInputs/env vars from the package.
-          inputsFrom = [ serial-mcp-server ];
+          inputsFrom = [ serial-mcp ];
 
           # Extras only useful at dev time, not for builds.
           packages = with pkgs; [
@@ -102,33 +119,39 @@
             cargo-nextest
           ];
 
-          env.RUST_SRC_PATH =
-            "${rustToolchain}/lib/rustlib/src/rust/library";
+          env.RUST_SRC_PATH = "${rustToolchain}/lib/rustlib/src/rust/library";
 
           shellHook = ''
-            echo "serial-mcp-server dev shell"
+            echo "serial-mcp dev shell"
             echo "rustc: $(rustc --version)"
           '';
         };
 
         # `nix flake check`
         checks = {
-          inherit serial-mcp-server;
+          inherit serial-mcp;
 
-          clippy = craneLib.cargoClippy (commonArgs // {
-            inherit cargoArtifacts;
-            cargoClippyExtraArgs = "--all-targets -- --deny warnings";
-          });
+          clippy = craneLib.cargoClippy (
+            commonArgs
+            // {
+              inherit cargoArtifacts;
+              cargoClippyExtraArgs = "--all-targets -- --deny warnings";
+            }
+          );
 
           fmt = craneLib.cargoFmt {
             src = commonArgs.src;
           };
 
-          nextest = craneLib.cargoNextest (commonArgs // {
-            inherit cargoArtifacts;
-            partitions = 1;
-            partitionType = "count";
-          });
+          nextest = craneLib.cargoNextest (
+            commonArgs
+            // {
+              inherit cargoArtifacts;
+              partitions = 1;
+              partitionType = "count";
+            }
+          );
         };
-      });
+      }
+    );
 }

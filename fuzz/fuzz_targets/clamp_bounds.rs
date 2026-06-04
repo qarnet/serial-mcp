@@ -1,8 +1,8 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use serial_mcp_server::limits::*;
-use serial_mcp_server::tools::helpers::{
+use serial_mcp::limits::*;
+use serial_mcp::tools::helpers::{
     clamp_or_err, clamp_poll_interval_or_err, clamp_timeout_or_err, require_min_or_err,
 };
 

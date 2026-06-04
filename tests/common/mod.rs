@@ -29,10 +29,10 @@ use serde_json::Map;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use serial_mcp_server::security::SecurityManager;
-use serial_mcp_server::serial::ConnectionManager;
-use serial_mcp_server::server::StreamRegistry;
-use serial_mcp_server::SerialHandler;
+use serial_mcp::security::SecurityManager;
+use serial_mcp::serial::ConnectionManager;
+use serial_mcp::server::StreamRegistry;
+use serial_mcp::SerialHandler;
 
 /// In-process HTTP MCP server bound to `127.0.0.1` on an OS-assigned
 /// port. The shared [`ConnectionManager`] is exposed so tests can insert

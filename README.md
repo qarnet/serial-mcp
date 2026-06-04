@@ -1,14 +1,14 @@
 # Serial MCP Server
 
 [![GitHub Release](https://img.shields.io/github/v/release/qarnet/serial-mcp-server)](https://github.com/qarnet/serial-mcp-server/releases)
-[![crates.io](https://img.shields.io/crates/v/serial-mcp-server)](https://crates.io/crates/serial-mcp-server)
+[![crates.io](https://img.shields.io/crates/v/serial-mcp)](https://crates.io/crates/serial-mcp)
 [![Rust](https://img.shields.io/badge/rust-1.70+-orange.svg)](https://rust-lang.org)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 An MCP server that lets AI assistants drive serial ports: open, read, write,
 wait for prompts, stream RX bytes, toggle DTR/RTS, send BREAK.
 
-> Be sure to ask your agent to give honest feedback on the tool after they finish using it. Always looking for ways to improve serial-mcp-server :)
+> Be sure to ask your agent to give honest feedback on the tool after they finish using it. Always looking for ways to improve serial-mcp :)
 
 **MCP 2025-11-25 compliant** · resource change notifications · port allowlist · stdio + HTTP transports
 
@@ -28,8 +28,8 @@ hardware — all through natural language.
 
 ```bash
 VERSION=$(curl -s https://api.github.com/repos/qarnet/serial-mcp-server/releases/latest | grep -oP '"tag_name": "\K[^"]+')
-curl -L "https://github.com/qarnet/serial-mcp-server/releases/download/${VERSION}/serial-mcp-server-${VERSION#v}-x86_64-linux" \
-  -o serial-mcp-server && chmod +x serial-mcp-server && sudo mv serial-mcp-server /usr/local/bin/
+curl -L "https://github.com/qarnet/serial-mcp-server/releases/download/${VERSION}/serial-mcp-${VERSION#v}-x86_64-linux" \
+  -o serial-mcp && chmod +x serial-mcp && sudo mv serial-mcp /usr/local/bin/
 ```
 
 Add user to `dialout` group for port access: `sudo usermod -aG dialout $USER`
@@ -39,18 +39,18 @@ Add user to `dialout` group for port access: `sudo usermod -aG dialout $USER`
 ```bash
 VERSION=$(curl -s https://api.github.com/repos/qarnet/serial-mcp-server/releases/latest | grep -oP '"tag_name": "\K[^"]+')
 ARCH=aarch64-macos   # Intel: x86_64-macos
-curl -L "https://github.com/qarnet/serial-mcp-server/releases/download/${VERSION}/serial-mcp-server-${VERSION#v}-${ARCH}" \
-  -o serial-mcp-server && chmod +x serial-mcp-server && sudo mv serial-mcp-server /usr/local/bin/
+curl -L "https://github.com/qarnet/serial-mcp-server/releases/download/${VERSION}/serial-mcp-${VERSION#v}-${ARCH}" \
+  -o serial-mcp && chmod +x serial-mcp && sudo mv serial-mcp /usr/local/bin/
 ```
 
 ### Windows
 
-Download `serial-mcp-server-{VERSION}-x86_64-windows.exe` from the [latest release](https://github.com/qarnet/serial-mcp-server/releases/latest) and place it on your `PATH`.
+Download `serial-mcp-{VERSION}-x86_64-windows.exe` from the [latest release](https://github.com/qarnet/serial-mcp-server/releases/latest) and place it on your `PATH`.
 
 ### Via cargo (all platforms)
 
 ```bash
-cargo install serial-mcp-server
+cargo install serial-mcp
 ```
 
 ### Via Nix
@@ -69,7 +69,7 @@ Quick example (Claude Code CLI, Linux/macOS):
 {
   "mcpServers": {
     "serial": {
-      "command": "/usr/local/bin/serial-mcp-server",
+      "command": "/usr/local/bin/serial-mcp",
       "args": ["--allowlist=/dev/ttyACM*,/dev/ttyUSB*"]
     }
   }
@@ -79,7 +79,7 @@ Quick example (Claude Code CLI, Linux/macOS):
 ## Options
 
 ```
-serial-mcp-server [OPTIONS]
+serial-mcp [OPTIONS]
 
   --transport <stdio|http>   Transport to use (default: stdio)
   --allowlist <patterns>     Comma-separated glob patterns for allowed ports
@@ -117,7 +117,7 @@ serial-mcp-server [OPTIONS]
 ## Exclusivity And Busy States
 
 - Ports are opened exclusively by default. If another program already has `/dev/ttyACM0`, `COM3`, etc. open, `open` should fail instead of sharing the device.
-- Common blockers: `picocom`, `screen`, `minicom`, another `serial-mcp-server` process, IDE serial monitors.
+- Common blockers: `picocom`, `screen`, `minicom`, another `serial-mcp` process, IDE serial monitors.
 - Within one open connection, only one RX operation may own the receive side at a time. Concurrent `read`, `read_line`, `wait_for`, `subscribe`, or raw connection-resource reads will fail fast with a busy error such as `Connection busy: subscribe already owns RX`.
 
 ## Development
@@ -139,7 +139,7 @@ SERIAL_MCP_TEST_PORT=/dev/ttyACM0 cargo test --test hardware_loopback -- --ignor
 
 ## Acknowledgements
 
-serial-mcp-server evolved from early experimentation with serial-port MCP tooling and has since grown into its own project. Thanks to everyone who contributed ideas, tested on real hardware, and reported bugs.
+serial-mcp evolved from early experimentation with serial-port MCP tooling and has since grown into its own project. Thanks to everyone who contributed ideas, tested on real hardware, and reported bugs.
 
 ## License
 

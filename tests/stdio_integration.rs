@@ -1,6 +1,6 @@
 //! Layer 5 — STDIO transport integration tests.
 //!
-//! These tests spawn the `serial-mcp-server` binary as a child process,
+//! These tests spawn the `serial-mcp` binary as a child process,
 //! connect via stdin/stdout pipes using rmcp's `TokioChildProcess` transport,
 //! and assert the MCP surface works identically to the HTTP variant.
 
@@ -33,12 +33,12 @@ fn build_stdio_server() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
         let output = std::process::Command::new("cargo")
-            .args(["build", "--bin", "serial-mcp-server"])
+            .args(["build", "--bin", "serial-mcp"])
             .output()
             .expect("cargo build");
         if !output.status.success() {
             panic!(
-                "cargo build --bin serial-mcp-server failed:\nstderr: {}",
+                "cargo build --bin serial-mcp failed:\nstderr: {}",
                 String::from_utf8_lossy(&output.stderr)
             );
         }
@@ -51,7 +51,7 @@ async fn start_stdio_client() -> rmcp::service::RunningService<rmcp::service::Ro
     let cmd = Command::new(
         std::env::current_dir()
             .unwrap()
-            .join("target/debug/serial-mcp-server"),
+            .join("target/debug/serial-mcp"),
     )
     .configure(|cmd| {
         cmd.env("RUST_LOG", "off");
@@ -67,7 +67,7 @@ async fn stdio_initialize_handshake_succeeds() {
     let client = start_stdio_client().await;
     let info = client.peer_info();
     assert!(info.is_some(), "no peer_info returned");
-    assert_eq!(info.unwrap().server_info.name, "serial-mcp-server");
+    assert_eq!(info.unwrap().server_info.name, "serial-mcp");
     client.cancel().await.ok();
 }
 
@@ -124,7 +124,7 @@ async fn stdio_full_connection_lifecycle_with_hardware() {
     let cmd = Command::new(
         std::env::current_dir()
             .unwrap()
-            .join("target/debug/serial-mcp-server"),
+            .join("target/debug/serial-mcp"),
     )
     .configure(|cmd| {
         cmd.env("RUST_LOG", "off");

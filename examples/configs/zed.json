@@ -1,9 +1,9 @@
 {
   "$comment": "Merge into ~/.config/zed/settings.json under the 'context_servers' key.",
   "context_servers": {
-    "serial-mcp-server": {
+    "serial-mcp": {
       "command": {
-        "path": "/usr/local/bin/serial-mcp-server",
+        "path": "/usr/local/bin/serial-mcp",
         "args": [],
         "env": {
           "RUST_LOG": "warn",

@@ -122,7 +122,7 @@ impl SerialHandler {
     }
 
     #[tool(
-        description = "Return the server version, package name, and a build-time git commit hash (when available). Use to confirm which version of serial-mcp-server is responding.",
+        description = "Return the server version, package name, and a build-time git commit hash (when available). Use to confirm which version of serial-mcp is responding.",
         title = "Get Server Version",
         annotations(read_only_hint = true, open_world_hint = false)
     )]

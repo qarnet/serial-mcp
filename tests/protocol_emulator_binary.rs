@@ -127,7 +127,7 @@ async fn protocol_emulator_binary_workflow() {
     let hex_structured = hex_result.structured_content.expect("structured");
     let hex_str = hex_structured["data"].as_str().unwrap();
     let decoded =
-        serial_mcp_server::codec::decode(serial_mcp_server::codec::Encoding::Hex, hex_str)
+        serial_mcp::codec::decode(serial_mcp::codec::Encoding::Hex, hex_str)
             .expect("hex decode");
     assert_eq!(decoded.len(), 256, "expected 256 raw bytes");
     let expected: Vec<u8> = (0u8..=255).collect();
@@ -173,7 +173,7 @@ async fn protocol_emulator_binary_workflow() {
     let b64_structured = b64_result.structured_content.expect("structured");
     let b64_str = b64_structured["data"].as_str().unwrap();
     let decoded =
-        serial_mcp_server::codec::decode(serial_mcp_server::codec::Encoding::Base64, b64_str)
+        serial_mcp::codec::decode(serial_mcp::codec::Encoding::Base64, b64_str)
             .expect("base64 decode");
     assert_eq!(decoded.len(), 256, "expected 256 raw bytes");
     assert_eq!(

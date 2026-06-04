@@ -1,5 +1,5 @@
 [package]
-name = "serial-mcp-server-fuzz"
+name = "serial-mcp-fuzz"
 version = "0.0.0"
 edition = "2021"
 publish = false
@@ -10,7 +10,7 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 
-[dependencies.serial-mcp-server]
+[dependencies.serial-mcp]
 path = ".."
 
 [dependencies.serde_json]

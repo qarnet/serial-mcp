@@ -8,12 +8,12 @@ fn build_stdio_server() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
         let output = std::process::Command::new("cargo")
-            .args(["build", "--bin", "serial-mcp-server"])
+            .args(["build", "--bin", "serial-mcp"])
             .output()
             .expect("cargo build");
         if !output.status.success() {
             panic!(
-                "cargo build --bin serial-mcp-server failed:\nstderr: {}",
+                "cargo build --bin serial-mcp failed:\nstderr: {}",
                 String::from_utf8_lossy(&output.stderr)
             );
         }
@@ -27,7 +27,7 @@ async fn blob_resource_template_is_advertised() {
     let cmd = Command::new(
         std::env::current_dir()
             .unwrap()
-            .join("target/debug/serial-mcp-server"),
+            .join("target/debug/serial-mcp"),
     )
     .configure(|cmd| {
         cmd.env("RUST_LOG", "off");
@@ -62,7 +62,7 @@ async fn resource_uri_parsing_includes_raw_suffix() {
     let cmd = Command::new(
         std::env::current_dir()
             .unwrap()
-            .join("target/debug/serial-mcp-server"),
+            .join("target/debug/serial-mcp"),
     )
     .configure(|cmd| {
         cmd.env("RUST_LOG", "off");

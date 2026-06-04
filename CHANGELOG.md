@@ -43,7 +43,7 @@ Tooling and encoding improvements.
 ## [0.3.0]
 
 **Breaking:**
-- `serial-mcp-server-http` binary removed — use `serial-mcp-server --transport=http`
+- `serial-mcp-http` binary removed — use `serial-mcp --transport=http`
 - `SERIAL_MCP_ALLOWLIST`, `SERIAL_MCP_HTTP_BIND`, `SERIAL_MCP_TRANSPORT` env vars removed — use `--allowlist=<patterns>`, `--bind=<addr>`, `--transport=<stdio|http>` CLI flags
 
 **Added:**

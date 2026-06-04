@@ -3,7 +3,7 @@
   "servers": {
     "serial": {
       "type": "stdio",
-      "command": "/usr/local/bin/serial-mcp-server",
+      "command": "/usr/local/bin/serial-mcp",
       "env": {
         "RUST_LOG": "warn",
         "SERIAL_MCP_ALLOWLIST": "/dev/ttyACM*,/dev/ttyUSB*"

@@ -1,7 +1,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use serial_mcp_server::tools::types::*;
+use serial_mcp::tools::types::*;
 
 fuzz_target!(|data: &[u8]| {
     let s = match std::str::from_utf8(data) {
