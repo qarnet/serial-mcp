@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+if ! command -v nix &>/dev/null; then
+    echo "=== pre-push: nix not found, skipping flake check ==="
+    exit 0
+fi
+
 echo "=== pre-push: nix flake check ==="
 nix flake check --accept-flake-config
 echo "=== OK ==="
