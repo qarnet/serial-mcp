@@ -12,12 +12,13 @@ Note: `serial-mcp` must be on your `PATH`. If installed via `cargo install`, it 
 
 ## Claude Code CLI
 
-Add to `.claude/settings.json` (project) or `~/.claude/settings.json` (global):
+`.mcp.json` (project) or `~/.claude.json` (global):
 
 ```json
 {
   "mcpServers": {
     "serial": {
+      "type": "stdio",
       "command": "serial-mcp",
       "args": ["--allowlist=/dev/ttyACM*,/dev/ttyUSB*"]
     }
@@ -32,6 +33,7 @@ Add to `.claude/settings.json` (project) or `~/.claude/settings.json` (global):
 {
   "mcpServers": {
     "serial": {
+      "type": "stdio",
       "command": "C:\\Users\\<user>\\.cargo\\bin\\serial-mcp.exe",
       "args": ["--allowlist=COM3,COM4"]
     }
@@ -52,7 +54,8 @@ Config file location:
 {
   "mcpServers": {
     "serial": {
-      "command": "/usr/local/bin/serial-mcp",
+      "type": "stdio",
+      "command": "serial-mcp",
       "args": ["--allowlist=/dev/ttyACM0"]
     }
   }
@@ -67,6 +70,7 @@ macOS:
 {
   "mcpServers": {
     "serial": {
+      "type": "stdio",
       "command": "serial-mcp",
       "args": ["--allowlist=/dev/tty.usbmodem*,/dev/tty.usbserial-*"]
     }
@@ -79,6 +83,7 @@ Windows:
 {
   "mcpServers": {
     "serial": {
+      "type": "stdio",
       "command": "C:\\Users\\<user>\\.cargo\\bin\\serial-mcp.exe",
       "args": ["--allowlist=COM3,COM4"]
     }
@@ -96,6 +101,7 @@ Windows:
 {
   "mcpServers": {
     "serial": {
+      "type": "stdio",
       "command": "serial-mcp",
       "args": ["--allowlist=/dev/ttyACM*,/dev/ttyUSB*"]
     }
@@ -127,11 +133,8 @@ Windows:
 {
   "context_servers": {
     "serial-mcp": {
-      "command": {
-        "path": "/usr/local/bin/serial-mcp",
-        "args": ["--allowlist=/dev/ttyACM*,/dev/ttyUSB*"]
-      },
-      "settings": {}
+      "command": "serial-mcp",
+      "args": ["--allowlist=/dev/ttyACM*,/dev/ttyUSB*"]
     }
   }
 }

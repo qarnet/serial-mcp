@@ -1,11 +1,10 @@
 {
-  "$comment": "Add to .claude/settings.json (project) or ~/.claude/settings.json (global). Replace the command path with your actual binary location.",
+  "$comment": "Add to .mcp.json (project) or ~/.claude.json (global).",
   "mcpServers": {
     "serial": {
-      "command": "/usr/local/bin/serial-mcp",
-      "args": [
-        "--allowlist=/dev/ttyACM*,/dev/ttyUSB*"
-      ]
+      "type": "stdio",
+      "command": "serial-mcp",
+      "args": ["--allowlist=/dev/ttyACM*,/dev/ttyUSB*"]
     }
   }
 }

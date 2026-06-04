@@ -69,7 +69,8 @@ Quick example (Claude Code CLI, Linux/macOS):
 {
   "mcpServers": {
     "serial": {
-      "command": "/usr/local/bin/serial-mcp",
+      "type": "stdio",
+      "command": "serial-mcp",
       "args": ["--allowlist=/dev/ttyACM*,/dev/ttyUSB*"]
     }
   }

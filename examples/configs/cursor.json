@@ -2,10 +2,9 @@
   "$comment": "Add to .cursor/mcp.json in your project root, or ~/.cursor/mcp.json globally.",
   "mcpServers": {
     "serial": {
-      "command": "/usr/local/bin/serial-mcp",
-      "args": [
-        "--allowlist=/dev/ttyACM*,/dev/ttyUSB*"
-      ]
+      "type": "stdio",
+      "command": "serial-mcp",
+      "args": ["--allowlist=/dev/ttyACM*,/dev/ttyUSB*"]
     }
   }
 }
