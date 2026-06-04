@@ -113,4 +113,3 @@ async fn stdio_list_resources_returns_statics_and_templates() {
 
     client.cancel().await.ok();
 }
-
