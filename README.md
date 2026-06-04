@@ -24,40 +24,21 @@ hardware — all through natural language.
 
 ## Install
 
-### Linux
-
-```bash
-VERSION=$(curl -s https://api.github.com/repos/qarnet/serial-mcp/releases/latest | grep -oP '"tag_name": "\K[^"]+')
-curl -L "https://github.com/qarnet/serial-mcp/releases/download/${VERSION}/serial-mcp-${VERSION#v}-x86_64-linux" \
-  -o serial-mcp && chmod +x serial-mcp && sudo mv serial-mcp /usr/local/bin/
-```
-
-Add user to `dialout` group for port access: `sudo usermod -aG dialout $USER`
-
-### macOS
-
-```bash
-VERSION=$(curl -s https://api.github.com/repos/qarnet/serial-mcp/releases/latest | grep -oP '"tag_name": "\K[^"]+')
-ARCH=aarch64-macos   # Intel: x86_64-macos
-curl -L "https://github.com/qarnet/serial-mcp/releases/download/${VERSION}/serial-mcp-${VERSION#v}-${ARCH}" \
-  -o serial-mcp && chmod +x serial-mcp && sudo mv serial-mcp /usr/local/bin/
-```
-
-### Windows
-
-Download `serial-mcp-{VERSION}-x86_64-windows.exe` from the [latest release](https://github.com/qarnet/serial-mcp/releases/latest) and place it on your `PATH`.
-
-### Via cargo (all platforms)
+### Via cargo
 
 ```bash
 cargo install serial-mcp
 ```
+
+Pre-built binaries are available on the [releases page](https://github.com/qarnet/serial-mcp/releases).
 
 ### Via Nix
 
 ```bash
 nix profile install github:qarnet/serial-mcp
 ```
+
+Linux users: add yourself to the `dialout` group for port access: `sudo usermod -aG dialout $USER`
 
 ## Wire Up Your Agent
 
@@ -96,12 +77,6 @@ serial-mcp [OPTIONS]
 |---|---|---|
 | stdio | default | Desktop agents |
 | HTTP | `--transport=http` | Remote / headless |
-
-## Exclusivity And Busy States
-
-- Ports are opened exclusively by default. If another program already has `/dev/ttyACM0`, `COM3`, etc. open, `open` should fail instead of sharing the device.
-- Common blockers: `picocom`, `screen`, `minicom`, another `serial-mcp` process, IDE serial monitors.
-- Within one open connection, only one RX operation may own the receive side at a time. Concurrent `read`, `read_line`, `wait_for`, `subscribe`, or raw connection-resource reads will fail fast with a busy error such as `Connection busy: subscribe already owns RX`.
 
 ## Development
 
