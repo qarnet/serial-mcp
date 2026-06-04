@@ -14,16 +14,6 @@ cargo test --lib list_ports_has_output_schema
 cargo test --test http_integration list_tools_returns_all_eleven_tools
 cargo test --test serial_pty pty_wait_for_matches_real_serial_pattern
 
-# Hardware tests (requires SERIAL_MCP_TEST_PORT env var)
-SERIAL_MCP_TEST_PORT=/dev/ttyACM0 cargo test --test hardware_loopback -- --ignored --test-threads=1
-
-# Lint (must pass zero warnings)
-cargo clippy --all-targets -- -D warnings
-cargo fmt --all -- --check
-
-# Validate example configs against their JSON schemas
-cargo test --locked --test config_schema_validation
-
 # Build all targets including tests
 cargo build --all-targets
 ```

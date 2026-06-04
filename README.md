@@ -76,9 +76,6 @@ Run `serial-mcp --help` for all options.
 cargo test
 cargo clippy --all-targets -- -D warnings
 cargo fmt --all -- --check
-
-# Hardware tests (requires TX-RX loopback device)
-SERIAL_MCP_TEST_PORT=/dev/ttyACM0 cargo test --test hardware_loopback -- --ignored
 ```
 
 ## Documentation
