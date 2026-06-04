@@ -1,0 +1,8 @@
+{
+  "mcp": {
+    "serial": {
+      "type": "local",
+      "command": ["serial-mcp"]
+    }
+  }
+}

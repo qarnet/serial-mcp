@@ -1,11 +1,10 @@
 /result
 /.direnv/
 /target/
-.vscode/**
-!.vscode/extensions.json
-!.vscode/settings.json
-examples/**/target/
 tests/proptest.proptest-regressions
 fuzz/target/
 fuzz/Cargo.lock
 opencode.json
+.idea/
+.vscode/
+.schemas/

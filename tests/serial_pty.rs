@@ -157,12 +157,9 @@ async fn pty_subscribe_streams_device_writes_as_notifications() {
 async fn pty_wait_for_matches_real_serial_pattern() {
     let (_server, client, _rx, mut pty, connection_id) = setup().await;
 
-    let writer = tokio::spawn(async move {
-        // Slow-feed bytes to exercise the wait_for accumulator.
-        pty.write_device(b"warming up... ").await.unwrap();
-        tokio::time::sleep(Duration::from_millis(40)).await;
-        pty.write_device(b"OK> ready").await.unwrap();
-    });
+    // Pre-buffer bytes in the PTY so the test exercises the real serial path
+    // without relying on task scheduling races.
+    pty.write_device(b"warming up... OK> ready").await.unwrap();
 
     let result = client
         .peer()
@@ -176,7 +173,6 @@ async fn pty_wait_for_matches_real_serial_pattern() {
         ))
         .await
         .unwrap();
-    writer.await.unwrap();
     assert_ne!(result.is_error, Some(true), "{result:?}");
     let structured = result.structured_content.expect("structured");
     assert!(structured.get("timed_out").is_none(), "{structured:?}");

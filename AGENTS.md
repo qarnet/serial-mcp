@@ -3,7 +3,7 @@
 ## Build / Test / Lint Commands
 
 ```bash
-# Full test suite (all test layers, ~70+ tests)
+# Full test suite
 cargo test
 
 # Run a single unit test by name
@@ -11,15 +11,8 @@ cargo test --lib verify_all_tool_schemas
 cargo test --lib list_ports_has_output_schema
 
 # Run a single integration test by name
-cargo test --test http_integration list_tools_returns_all_eleven_tools
+cargo test --test http_integration list_tools_returns_all_thirteen_tools
 cargo test --test serial_pty pty_wait_for_matches_real_serial_pattern
-
-# Hardware tests (requires SERIAL_MCP_TEST_PORT env var)
-SERIAL_MCP_TEST_PORT=/dev/ttyACM0 cargo test --test hardware_loopback -- --ignored --test-threads=1
-
-# Lint (must pass zero warnings)
-cargo clippy --all-targets -- -D warnings
-cargo fmt --all -- --check
 
 # Build all targets including tests
 cargo build --all-targets
@@ -102,7 +95,7 @@ fn log_tool_err<E: std::fmt::Display>(op: &str, context: &str, err: E) -> String
 
 - **Server** (`src/server.rs`): MCP surface — tools, resources, prompts
 - **Serial** (`src/serial.rs`): Data plane — `SerialConnection`, `ConnectionManager`, `SerialIo` trait
-- **Codec** (`src/codec.rs`): `Encoding` enum (utf8/hex/base64) with encode/decode
+- **Codec** (`src/codec.rs`): `Encoding` enum (utf8/text/hex/base64) with encode/decode
 - **Error** (`src/error.rs`): Single `SerialError` enum
 
 ## Tool Implementation Pattern

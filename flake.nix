@@ -101,10 +101,6 @@
             drv = serial-mcp;
             name = "serial-mcp";
           };
-          serial-mcp-http = flake-utils.lib.mkApp {
-            drv = serial-mcp;
-            name = "serial-mcp-http";
-          };
         };
 
         # `nix develop`
@@ -117,6 +113,7 @@
             cargo-watch
             cargo-edit
             cargo-nextest
+            jsonschema-cli
           ];
 
           env.RUST_SRC_PATH = "${rustToolchain}/lib/rustlib/src/rust/library";
