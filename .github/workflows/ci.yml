@@ -53,6 +53,12 @@ jobs:
       - name: cargo clippy
         run: cargo clippy --all-targets --locked -- -D warnings
 
+      - name: Lint example configs
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          cargo install jsonschema-cli
+          ./lint-examples.sh
+
   tag-and-release:
     name: Tag & Release
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'

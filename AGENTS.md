@@ -3,7 +3,7 @@
 ## Build / Test / Lint Commands
 
 ```bash
-# Full test suite (all test layers, ~70+ tests)
+# Full test suite
 cargo test
 
 # Run a single unit test by name
@@ -20,6 +20,9 @@ SERIAL_MCP_TEST_PORT=/dev/ttyACM0 cargo test --test hardware_loopback -- --ignor
 # Lint (must pass zero warnings)
 cargo clippy --all-targets -- -D warnings
 cargo fmt --all -- --check
+
+# Validate example configs against their JSON schemas
+./lint-examples.sh             # requires: cargo install jsonschema-cli
 
 # Build all targets including tests
 cargo build --all-targets
