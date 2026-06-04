@@ -101,10 +101,6 @@
             drv = serial-mcp;
             name = "serial-mcp";
           };
-          serial-mcp-http = flake-utils.lib.mkApp {
-            drv = serial-mcp;
-            name = "serial-mcp-http";
-          };
         };
 
         # `nix develop`

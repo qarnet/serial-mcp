@@ -11,7 +11,7 @@ cargo test --lib verify_all_tool_schemas
 cargo test --lib list_ports_has_output_schema
 
 # Run a single integration test by name
-cargo test --test http_integration list_tools_returns_all_eleven_tools
+cargo test --test http_integration list_tools_returns_all_thirteen_tools
 cargo test --test serial_pty pty_wait_for_matches_real_serial_pattern
 
 # Build all targets including tests
@@ -95,7 +95,7 @@ fn log_tool_err<E: std::fmt::Display>(op: &str, context: &str, err: E) -> String
 
 - **Server** (`src/server.rs`): MCP surface — tools, resources, prompts
 - **Serial** (`src/serial.rs`): Data plane — `SerialConnection`, `ConnectionManager`, `SerialIo` trait
-- **Codec** (`src/codec.rs`): `Encoding` enum (utf8/hex/base64) with encode/decode
+- **Codec** (`src/codec.rs`): `Encoding` enum (utf8/text/hex/base64) with encode/decode
 - **Error** (`src/error.rs`): Single `SerialError` enum
 
 ## Tool Implementation Pattern
