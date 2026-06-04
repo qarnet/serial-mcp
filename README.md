@@ -112,6 +112,12 @@ serial-mcp-server [OPTIONS]
 6. close(id)
 ```
 
+## Exclusivity And Busy States
+
+- Ports are opened exclusively by default. If another program already has `/dev/ttyACM0`, `COM3`, etc. open, `open` should fail instead of sharing the device.
+- Common blockers: `picocom`, `screen`, `minicom`, another `serial-mcp-server` process, IDE serial monitors.
+- Within one open connection, only one RX operation may own the receive side at a time. Concurrent `read`, `read_line`, `wait_for`, `subscribe`, or raw connection-resource reads will fail fast with a busy error such as `Connection busy: subscribe already owns RX`.
+
 ## Development
 
 ```bash

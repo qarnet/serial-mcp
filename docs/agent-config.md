@@ -177,6 +177,11 @@ Agent config (any client that supports streamable HTTP):
 }
 ```
 
+## Troubleshooting
+
+- `Failed to open port` or `Unable to acquire exclusive lock on serial port`: another program already owns the device. Close tools like `picocom`, `screen`, `minicom`, serial monitors, or another `serial-mcp-server` instance.
+- `Connection busy: ... already owns RX`: one receive-side MCP operation is already active on that connection. Finish or unsubscribe the current `read`, `read_line`, `wait_for`, or `subscribe` operation before starting another.
+
 ## Dev one-liner (no install, cargo run from source)
 
 ```json
