@@ -1,5 +1,4 @@
 {
-  "$comment": "Add to .mcp.json (project) or ~/.claude.json (global). See docs/agent-config.md for details.",
   "mcpServers": {
     "serial": {
       "type": "stdio",
