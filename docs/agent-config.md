@@ -2,7 +2,7 @@
 
 Note: `serial-mcp` must be on your `PATH`. If installed via `cargo install`, it should already be available as `serial-mcp`.
 
-Config schemas vary by tool. Each section links to the official schema reference and a ready-to-use example config in [`examples/`](../examples/). If a config stops working, check the linked docs — schemas can change.
+Config schemas vary by tool. Each section links to the official schema reference and a ready-to-use example config in [`example-configs/`](../example-configs/). If a config stops working, check the linked docs — schemas can change.
 
 ## Port names by platform
 
@@ -16,7 +16,7 @@ Config schemas vary by tool. Each section links to the official schema reference
 
 **File:** `.mcp.json` (project) or `~/.claude.json` (global)
 **Schema:** [code.claude.com/docs/en/mcp](https://code.claude.com/docs/en/mcp)
-**Example:** [`examples/claude_code.json`](../examples/claude_code.json)
+**Example:** [`example-configs/claude_code.json`](../example-configs/claude_code.json)
 
 ## Claude Desktop
 
@@ -26,31 +26,31 @@ Config schemas vary by tool. Each section links to the official schema reference
 - Windows: `%APPDATA%\Claude\claude_desktop_config.json`
 
 **Schema:** [code.claude.com/docs/en/mcp](https://code.claude.com/docs/en/mcp)
-**Example:** [`examples/claude_desktop.json`](../examples/claude_desktop.json)
+**Example:** [`example-configs/claude_desktop.json`](../example-configs/claude_desktop.json)
 
 ## Cursor
 
 **File:** `.cursor/mcp.json` (project) or `~/.cursor/mcp.json` (global)
 **Schema:** [cursor.com/docs/mcp](https://cursor.com/docs/mcp)
-**Example:** [`examples/cursor.json`](../examples/cursor.json)
+**Example:** [`example-configs/cursor.json`](../example-configs/cursor.json)
 
 ## VS Code (Copilot)
 
 **File:** `.vscode/mcp.json` in your workspace
 **Schema:** [code.visualstudio.com/docs/agents/reference/mcp-configuration](https://code.visualstudio.com/docs/agents/reference/mcp-configuration)
-**Example:** [`examples/vscode.json`](../examples/vscode.json)
+**Example:** [`example-configs/vscode.json`](../example-configs/vscode.json)
 
 ## Zed
 
 **File:** `~/.config/zed/settings.json` under `"context_servers"`
 **Schema:** [zed.dev/docs/ai/mcp](https://zed.dev/docs/ai/mcp)
-**Example:** [`examples/zed.json`](../examples/zed.json)
+**Example:** [`example-configs/zed.json`](../example-configs/zed.json)
 
 ## opencode
 
 **File:** `opencode.json` / `opencode.jsonc` (project) or `~/.config/opencode/opencode.json`
 **Schema:** [opencode.ai/config.json](https://opencode.ai/config.json)
-**Example:** [`examples/opencode.json`](../examples/opencode.json)
+**Example:** [`example-configs/opencode.json`](../example-configs/opencode.json)
 
 ## HTTP transport (remote / headless)
 
@@ -77,7 +77,7 @@ Agent config (any client that supports streamable HTTP):
 
 ## Dev one-liner (no install, cargo run from source)
 
-[`examples/opencode.json`](../examples/opencode.json) — set `command` to:
+[`example-configs/opencode.json`](../example-configs/opencode.json) — set `command` to:
 
 ```json
 ["cargo", "run", "--quiet", "--manifest-path", "/path/to/serial-mcp/Cargo.toml", "--bin", "serial-mcp", "--", "--allowlist=/dev/ttyACM*"]
