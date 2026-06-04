@@ -2,7 +2,7 @@
 
 Note: `serial-mcp` must be on your `PATH`. If installed via `cargo install`, it should already be available as `serial-mcp`.
 
-Config schemas vary by tool. Where a published JSON schema exists, we provide an example config in [`example-configs/`](../example-configs/) and validate it via [`lint-examples.sh`](../lint-examples.sh). Where none exists, we link the official docs. If a config stops working, check the linked docs — schemas can change.
+Config schemas vary by tool. Where a published JSON schema exists, we provide an example config in [`example-configs/`](../example-configs/) and validate it via a Rust integration test. Where none exists, we link the official docs. If a config stops working, check the linked docs — schemas can change.
 
 ## Port names by platform
 
@@ -120,7 +120,7 @@ Agent config (any client that supports streamable HTTP):
 
 ## Schema validation
 
-A [lint script](../lint-examples.sh) validates the example configs against their published JSON schemas. Schemas used:
+Config examples are validated against their published JSON schemas as a Rust integration test. Schemas used:
 
 ```
 claude_code_settings = "https://json.schemastore.org/claude-code-settings.json"
@@ -128,7 +128,11 @@ opencode_config     = "https://opencode.ai/config.json"
 codex_config        = "https://developers.openai.com/codex/config-schema.json"
 ```
 
-Run locally: `./lint-examples.sh` — requires `cargo install jsonschema-cli`.
+Run locally: `cargo test --locked --test config_schema_validation`
+
+Vendored schemas live in [`schemas/`](../schemas/). To refresh them against the latest upstream: `./scripts/update-config-schemas.sh`.
+
+A scheduled [GitHub Actions workflow](../.github/workflows/schema-drift.yml) checks daily whether upstream schemas have changed.
 
 Each tool also validates config at runtime:
 

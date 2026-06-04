@@ -22,7 +22,7 @@ cargo clippy --all-targets -- -D warnings
 cargo fmt --all -- --check
 
 # Validate example configs against their JSON schemas
-./lint-examples.sh             # requires: cargo install jsonschema-cli
+cargo test --locked --test config_schema_validation
 
 # Build all targets including tests
 cargo build --all-targets
