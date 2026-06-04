@@ -2,7 +2,7 @@
 
 Note: `serial-mcp` must be on your `PATH`. If installed via `cargo install`, it should already be available as `serial-mcp`.
 
-Config schemas vary by tool. Each section links to the official schema reference. If a config stops working, check the linked docs — schemas can change.
+Config schemas vary by tool. Each section links to the official schema reference and a ready-to-use example config in [`examples/`](../examples/). If a config stops working, check the linked docs — schemas can change.
 
 ## Port names by platform
 
@@ -14,148 +14,43 @@ Config schemas vary by tool. Each section links to the official schema reference
 
 ## Claude Code CLI
 
-`.mcp.json` (project) or `~/.claude.json` (global). [Schema →](https://code.claude.com/docs/en/mcp)
-
-```json
-{
-  "mcpServers": {
-    "serial": {
-      "type": "stdio",
-      "command": "serial-mcp",
-      "args": ["--allowlist=/dev/ttyACM*,/dev/ttyUSB*"]
-    }
-  }
-}
-```
-
-<details>
-<summary>Windows</summary>
-
-```json
-{
-  "mcpServers": {
-    "serial": {
-      "type": "stdio",
-      "command": "C:\\Users\\<user>\\.cargo\\bin\\serial-mcp.exe",
-      "args": ["--allowlist=COM3,COM4"]
-    }
-  }
-}
-```
-
-</details>
+**File:** `.mcp.json` (project) or `~/.claude.json` (global)
+**Schema:** [code.claude.com/docs/en/mcp](https://code.claude.com/docs/en/mcp)
+**Example:** [`examples/claude_code.json`](../examples/claude_code.json)
 
 ## Claude Desktop
 
-[Same schema →](https://code.claude.com/docs/en/mcp). Config file location:
-- **Linux:** `~/.config/claude-desktop/claude_desktop_config.json`
-- **macOS:** `~/Library/Application Support/Claude/claude_desktop_config.json`
-- **Windows:** `%APPDATA%\Claude\claude_desktop_config.json`
+**File:**
+- Linux: `~/.config/claude-desktop/claude_desktop_config.json`
+- macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
+- Windows: `%APPDATA%\Claude\claude_desktop_config.json`
 
-```json
-{
-  "mcpServers": {
-    "serial": {
-      "type": "stdio",
-      "command": "serial-mcp",
-      "args": ["--allowlist=/dev/ttyACM0"]
-    }
-  }
-}
-```
-
-<details>
-<summary>macOS / Windows</summary>
-
-macOS:
-```json
-{
-  "mcpServers": {
-    "serial": {
-      "type": "stdio",
-      "command": "serial-mcp",
-      "args": ["--allowlist=/dev/tty.usbmodem*,/dev/tty.usbserial-*"]
-    }
-  }
-}
-```
-
-Windows:
-```json
-{
-  "mcpServers": {
-    "serial": {
-      "type": "stdio",
-      "command": "C:\\Users\\<user>\\.cargo\\bin\\serial-mcp.exe",
-      "args": ["--allowlist=COM3,COM4"]
-    }
-  }
-}
-```
-
-</details>
+**Schema:** [code.claude.com/docs/en/mcp](https://code.claude.com/docs/en/mcp)
+**Example:** [`examples/claude_desktop.json`](../examples/claude_desktop.json)
 
 ## Cursor
 
-[Schema →](https://cursor.com/docs/mcp). `.cursor/mcp.json` (project) or `~/.cursor/mcp.json` (global):
-
-```json
-{
-  "mcpServers": {
-    "serial": {
-      "type": "stdio",
-      "command": "serial-mcp",
-      "args": ["--allowlist=/dev/ttyACM*,/dev/ttyUSB*"]
-    }
-  }
-}
-```
+**File:** `.cursor/mcp.json` (project) or `~/.cursor/mcp.json` (global)
+**Schema:** [cursor.com/docs/mcp](https://cursor.com/docs/mcp)
+**Example:** [`examples/cursor.json`](../examples/cursor.json)
 
 ## VS Code (Copilot)
 
-[Schema →](https://code.visualstudio.com/docs/agents/reference/mcp-configuration). `.vscode/mcp.json` in your workspace:
-
-```json
-{
-  "servers": {
-    "serial": {
-      "type": "stdio",
-      "command": "serial-mcp",
-      "args": ["--allowlist=/dev/ttyACM*,/dev/ttyUSB*"]
-    }
-  }
-}
-```
+**File:** `.vscode/mcp.json` in your workspace
+**Schema:** [code.visualstudio.com/docs/agents/reference/mcp-configuration](https://code.visualstudio.com/docs/agents/reference/mcp-configuration)
+**Example:** [`examples/vscode.json`](../examples/vscode.json)
 
 ## Zed
 
-[Schema →](https://zed.dev/docs/ai/mcp). `~/.config/zed/settings.json` under `"context_servers"`:
-
-```json
-{
-  "context_servers": {
-    "serial-mcp": {
-      "command": "serial-mcp",
-      "args": ["--allowlist=/dev/ttyACM*,/dev/ttyUSB*"]
-    }
-  }
-}
-```
+**File:** `~/.config/zed/settings.json` under `"context_servers"`
+**Schema:** [zed.dev/docs/ai/mcp](https://zed.dev/docs/ai/mcp)
+**Example:** [`examples/zed.json`](../examples/zed.json)
 
 ## opencode
 
-[Schema →](https://opencode.ai/config.json). `opencode.json` / `opencode.jsonc` (project) or `~/.config/opencode/opencode.json`:
-
-```json
-{
-  "mcpServers": {
-    "serial": {
-      "type": "local",
-      "command": ["serial-mcp", "--allowlist=/dev/ttyACM*,/dev/ttyUSB*"]
-    }
-  }
-}
-```
+**File:** `opencode.json` / `opencode.jsonc` (project) or `~/.config/opencode/opencode.json`
+**Schema:** [opencode.ai/config.json](https://opencode.ai/config.json)
+**Example:** [`examples/opencode.json`](../examples/opencode.json)
 
 ## HTTP transport (remote / headless)
 
@@ -180,28 +75,18 @@ Agent config (any client that supports streamable HTTP):
 }
 ```
 
+## Dev one-liner (no install, cargo run from source)
+
+[`examples/opencode.json`](../examples/opencode.json) — set `command` to:
+
+```json
+["cargo", "run", "--quiet", "--manifest-path", "/path/to/serial-mcp/Cargo.toml", "--bin", "serial-mcp", "--", "--allowlist=/dev/ttyACM*"]
+```
+
 ## Troubleshooting
 
 - `Failed to open port` or `Unable to acquire exclusive lock on serial port`: another program already owns the device. Close tools like `picocom`, `screen`, `minicom`, serial monitors, or another `serial-mcp` instance.
 - `Connection busy: ... already owns RX`: one receive-side MCP operation is already active on that connection. Finish or unsubscribe the current `read`, `read_line`, `wait_for`, or `subscribe` operation before starting another.
-
-## Dev one-liner (no install, cargo run from source)
-
-```json
-{
-  "mcpServers": {
-    "serial": {
-      "type": "local",
-      "command": [
-        "cargo", "run", "--quiet",
-        "--manifest-path", "/path/to/serial-mcp/Cargo.toml",
-        "--bin", "serial-mcp", "--",
-        "--allowlist=/dev/ttyACM*"
-      ]
-    }
-  }
-}
-```
 
 ## Schema validation
 
