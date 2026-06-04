@@ -2,7 +2,7 @@
 
 **Project:** serial-mcp-server  
 **Protocol Version:** 2025-11-25  
-**Last Updated:** 2026-05-25  
+**Last Updated:** 2026-06-04  
 **Compliance Score:** ~90% (47/52 features implemented)
 
 ---
@@ -19,7 +19,7 @@ This server implements all **core MCP 2025-11-25 features** required for product
 
 | Capability | Status | Notes |
 |-----------|--------|-------|
-| `tools` | ✅ | 11 tools implemented |
+| `tools` | ✅ | 13 tools implemented |
 | `tools.listChanged` | ✅ | Declared (static tools, never fires) |
 | `resources` | ✅ | 2 static resources + 2 templates |
 | `resources.listChanged` | ✅ | Fires on open/close |
@@ -43,7 +43,7 @@ This server implements all **core MCP 2025-11-25 features** required for product
 |--------|--------|-------|
 | `initialize` | ✅ | rmcp framework handles handshake |
 | `ping` | ✅ | Health check |
-| `tools/list` | ✅ | 11 tools returned |
+| `tools/list` | ✅ | 13 tools returned |
 | `tools/call` | ✅ | Full tool invocation with structured JSON |
 | `resources/list` | ✅ | 2 static resources |
 | `resources/read` | ✅ | Text + blob (base64) support |
@@ -107,10 +107,10 @@ This server implements all **core MCP 2025-11-25 features** required for product
 | Feature | Status | Notes |
 |---------|--------|-------|
 | `name` | ✅ | snake_case, descriptive |
-| `title` | ✅ | Set on all 11 tools |
+| `title` | ✅ | Set on all 13 tools |
 | `description` | ✅ | All tools have descriptions |
 | `inputSchema` | ✅ | Auto-generated via schemars |
-| `outputSchema` | ✅ | Auto-generated via rmcp macro for all 11 tools (v0.2.2) |
+| `outputSchema` | ✅ | Auto-generated via rmcp macro for all 13 tools (v0.2.2) |
 | `annotations` (readOnlyHint, etc.) | ✅ | Set on relevant tools |
 | `execution.taskSupport` | ✅ | "optional" on read, wait_for, send_break |
 | `structuredContent` | ⚠️ | Returns Json<T> as text (spec says SHOULD also include text for backward compat) |
@@ -206,7 +206,7 @@ This server implements all **core MCP 2025-11-25 features** required for product
 
 All features required for a functional MCP server:
 
-- [x] Tool discovery and invocation (11 tools)
+- [x] Tool discovery and invocation (13 tools)
 - [x] Tool titles and annotations
 - [x] Resource CRUD with text + blob
 - [x] Prompt templates with completions
