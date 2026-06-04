@@ -15,7 +15,7 @@ declare -A SCHEMAS=(
 
 # Map schemas to config files they validate.
 declare -A VALIDATES=(
-    [claude_code_settings]="$DIR/claude_code.json $DIR/claude_desktop.json"
+    [claude_code_settings]="$DIR/claude_code.json"
     [opencode_config]="$DIR/opencode.json"
     [cursor_sandbox]=""
 )

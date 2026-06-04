@@ -14,23 +14,18 @@ Config schemas vary by tool. Where a published JSON schema exists, we use it for
 
 ---
 
-## Claude Code CLI
+## Claude Code / Desktop
 
-**File:** `.mcp.json` (project) or `~/.claude.json` (global)
+**File:**
+- Claude Code: `.mcp.json` (project) or `~/.claude.json` (global)
+- Claude Desktop:
+  - Linux: `~/.config/claude-desktop/claude_desktop_config.json`
+  - macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
+  - Windows: `%APPDATA%\Claude\claude_desktop_config.json`
+
 **Docs:** [code.claude.com/docs/en/mcp](https://code.claude.com/docs/en/mcp)
 **Schema:** `https://json.schemastore.org/claude-code-settings.json`
 **Example:** [`example-configs/claude_code.json`](../example-configs/claude_code.json)
-
-## Claude Desktop
-
-**File:**
-- Linux: `~/.config/claude-desktop/claude_desktop_config.json`
-- macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
-- Windows: `%APPDATA%\Claude\claude_desktop_config.json`
-
-**Docs:** [code.claude.com/docs/en/mcp](https://code.claude.com/docs/en/mcp)
-**Schema:** `https://json.schemastore.org/claude-code-settings.json`
-**Example:** [`example-configs/claude_desktop.json`](../example-configs/claude_desktop.json)
 
 ## Cursor
 
