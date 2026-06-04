@@ -7,3 +7,4 @@ fuzz/Cargo.lock
 opencode.json
 .idea/
 .vscode/
+.schemas/

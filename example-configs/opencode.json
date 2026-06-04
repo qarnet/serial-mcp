@@ -1,7 +1,6 @@
 {
   "$schema": "https://opencode.ai/config.json",
-  "$comment": "Drop-in MCP server configuration for opencode. Place in opencode.json or merge into existing mcpServers.",
-  "mcpServers": {
+  "mcp": {
     "serial": {
       "type": "local",
       "command": ["serial-mcp", "--allowlist=/dev/ttyACM*,/dev/ttyUSB*"]

@@ -39,18 +39,21 @@ Config schemas vary by tool. Each section links to the official schema reference
 **File:** `.vscode/mcp.json` in your workspace
 **Schema:** [code.visualstudio.com/docs/agents/reference/mcp-configuration](https://code.visualstudio.com/docs/agents/reference/mcp-configuration)
 **Example:** [`example-configs/vscode.json`](../example-configs/vscode.json)
+**Note:** VS Code uses `"servers"` as the top-level key, not `"mcpServers"`.
 
 ## Zed
 
 **File:** `~/.config/zed/settings.json` under `"context_servers"`
 **Schema:** [zed.dev/docs/ai/mcp](https://zed.dev/docs/ai/mcp)
 **Example:** [`example-configs/zed.json`](../example-configs/zed.json)
+**Note:** Zed uses `"context_servers"` as the top-level key. No `type` field — inferred from `command` vs `url`.
 
 ## opencode
 
 **File:** `opencode.json` / `opencode.jsonc` (project) or `~/.config/opencode/opencode.json`
 **Schema:** [opencode.ai/config.json](https://opencode.ai/config.json)
 **Example:** [`example-configs/opencode.json`](../example-configs/opencode.json)
+**Note:** opencode uses `"mcp"` as the top-level key, not `"mcpServers"`.
 
 ## HTTP transport (remote / headless)
 
@@ -77,10 +80,20 @@ Agent config (any client that supports streamable HTTP):
 
 ## Dev one-liner (no install, cargo run from source)
 
-[`example-configs/opencode.json`](../example-configs/opencode.json) — set `command` to:
-
 ```json
-["cargo", "run", "--quiet", "--manifest-path", "/path/to/serial-mcp/Cargo.toml", "--bin", "serial-mcp", "--", "--allowlist=/dev/ttyACM*"]
+{
+  "mcp": {
+    "serial": {
+      "type": "local",
+      "command": [
+        "cargo", "run", "--quiet",
+        "--manifest-path", "/path/to/serial-mcp/Cargo.toml",
+        "--bin", "serial-mcp", "--",
+        "--allowlist=/dev/ttyACM*"
+      ]
+    }
+  }
+}
 ```
 
 ## Troubleshooting
