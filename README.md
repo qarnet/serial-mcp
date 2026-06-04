@@ -1,6 +1,6 @@
 # Serial MCP Server
 
-[![GitHub Release](https://img.shields.io/github/v/release/qarnet/serial-mcp-server)](https://github.com/qarnet/serial-mcp-server/releases)
+[![GitHub Release](https://img.shields.io/github/v/release/qarnet/serial-mcp)](https://github.com/qarnet/serial-mcp/releases)
 [![crates.io](https://img.shields.io/crates/v/serial-mcp)](https://crates.io/crates/serial-mcp)
 [![Rust](https://img.shields.io/badge/rust-1.70+-orange.svg)](https://rust-lang.org)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
@@ -27,8 +27,8 @@ hardware — all through natural language.
 ### Linux
 
 ```bash
-VERSION=$(curl -s https://api.github.com/repos/qarnet/serial-mcp-server/releases/latest | grep -oP '"tag_name": "\K[^"]+')
-curl -L "https://github.com/qarnet/serial-mcp-server/releases/download/${VERSION}/serial-mcp-${VERSION#v}-x86_64-linux" \
+VERSION=$(curl -s https://api.github.com/repos/qarnet/serial-mcp/releases/latest | grep -oP '"tag_name": "\K[^"]+')
+curl -L "https://github.com/qarnet/serial-mcp/releases/download/${VERSION}/serial-mcp-${VERSION#v}-x86_64-linux" \
   -o serial-mcp && chmod +x serial-mcp && sudo mv serial-mcp /usr/local/bin/
 ```
 
@@ -37,15 +37,15 @@ Add user to `dialout` group for port access: `sudo usermod -aG dialout $USER`
 ### macOS
 
 ```bash
-VERSION=$(curl -s https://api.github.com/repos/qarnet/serial-mcp-server/releases/latest | grep -oP '"tag_name": "\K[^"]+')
+VERSION=$(curl -s https://api.github.com/repos/qarnet/serial-mcp/releases/latest | grep -oP '"tag_name": "\K[^"]+')
 ARCH=aarch64-macos   # Intel: x86_64-macos
-curl -L "https://github.com/qarnet/serial-mcp-server/releases/download/${VERSION}/serial-mcp-${VERSION#v}-${ARCH}" \
+curl -L "https://github.com/qarnet/serial-mcp/releases/download/${VERSION}/serial-mcp-${VERSION#v}-${ARCH}" \
   -o serial-mcp && chmod +x serial-mcp && sudo mv serial-mcp /usr/local/bin/
 ```
 
 ### Windows
 
-Download `serial-mcp-{VERSION}-x86_64-windows.exe` from the [latest release](https://github.com/qarnet/serial-mcp-server/releases/latest) and place it on your `PATH`.
+Download `serial-mcp-{VERSION}-x86_64-windows.exe` from the [latest release](https://github.com/qarnet/serial-mcp/releases/latest) and place it on your `PATH`.
 
 ### Via cargo (all platforms)
 
@@ -56,7 +56,7 @@ cargo install serial-mcp
 ### Via Nix
 
 ```bash
-nix profile install github:qarnet/serial-mcp-server
+nix profile install github:qarnet/serial-mcp
 ```
 
 ## Wire Up Your Agent

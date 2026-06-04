@@ -8,7 +8,7 @@ authors = [
 description = "MCP server for serial port communication. 13 tools (open/read/read_line/write/wait_for/subscribe/...), resources, prompts, task cancellation, stdio + streamable-HTTP transports."
 license = "MIT"
 readme = "README.md"
-repository = "https://github.com/qarnet/serial-mcp-server"
+repository = "https://github.com/qarnet/serial-mcp"
 keywords = ["mcp", "serial", "communication", "embedded", "protocol"]
 categories = ["development-tools", "embedded"]
 

@@ -88,7 +88,7 @@
         };
       in
       {
-        # `nix build`, `nix run github:qarnet/serial-mcp-server`
+        # `nix build`, `nix run github:qarnet/serial-mcp`
         packages = {
           default = serial-mcp;
           serial-mcp = serial-mcp;
