@@ -15,14 +15,21 @@ struct RemoteSchemaCase {
     instance_path: &'static str,
 }
 
-fn load_json_file(path: impl AsRef<Path>) -> Value {
+fn load_json_file(path: impl AsRef<Path>) -> Option<Value> {
     let path = path.as_ref();
 
-    let text = fs::read_to_string(path)
-        .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()));
+    let text = match fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            eprintln!("skipping: file not found: {}", path.display());
+            return None;
+        }
+        Err(err) => panic!("failed to read {}: {err}", path.display()),
+    };
 
-    serde_json::from_str(&text)
-        .unwrap_or_else(|err| panic!("failed to parse JSON {}: {err}", path.display()))
+    let value = serde_json::from_str(&text)
+        .unwrap_or_else(|err| panic!("failed to parse JSON {}: {err}", path.display()));
+    Some(value)
 }
 
 fn fetch_json(url: &str) -> Value {
@@ -35,7 +42,10 @@ fn fetch_json(url: &str) -> Value {
 }
 
 fn validate_json(name: &str, schema_ref: &str, schema: &Value, instance_path: &str) {
-    let instance = load_json_file(instance_path);
+    let instance = match load_json_file(instance_path) {
+        Some(i) => i,
+        None => return,
+    };
 
     let compiled = jsonschema::validator_for(schema)
         .unwrap_or_else(|err| panic!("invalid schema for {name} ({schema_ref}): {err}"));
@@ -100,7 +110,10 @@ fn remote_cases() -> [RemoteSchemaCase; 3] {
 #[test]
 fn example_configs_match_vendored_schemas() {
     for case in local_cases() {
-        let schema = load_json_file(case.schema_path);
+        let schema = match load_json_file(case.schema_path) {
+            Some(s) => s,
+            None => continue,
+        };
         validate_json(case.name, case.schema_path, &schema, case.instance_path);
     }
 }

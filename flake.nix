@@ -32,9 +32,21 @@
 
         craneLib = (crane.mkLib pkgs).overrideToolchain rustToolchain;
 
+        src = pkgs.lib.cleanSourceWith {
+          src = ./.;
+          filter =
+            path: type:
+            let
+              relPath = pkgs.lib.removePrefix (toString ./.) (toString path);
+            in
+            craneLib.filterCargoSources path type
+            || pkgs.lib.hasPrefix "schemas" relPath
+            || pkgs.lib.hasPrefix "example-configs" relPath;
+        };
+
         # Common args shared by both the deps-only and final derivations.
         commonArgs = {
-          src = craneLib.cleanCargoSource ./.;
+          inherit src;
           strictDeps = true;
 
           nativeBuildInputs = with pkgs; [ pkg-config ];
@@ -66,7 +78,7 @@
         craneLibCross = (crane.mkLib pkgsCross).overrideToolchain rustToolchain;
 
         serial-mcp-aarch64 = craneLibCross.buildPackage {
-          src = craneLib.cleanCargoSource ./.;
+          inherit src;
           strictDeps = true;
 
           # Tools that run on the BUILD machine (x86_64 here).
