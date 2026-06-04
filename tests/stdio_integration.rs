@@ -4,10 +4,8 @@
 //! connect via stdin/stdout pipes using rmcp's `TokioChildProcess` transport,
 //! and assert the MCP surface works identically to the HTTP variant.
 
-use std::time::Duration;
-
 use rmcp::{
-    model::{CallToolRequestParams, PaginatedRequestParams},
+    model::PaginatedRequestParams,
     transport::{child_process::TokioChildProcess, ConfigureCommandExt},
     ServiceExt,
 };
