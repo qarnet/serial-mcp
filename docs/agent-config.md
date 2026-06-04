@@ -2,6 +2,8 @@
 
 Note: `serial-mcp` must be on your `PATH`. If installed via `cargo install`, it should already be available as `serial-mcp`.
 
+Config schemas vary by tool. Each section links to the official schema reference. If a config stops working, check the linked docs — schemas can change.
+
 ## Port names by platform
 
 | Platform | Example ports | Notes |
@@ -12,7 +14,7 @@ Note: `serial-mcp` must be on your `PATH`. If installed via `cargo install`, it 
 
 ## Claude Code CLI
 
-`.mcp.json` (project) or `~/.claude.json` (global):
+`.mcp.json` (project) or `~/.claude.json` (global). [Schema →](https://code.claude.com/docs/en/mcp)
 
 ```json
 {
@@ -45,7 +47,7 @@ Note: `serial-mcp` must be on your `PATH`. If installed via `cargo install`, it 
 
 ## Claude Desktop
 
-Config file location:
+[Same schema →](https://code.claude.com/docs/en/mcp). Config file location:
 - **Linux:** `~/.config/claude-desktop/claude_desktop_config.json`
 - **macOS:** `~/Library/Application Support/Claude/claude_desktop_config.json`
 - **Windows:** `%APPDATA%\Claude\claude_desktop_config.json`
@@ -95,7 +97,7 @@ Windows:
 
 ## Cursor
 
-`.cursor/mcp.json` (project) or `~/.cursor/mcp.json` (global):
+[Schema →](https://cursor.com/docs/mcp). `.cursor/mcp.json` (project) or `~/.cursor/mcp.json` (global):
 
 ```json
 {
@@ -111,7 +113,7 @@ Windows:
 
 ## VS Code (Copilot)
 
-`.vscode/mcp.json` in your workspace:
+[Schema →](https://code.visualstudio.com/docs/agents/reference/mcp-configuration). `.vscode/mcp.json` in your workspace:
 
 ```json
 {
@@ -127,7 +129,7 @@ Windows:
 
 ## Zed
 
-`~/.config/zed/settings.json` under `"context_servers"`:
+[Schema →](https://zed.dev/docs/ai/mcp). `~/.config/zed/settings.json` under `"context_servers"`:
 
 ```json
 {
@@ -142,7 +144,7 @@ Windows:
 
 ## opencode
 
-`opencode.json` / `opencode.jsonc` (project) or `~/.config/opencode/opencode.json`:
+[Schema →](https://opencode.ai/config.json). `opencode.json` / `opencode.jsonc` (project) or `~/.config/opencode/opencode.json`:
 
 ```json
 {
@@ -200,3 +202,17 @@ Agent config (any client that supports streamable HTTP):
   }
 }
 ```
+
+## Schema validation
+
+Each tool validates config differently:
+
+| Tool | How to validate |
+|---|---|
+| Claude Code CLI / Desktop | Run `claude mcp list` — shows connection status for each server |
+| Cursor | Open Cursor Settings → MCP — green dot means connected |
+| VS Code | Command Palette → `MCP: List Servers` — shows status |
+| Zed | Open Zed → AI → MCP Servers — lists servers and their status |
+| opencode | opencode validates on startup; check `~/.local/share/opencode/opencode.log` for errors |
+
+If a config doesn't work, click the schema link for that tool to verify the current JSON shape — schemas can change between versions.
