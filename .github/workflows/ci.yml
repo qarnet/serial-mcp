@@ -41,6 +41,7 @@ jobs:
           components: clippy, rustfmt
 
       - name: Cache cargo registry + build
+        if: matrix.os != 'windows-latest'
         uses: Swatinem/rust-cache@v2
 
       - name: cargo fmt --check
