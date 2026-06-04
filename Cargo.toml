@@ -3,7 +3,6 @@ name = "serial-mcp-server"
 version = "0.3.2"
 edition = "2021"
 authors = [
-    "adancurusul <adancurusul@gmail.com>",
     "Thomas Kirschner <thomaskirschner85@yahoo.de>",
 ]
 description = "MCP server for serial port communication. 13 tools (open/read/read_line/write/wait_for/subscribe/...), resources, prompts, task cancellation, stdio + streamable-HTTP transports."

@@ -11,8 +11,8 @@
 | [0.2.3](#023) | 2026-05-26 | `subscribe(timeout_ms)` blocking mode |
 | [0.2.2](#022) | 2026-05-26 | MCP compliance fixes, pagination, input validation, race-condition fix |
 | [0.2.1](#021) | 2026-05-24 | MCP 2025-11-25, resource change notifications, port allowlist, stdio tests |
-| [0.2.0](#020) | 2026-05-23 | Fork baseline: rmcp 1.7 rewrite, 6 new tools, resources, prompts, HTTP transport |
-| [0.1.0](#010) | — | Upstream initial release (5 tools, STM32 demo) |
+| [0.2.0](#020) | 2026-05-23 | Project reset: rmcp 1.7 rewrite, 6 new tools, resources, prompts, HTTP transport |
+| [0.1.0](#010) | — | Initial release (5 tools, STM32 demo) |
 
 ---
 
@@ -105,7 +105,7 @@ MCP 2025-11-25 compliance, CDC-ACM hardware fixes, port allowlist.
 
 ## [0.2.0]
 
-Fork baseline — aggressive rewrite of [adancurusul/serial-mcp-server](https://github.com/adancurusul/serial-mcp-server). Removed ~80% dead scaffolding, migrated to rmcp 1.7.
+Project reset with an aggressive rewrite. Removed ~80% dead scaffolding and migrated to rmcp 1.7.
 
 **Added:** `flush`, `set_dtr_rts`, `send_break`, `wait_for`, `subscribe`, `unsubscribe` tools; `serial://` resources; `diagnose_port` + `interactive_terminal` prompts; task cancellation; HTTP transport; `codec` module; `SerialIo` trait abstraction.
 
@@ -115,4 +115,4 @@ Fork baseline — aggressive rewrite of [adancurusul/serial-mcp-server](https://
 
 ## [0.1.0]
 
-Upstream initial release by [adancurusul](https://github.com/adancurusul/serial-mcp-server/commit/d5a8196). Five tools: `list_ports`, `open`, `close`, `write`, `read`. STM32 demo firmware included.
+Initial release. Five tools: `list_ports`, `open`, `close`, `write`, `read`. STM32 demo firmware included.

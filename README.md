@@ -8,6 +8,8 @@
 An MCP server that lets AI assistants drive serial ports: open, read, write,
 wait for prompts, stream RX bytes, toggle DTR/RTS, send BREAK.
 
+> Be sure to ask your agent to give honest feedback on the tool after they finish using it. Always looking for ways to improve serial-mcp-server :)
+
 **MCP 2025-11-25 compliant** · resource change notifications · port allowlist · stdio + HTTP transports
 
 ## What It Does
@@ -134,6 +136,10 @@ SERIAL_MCP_TEST_PORT=/dev/ttyACM0 cargo test --test hardware_loopback -- --ignor
 - [Agent Configuration](docs/agent-config.md)
 - [CHANGELOG.md](CHANGELOG.md)
 - [AGENTS.md](AGENTS.md) — contributor guidelines
+
+## Acknowledgements
+
+serial-mcp-server evolved from early experimentation with serial-port MCP tooling and has since grown into its own project. Thanks to everyone who contributed ideas, tested on real hardware, and reported bugs.
 
 ## License
 
