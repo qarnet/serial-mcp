@@ -16,6 +16,7 @@ use rmcp::{
 
 use tracing::{debug, info};
 
+use crate::rx_session::RxSessionManager;
 use crate::security::SecurityManager;
 use crate::serial::{ConnectionManager, ConnectionSummary, PortInfo, SerialConnection};
 
@@ -65,6 +66,7 @@ pub struct SerialHandler {
     streams: StreamRegistry,
     security: SecurityManager,
     subscribers: Arc<tokio::sync::Mutex<HashMap<String, usize>>>,
+    rx_sessions: Arc<RxSessionManager>,
 }
 
 #[tool_router]
@@ -109,6 +111,7 @@ impl SerialHandler {
             streams,
             security,
             subscribers: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            rx_sessions: Arc::new(RxSessionManager::new()),
         }
     }
 
@@ -162,6 +165,8 @@ impl SerialHandler {
     ) -> Result<Json<CloseResult>, String> {
         let connection_id = args.connection_id.clone();
         let result = port_ops::close(&self.connections, args).await?;
+        // Shut down RX session (pump + consumers) for this connection.
+        self.rx_sessions.remove(&connection_id).await;
         // Abort any active RX subscription tied to this connection.
         self.streams.lock().await.remove(&connection_id);
         self.notify_resource_changed(&connection_id, &ctx).await;
