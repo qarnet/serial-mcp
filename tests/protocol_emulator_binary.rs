@@ -117,7 +117,7 @@ async fn protocol_emulator_binary_workflow() {
             json!({
                 "connection_id": connection_id,
                 "timeout_ms": 2000,
-                "max_bytes": 512,
+                "max_buffered_bytes": 512,
                 "encoding": "hex",
             }),
         ))
@@ -162,7 +162,7 @@ async fn protocol_emulator_binary_workflow() {
             json!({
                 "connection_id": connection_id,
                 "timeout_ms": 2000,
-                "max_bytes": 512,
+                "max_buffered_bytes": 512,
                 "encoding": "base64",
             }),
         ))
@@ -209,7 +209,7 @@ async fn protocol_emulator_binary_workflow() {
             json!({
                 "connection_id": connection_id,
                 "timeout_ms": 2000,
-                "max_bytes": 256,
+                "max_buffered_bytes": 256,
                 "encoding": "utf8",
             }),
         ))
@@ -259,7 +259,7 @@ async fn protocol_emulator_binary_workflow() {
             json!({
                 "connection_id": connection_id,
                 "timeout_ms": 2000,
-                "max_bytes": 4096,
+                "max_buffered_bytes": 4096,
                 "encoding": "hex",
             }),
         ))
@@ -306,7 +306,7 @@ async fn protocol_emulator_binary_workflow() {
                 "pattern_encoding": "hex",
                 "response_encoding": "hex",
                 "timeout_ms": 3000,
-                "max_bytes": 64,
+                "max_buffered_bytes": 64,
             }),
         ))
         .await

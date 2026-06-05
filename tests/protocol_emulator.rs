@@ -292,7 +292,7 @@ async fn protocol_emulator_workflow() {
             json!({
                 "connection_id": connection_id,
                 "timeout_ms": 2000,
-                "max_bytes": 256,
+                "max_buffered_bytes": 256,
                 "encoding": "utf8",
             }),
         ))
@@ -337,7 +337,7 @@ async fn protocol_emulator_workflow() {
             json!({
                 "connection_id": connection_id,
                 "timeout_ms": 2000,
-                "max_bytes": 256,
+                "max_buffered_bytes": 256,
                 "encoding": "hex",
             }),
         ))
@@ -397,7 +397,7 @@ async fn protocol_emulator_workflow() {
                 "connection_id": connection_id,
                 "pattern": "T=",
                 "timeout_ms": 5000,
-                "max_bytes": 1024,
+                "max_buffered_bytes": 1024,
             }),
         ))
         .await
@@ -430,7 +430,7 @@ async fn protocol_emulator_workflow() {
                 "connection_id": connection_id,
                 "pattern": "IMPOSSIBLE",
                 "timeout_ms": 100,
-                "max_bytes": 64,
+                "max_buffered_bytes": 64,
             }),
         ))
         .await
@@ -532,7 +532,7 @@ async fn protocol_emulator_workflow() {
             json!({
                 "connection_id": connection_id,
                 "timeout_ms": 300,
-                "max_bytes": 64,
+                "max_buffered_bytes": 64,
             }),
         ))
         .await
@@ -770,7 +770,7 @@ async fn protocol_emulator_workflow() {
             json!({
                 "connection_id": connection_id,
                 "timeout_ms": 100,
-                "max_bytes": 64,
+                "max_buffered_bytes": 64,
             }),
         ))
         .await

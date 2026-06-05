@@ -97,7 +97,7 @@ async fn pty_device_write_then_client_read() {
             json!({
                 "connection_id": connection_id,
                 "timeout_ms": 1500,
-                "max_bytes": 64,
+                "max_buffered_bytes": 64,
             }),
         ))
         .await

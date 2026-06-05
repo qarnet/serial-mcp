@@ -46,7 +46,7 @@ pub fn timeout_ms_schema(_gen: &mut SchemaGenerator) -> Schema {
     })
 }
 
-pub fn read_max_bytes_schema(_gen: &mut SchemaGenerator) -> Schema {
+pub fn read_max_buffered_bytes_schema(_gen: &mut SchemaGenerator) -> Schema {
     json_schema!({
         "type": "integer",
         "minimum": MIN_READ_BYTES,
@@ -54,7 +54,7 @@ pub fn read_max_bytes_schema(_gen: &mut SchemaGenerator) -> Schema {
     })
 }
 
-pub fn wait_max_bytes_schema(_gen: &mut SchemaGenerator) -> Schema {
+pub fn wait_max_buffered_bytes_schema(_gen: &mut SchemaGenerator) -> Schema {
     json_schema!({
         "type": "integer",
         "minimum": MIN_WAIT_BYTES,
@@ -62,7 +62,7 @@ pub fn wait_max_bytes_schema(_gen: &mut SchemaGenerator) -> Schema {
     })
 }
 
-pub fn stream_chunk_bytes_schema(_gen: &mut SchemaGenerator) -> Schema {
+pub fn stream_buffered_bytes_schema(_gen: &mut SchemaGenerator) -> Schema {
     json_schema!({
         "type": "integer",
         "minimum": MIN_STREAM_CHUNK_BYTES,

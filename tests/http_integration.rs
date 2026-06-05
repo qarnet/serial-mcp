@@ -70,7 +70,7 @@ async fn progress_notifications_emitted_for_wait_for() {
             "connection_id": connection_id,
             "pattern": "NEVER_MATCH",
             "timeout_ms": 600,
-            "max_bytes": 128,
+            "max_buffered_bytes": 128,
         }),
     );
 
@@ -615,19 +615,19 @@ async fn validation_limits_return_tool_errors_over_http() {
     let cases = [
         tool_request(
             "read",
-            json!({ "connection_id": connection_id, "max_bytes": 0 }),
+            json!({ "connection_id": connection_id, "max_buffered_bytes": 0 }),
         ),
         tool_request(
             "read",
-            json!({ "connection_id": connection_id, "max_bytes": MAX_READ_BYTES + 1 }),
+            json!({ "connection_id": connection_id, "max_buffered_bytes": MAX_READ_BYTES + 1 }),
         ),
         tool_request(
             "wait_for",
-            json!({ "connection_id": connection_id, "pattern": "x", "max_bytes": 0 }),
+            json!({ "connection_id": connection_id, "pattern": "x", "max_buffered_bytes": 0 }),
         ),
         tool_request(
             "wait_for",
-            json!({ "connection_id": connection_id, "pattern": "x", "max_bytes": MAX_WAIT_BYTES + 1 }),
+            json!({ "connection_id": connection_id, "pattern": "x", "max_buffered_bytes": MAX_WAIT_BYTES + 1 }),
         ),
         tool_request(
             "wait_for",
@@ -635,11 +635,11 @@ async fn validation_limits_return_tool_errors_over_http() {
         ),
         tool_request(
             "subscribe",
-            json!({ "connection_id": connection_id, "max_chunk_bytes": 0 }),
+            json!({ "connection_id": connection_id, "max_buffered_bytes": 0 }),
         ),
         tool_request(
             "subscribe",
-            json!({ "connection_id": connection_id, "max_chunk_bytes": MAX_STREAM_CHUNK_BYTES + 1 }),
+            json!({ "connection_id": connection_id, "max_buffered_bytes": MAX_STREAM_CHUNK_BYTES + 1 }),
         ),
         tool_request(
             "subscribe",
@@ -733,7 +733,7 @@ async fn read_with_no_data_times_out_with_is_error() {
             json!({
                 "connection_id": connection_id,
                 "timeout_ms": 50,
-                "max_bytes": 64,
+                "max_buffered_bytes": 64,
             }),
         ))
         .await
@@ -779,7 +779,7 @@ async fn wait_for_timeout_returns_is_error() {
                 "connection_id": connection_id,
                 "pattern": "NEVER_MATCH",
                 "timeout_ms": 60,
-                "max_bytes": 128,
+                "max_buffered_bytes": 128,
             }),
         ))
         .await
@@ -826,7 +826,7 @@ async fn read_result_contains_elapsed_ms() {
             json!({
                 "connection_id": connection_id,
                 "timeout_ms": 1000,
-                "max_bytes": 64,
+                "max_buffered_bytes": 64,
             }),
         ))
         .await
@@ -861,7 +861,7 @@ async fn wait_for_default_timeout_still_times_out() {
             json!({
                 "connection_id": connection_id,
                 "pattern": "NEVER_MATCH",
-                "max_bytes": 128,
+                "max_buffered_bytes": 128,
             }),
         ))
         .await

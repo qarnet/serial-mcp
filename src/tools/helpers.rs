@@ -2,27 +2,27 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use rmcp::{
-    model::{
-        LoggingLevel, LoggingMessageNotificationParam, ProgressNotificationParam, ProgressToken,
-    },
+    model::{ProgressNotificationParam, ProgressToken},
     service::Peer,
     Json, RoleServer,
 };
-use tracing::{error, warn};
+use tracing::error;
 
 use tokio::sync::mpsc;
 
 use crate::codec::{self, Encoding};
-use crate::error::SerialError;
+use crate::match_config::{shape_match_context, ByteMatcher};
+use crate::rx_metadata::RxStopMetadata;
 use crate::rx_session::RxEvent;
 use crate::serial::{
     ConnectionConfig, ConnectionManager, DataBits, FlowControl, Parity, SerialConnection, StopBits,
 };
+use crate::stop_controller::{RxStopController, RxStopDecision};
 use crate::tools::types::*;
 
 pub use crate::limits::{
-    MAX_READ_BYTES, MAX_STREAM_CHUNK_BYTES, MAX_TIMEOUT_MS, MAX_WAIT_BYTES, MAX_WRITE_BYTES,
-    MIN_POLL_INTERVAL_MS, MIN_READ_BYTES, MIN_STREAM_CHUNK_BYTES, MIN_WAIT_BYTES,
+    MAX_READ_BYTES, MAX_STREAM_CHUNK_BYTES, MAX_TIMEOUT_MS, MAX_WRITE_BYTES, MIN_POLL_INTERVAL_MS,
+    MIN_READ_BYTES, MIN_STREAM_CHUNK_BYTES,
 };
 
 pub(crate) const DEFAULT_READ_TIMEOUT_MS: u64 = 1000;
@@ -81,112 +81,15 @@ pub async fn lookup_connection(
 /// read-timeout case from a successful read of `bytes`.
 pub struct ReadOutcome {
     pub bytes: Vec<u8>,
-    pub timed_out: bool,
     pub elapsed_ms: u64,
+    pub meta: RxStopMetadata,
+    /// Whether a match pattern was found. `false` when no matcher was provided.
+    pub matched: bool,
+    /// Byte offset within `bytes` where the match starts, or `None`.
+    pub match_index: Option<usize>,
 }
 
-pub async fn read_bytes(
-    connection: &SerialConnection,
-    max_bytes: usize,
-    timeout_ms: Option<u64>,
-    ct: &tokio_util::sync::CancellationToken,
-    progress_token: Option<ProgressToken>,
-    peer: Option<&Peer<RoleServer>>,
-) -> Result<ReadOutcome, String> {
-    const SETTLE_MS: u64 = 50;
-
-    let effective_timeout = timeout_ms.unwrap_or(DEFAULT_READ_TIMEOUT_MS);
-    let deadline = Instant::now() + Duration::from_millis(effective_timeout);
-    let read_start = Instant::now();
-    let mut buf = vec![0u8; max_bytes];
-
-    let mut last_progress = Instant::now();
-
-    // Read until at least one byte arrives or we time out.
-    let first_n = loop {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            return Ok(ReadOutcome {
-                bytes: Vec::new(),
-                timed_out: true,
-                elapsed_ms: read_start.elapsed().as_millis() as u64,
-            });
-        }
-
-        let poll_ms = remaining.as_millis() as u64;
-        let poll_ms = poll_ms.clamp(1, 250);
-
-        match tokio::select! {
-            _ = ct.cancelled() => return Err("Cancelled".into()),
-            res = connection.read(&mut buf, Some(poll_ms)) => res,
-        } {
-            Ok(n) if n > 0 => break n,
-            Ok(_) => {}
-            Err(SerialError::ReadTimeout) => {}
-            Err(e) => return Err(log_tool_err("read", "Data reading failed", e)),
-        }
-
-        if let (Some(token), Some(peer)) = (progress_token.clone(), peer) {
-            if last_progress.elapsed() >= Duration::from_millis(250) {
-                last_progress = Instant::now();
-                let remaining = deadline.saturating_duration_since(Instant::now());
-                let elapsed_ms = effective_timeout.saturating_sub(remaining.as_millis() as u64);
-                let _ = peer
-                    .notify_progress(ProgressNotificationParam {
-                        progress_token: token,
-                        progress: elapsed_ms as f64,
-                        total: Some(effective_timeout as f64),
-                        message: Some("waiting for data".into()),
-                    })
-                    .await;
-            }
-        }
-    };
-
-    let mut total = first_n;
-    while total < max_bytes {
-        let remaining = deadline
-            .saturating_duration_since(Instant::now())
-            .as_millis() as u64;
-        let settle = remaining.min(SETTLE_MS);
-        if settle == 0 {
-            break;
-        }
-        let res = tokio::select! {
-            _ = ct.cancelled() => return Err("Cancelled".into()),
-            res = connection.read(&mut buf[total..], Some(settle)) => res,
-        };
-        match res {
-            Ok(n) if n > 0 => {
-                total += n;
-                if let (Some(token), Some(peer)) = (progress_token.clone(), peer) {
-                    let remaining = deadline.saturating_duration_since(Instant::now());
-                    let elapsed_ms = effective_timeout.saturating_sub(remaining.as_millis() as u64);
-                    if last_progress.elapsed() >= Duration::from_millis(250) {
-                        last_progress = Instant::now();
-                        let _ = peer
-                            .notify_progress(ProgressNotificationParam {
-                                progress_token: token,
-                                progress: elapsed_ms as f64,
-                                total: Some(effective_timeout as f64),
-                                message: Some(format!("read {total} bytes")),
-                            })
-                            .await;
-                    }
-                }
-            }
-            _ => break,
-        }
-    }
-
-    buf.truncate(total);
-    Ok(ReadOutcome {
-        bytes: buf,
-        timed_out: false,
-        elapsed_ms: read_start.elapsed().as_millis() as u64,
-    })
-}
-
+#[allow(clippy::too_many_arguments)]
 pub async fn read_bytes_via_session(
     mut event_rx: mpsc::Receiver<RxEvent>,
     max_bytes: usize,
@@ -194,34 +97,91 @@ pub async fn read_bytes_via_session(
     ct: &tokio_util::sync::CancellationToken,
     progress_token: Option<ProgressToken>,
     peer: Option<&Peer<RoleServer>>,
+    mut matcher: Option<ByteMatcher>,
+    no_new_rx_timeout_ms: Option<u64>,
 ) -> Result<ReadOutcome, String> {
     const SETTLE_MS: u64 = 50;
 
     let effective_timeout = timeout_ms.unwrap_or(DEFAULT_READ_TIMEOUT_MS);
-    let deadline = Instant::now() + Duration::from_millis(effective_timeout);
     let read_start = Instant::now();
+    let mut ctrl = RxStopController::new(read_start, timeout_ms, max_bytes, no_new_rx_timeout_ms);
+    let deadline = ctrl
+        .deadline()
+        .unwrap_or_else(|| read_start + Duration::from_millis(effective_timeout));
 
     let mut last_progress = Instant::now();
     let mut accumulated: Vec<u8> = Vec::with_capacity(max_bytes);
 
+    let context_amount = matcher.as_ref().and_then(|m| m.context_amount());
+    let needle_len = matcher.as_ref().map(|m| m.needle().len());
+
+    let make_outcome = |bytes: Vec<u8>,
+                        elapsed_ms: u64,
+                        meta: RxStopMetadata,
+                        matched: bool,
+                        match_index: Option<usize>| {
+        let outcome = ReadOutcome {
+            bytes,
+            elapsed_ms,
+            meta,
+            matched,
+            match_index,
+        };
+        if !outcome.matched || context_amount.is_none() {
+            return outcome;
+        }
+        let Some(match_idx) = outcome.match_index else {
+            return outcome;
+        };
+        let Some(nlen) = needle_len else {
+            return outcome;
+        };
+        let shaped = shape_match_context(&outcome.bytes, match_idx, nlen, context_amount);
+        let bytes_returned = shaped.data.len();
+        ReadOutcome {
+            bytes: shaped.data,
+            elapsed_ms: outcome.elapsed_ms,
+            meta: RxStopMetadata::match_found(outcome.meta.bytes_observed, bytes_returned),
+            matched: true,
+            match_index: Some(shaped.match_index),
+        }
+    };
+
     loop {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            return Ok(ReadOutcome {
-                bytes: accumulated,
-                timed_out: true,
-                elapsed_ms: read_start.elapsed().as_millis() as u64,
-            });
+        if let RxStopDecision::Stop(outcome) = ctrl.check_timeout() {
+            return Ok(make_outcome(
+                accumulated,
+                read_start.elapsed().as_millis() as u64,
+                outcome.meta,
+                outcome.matched,
+                outcome.match_index,
+            ));
+        }
+        if let RxStopDecision::Stop(outcome) = ctrl.check_silence_timeout() {
+            return Ok(make_outcome(
+                accumulated,
+                read_start.elapsed().as_millis() as u64,
+                outcome.meta,
+                outcome.matched,
+                outcome.match_index,
+            ));
         }
 
-        let wait = remaining.as_millis() as u64;
-        let wait = wait.clamp(1, 250);
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let remaining_ms = remaining.as_millis() as u64;
+        let wait = remaining_ms.saturating_sub(1).clamp(1, 250);
 
         let event = tokio::select! {
-            _ = ct.cancelled() => return Err("Cancelled".into()),
+            _ = ct.cancelled() => {
+                let outcome = ctrl.cancelled();
+                return Ok(make_outcome(accumulated, read_start.elapsed().as_millis() as u64, outcome.meta, outcome.matched, outcome.match_index));
+            }
             msg = tokio::time::timeout(Duration::from_millis(wait), event_rx.recv()) => match msg {
                 Ok(Some(e)) => e,
-                Ok(None) => return Err("Connection closed".into()),
+                Ok(None) => {
+                    let outcome = ctrl.channel_closed();
+                    return Ok(make_outcome(accumulated, read_start.elapsed().as_millis() as u64, outcome.meta, outcome.matched, outcome.match_index));
+                }
                 Err(_) => {
                     if let (Some(token), Some(peer)) = (progress_token.clone(), peer) {
                         if last_progress.elapsed() >= Duration::from_millis(250) {
@@ -246,16 +206,53 @@ pub async fn read_bytes_via_session(
 
         match event {
             RxEvent::Data(chunk) => {
+                ctrl.notify_data_received();
+                let chunk_len = chunk.len();
                 let room = max_bytes.saturating_sub(accumulated.len());
                 let take = chunk.len().min(room);
                 accumulated.extend_from_slice(&chunk[..take]);
-                break;
+
+                let match_result = matcher.as_mut().map(|m| m.push(&chunk[..take]));
+                let buffered_len = accumulated.len();
+
+                if let RxStopDecision::Stop(outcome) =
+                    ctrl.push_data(chunk_len, buffered_len, match_result)
+                {
+                    return Ok(make_outcome(
+                        accumulated,
+                        read_start.elapsed().as_millis() as u64,
+                        outcome.meta,
+                        outcome.matched,
+                        outcome.match_index,
+                    ));
+                }
+
+                // Without a matcher, first-byte-then-settle semantics.
+                if matcher.is_none() {
+                    break;
+                }
+                // With a matcher, push_data already checked max_buffered_bytes.
+                // Loop continues to accumulate until match/timeout/close.
             }
-            RxEvent::Closed => return Err("Connection closed".into()),
-            RxEvent::Error(msg) => return Err(log_tool_err("read", "Data reading failed", msg)),
+            RxEvent::Closed => {
+                let outcome = ctrl.connection_closed();
+                return Ok(make_outcome(
+                    accumulated,
+                    read_start.elapsed().as_millis() as u64,
+                    outcome.meta,
+                    outcome.matched,
+                    outcome.match_index,
+                ));
+            }
+            RxEvent::Error(msg) => {
+                return Err(log_tool_err("read", "Data reading failed", msg));
+            }
         }
     }
 
+    // Settle phase: gather burst after first byte (only when no matcher).
+    // With a matcher, the loop above continues until match/timeout/max/closed.
+    let _start_len = accumulated.len();
     while accumulated.len() < max_bytes {
         let remaining = deadline
             .saturating_duration_since(Instant::now())
@@ -264,8 +261,31 @@ pub async fn read_bytes_via_session(
         if settle == 0 {
             break;
         }
+
+        if let RxStopDecision::Stop(outcome) = ctrl.check_timeout() {
+            return Ok(make_outcome(
+                accumulated,
+                read_start.elapsed().as_millis() as u64,
+                outcome.meta,
+                outcome.matched,
+                outcome.match_index,
+            ));
+        }
+        if let RxStopDecision::Stop(outcome) = ctrl.check_silence_timeout() {
+            return Ok(make_outcome(
+                accumulated,
+                read_start.elapsed().as_millis() as u64,
+                outcome.meta,
+                outcome.matched,
+                outcome.match_index,
+            ));
+        }
+
         let event = tokio::select! {
-            _ = ct.cancelled() => return Err("Cancelled".into()),
+            _ = ct.cancelled() => {
+                let outcome = ctrl.cancelled();
+                return Ok(make_outcome(accumulated, read_start.elapsed().as_millis() as u64, outcome.meta, outcome.matched, outcome.match_index));
+            }
             msg = tokio::time::timeout(Duration::from_millis(settle), event_rx.recv()) => match msg {
                 Ok(Some(e)) => Some(e),
                 Ok(None) | Err(_) => None,
@@ -273,9 +293,12 @@ pub async fn read_bytes_via_session(
         };
         match event {
             Some(RxEvent::Data(chunk)) => {
+                ctrl.notify_data_received();
+                ctrl.record_data(chunk.len(), accumulated.len());
                 let room = max_bytes.saturating_sub(accumulated.len());
                 let take = chunk.len().min(room);
                 accumulated.extend_from_slice(&chunk[..take]);
+                ctrl.record_data(0, accumulated.len());
                 if let (Some(token), Some(peer)) = (progress_token.clone(), peer) {
                     let elapsed_ms = effective_timeout.saturating_sub(
                         deadline
@@ -303,206 +326,26 @@ pub async fn read_bytes_via_session(
         }
     }
 
-    let timed_out = false;
-    Ok(ReadOutcome {
-        bytes: accumulated,
-        timed_out,
-        elapsed_ms: read_start.elapsed().as_millis() as u64,
-    })
-}
-
-pub struct WaitOutcome {
-    pub bytes: Vec<u8>,
-    pub match_index: Option<usize>,
-    pub timed_out: bool,
-}
-
-pub async fn read_until_pattern(
-    connection: &SerialConnection,
-    pattern: &[u8],
-    timeout_ms: u64,
-    max_bytes: usize,
-    ct: &tokio_util::sync::CancellationToken,
-    progress_token: Option<ProgressToken>,
-    peer: Option<&Peer<RoleServer>>,
-) -> Result<WaitOutcome, String> {
-    const CHUNK_CAPACITY: usize = 256;
-    let deadline = Instant::now() + Duration::from_millis(timeout_ms);
-    let mut accumulated: Vec<u8> = Vec::with_capacity(CHUNK_CAPACITY.min(max_bytes));
-
-    let mut last_progress = Instant::now();
-
-    if let (Some(token), Some(peer)) = (progress_token.clone(), peer) {
-        let _ = peer
-            .notify_progress(ProgressNotificationParam {
-                progress_token: token,
-                progress: 0.0,
-                total: Some(timeout_ms as f64),
-                message: Some("wait_for started".to_string()),
-            })
-            .await;
+    // After settle phase, determine the stop reason.
+    // If we filled the buffer during settle, it's MaxBufferedBytes;
+    // otherwise it's DataComplete.
+    if let RxStopDecision::Stop(outcome) = ctrl.check_max_buffered_bytes() {
+        return Ok(make_outcome(
+            accumulated,
+            read_start.elapsed().as_millis() as u64,
+            outcome.meta,
+            outcome.matched,
+            outcome.match_index,
+        ));
     }
-
-    loop {
-        if ct.is_cancelled() {
-            return Err("Cancelled".into());
-        }
-        if let Some(idx) = find_subslice(&accumulated, pattern) {
-            return Ok(WaitOutcome {
-                bytes: accumulated,
-                match_index: Some(idx),
-                timed_out: false,
-            });
-        }
-        if accumulated.len() >= max_bytes {
-            return Ok(WaitOutcome {
-                bytes: accumulated,
-                match_index: None,
-                timed_out: false,
-            });
-        }
-        let now = Instant::now();
-        if now >= deadline {
-            return Ok(WaitOutcome {
-                bytes: accumulated,
-                match_index: None,
-                timed_out: true,
-            });
-        }
-
-        if let (Some(token), Some(peer)) = (progress_token.clone(), peer) {
-            if last_progress.elapsed() >= Duration::from_millis(250) {
-                last_progress = Instant::now();
-                let remaining = deadline.saturating_duration_since(Instant::now());
-                let elapsed_ms = timeout_ms.saturating_sub(remaining.as_millis() as u64);
-                let _ = peer
-                    .notify_progress(ProgressNotificationParam {
-                        progress_token: token,
-                        progress: elapsed_ms as f64,
-                        total: Some(timeout_ms as f64),
-                        message: Some(format!("wait_for {} bytes", accumulated.len())),
-                    })
-                    .await;
-            }
-        }
-
-        let remaining_ms = (deadline - now).as_millis() as u64;
-        // Poll in short slices so we can emit progress updates even with no data.
-        let remaining_ms = remaining_ms.clamp(1, 250);
-        let room = (max_bytes - accumulated.len()).min(CHUNK_CAPACITY);
-        let mut chunk = vec![0u8; room];
-        match tokio::select! {
-            _ = ct.cancelled() => return Err("Cancelled".into()),
-            res = connection.read(&mut chunk, Some(remaining_ms)) => res,
-        } {
-            Ok(0) => continue,
-            Ok(n) => {
-                chunk.truncate(n);
-                accumulated.extend_from_slice(&chunk);
-            }
-            Err(SerialError::ReadTimeout) => {
-                // No data arrived during this poll slice; keep waiting until the
-                // overall deadline is reached.
-                continue;
-            }
-            Err(e) => return Err(log_tool_err("wait_for", "Read failed during wait", e)),
-        }
-    }
-}
-
-pub async fn wait_for_pattern_via_session(
-    mut event_rx: mpsc::Receiver<RxEvent>,
-    pattern: &[u8],
-    timeout_ms: u64,
-    max_bytes: usize,
-    ct: &tokio_util::sync::CancellationToken,
-    progress_token: Option<ProgressToken>,
-    peer: Option<&Peer<RoleServer>>,
-) -> Result<WaitOutcome, String> {
-    let deadline = Instant::now() + Duration::from_millis(timeout_ms);
-    let mut accumulated: Vec<u8> = Vec::with_capacity(max_bytes);
-
-    let mut last_progress = Instant::now();
-
-    if let (Some(token), Some(peer)) = (progress_token.clone(), peer) {
-        let _ = peer
-            .notify_progress(ProgressNotificationParam {
-                progress_token: token,
-                progress: 0.0,
-                total: Some(timeout_ms as f64),
-                message: Some("wait_for started".to_string()),
-            })
-            .await;
-    }
-
-    loop {
-        if ct.is_cancelled() {
-            return Err("Cancelled".into());
-        }
-        if let Some(idx) = find_subslice(&accumulated, pattern) {
-            return Ok(WaitOutcome {
-                bytes: accumulated,
-                match_index: Some(idx),
-                timed_out: false,
-            });
-        }
-        if accumulated.len() >= max_bytes {
-            return Ok(WaitOutcome {
-                bytes: accumulated,
-                match_index: None,
-                timed_out: false,
-            });
-        }
-        let now = Instant::now();
-        if now >= deadline {
-            return Ok(WaitOutcome {
-                bytes: accumulated,
-                match_index: None,
-                timed_out: true,
-            });
-        }
-
-        if let (Some(token), Some(peer)) = (progress_token.clone(), peer) {
-            if last_progress.elapsed() >= Duration::from_millis(250) {
-                last_progress = Instant::now();
-                let remaining = deadline.saturating_duration_since(Instant::now());
-                let elapsed_ms = timeout_ms.saturating_sub(remaining.as_millis() as u64);
-                let _ = peer
-                    .notify_progress(ProgressNotificationParam {
-                        progress_token: token,
-                        progress: elapsed_ms as f64,
-                        total: Some(timeout_ms as f64),
-                        message: Some(format!("wait_for {} bytes", accumulated.len())),
-                    })
-                    .await;
-            }
-        }
-
-        let remaining_ms = (deadline - now).as_millis() as u64;
-        let remaining_ms = remaining_ms.clamp(1, 250);
-
-        let event = tokio::select! {
-            _ = ct.cancelled() => return Err("Cancelled".into()),
-            msg = tokio::time::timeout(Duration::from_millis(remaining_ms), event_rx.recv()) => match msg {
-                Ok(Some(e)) => Some(e),
-                Ok(None) => return Err("Connection closed".into()),
-                Err(_) => None,
-            },
-        };
-
-        match event {
-            Some(RxEvent::Data(chunk)) => {
-                let room = max_bytes.saturating_sub(accumulated.len());
-                let take = chunk.len().min(room);
-                accumulated.extend_from_slice(&chunk[..take]);
-            }
-            Some(RxEvent::Closed) => return Err("Connection closed".into()),
-            Some(RxEvent::Error(msg)) => {
-                return Err(log_tool_err("wait_for", "Read failed during wait", msg))
-            }
-            None => continue,
-        }
-    }
+    let outcome = ctrl.data_complete();
+    Ok(make_outcome(
+        accumulated,
+        read_start.elapsed().as_millis() as u64,
+        outcome.meta,
+        outcome.matched,
+        outcome.match_index,
+    ))
 }
 
 pub(crate) fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
@@ -515,102 +358,37 @@ pub(crate) fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 }
 
 // ------------------------------------------------------------------
-// Streaming helper
-// ------------------------------------------------------------------
-
-pub async fn stream_rx(
-    peer: Peer<rmcp::RoleServer>,
-    connection: Arc<SerialConnection>,
-    encoding: Encoding,
-    max_chunk_bytes: usize,
-    poll_interval_ms: u64,
-) {
-    let logger = format!("serial:{}", connection.id());
-    let mut buf = vec![0u8; max_chunk_bytes];
-    loop {
-        match connection.read(&mut buf, Some(poll_interval_ms)).await {
-            Ok(0) | Err(SerialError::ReadTimeout) => continue,
-            Ok(n) => {
-                let chunk = &buf[..n];
-                let encoded = match codec::encode(encoding, chunk) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        warn!(
-                            "RX encoding error on {}: {encoding} cannot encode {} bytes — dropped",
-                            connection.id(),
-                            n
-                        );
-                        // Emit a warning notification so the client is aware of dropped bytes
-                        let payload = serde_json::json!({
-                            "connection_id": connection.id(),
-                            "encoding_error": true,
-                            "encoding": encoding.to_string(),
-                            "bytes_dropped": n,
-                            "reason": e.to_string(),
-                        });
-                        let param = LoggingMessageNotificationParam {
-                            level: LoggingLevel::Warning,
-                            logger: Some(logger.clone()),
-                            data: payload,
-                        };
-                        if let Err(e) = peer.notify_logging_message(param).await {
-                            error!("RX stream peer disconnected: {}", e);
-                            break;
-                        }
-                        continue;
-                    }
-                };
-                let payload = serde_json::json!({
-                    "connection_id": connection.id(),
-                    "bytes_read": n,
-                    "encoding": encoding.to_string(),
-                    "data": encoded,
-                });
-                let param = LoggingMessageNotificationParam {
-                    level: LoggingLevel::Info,
-                    logger: Some(logger.clone()),
-                    data: payload,
-                };
-                if let Err(e) = peer.notify_logging_message(param).await {
-                    error!("RX stream peer disconnected: {}", e);
-                    break;
-                }
-            }
-            Err(e) => {
-                error!("RX stream read error on {}: {}", connection.id(), e);
-                break;
-            }
-        }
-    }
-}
-
-// ------------------------------------------------------------------
 // Result builders
 // ------------------------------------------------------------------
 
 pub fn build_read_result(
     outcome: ReadOutcome,
     connection_id: String,
+    name: Option<String>,
     encoding: Encoding,
     requested_timeout_ms: Option<u64>,
+    requested_no_new_rx_timeout_ms: Option<u64>,
 ) -> Result<Json<ReadResult>, String> {
     let timeout_ms = requested_timeout_ms.unwrap_or(DEFAULT_READ_TIMEOUT_MS);
-    if outcome.timed_out {
-        return Err(format!(
-            "Read timed out after {timeout_ms}ms on {connection_id}"
-        ));
-    }
     let bytes_read = outcome.bytes.len();
     let elapsed_ms = outcome.elapsed_ms;
     let data = codec::encode(encoding, &outcome.bytes)
         .map_err(|e| format!("Data encoding failed - {e}"))?;
     Ok(Json(ReadResult {
         connection_id,
+        name,
         bytes_read,
         encoding: encoding.to_string(),
         data,
         timeout_ms,
+        no_new_rx_timeout_ms: requested_no_new_rx_timeout_ms,
         elapsed_ms,
+        stop_reason: outcome.meta.stop_reason.to_string(),
+        truncated: outcome.meta.truncated,
+        bytes_observed: outcome.meta.bytes_observed,
+        bytes_returned: outcome.meta.bytes_returned,
+        matched: outcome.matched,
+        match_index: outcome.match_index,
     }))
 }
 
@@ -626,7 +404,8 @@ pub fn parse_encoding(raw: &str) -> Result<Encoding, String> {
 pub fn parse_open_args(args: OpenArgs) -> Result<ConnectionConfig, String> {
     Ok(ConnectionConfig {
         port: args.port,
-        baud_rate: args.baud_rate.0,
+        name: args.name,
+        baud_rate: args.baud_rate,
         data_bits: parse_data_bits(&args.data_bits)?,
         stop_bits: parse_stop_bits(&args.stop_bits)?,
         parity: parse_parity(&args.parity)?,
@@ -684,17 +463,13 @@ pub fn log_tool_err<E: std::fmt::Display>(op: &str, context: &str, err: E) -> St
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::flex_deserialize::FlexibleU32;
-
-    use tokio::io::AsyncWriteExt;
-
-    use crate::serial::test_support::loopback_connection;
 
     #[test]
     fn open_args_parsed_strictly() {
         let args = OpenArgs {
             port: "/dev/ttyUSB0".into(),
-            baud_rate: FlexibleU32(115200),
+            name: Some("console".into()),
+            baud_rate: 115200,
             data_bits: "8".into(),
             stop_bits: "1".into(),
             parity: "none".into(),
@@ -702,6 +477,7 @@ mod tests {
         };
         let config = parse_open_args(args).unwrap();
         assert_eq!(config.port, "/dev/ttyUSB0");
+        assert_eq!(config.name.as_deref(), Some("console"));
         assert_eq!(config.baud_rate, 115200);
     }
 
@@ -709,7 +485,8 @@ mod tests {
     fn open_args_reject_invalid_data_bits() {
         let args = OpenArgs {
             port: "X".into(),
-            baud_rate: FlexibleU32(9600),
+            name: None,
+            baud_rate: 9600,
             data_bits: "9".into(),
             stop_bits: "1".into(),
             parity: "none".into(),
@@ -733,50 +510,105 @@ mod tests {
     }
 
     #[test]
-    fn build_read_result_timeout_returns_err() {
+    fn build_read_result_timeout_returns_success_with_stop_reason() {
         let outcome = ReadOutcome {
             bytes: Vec::new(),
-            timed_out: true,
             elapsed_ms: 250,
+            meta: RxStopMetadata::timeout(0),
+            matched: false,
+            match_index: None,
         };
-        match build_read_result(outcome, "abc".into(), Encoding::Utf8, Some(250)) {
-            Err(err) => {
-                assert!(err.contains("timed out"));
-                assert!(err.contains("250ms"));
-            }
-            Ok(_) => panic!("timeout must return Err"),
-        }
+        let Json(result) =
+            build_read_result(outcome, "abc".into(), None, Encoding::Utf8, Some(250), None)
+                .expect("timeout must return Ok");
+        assert_eq!(result.stop_reason, "timeout");
+        assert_eq!(result.bytes_read, 0);
+        assert!(!result.matched);
+        assert!(result.match_index.is_none());
     }
 
     #[test]
-    fn build_read_result_timeout_uses_default() {
+    fn build_read_result_timeout_uses_default_timeout_ms() {
         let outcome = ReadOutcome {
             bytes: Vec::new(),
-            timed_out: true,
             elapsed_ms: DEFAULT_READ_TIMEOUT_MS,
+            meta: RxStopMetadata::timeout(0),
+            matched: false,
+            match_index: None,
         };
-        match build_read_result(outcome, "abc".into(), Encoding::Hex, None) {
-            Err(err) => {
-                assert!(err.contains("timed out"));
-                assert!(err.contains(&DEFAULT_READ_TIMEOUT_MS.to_string()));
-            }
-            Ok(_) => panic!("timeout must return Err"),
-        }
+        let Json(result) =
+            build_read_result(outcome, "abc".into(), None, Encoding::Hex, None, None)
+                .expect("timeout must return Ok");
+        assert_eq!(result.timeout_ms, DEFAULT_READ_TIMEOUT_MS);
+        assert_eq!(result.stop_reason, "timeout");
     }
 
     #[test]
     fn build_read_result_data_branch_encodes_hex() {
         let outcome = ReadOutcome {
             bytes: b"Hi".to_vec(),
-            timed_out: false,
             elapsed_ms: 42,
+            meta: RxStopMetadata::data_complete(2, 2),
+            matched: false,
+            match_index: None,
         };
-        let Json(result) = build_read_result(outcome, "abc".into(), Encoding::Hex, Some(500))
-            .expect("data result must build");
+        let Json(result) =
+            build_read_result(outcome, "abc".into(), None, Encoding::Hex, Some(500), None)
+                .expect("data result must build");
         assert_eq!(result.bytes_read, 2);
         assert_eq!(result.encoding, "hex");
         assert_eq!(result.data, "48 69");
         assert_eq!(result.elapsed_ms, 42);
+        assert_eq!(result.stop_reason, "data_complete");
+        assert!(!result.truncated);
+        assert_eq!(result.bytes_observed, 2);
+        assert_eq!(result.bytes_returned, 2);
+        assert!(!result.matched);
+        assert!(result.match_index.is_none());
+    }
+
+    #[test]
+    fn build_read_result_data_branch_includes_name() {
+        let outcome = ReadOutcome {
+            bytes: b"Hi".to_vec(),
+            elapsed_ms: 42,
+            meta: RxStopMetadata::data_complete(2, 2),
+            matched: false,
+            match_index: None,
+        };
+        let Json(result) = build_read_result(
+            outcome,
+            "abc".into(),
+            Some("console".into()),
+            Encoding::Hex,
+            Some(500),
+            None,
+        )
+        .expect("data result must build");
+        assert_eq!(result.name.as_deref(), Some("console"));
+    }
+
+    #[test]
+    fn build_read_result_match_fields_populated() {
+        let outcome = ReadOutcome {
+            bytes: b"hello OK> world".to_vec(),
+            elapsed_ms: 100,
+            meta: RxStopMetadata::match_found(16, 16),
+            matched: true,
+            match_index: Some(6),
+        };
+        let Json(result) = build_read_result(
+            outcome,
+            "conn".into(),
+            None,
+            Encoding::Utf8,
+            Some(1000),
+            None,
+        )
+        .expect("matched read result must build");
+        assert!(result.matched);
+        assert_eq!(result.match_index, Some(6));
+        assert_eq!(result.stop_reason, "match_found");
     }
 
     #[test]
@@ -800,49 +632,6 @@ mod tests {
     #[test]
     fn find_subslice_needle_longer_than_haystack() {
         assert_eq!(find_subslice(b"hi", b"hello"), None);
-    }
-
-    #[tokio::test]
-    async fn read_until_pattern_matches_when_pattern_arrives() {
-        let (conn, mut peer) = loopback_connection("test");
-        let writer = tokio::spawn(async move {
-            peer.write_all(b"junk before OK> and tail").await.unwrap();
-        });
-        let ct = tokio_util::sync::CancellationToken::new();
-        let outcome = read_until_pattern(&conn, b"OK>", 1_000, 1024, &ct, None, None)
-            .await
-            .unwrap();
-        writer.await.unwrap();
-        assert_eq!(outcome.match_index, Some(12));
-        assert!(!outcome.timed_out);
-        assert!(outcome.bytes.starts_with(b"junk before OK>"));
-    }
-
-    #[tokio::test]
-    async fn read_until_pattern_times_out_with_no_match() {
-        let (conn, mut peer) = loopback_connection("test");
-        peer.write_all(b"only noise here").await.unwrap();
-        let ct = tokio_util::sync::CancellationToken::new();
-        let outcome = read_until_pattern(&conn, b"OK>", 60, 1024, &ct, None, None)
-            .await
-            .unwrap();
-        assert!(outcome.timed_out);
-        assert!(outcome.match_index.is_none());
-        assert!(outcome.bytes.windows(3).all(|w| w != b"OK>"));
-    }
-
-    #[tokio::test]
-    async fn read_until_pattern_stops_at_max_bytes() {
-        let (conn, mut peer) = loopback_connection("test");
-        let blob = vec![b'.'; 600];
-        peer.write_all(&blob).await.unwrap();
-        let ct = tokio_util::sync::CancellationToken::new();
-        let outcome = read_until_pattern(&conn, b"OK>", 1_000, 256, &ct, None, None)
-            .await
-            .unwrap();
-        assert!(!outcome.timed_out);
-        assert!(outcome.match_index.is_none());
-        assert_eq!(outcome.bytes.len(), 256);
     }
 
     #[test]
@@ -871,5 +660,34 @@ mod tests {
         assert!(clamp_poll_interval_or_err("test.poll_ms", 10, MIN_POLL_INTERVAL_MS).is_ok());
         assert!(clamp_poll_interval_or_err("test.poll_ms", 9, MIN_POLL_INTERVAL_MS).is_err());
         assert!(clamp_poll_interval_or_err("test.poll_ms", 0, MIN_POLL_INTERVAL_MS).is_err());
+    }
+
+    #[test]
+    fn shape_match_context_at_offset_zero_with_context() {
+        let shaped = crate::match_config::shape_match_context(b"OK>rest", 0, 3, Some(128));
+        assert_eq!(shaped.data, b"OK>");
+        assert_eq!(shaped.match_index, 0);
+    }
+
+    #[test]
+    fn shape_match_context_larger_than_pre_match() {
+        let shaped = crate::match_config::shape_match_context(b"ABOK>x", 2, 3, Some(100));
+        assert_eq!(shaped.data, b"ABOK>");
+        assert_eq!(shaped.match_index, 2);
+    }
+
+    #[test]
+    fn shape_match_context_exact_pre_match() {
+        let shaped = crate::match_config::shape_match_context(b"XXOK>", 2, 3, Some(2));
+        assert_eq!(shaped.data, b"XXOK>");
+        assert_eq!(shaped.match_index, 2);
+    }
+
+    #[test]
+    fn shape_match_context_truncates_post_match() {
+        let shaped = crate::match_config::shape_match_context(b"preOK>post123", 3, 3, Some(3));
+        // pre_start=0, match_end=6, shaped="preOK>" (6 bytes)
+        assert_eq!(shaped.data, b"preOK>");
+        assert_eq!(shaped.match_index, 3);
     }
 }

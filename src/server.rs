@@ -16,6 +16,7 @@ use rmcp::{
 
 use tracing::{debug, info};
 
+use crate::buffer_budget::BufferBudget;
 use crate::rx_session::RxSessionManager;
 use crate::security::SecurityManager;
 use crate::serial::{ConnectionManager, PortInfo};
@@ -67,6 +68,7 @@ pub struct SerialHandler {
     security: SecurityManager,
     subscribers: Arc<tokio::sync::Mutex<HashMap<String, usize>>>,
     rx_sessions: Arc<RxSessionManager>,
+    budget: Arc<dyn BufferBudget>,
 }
 
 #[tool_router]
@@ -94,10 +96,16 @@ impl SerialHandler {
         connections: Arc<ConnectionManager>,
         security: SecurityManager,
     ) -> Self {
-        Self::with_manager_security_and_streams(
+        use crate::limits::{DEFAULT_MAX_PROGRAM_BUFFERED_BYTES, DEFAULT_MAX_TOOL_BUFFERED_BYTES};
+        let budget: Arc<dyn BufferBudget> = Arc::new(crate::buffer_budget::AtomicBudget::new(
+            DEFAULT_MAX_PROGRAM_BUFFERED_BYTES,
+            DEFAULT_MAX_TOOL_BUFFERED_BYTES,
+        ));
+        Self::with_manager_security_streams_and_budget(
             connections,
             security,
             Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            budget,
         )
     }
 
@@ -106,12 +114,27 @@ impl SerialHandler {
         security: SecurityManager,
         streams: StreamRegistry,
     ) -> Self {
+        use crate::limits::{DEFAULT_MAX_PROGRAM_BUFFERED_BYTES, DEFAULT_MAX_TOOL_BUFFERED_BYTES};
+        let budget: Arc<dyn BufferBudget> = Arc::new(crate::buffer_budget::AtomicBudget::new(
+            DEFAULT_MAX_PROGRAM_BUFFERED_BYTES,
+            DEFAULT_MAX_TOOL_BUFFERED_BYTES,
+        ));
+        Self::with_manager_security_streams_and_budget(connections, security, streams, budget)
+    }
+
+    pub fn with_manager_security_streams_and_budget(
+        connections: Arc<ConnectionManager>,
+        security: SecurityManager,
+        streams: StreamRegistry,
+        budget: Arc<dyn BufferBudget>,
+    ) -> Self {
         Self {
             connections,
             streams,
             security,
             subscribers: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             rx_sessions: Arc::new(RxSessionManager::new()),
+            budget,
         }
     }
 
@@ -198,7 +221,16 @@ impl SerialHandler {
         peer: rmcp::Peer<RoleServer>,
         Parameters(args): Parameters<ReadArgs>,
     ) -> Result<Json<ReadResult>, String> {
-        io_ops::read(&self.connections, &self.rx_sessions, meta, ct, peer, args).await
+        io_ops::read(
+            &self.connections,
+            &self.rx_sessions,
+            &self.budget,
+            meta,
+            ct,
+            peer,
+            args,
+        )
+        .await
     }
 
     #[tool(
@@ -282,6 +314,7 @@ impl SerialHandler {
         stream_ops::subscribe(
             &self.connections,
             &self.rx_sessions,
+            &self.budget,
             &self.streams,
             args,
             meta,
@@ -321,7 +354,16 @@ impl SerialHandler {
         peer: rmcp::Peer<RoleServer>,
         Parameters(args): Parameters<WaitForArgs>,
     ) -> Result<Json<WaitForResult>, String> {
-        pattern_ops::wait_for(&self.connections, &self.rx_sessions, meta, ct, peer, args).await
+        pattern_ops::wait_for(
+            &self.connections,
+            &self.rx_sessions,
+            &self.budget,
+            meta,
+            ct,
+            peer,
+            args,
+        )
+        .await
     }
 }
 

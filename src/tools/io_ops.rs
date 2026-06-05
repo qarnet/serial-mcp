@@ -1,10 +1,11 @@
 use std::sync::Arc;
-use std::time::Instant;
 
 use rmcp::{model::Meta, Json, Peer, RoleServer};
 use tracing::{debug, info};
 
+use crate::buffer_budget::BufferBudget;
 use crate::codec;
+use crate::match_config::{validate_match_request, ByteMatcher};
 use crate::rx_session::RxSessionManager;
 use crate::serial::ConnectionManager;
 use crate::tools::helpers::{
@@ -12,10 +13,7 @@ use crate::tools::helpers::{
     parse_encoding, read_bytes_via_session, require_min_or_err, MAX_READ_BYTES, MAX_TIMEOUT_MS,
     MAX_WRITE_BYTES, MIN_READ_BYTES,
 };
-use crate::tools::types::{
-    FlushArgs, FlushResult, ReadArgs, ReadLineArgs, ReadLineResult, ReadResult, WriteArgs,
-    WriteResult,
-};
+use crate::tools::types::{FlushArgs, FlushResult, ReadArgs, ReadResult, WriteArgs, WriteResult};
 
 pub async fn write(
     connections: &Arc<ConnectionManager>,
@@ -39,6 +37,7 @@ pub async fn write(
     debug!("Wrote {} bytes to {}", bytes_written, args.connection_id);
     Ok(Json(WriteResult {
         connection_id: args.connection_id,
+        name: connection.name().map(str::to_string),
         bytes_written,
         encoding: encoding.to_string(),
     }))
@@ -47,24 +46,63 @@ pub async fn write(
 pub async fn read(
     connections: &Arc<ConnectionManager>,
     rx_sessions: &Arc<RxSessionManager>,
+    budget: &Arc<dyn BufferBudget>,
     meta: Meta,
     ct: tokio_util::sync::CancellationToken,
     peer: Peer<RoleServer>,
     args: ReadArgs,
 ) -> Result<Json<ReadResult>, String> {
     debug!(
-        "Read from {} (timeout {:?})",
-        args.connection_id, args.timeout_ms
+        "Read from {} (timeout {:?}, no_new_rx_timeout {:?})",
+        args.connection_id, args.timeout_ms, args.no_new_rx_timeout_ms
     );
 
     let encoding = parse_encoding(&args.encoding)?;
     let connection = lookup_connection(connections, &args.connection_id).await?;
-    let max_bytes = require_min_or_err("read.max_bytes", args.max_bytes.0, MIN_READ_BYTES)?;
-    let max_bytes = clamp_or_err("read.max_bytes", max_bytes, MAX_READ_BYTES)?;
-    let timeout_ms: Option<u64> = args.timeout_ms.into();
-    if let Some(ms) = timeout_ms {
-        clamp_timeout_or_err("read.timeout_ms", ms, MAX_TIMEOUT_MS)?;
+    let max_buffered_bytes = require_min_or_err(
+        "read.max_buffered_bytes",
+        args.max_buffered_bytes,
+        MIN_READ_BYTES,
+    )?;
+    let max_buffered_bytes = clamp_or_err(
+        "read.max_buffered_bytes",
+        max_buffered_bytes,
+        MAX_READ_BYTES,
+    )?;
+    if let Some(timeout_ms) = args.timeout_ms {
+        clamp_timeout_or_err("read.timeout_ms", timeout_ms, MAX_TIMEOUT_MS)?;
     }
+    if let Some(silence_ms) = args.no_new_rx_timeout_ms {
+        if silence_ms == 0 {
+            return Err("read.no_new_rx_timeout_ms must be > 0".into());
+        }
+        clamp_timeout_or_err("read.no_new_rx_timeout_ms", silence_ms, MAX_TIMEOUT_MS)?;
+    }
+
+    // Resolve matcher if provided.
+    let matcher: Option<ByteMatcher> = match &args.r#match {
+        Some(m) => Some(validate_match_request(m)?),
+        None => None,
+    };
+
+    // Reserve budget before registering consumer.
+    let _reservation = budget.try_reserve(max_buffered_bytes).map_err(|e| {
+        match e {
+            crate::buffer_budget::BufferBudgetError::OverToolLimit { requested, tool_limit } => {
+                format!("read.max_buffered_bytes={requested} exceeds per-tool limit {tool_limit}")
+            }
+            crate::buffer_budget::BufferBudgetError::ZeroRequest => {
+                "read.max_buffered_bytes must be > 0".into()
+            }
+            crate::buffer_budget::BufferBudgetError::InsufficientProgramBudget {
+                requested,
+                available,
+            } => {
+                format!("insufficient program buffer budget: requested {requested}, available {available}")
+            }
+        }
+    })?;
+
     let progress_token = meta.get_progress_token();
 
     let session = rx_sessions.get_or_create(Arc::clone(&connection)).await;
@@ -72,17 +110,26 @@ pub async fn read(
 
     let outcome = read_bytes_via_session(
         event_rx,
-        max_bytes,
-        timeout_ms,
+        max_buffered_bytes,
+        args.timeout_ms,
         &ct,
         progress_token,
         Some(&peer),
+        matcher,
+        args.no_new_rx_timeout_ms,
     )
     .await?;
 
     session.prune_consumers();
 
-    build_read_result(outcome, args.connection_id, encoding, timeout_ms)
+    build_read_result(
+        outcome,
+        args.connection_id,
+        connection.name().map(str::to_string),
+        encoding,
+        args.timeout_ms,
+        args.no_new_rx_timeout_ms,
+    )
 }
 
 pub async fn flush(
@@ -103,76 +150,7 @@ pub async fn flush(
 
     Ok(Json(FlushResult {
         connection_id: args.connection_id,
+        name: connection.name().map(str::to_string),
         target: args.target,
-    }))
-}
-
-pub async fn read_line(
-    connections: &Arc<ConnectionManager>,
-    meta: Meta,
-    ct: tokio_util::sync::CancellationToken,
-    peer: Peer<RoleServer>,
-    args: ReadLineArgs,
-) -> Result<Json<ReadLineResult>, String> {
-    debug!(
-        "read_line {} (timeout {:?})",
-        args.connection_id, args.timeout_ms
-    );
-
-    let encoding = parse_encoding(&args.encoding)?;
-    let connection = lookup_connection(connections, &args.connection_id).await?;
-    let _rx_lease = crate::serial::SerialConnection::acquire_rx(&connection, "read_line")?;
-    let max_bytes = require_min_or_err("read_line.max_bytes", args.max_bytes.0, MIN_READ_BYTES)?;
-    let max_bytes = clamp_or_err("read_line.max_bytes", max_bytes, MAX_WAIT_BYTES)?;
-    let timeout_ms: u64 =
-        Into::<Option<u64>>::into(args.timeout_ms).unwrap_or(DEFAULT_READ_TIMEOUT_MS);
-    clamp_timeout_or_err("read_line.timeout_ms", timeout_ms, MAX_TIMEOUT_MS)?;
-
-    let progress_token = meta.get_progress_token();
-    let start = Instant::now();
-    let outcome = read_until_pattern(
-        &connection,
-        b"\n",
-        timeout_ms,
-        max_bytes,
-        &ct,
-        progress_token,
-        Some(&peer),
-    )
-    .await?;
-
-    let elapsed_ms = start.elapsed().as_millis() as u64;
-
-    if outcome.timed_out {
-        return Err(format!(
-            "read_line timed out after {timeout_ms}ms on {}",
-            args.connection_id
-        ));
-    }
-
-    let match_idx = outcome.match_index.unwrap_or(outcome.bytes.len());
-    let mut line_bytes = Vec::from(&outcome.bytes[..match_idx]);
-    let trailing = outcome.bytes.get(match_idx + 1..).unwrap_or(&[]);
-    connection.unread(trailing).await;
-    if line_bytes.last() == Some(&b'\r') {
-        line_bytes.pop();
-    }
-
-    let bytes_read = line_bytes.len();
-    let data =
-        codec::encode(encoding, &line_bytes).map_err(|e| format!("Data encoding failed - {e}"))?;
-
-    info!(
-        "read_line {} returned {bytes_read} bytes in {elapsed_ms}ms",
-        args.connection_id
-    );
-
-    Ok(Json(ReadLineResult {
-        connection_id: args.connection_id,
-        bytes_read,
-        encoding: encoding.to_string(),
-        line: data,
-        timeout_ms,
-        elapsed_ms,
     }))
 }

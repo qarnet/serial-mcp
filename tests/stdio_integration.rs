@@ -4,8 +4,10 @@
 //! connect via stdin/stdout pipes using rmcp's `TokioChildProcess` transport,
 //! and assert the MCP surface works identically to the HTTP variant.
 
+use std::time::Duration;
+
 use rmcp::{
-    model::PaginatedRequestParams,
+    model::{CallToolRequestParams, PaginatedRequestParams},
     transport::{child_process::TokioChildProcess, ConfigureCommandExt},
     ServiceExt,
 };
@@ -13,16 +15,15 @@ use tokio::process::Command;
 
 const EXPECTED_TOOLS: &[&str] = &[
     "list_ports",
-    "get_version",
+    "list_connections",
     "open",
     "close",
     "write",
     "read",
-    "read_line",
     "flush",
     "set_dtr_rts",
+    "set_flow_control",
     "send_break",
-    "wait_for",
     "subscribe",
     "unsubscribe",
 ];
@@ -70,7 +71,7 @@ async fn stdio_initialize_handshake_succeeds() {
 }
 
 #[tokio::test]
-async fn stdio_list_tools_returns_all_thirteen_tools() {
+async fn stdio_list_tools_returns_all_twelve_tools() {
     let client = start_stdio_client().await;
 
     let result = client
@@ -108,6 +109,110 @@ async fn stdio_list_resources_returns_statics_and_templates() {
         2,
         "expected 2 resource templates (connection + raw)"
     );
+
+    client.cancel().await.ok();
+}
+
+#[tokio::test]
+#[ignore = "requires hardware loopback device"]
+async fn stdio_full_connection_lifecycle_with_hardware() {
+    let port = std::env::var("SERIAL_MCP_TEST_PORT").unwrap_or_else(|_| "/dev/ttyACM0".to_string());
+
+    build_stdio_server();
+
+    let cmd = Command::new(
+        std::env::current_dir()
+            .unwrap()
+            .join("target/debug/serial-mcp"),
+    )
+    .configure(|cmd| {
+        cmd.env("RUST_LOG", "off");
+    });
+
+    let transport = TokioChildProcess::new(cmd).expect("spawn stdio server");
+
+    let client = ().serve(transport).await.expect("initialize client");
+
+    // Open the hardware port
+    let open = client
+        .call_tool(
+            CallToolRequestParams::new("open").with_arguments(
+                serde_json::json!({
+                    "port": &port,
+                    "baud_rate": 115200,
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+            ),
+        )
+        .await
+        .unwrap();
+    assert_ne!(open.is_error, Some(true), "open failed: {open:?}");
+    let structured = open.structured_content.expect("structured");
+    let conn_id = structured["connection_id"].as_str().unwrap();
+
+    // Write test data
+    let write = client
+        .call_tool(
+            CallToolRequestParams::new("write").with_arguments(
+                serde_json::json!({
+                    "connection_id": conn_id,
+                    "data": "hello-stdio",
+                    "encoding": "utf8",
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+            ),
+        )
+        .await
+        .unwrap();
+    assert_ne!(write.is_error, Some(true), "write failed: {write:?}");
+
+    // Give time for loopback
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Read back the data
+    let read = client
+        .call_tool(
+            CallToolRequestParams::new("read").with_arguments(
+                serde_json::json!({
+                    "connection_id": conn_id,
+                    "timeout_ms": 1000,
+                    "max_buffered_bytes": 64,
+                    "encoding": "utf8",
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+            ),
+        )
+        .await
+        .unwrap();
+    assert_ne!(read.is_error, Some(true), "read failed: {read:?}");
+    let structured = read.structured_content.expect("structured");
+    let data = structured["data"].as_str().unwrap();
+    assert!(
+        data.contains("hello-stdio"),
+        "expected 'hello-stdio' in read data, got {data:?}"
+    );
+
+    // Close the connection
+    let close = client
+        .call_tool(
+            CallToolRequestParams::new("close").with_arguments(
+                serde_json::json!({
+                    "connection_id": conn_id,
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+            ),
+        )
+        .await
+        .unwrap();
+    assert_ne!(close.is_error, Some(true), "close failed: {close:?}");
 
     client.cancel().await.ok();
 }
