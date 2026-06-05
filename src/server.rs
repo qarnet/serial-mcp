@@ -18,7 +18,7 @@ use tracing::{debug, info};
 
 use crate::rx_session::RxSessionManager;
 use crate::security::SecurityManager;
-use crate::serial::{ConnectionManager, ConnectionSummary, PortInfo, SerialConnection};
+use crate::serial::{ConnectionManager, PortInfo};
 
 use crate::prompts::types::*;
 use crate::prompts::{diagnose, interactive};
@@ -262,7 +262,7 @@ impl SerialHandler {
     }
 
     #[tool(
-        description = "Subscribe to a connection: when timeout_ms is set, blocks for that duration collecting data and returns it inline. When omitted, a background task reads bytes in chunks and forwards them to the client as MCP `notifications/message` events with logger=\"serial:<connection_id>\". Replaces any prior subscription on the same connection. Stop with unsubscribe or by closing the connection.",
+        description = "Subscribe to a connection: starts a background stream that forwards received bytes as MCP `notifications/message` events with logger=\"serial:<connection_id>\". When timeout_ms is set, the stream auto-stops after that duration. When omitted, the stream runs until unsubscribe, connection close, or error. Replaces any prior subscription on the same connection. A final notification with stop_reason is emitted when the stream ends.",
         title = "Subscribe to RX Stream",
         annotations(
             destructive_hint = false,
@@ -279,7 +279,17 @@ impl SerialHandler {
         Parameters(args): Parameters<SubscribeArgs>,
         ctx: RequestContext<RoleServer>,
     ) -> Result<Json<SubscribeResult>, String> {
-        stream_ops::subscribe(&self.connections, &self.streams, args, meta, ct, peer, ctx).await
+        stream_ops::subscribe(
+            &self.connections,
+            &self.rx_sessions,
+            &self.streams,
+            args,
+            meta,
+            ct,
+            peer,
+            ctx,
+        )
+        .await
     }
 
     #[tool(
@@ -295,7 +305,7 @@ impl SerialHandler {
         &self,
         Parameters(args): Parameters<UnsubscribeArgs>,
     ) -> Result<Json<UnsubscribeResult>, String> {
-        stream_ops::unsubscribe(&self.streams, args).await
+        stream_ops::unsubscribe(&self.connections, &self.rx_sessions, &self.streams, args).await
     }
 
     #[tool(

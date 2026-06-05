@@ -106,6 +106,15 @@ impl ConsumerRegistry {
         self.blocking.retain(|c| c.try_send(event.clone()));
         self.streaming.retain(|c| c.try_send(event.clone()));
     }
+
+    fn prune_closed(&mut self) {
+        self.blocking.retain(|c| c.tx.is_closed());
+        self.streaming.retain(|c| c.tx.is_closed());
+    }
+
+    fn is_empty(&self) -> bool {
+        self.blocking.is_empty() && self.streaming.is_empty()
+    }
 }
 
 // ---- Per-connection session ------------------------------------------------
@@ -119,7 +128,7 @@ pub struct RxSession {
     connection: Arc<SerialConnection>,
     consumers: Arc<StdMutex<ConsumerRegistry>>,
     pump_task: StdMutex<Option<JoinHandle<()>>>,
-    pump_token: CancellationToken,
+    pump_token: StdMutex<CancellationToken>,
 }
 
 impl RxSession {
@@ -128,13 +137,12 @@ impl RxSession {
 
     pub fn new(connection: Arc<SerialConnection>) -> Self {
         let connection_id = connection.id().to_string();
-        let pump_token = CancellationToken::new();
         Self {
             connection_id,
             connection,
             consumers: Arc::new(StdMutex::new(ConsumerRegistry::new())),
             pump_task: StdMutex::new(None),
-            pump_token,
+            pump_token: StdMutex::new(CancellationToken::new()),
         }
     }
 
@@ -145,11 +153,31 @@ impl RxSession {
     /// Ensure the pump task is running. Idempotent.
     fn ensure_pump_running(&self) {
         let mut task_slot = self.pump_task.lock().expect("pump_task mutex poisoned");
-        if task_slot.is_some() {
-            return;
+        if let Some(handle) = task_slot.take() {
+            if handle.is_finished() {
+                debug!(
+                    "rx_session: previous pump for {} finished, restarting",
+                    self.connection_id
+                );
+            } else {
+                *task_slot = Some(handle);
+                return;
+            }
+        }
+        // If the previous pump was cancelled (e.g., via prune_consumers),
+        // the token is stale. Replace with a fresh one.
+        {
+            let mut token = self.pump_token.lock().expect("pump_token mutex poisoned");
+            if token.is_cancelled() {
+                *token = CancellationToken::new();
+            }
         }
         let connection = Arc::clone(&self.connection);
-        let token = self.pump_token.clone();
+        let token = self
+            .pump_token
+            .lock()
+            .expect("pump_token mutex poisoned")
+            .clone();
         let consumers = Arc::clone(&self.consumers);
         let handle = tokio::spawn(pump_loop(connection, token, consumers));
         *task_slot = Some(handle);
@@ -193,13 +221,38 @@ impl RxSession {
         rx
     }
 
+    /// Prune consumers whose receivers have been dropped, and if no
+    /// consumers remain, cancel the pump token so it exits promptly.
+    ///
+    /// Call this after removing a stream handle (e.g., unsubscribe) so
+    /// the pump does not keep reading serial data that other direct-read
+    /// tools (read, wait_for) need. Until PLAN 1c/1d migrate those tools
+    /// onto RxSession, this avoids RX data starvation.
+    pub fn prune_consumers(&self) {
+        let mut reg = self.consumers.lock().expect("consumers mutex poisoned");
+        reg.prune_closed();
+        if reg.is_empty() {
+            self.pump_token
+                .lock()
+                .expect("pump_token mutex poisoned")
+                .cancel();
+            debug!(
+                "rx_session: pump cancelled for {} (no consumers after prune)",
+                self.connection_id
+            );
+        }
+    }
+
     /// Signal the pump to stop and notify all consumers with [`RxEvent::Closed`].
     ///
     /// This only cancels the pump token — it does **not** wait for the pump
     /// task to finish. Call [`Self::join_pump`] after shutdown to await
     /// pump exit. Safe to call multiple times.
     pub fn shutdown(&self) {
-        self.pump_token.cancel();
+        self.pump_token
+            .lock()
+            .expect("pump_token mutex poisoned")
+            .cancel();
         self.consumers
             .lock()
             .expect("consumers mutex poisoned")
@@ -247,13 +300,23 @@ async fn pump_loop(
             res = connection.read(&mut buf, Some(100)) => res,
         };
         match read_result {
-            Ok(0) | Err(crate::error::SerialError::ReadTimeout) => continue,
+            Ok(0) | Err(crate::error::SerialError::ReadTimeout) => {
+                let mut reg = consumers.lock().expect("consumers mutex poisoned");
+                reg.prune_closed();
+                if reg.is_empty() {
+                    info!("rx_session: pump for {conn_id} exiting (no consumers)");
+                    break;
+                }
+                continue;
+            }
             Ok(n) => {
                 let chunk = buf[..n].to_vec();
-                consumers
-                    .lock()
-                    .expect("consumers mutex poisoned")
-                    .fanout(RxEvent::Data(chunk));
+                let mut reg = consumers.lock().expect("consumers mutex poisoned");
+                reg.fanout(RxEvent::Data(chunk));
+                if reg.is_empty() {
+                    info!("rx_session: pump for {conn_id} exiting (no consumers)");
+                    break;
+                }
             }
             Err(e) => {
                 error!("rx_session: read error on {conn_id}: {e}");
@@ -331,6 +394,11 @@ impl RxSessionManager {
     pub async fn count(&self) -> usize {
         self.sessions.lock().await.len()
     }
+
+    /// Look up an existing session by connection id, if one exists.
+    pub async fn get(&self, connection_id: &str) -> Option<Arc<RxSession>> {
+        self.sessions.lock().await.get(connection_id).cloned()
+    }
 }
 
 // ---- Tests -----------------------------------------------------------------
@@ -376,10 +444,18 @@ mod tests {
         let session = mgr.get_or_create(Arc::clone(&conn)).await;
         let id = session.connection_id().to_string();
         let _rx = session.register_blocking();
-        assert!(!session.pump_token.is_cancelled());
+        assert!(!session
+            .pump_token
+            .lock()
+            .expect("pump_token")
+            .is_cancelled());
         mgr.remove(&id).await;
         assert_eq!(mgr.count().await, 0);
-        assert!(session.pump_token.is_cancelled());
+        assert!(session
+            .pump_token
+            .lock()
+            .expect("pump_token")
+            .is_cancelled());
         assert!(
             session.pump_task.lock().expect("pump_task").is_none(),
             "pump task handle should be consumed after join"
@@ -409,9 +485,17 @@ mod tests {
         let conn = Arc::new(conn);
         let session = RxSession::new(conn);
         let _rx = session.register_blocking();
-        assert!(!session.pump_token.is_cancelled());
+        assert!(!session
+            .pump_token
+            .lock()
+            .expect("pump_token")
+            .is_cancelled());
         session.shutdown();
-        assert!(session.pump_token.is_cancelled());
+        assert!(session
+            .pump_token
+            .lock()
+            .expect("pump_token")
+            .is_cancelled());
     }
 
     #[tokio::test]
@@ -466,9 +550,17 @@ mod tests {
         let session = mgr.get_or_create(Arc::clone(&conn)).await;
         let conn_id = session.connection_id().to_string();
         let _rx = session.register_blocking();
-        assert!(!session.pump_token.is_cancelled());
+        assert!(!session
+            .pump_token
+            .lock()
+            .expect("pump_token")
+            .is_cancelled());
         mgr.remove(&conn_id).await;
-        assert!(session.pump_token.is_cancelled());
+        assert!(session
+            .pump_token
+            .lock()
+            .expect("pump_token")
+            .is_cancelled());
         assert_eq!(mgr.count().await, 0);
         assert!(
             session.pump_task.lock().expect("pump_task").is_none(),
@@ -531,7 +623,11 @@ mod tests {
         session.shutdown();
         session.shutdown();
         session.shutdown();
-        assert!(session.pump_token.is_cancelled());
+        assert!(session
+            .pump_token
+            .lock()
+            .expect("pump_token")
+            .is_cancelled());
         let events = collect_events(&mut rx);
         let closed_count = events
             .iter()
@@ -566,7 +662,11 @@ mod tests {
                 "pump handle should be consumed after remove on iteration {i}"
             );
             assert!(
-                session.pump_token.is_cancelled(),
+                session
+                    .pump_token
+                    .lock()
+                    .expect("pump_token")
+                    .is_cancelled(),
                 "pump token should be cancelled after remove on iteration {i}"
             );
             assert_eq!(mgr.count().await, 0);

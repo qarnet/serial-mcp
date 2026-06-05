@@ -453,19 +453,18 @@ async fn subscribe_then_peer_write_pushes_notification() {
 }
 
 #[tokio::test]
-async fn subscribe_with_timeout_collects_and_returns_data() {
+async fn subscribe_with_timeout_auto_stops_in_background() {
     let manager = Arc::new(ConnectionManager::new());
-    let (conn, mut peer) = loopback_connection("loop-sub-blocking");
+    let (conn, mut peer) = loopback_connection("loop-sub-timed");
     let connection_id = manager.insert(conn).await.unwrap();
 
     let server = TestServer::start_with(manager).await;
-    let (client, _rx) = connect_client(&server).await.unwrap();
+    let (client, mut rx) = connect_client(&server).await.unwrap();
 
     // Pre-fill the duplex buffer so data is immediately available when
-    // subscribe starts its poll loop.
-    peer.write_all(b"hello-blocking").await.unwrap();
+    // subscribe starts.
+    peer.write_all(b"hello-timed").await.unwrap();
     peer.flush().await.unwrap();
-    drop(peer);
 
     let result = client
         .peer()
@@ -475,6 +474,7 @@ async fn subscribe_with_timeout_collects_and_returns_data() {
                 "connection_id": connection_id,
                 "timeout_ms": 500,
                 "encoding": "utf8",
+                "poll_interval_ms": 50,
             }),
         ))
         .await
@@ -482,10 +482,26 @@ async fn subscribe_with_timeout_collects_and_returns_data() {
 
     assert_ne!(result.is_error, Some(true), "{result:?}");
     let structured = result.structured_content.expect("structured content");
-    assert_eq!(structured["data"], json!("hello-blocking"));
-    assert!(structured.get("bytes_read").is_some());
-    assert!(structured.get("elapsed_ms").is_some());
-    assert_eq!(structured["timeout_ms"], json!(500));
+    // Both subscribe modes now return immediate ack; data is always null.
+    assert!(structured["data"].is_null(), "data must be null in ack");
+    assert!(
+        structured["bytes_read"].is_null(),
+        "bytes_read must be null in ack"
+    );
+    assert!(
+        structured["elapsed_ms"].is_null(),
+        "elapsed_ms must be null in ack"
+    );
+
+    // Data arrives as a background notification.
+    let event = next_notification(&mut rx, Duration::from_secs(2))
+        .await
+        .unwrap();
+    let data = event.data.as_object().unwrap();
+    assert_eq!(
+        data["data"],
+        serde_json::Value::String("hello-timed".into())
+    );
 
     client.cancel().await.ok();
 }

@@ -168,7 +168,7 @@ async fn protocol_emulator_workflow() {
         "ports must be an array"
     );
 
-    // ---- Stage 2: write + subscribe (blocking mode) ----
+    // ---- Stage 2: write + subscribe (background mode) ----
     let _flush = client
         .peer()
         .call_tool(tool_request(
@@ -198,6 +198,8 @@ async fn protocol_emulator_workflow() {
         "expected >=9 bytes written"
     );
 
+    // Subscribe is always background after PLAN 1b. Data arrives as
+    // notifications rather than inline in the tool result.
     let sub_result = client
         .peer()
         .call_tool(tool_request(
@@ -206,30 +208,59 @@ async fn protocol_emulator_workflow() {
                 "connection_id": connection_id,
                 "timeout_ms": 3000,
                 "encoding": "utf8",
+                "poll_interval_ms": 50,
             }),
         ))
         .await
         .unwrap();
     assert_ne!(sub_result.is_error, Some(true), "{sub_result:?}");
     let sub_structured = sub_result.structured_content.expect("structured");
+    // Subscribe always returns immediate ack; data/bytes_read/elapsed_ms are null.
     assert!(
-        !sub_structured["data"].is_null(),
-        "blocking subscribe must return data"
+        sub_structured["data"].is_null(),
+        "subscribe ack data must be null"
     );
-    let data = sub_structured["data"].as_str().unwrap();
-    assert!(data.contains("T=26.75"), "data must contain temp");
-    assert!(data.contains("H=53.30"), "data must contain humidity");
-    assert!(data.contains("P=980.9"), "data must contain pressure");
-    assert!(data.contains("C=409"), "data must contain co2");
-    assert!(
-        sub_structured["bytes_read"].as_u64().unwrap_or(0) > 0,
-        "bytes_read must be > 0"
-    );
-    assert!(
-        sub_structured["elapsed_ms"].as_u64().unwrap_or(0) > 0,
-        "elapsed_ms must be > 0"
-    );
-    assert_eq!(sub_structured["timeout_ms"], json!(3000));
+
+    // Collect data from background notifications.
+    let mut collected = String::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        match tokio::time::timeout(remaining, rx.recv()).await {
+            Ok(Some(event)) => {
+                if let Some(data_str) = event.data.get("data").and_then(|v| v.as_str()) {
+                    collected.push_str(data_str);
+                    if collected.contains("T=26.75")
+                        && collected.contains("H=53.30")
+                        && collected.contains("P=980.9")
+                        && collected.contains("C=409")
+                    {
+                        break;
+                    }
+                }
+            }
+            _ => break,
+        }
+    }
+    assert!(collected.contains("T=26.75"), "data must contain temp");
+    assert!(collected.contains("H=53.30"), "data must contain humidity");
+    assert!(collected.contains("P=980.9"), "data must contain pressure");
+    assert!(collected.contains("C=409"), "data must contain co2");
+
+    // Unsubscribe to stop the background stream before read/wait_for
+    // compete with the pump for serial RX data. (PLAN 1c/1d will
+    // eliminate this conflict by migrating those tools onto RxSession.)
+    client
+        .peer()
+        .call_tool(tool_request(
+            "unsubscribe",
+            json!({ "connection_id": connection_id }),
+        ))
+        .await
+        .unwrap();
 
     // ---- Stage 3: write + read (CSV) ----
     client
@@ -518,7 +549,7 @@ async fn protocol_emulator_workflow() {
         "read timeout must mention timeout"
     );
 
-    // ---- Stage 9: subscribe blocking with empty data ----
+    // ---- Stage 9: subscribe with timeout, no data ----
     client
         .peer()
         .call_tool(tool_request(
@@ -536,18 +567,24 @@ async fn protocol_emulator_workflow() {
                 "connection_id": connection_id,
                 "timeout_ms": 300,
                 "encoding": "utf8",
+                "poll_interval_ms": 50,
             }),
         ))
         .await
         .unwrap();
-    // Subscribe doesn't error on empty read; it returns what it collected.
+    // Subscribe always returns immediate ack with null data fields.
     assert_ne!(empty_sub.is_error, Some(true), "{empty_sub:?}");
     let empty_structured = empty_sub.structured_content.expect("structured");
-    assert_eq!(
-        empty_structured["bytes_read"].as_u64().unwrap_or(0),
-        0,
-        "expected 0 bytes for empty subscribe"
+    assert!(
+        empty_structured["data"].is_null(),
+        "subscribe ack data must be null"
     );
+    assert!(
+        empty_structured["bytes_read"].is_null(),
+        "subscribe ack bytes_read must be null"
+    );
+    // The stream will auto-stop after timeout in background, emitting a
+    // stop notification with bytes_read=0.
 
     // ---- Stage 10: flushes, DTR/RTS, break, unsubscribe ----
     let flush_out = client

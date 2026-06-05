@@ -635,16 +635,25 @@ fn subscribe_result_blocking_filled_fields_match_schema() {
         max_chunk_bytes: 2048,
         poll_interval_ms: 100,
         replaced_previous: true,
-        data: Some("T=21.5 H=50".into()),
-        bytes_read: Some(14),
-        elapsed_ms: Some(500),
-        timeout_ms: Some(3000),
+        data: None,
+        bytes_read: None,
+        elapsed_ms: None,
+        timeout_ms: None,
     };
     let v = serde_json::to_value(&r).unwrap();
-    assert!(v["data"].is_string());
-    assert_eq!(v["bytes_read"], 14);
-    assert_eq!(v["elapsed_ms"], 500);
-    assert_eq!(v["timeout_ms"], 3000);
+    assert!(v["data"].is_null(), "data must be null after PLAN 1b");
+    assert!(
+        v["bytes_read"].is_null(),
+        "bytes_read must be null after PLAN 1b"
+    );
+    assert!(
+        v["elapsed_ms"].is_null(),
+        "elapsed_ms must be null after PLAN 1b"
+    );
+    assert!(
+        v["timeout_ms"].is_null(),
+        "timeout_ms must be null after PLAN 1b"
+    );
     validate_schema::<SubscribeResult>(&v);
     roundtrip_stable(&r);
 }

@@ -208,8 +208,8 @@ pub struct SubscribeResult {
     #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
     pub poll_interval_ms: u64,
     pub replaced_previous: bool,
-    /// Present only when timeout_ms was set. Contains all data accumulated
-    /// during the subscription window. `null` in fire-and-forget mode.
+    /// Always `null` since PLAN 1b. Subscribe is now always background;
+    /// data arrives as notifications, not inline.
     pub data: Option<String>,
     #[schemars(schema_with = "crate::schema_helpers::option_uint_schema")]
     pub bytes_read: Option<usize>,
