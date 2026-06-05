@@ -4,15 +4,17 @@ use rmcp::{model::Meta, Json, Peer, RoleServer};
 use tracing::debug;
 
 use crate::codec;
+use crate::rx_session::RxSessionManager;
 use crate::serial::ConnectionManager;
 use crate::tools::helpers::{
-    clamp_or_err, clamp_timeout_or_err, lookup_connection, parse_encoding, read_until_pattern,
-    require_min_or_err, MAX_TIMEOUT_MS, MAX_WAIT_BYTES, MIN_WAIT_BYTES,
+    clamp_or_err, clamp_timeout_or_err, lookup_connection, parse_encoding, require_min_or_err,
+    wait_for_pattern_via_session, MAX_TIMEOUT_MS, MAX_WAIT_BYTES, MIN_WAIT_BYTES,
 };
 use crate::tools::types::{WaitForArgs, WaitForResult};
 
 pub async fn wait_for(
     connections: &Arc<ConnectionManager>,
+    rx_sessions: &Arc<RxSessionManager>,
     meta: Meta,
     ct: tokio_util::sync::CancellationToken,
     peer: Peer<RoleServer>,
@@ -40,8 +42,12 @@ pub async fn wait_for(
     let connection = lookup_connection(connections, &args.connection_id).await?;
     let _rx_lease = crate::serial::SerialConnection::acquire_rx(&connection, "wait_for")?;
     let progress_token = meta.get_progress_token();
-    let outcome = read_until_pattern(
-        &connection,
+
+    let session = rx_sessions.get_or_create(Arc::clone(&connection)).await;
+    let event_rx = session.register_blocking();
+
+    let outcome = wait_for_pattern_via_session(
+        event_rx,
         &pattern,
         timeout_ms,
         max_bytes,
@@ -50,6 +56,8 @@ pub async fn wait_for(
         Some(&peer),
     )
     .await?;
+
+    session.prune_consumers();
 
     if outcome.timed_out {
         return Err(format!(

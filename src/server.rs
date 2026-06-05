@@ -198,7 +198,7 @@ impl SerialHandler {
         peer: rmcp::Peer<RoleServer>,
         Parameters(args): Parameters<ReadArgs>,
     ) -> Result<Json<ReadResult>, String> {
-        io_ops::read(&self.connections, meta, ct, peer, args).await
+        io_ops::read(&self.connections, &self.rx_sessions, meta, ct, peer, args).await
     }
 
     #[tool(
@@ -321,7 +321,7 @@ impl SerialHandler {
         peer: rmcp::Peer<RoleServer>,
         Parameters(args): Parameters<WaitForArgs>,
     ) -> Result<Json<WaitForResult>, String> {
-        pattern_ops::wait_for(&self.connections, meta, ct, peer, args).await
+        pattern_ops::wait_for(&self.connections, &self.rx_sessions, meta, ct, peer, args).await
     }
 }
 

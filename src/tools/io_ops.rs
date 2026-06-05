@@ -5,11 +5,12 @@ use rmcp::{model::Meta, Json, Peer, RoleServer};
 use tracing::{debug, info};
 
 use crate::codec;
+use crate::rx_session::RxSessionManager;
 use crate::serial::ConnectionManager;
 use crate::tools::helpers::{
     build_read_result, clamp_or_err, clamp_timeout_or_err, log_tool_err, lookup_connection,
-    parse_encoding, read_bytes, read_until_pattern, require_min_or_err, DEFAULT_READ_TIMEOUT_MS,
-    MAX_READ_BYTES, MAX_TIMEOUT_MS, MAX_WAIT_BYTES, MAX_WRITE_BYTES, MIN_READ_BYTES,
+    parse_encoding, read_bytes_via_session, require_min_or_err, MAX_READ_BYTES, MAX_TIMEOUT_MS,
+    MAX_WRITE_BYTES, MIN_READ_BYTES,
 };
 use crate::tools::types::{
     FlushArgs, FlushResult, ReadArgs, ReadLineArgs, ReadLineResult, ReadResult, WriteArgs,
@@ -45,6 +46,7 @@ pub async fn write(
 
 pub async fn read(
     connections: &Arc<ConnectionManager>,
+    rx_sessions: &Arc<RxSessionManager>,
     meta: Meta,
     ct: tokio_util::sync::CancellationToken,
     peer: Peer<RoleServer>,
@@ -57,7 +59,6 @@ pub async fn read(
 
     let encoding = parse_encoding(&args.encoding)?;
     let connection = lookup_connection(connections, &args.connection_id).await?;
-    let _rx_lease = crate::serial::SerialConnection::acquire_rx(&connection, "read")?;
     let max_bytes = require_min_or_err("read.max_bytes", args.max_bytes.0, MIN_READ_BYTES)?;
     let max_bytes = clamp_or_err("read.max_bytes", max_bytes, MAX_READ_BYTES)?;
     let timeout_ms: Option<u64> = args.timeout_ms.into();
@@ -65,8 +66,12 @@ pub async fn read(
         clamp_timeout_or_err("read.timeout_ms", ms, MAX_TIMEOUT_MS)?;
     }
     let progress_token = meta.get_progress_token();
-    let outcome = read_bytes(
-        &connection,
+
+    let session = rx_sessions.get_or_create(Arc::clone(&connection)).await;
+    let event_rx = session.register_blocking();
+
+    let outcome = read_bytes_via_session(
+        event_rx,
         max_bytes,
         timeout_ms,
         &ct,
@@ -74,6 +79,9 @@ pub async fn read(
         Some(&peer),
     )
     .await?;
+
+    session.prune_consumers();
+
     build_read_result(outcome, args.connection_id, encoding, timeout_ms)
 }
 

@@ -108,8 +108,8 @@ impl ConsumerRegistry {
     }
 
     fn prune_closed(&mut self) {
-        self.blocking.retain(|c| c.tx.is_closed());
-        self.streaming.retain(|c| c.tx.is_closed());
+        self.blocking.retain(|c| !c.tx.is_closed());
+        self.streaming.retain(|c| !c.tx.is_closed());
     }
 
     fn is_empty(&self) -> bool {

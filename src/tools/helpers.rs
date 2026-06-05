@@ -10,8 +10,11 @@ use rmcp::{
 };
 use tracing::{error, warn};
 
+use tokio::sync::mpsc;
+
 use crate::codec::{self, Encoding};
 use crate::error::SerialError;
+use crate::rx_session::RxEvent;
 use crate::serial::{
     ConnectionConfig, ConnectionManager, DataBits, FlowControl, Parity, SerialConnection, StopBits,
 };
@@ -184,6 +187,130 @@ pub async fn read_bytes(
     })
 }
 
+pub async fn read_bytes_via_session(
+    mut event_rx: mpsc::Receiver<RxEvent>,
+    max_bytes: usize,
+    timeout_ms: Option<u64>,
+    ct: &tokio_util::sync::CancellationToken,
+    progress_token: Option<ProgressToken>,
+    peer: Option<&Peer<RoleServer>>,
+) -> Result<ReadOutcome, String> {
+    const SETTLE_MS: u64 = 50;
+
+    let effective_timeout = timeout_ms.unwrap_or(DEFAULT_READ_TIMEOUT_MS);
+    let deadline = Instant::now() + Duration::from_millis(effective_timeout);
+    let read_start = Instant::now();
+
+    let mut last_progress = Instant::now();
+    let mut accumulated: Vec<u8> = Vec::with_capacity(max_bytes);
+
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Ok(ReadOutcome {
+                bytes: accumulated,
+                timed_out: true,
+                elapsed_ms: read_start.elapsed().as_millis() as u64,
+            });
+        }
+
+        let wait = remaining.as_millis() as u64;
+        let wait = wait.clamp(1, 250);
+
+        let event = tokio::select! {
+            _ = ct.cancelled() => return Err("Cancelled".into()),
+            msg = tokio::time::timeout(Duration::from_millis(wait), event_rx.recv()) => match msg {
+                Ok(Some(e)) => e,
+                Ok(None) => return Err("Connection closed".into()),
+                Err(_) => {
+                    if let (Some(token), Some(peer)) = (progress_token.clone(), peer) {
+                        if last_progress.elapsed() >= Duration::from_millis(250) {
+                            last_progress = Instant::now();
+                            let elapsed_ms = effective_timeout.saturating_sub(
+                                deadline.saturating_duration_since(Instant::now()).as_millis() as u64
+                            );
+                            let _ = peer
+                                .notify_progress(ProgressNotificationParam {
+                                    progress_token: token,
+                                    progress: elapsed_ms as f64,
+                                    total: Some(effective_timeout as f64),
+                                    message: Some("waiting for data".into()),
+                                })
+                                .await;
+                        }
+                    }
+                    continue;
+                }
+            },
+        };
+
+        match event {
+            RxEvent::Data(chunk) => {
+                let room = max_bytes.saturating_sub(accumulated.len());
+                let take = chunk.len().min(room);
+                accumulated.extend_from_slice(&chunk[..take]);
+                break;
+            }
+            RxEvent::Closed => return Err("Connection closed".into()),
+            RxEvent::Error(msg) => return Err(log_tool_err("read", "Data reading failed", msg)),
+        }
+    }
+
+    while accumulated.len() < max_bytes {
+        let remaining = deadline
+            .saturating_duration_since(Instant::now())
+            .as_millis() as u64;
+        let settle = remaining.min(SETTLE_MS);
+        if settle == 0 {
+            break;
+        }
+        let event = tokio::select! {
+            _ = ct.cancelled() => return Err("Cancelled".into()),
+            msg = tokio::time::timeout(Duration::from_millis(settle), event_rx.recv()) => match msg {
+                Ok(Some(e)) => Some(e),
+                Ok(None) | Err(_) => None,
+            },
+        };
+        match event {
+            Some(RxEvent::Data(chunk)) => {
+                let room = max_bytes.saturating_sub(accumulated.len());
+                let take = chunk.len().min(room);
+                accumulated.extend_from_slice(&chunk[..take]);
+                if let (Some(token), Some(peer)) = (progress_token.clone(), peer) {
+                    let elapsed_ms = effective_timeout.saturating_sub(
+                        deadline
+                            .saturating_duration_since(Instant::now())
+                            .as_millis() as u64,
+                    );
+                    if last_progress.elapsed() >= Duration::from_millis(250) {
+                        last_progress = Instant::now();
+                        let _ = peer
+                            .notify_progress(ProgressNotificationParam {
+                                progress_token: token,
+                                progress: elapsed_ms as f64,
+                                total: Some(effective_timeout as f64),
+                                message: Some(format!("read {} bytes", accumulated.len())),
+                            })
+                            .await;
+                    }
+                }
+            }
+            Some(RxEvent::Closed) => break,
+            Some(RxEvent::Error(msg)) => {
+                return Err(log_tool_err("read", "Data reading failed", msg))
+            }
+            None => break,
+        }
+    }
+
+    let timed_out = false;
+    Ok(ReadOutcome {
+        bytes: accumulated,
+        timed_out,
+        elapsed_ms: read_start.elapsed().as_millis() as u64,
+    })
+}
+
 pub struct WaitOutcome {
     pub bytes: Vec<u8>,
     pub match_index: Option<usize>,
@@ -279,6 +406,101 @@ pub async fn read_until_pattern(
                 continue;
             }
             Err(e) => return Err(log_tool_err("wait_for", "Read failed during wait", e)),
+        }
+    }
+}
+
+pub async fn wait_for_pattern_via_session(
+    mut event_rx: mpsc::Receiver<RxEvent>,
+    pattern: &[u8],
+    timeout_ms: u64,
+    max_bytes: usize,
+    ct: &tokio_util::sync::CancellationToken,
+    progress_token: Option<ProgressToken>,
+    peer: Option<&Peer<RoleServer>>,
+) -> Result<WaitOutcome, String> {
+    let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+    let mut accumulated: Vec<u8> = Vec::with_capacity(max_bytes);
+
+    let mut last_progress = Instant::now();
+
+    if let (Some(token), Some(peer)) = (progress_token.clone(), peer) {
+        let _ = peer
+            .notify_progress(ProgressNotificationParam {
+                progress_token: token,
+                progress: 0.0,
+                total: Some(timeout_ms as f64),
+                message: Some("wait_for started".to_string()),
+            })
+            .await;
+    }
+
+    loop {
+        if ct.is_cancelled() {
+            return Err("Cancelled".into());
+        }
+        if let Some(idx) = find_subslice(&accumulated, pattern) {
+            return Ok(WaitOutcome {
+                bytes: accumulated,
+                match_index: Some(idx),
+                timed_out: false,
+            });
+        }
+        if accumulated.len() >= max_bytes {
+            return Ok(WaitOutcome {
+                bytes: accumulated,
+                match_index: None,
+                timed_out: false,
+            });
+        }
+        let now = Instant::now();
+        if now >= deadline {
+            return Ok(WaitOutcome {
+                bytes: accumulated,
+                match_index: None,
+                timed_out: true,
+            });
+        }
+
+        if let (Some(token), Some(peer)) = (progress_token.clone(), peer) {
+            if last_progress.elapsed() >= Duration::from_millis(250) {
+                last_progress = Instant::now();
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                let elapsed_ms = timeout_ms.saturating_sub(remaining.as_millis() as u64);
+                let _ = peer
+                    .notify_progress(ProgressNotificationParam {
+                        progress_token: token,
+                        progress: elapsed_ms as f64,
+                        total: Some(timeout_ms as f64),
+                        message: Some(format!("wait_for {} bytes", accumulated.len())),
+                    })
+                    .await;
+            }
+        }
+
+        let remaining_ms = (deadline - now).as_millis() as u64;
+        let remaining_ms = remaining_ms.clamp(1, 250);
+
+        let event = tokio::select! {
+            _ = ct.cancelled() => return Err("Cancelled".into()),
+            msg = tokio::time::timeout(Duration::from_millis(remaining_ms), event_rx.recv()) => match msg {
+                Ok(Some(e)) => Some(e),
+                Ok(None) => return Err("Connection closed".into()),
+                Err(_) => None,
+            },
+        };
+
+        match event {
+            Some(RxEvent::Data(chunk)) => {
+                let room = max_bytes.saturating_sub(accumulated.len());
+                let take = chunk.len().min(room);
+                accumulated.extend_from_slice(&chunk[..take]);
+            }
+            Some(RxEvent::Closed) => return Err("Connection closed".into()),
+            Some(RxEvent::Error(msg)) => {
+                return Err(log_tool_err("wait_for", "Read failed during wait", msg))
+            }
+            None => continue,
         }
     }
 }
