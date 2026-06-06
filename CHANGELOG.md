@@ -2,6 +2,7 @@
 
 | Version | Date | Highlights |
 |---|---|---|
+| [0.5.0](#050) | 2026-06-06 | RX redesign (Plans 1-7): session pump, unified stop controller, match options, buffer budgets, silence timeout, context shaping |
 | [0.4.1](#041) | 2026-06-04 | CI/release hardening, schema-validated config examples, docs cleanup |
 | [0.4.0](#040) | 2026-06-04 | Crate rename to `serial-mcp`, `read_line` + `get_version` tools, text encoding, RX guard, flexible args |
 | [0.3.0](#030) | 2026-05-30 | Single binary, CLI args replace env vars, multi-platform builds + crates.io |
@@ -13,6 +14,27 @@
 | [0.2.1](#021) | 2026-05-24 | MCP 2025-11-25, resource change notifications, port allowlist, stdio tests |
 | [0.2.0](#020) | 2026-05-23 | Project reset: rmcp 1.7 rewrite, 6 new tools, resources, prompts, HTTP transport |
 | [0.1.0](#010) | — | Initial release (5 tools, STM32 demo) |
+
+---
+
+## [0.5.0]
+
+Full RX subsystem redesign (Plans 1-7). Breaking internal change; no tool API removed except `wait_for`.
+
+**Added:**
+- Per-connection `RxSession` pump — a single background task reads from each serial port and fans bytes out to registered consumers. `read` and `subscribe` both consume from this pump; they never read the port directly and no longer race each other.
+- `match` option on `read` and `subscribe` — stops when a byte pattern (literal substring, regex, or hex) is found. `read` returns the matched data; `subscribe` emits a stop notification with `matched=true`, `match_index`, and optional shaped context.
+- `context_amount_of_matched_bytes` in match config — shapes pre-match context window: `"before"` returns N bytes before the match, `"around"` returns N bytes either side, `"none"` returns only the matched bytes.
+- `no_new_rx_timeout_ms` on `read` and `subscribe` — silence timeout: stops when no new bytes arrive for the specified duration. Distinct from the wall-clock `timeout_ms`.
+- `--max-program-buffered-bytes` and `--max-tool-buffered-bytes` CLI flags — global buffer budget caps. Each `read`/`subscribe` call reserves from the program budget and is bounded by the tool limit. Prevents runaway memory use under high-volume streams.
+- `RxStopController` — shared stop-condition evaluator used by both `read` and `subscribe`. Guarantees identical stop semantics for timeout, silence, match, max-buffer, connection-closed, and peer-disconnect across all RX tools.
+- Hardware integration tests for XIAO BLE (nRF52840 CDC-ACM, `tests/xiao_ble_validation.rs`) — 7 ignored tests covering match stop, silence timeout, buffer budget, and close-under-stream using the RTT feedback firmware's `spam` command.
+
+**Fixed:**
+- `subscribe(match=...)` never stopped — two bugs: (1) `RxStopController::push_data` fired `MaxBufferedBytes` when `max_bytes=0` (subscribe's unlimited mode uses 0 as sentinel); guarded with `self.max_bytes > 0`. (2) `stream_rx_via_session` called `record_data` (counters only) then consumed `match_result` in an outer `if let` before passing it to `push_data`, so the controller never saw the match; replaced with a single `push_data(n, n, match_result)` call mirroring the `read` path.
+
+**Removed:**
+- `wait_for` tool — superseded by `read(match=...)`. Removed along with dead helpers `read_bytes`, `read_until_pattern`, and `stream_rx`.
 
 ---
 

@@ -5,6 +5,7 @@ tests/proptest.proptest-regressions
 fuzz/target/
 fuzz/Cargo.lock
 opencode.json
+STATUS.md
 .idea/
 .vscode/
 .schemas/
