@@ -12,6 +12,7 @@ pub mod schema_helpers;
 pub mod security;
 pub mod serial;
 pub mod server;
+pub mod stop_controller;
 pub mod tools;
 
 pub use error::{Result, SerialError};
