@@ -144,8 +144,7 @@ async fn protocol_emulator_binary_workflow() {
     let hex_structured = hex_result.structured_content.expect("structured");
     let hex_str = hex_structured["data"].as_str().unwrap();
     let decoded =
-        serial_mcp::codec::decode(serial_mcp::codec::Encoding::Hex, hex_str)
-            .expect("hex decode");
+        serial_mcp::codec::decode(serial_mcp::codec::Encoding::Hex, hex_str).expect("hex decode");
     assert_eq!(decoded.len(), 256, "expected 256 raw bytes");
     let expected: Vec<u8> = (0u8..=255).collect();
     assert_eq!(decoded, expected, "byte values must be 0x00..0xFF");
@@ -189,9 +188,8 @@ async fn protocol_emulator_binary_workflow() {
     assert_tool_ok(&b64_result, "read base64 roundtrip");
     let b64_structured = b64_result.structured_content.expect("structured");
     let b64_str = b64_structured["data"].as_str().unwrap();
-    let decoded =
-        serial_mcp::codec::decode(serial_mcp::codec::Encoding::Base64, b64_str)
-            .expect("base64 decode");
+    let decoded = serial_mcp::codec::decode(serial_mcp::codec::Encoding::Base64, b64_str)
+        .expect("base64 decode");
     assert_eq!(decoded.len(), 256, "expected 256 raw bytes");
     assert_eq!(
         decoded, expected,

@@ -18,9 +18,7 @@ use rmcp::model::{
 use serde_json::json;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use serial_mcp::limits::{
-    MAX_READ_BYTES, MAX_STREAM_CHUNK_BYTES, MAX_TIMEOUT_MS, MAX_WRITE_BYTES,
-};
+use serial_mcp::limits::{MAX_READ_BYTES, MAX_STREAM_CHUNK_BYTES, MAX_TIMEOUT_MS, MAX_WRITE_BYTES};
 use serial_mcp::serial::{test_support::loopback_connection, ConnectionManager};
 
 mod common;

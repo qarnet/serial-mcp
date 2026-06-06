@@ -3,9 +3,7 @@ use rmcp::transport::streamable_http_server::{
 };
 use rmcp::{transport::stdio, ServiceExt};
 use serial_mcp::buffer_budget::AtomicBudget;
-use serial_mcp::limits::{
-    DEFAULT_MAX_PROGRAM_BUFFERED_BYTES, DEFAULT_MAX_TOOL_BUFFERED_BYTES,
-};
+use serial_mcp::limits::{DEFAULT_MAX_PROGRAM_BUFFERED_BYTES, DEFAULT_MAX_TOOL_BUFFERED_BYTES};
 use serial_mcp::security::SecurityManager;
 use serial_mcp::serial::ConnectionManager;
 use serial_mcp::server::StreamRegistry;
@@ -231,11 +229,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     init_tracing();
 
     let security = SecurityManager::from_patterns(&args.allowlist);
-    let budget: Arc<dyn serial_mcp::buffer_budget::BufferBudget> =
-        Arc::new(AtomicBudget::new(
-            args.max_program_buffered_bytes,
-            args.max_tool_buffered_bytes,
-        ));
+    let budget: Arc<dyn serial_mcp::buffer_budget::BufferBudget> = Arc::new(AtomicBudget::new(
+        args.max_program_buffered_bytes,
+        args.max_tool_buffered_bytes,
+    ));
 
     info!(
         "Buffer budget: program={} tool={}",
