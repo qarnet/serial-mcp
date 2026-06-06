@@ -7,9 +7,12 @@ use tracing::{debug, info};
 
 use crate::serial::{ConnectionManager, SerialConnection};
 use crate::tools::helpers::{
-    clamp_timeout_or_err, log_tool_err, lookup_connection, MAX_TIMEOUT_MS,
+    clamp_timeout_or_err, log_tool_err, lookup_connection, parse_flow_control, MAX_TIMEOUT_MS,
 };
-use crate::tools::types::{SendBreakArgs, SendBreakResult, SetDtrRtsArgs, SetDtrRtsResult};
+use crate::tools::types::{
+    SendBreakArgs, SendBreakResult, SetDtrRtsArgs, SetDtrRtsResult, SetFlowControlArgs,
+    SetFlowControlResult,
+};
 
 pub async fn set_dtr_rts(
     connections: &Arc<ConnectionManager>,
@@ -39,8 +42,38 @@ pub async fn set_dtr_rts(
 
     Ok(Json(SetDtrRtsResult {
         connection_id: args.connection_id,
+        name: connection.name().map(str::to_string),
         dtr: args.dtr,
         rts: args.rts,
+    }))
+}
+
+pub async fn set_flow_control(
+    connections: &Arc<ConnectionManager>,
+    args: SetFlowControlArgs,
+) -> Result<Json<SetFlowControlResult>, String> {
+    debug!(
+        "set_flow_control {} flow_control={}",
+        args.connection_id, args.flow_control
+    );
+
+    let flow_control = parse_flow_control(&args.flow_control)?;
+    let connection = lookup_connection(connections, &args.connection_id).await?;
+    connection
+        .set_flow_control(flow_control)
+        .await
+        .map_err(|e| {
+            log_tool_err(
+                "set_flow_control",
+                &format!("Failed to set flow control on {}", args.connection_id),
+                e,
+            )
+        })?;
+
+    Ok(Json(SetFlowControlResult {
+        connection_id: args.connection_id,
+        name: connection.name().map(str::to_string),
+        flow_control,
     }))
 }
 
@@ -53,11 +86,10 @@ pub async fn send_break(
 ) -> Result<Json<SendBreakResult>, String> {
     debug!(
         "send_break {} duration={}ms",
-        args.connection_id, args.duration_ms.0
+        args.connection_id, args.duration_ms
     );
 
-    let duration_ms = args.duration_ms.0;
-    clamp_timeout_or_err("send_break.duration_ms", duration_ms, MAX_TIMEOUT_MS)?;
+    clamp_timeout_or_err("send_break.duration_ms", args.duration_ms, MAX_TIMEOUT_MS)?;
     let connection = lookup_connection(connections, &args.connection_id).await?;
 
     struct BreakResetGuard {
@@ -100,14 +132,14 @@ pub async fn send_break(
             .notify_progress(rmcp::model::ProgressNotificationParam {
                 progress_token: token,
                 progress: 0.0,
-                total: Some(duration_ms as f64),
+                total: Some(args.duration_ms as f64),
                 message: Some("break asserted".into()),
             })
             .await;
     }
 
     let start = Instant::now();
-    let deadline = start + Duration::from_millis(duration_ms);
+    let deadline = start + Duration::from_millis(args.duration_ms);
     let mut progress_ticker = tokio::time::interval(Duration::from_millis(250));
     progress_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut progress_emitted = false;
@@ -126,7 +158,7 @@ pub async fn send_break(
                             .notify_progress(rmcp::model::ProgressNotificationParam {
                                 progress_token: token,
                                 progress: elapsed as f64,
-                                total: Some(duration_ms as f64),
+                                total: Some(args.duration_ms as f64),
                                 message: Some("holding break".into()),
                             })
                             .await;
@@ -146,15 +178,15 @@ pub async fn send_break(
 
     info!(
         "Sent break on {} for {}ms (actual {}ms)",
-        args.connection_id, duration_ms, actual_duration_ms
+        args.connection_id, args.duration_ms, actual_duration_ms
     );
 
     if let Some(token) = progress_token {
         let _ = peer
             .notify_progress(rmcp::model::ProgressNotificationParam {
                 progress_token: token,
-                progress: duration_ms as f64,
-                total: Some(duration_ms as f64),
+                progress: args.duration_ms as f64,
+                total: Some(args.duration_ms as f64),
                 message: Some("break released".into()),
             })
             .await;
@@ -162,7 +194,8 @@ pub async fn send_break(
 
     Ok(Json(SendBreakResult {
         connection_id: args.connection_id,
-        duration_ms,
+        name: connection.name().map(str::to_string),
+        duration_ms: args.duration_ms,
         actual_duration_ms,
     }))
 }

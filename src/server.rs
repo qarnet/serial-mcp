@@ -16,13 +16,16 @@ use rmcp::{
 
 use tracing::{debug, info};
 
+use crate::buffer_budget::BufferBudget;
+use crate::rx_session::RxSessionManager;
 use crate::security::SecurityManager;
-use crate::serial::{ConnectionManager, ConnectionSummary, PortInfo, SerialConnection};
+use crate::serial::{ConnectionManager, PortInfo};
+use crate::tx_session::TxSessionManager;
 
 use crate::prompts::types::*;
 use crate::prompts::{diagnose, interactive};
 use crate::tools::types::*;
-use crate::tools::{control_ops, io_ops, pattern_ops, port_ops, stream_ops};
+use crate::tools::{control_ops, io_ops, port_ops, stream_ops};
 
 /// Helper for cursor-based pagination over a vector of items.
 ///
@@ -65,6 +68,9 @@ pub struct SerialHandler {
     streams: StreamRegistry,
     security: SecurityManager,
     subscribers: Arc<tokio::sync::Mutex<HashMap<String, usize>>>,
+    rx_sessions: Arc<RxSessionManager>,
+    tx_sessions: Arc<TxSessionManager>,
+    budget: Arc<dyn BufferBudget>,
 }
 
 #[tool_router]
@@ -92,10 +98,16 @@ impl SerialHandler {
         connections: Arc<ConnectionManager>,
         security: SecurityManager,
     ) -> Self {
-        Self::with_manager_security_and_streams(
+        use crate::limits::{DEFAULT_MAX_PROGRAM_BUFFERED_BYTES, DEFAULT_MAX_TOOL_BUFFERED_BYTES};
+        let budget: Arc<dyn BufferBudget> = Arc::new(crate::buffer_budget::AtomicBudget::new(
+            DEFAULT_MAX_PROGRAM_BUFFERED_BYTES,
+            DEFAULT_MAX_TOOL_BUFFERED_BYTES,
+        ));
+        Self::with_manager_security_streams_and_budget(
             connections,
             security,
             Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            budget,
         )
     }
 
@@ -104,11 +116,28 @@ impl SerialHandler {
         security: SecurityManager,
         streams: StreamRegistry,
     ) -> Self {
+        use crate::limits::{DEFAULT_MAX_PROGRAM_BUFFERED_BYTES, DEFAULT_MAX_TOOL_BUFFERED_BYTES};
+        let budget: Arc<dyn BufferBudget> = Arc::new(crate::buffer_budget::AtomicBudget::new(
+            DEFAULT_MAX_PROGRAM_BUFFERED_BYTES,
+            DEFAULT_MAX_TOOL_BUFFERED_BYTES,
+        ));
+        Self::with_manager_security_streams_and_budget(connections, security, streams, budget)
+    }
+
+    pub fn with_manager_security_streams_and_budget(
+        connections: Arc<ConnectionManager>,
+        security: SecurityManager,
+        streams: StreamRegistry,
+        budget: Arc<dyn BufferBudget>,
+    ) -> Self {
         Self {
             connections,
             streams,
             security,
             subscribers: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            rx_sessions: Arc::new(RxSessionManager::new()),
+            tx_sessions: Arc::new(TxSessionManager::new()),
+            budget,
         }
     }
 
@@ -122,16 +151,12 @@ impl SerialHandler {
     }
 
     #[tool(
-        description = "Return the server version, package name, and a build-time git commit hash (when available). Use to confirm which version of serial-mcp is responding.",
-        title = "Get Server Version",
+        description = "List all open serial connections held by this server",
+        title = "List Open Connections",
         annotations(read_only_hint = true, open_world_hint = false)
     )]
-    async fn get_version(&self) -> Result<Json<VersionResult>, String> {
-        Ok(Json(VersionResult {
-            name: env!("CARGO_PKG_NAME").to_string(),
-            version: env!("CARGO_PKG_VERSION").to_string(),
-            commit: option_env!("GIT_HASH").map(|s| s.to_string()),
-        }))
+    async fn list_connections(&self) -> Result<Json<ListConnectionsResult>, String> {
+        port_ops::list_connections(&self.connections).await
     }
 
     #[tool(
@@ -162,6 +187,10 @@ impl SerialHandler {
     ) -> Result<Json<CloseResult>, String> {
         let connection_id = args.connection_id.clone();
         let result = port_ops::close(&self.connections, args).await?;
+        // Shut down RX session (pump + consumers) for this connection.
+        self.rx_sessions.remove(&connection_id).await;
+        // Shut down TX session (worker) for this connection.
+        self.tx_sessions.remove(&connection_id).await;
         // Abort any active RX subscription tied to this connection.
         self.streams.lock().await.remove(&connection_id);
         self.notify_resource_changed(&connection_id, &ctx).await;
@@ -177,11 +206,11 @@ impl SerialHandler {
         &self,
         Parameters(args): Parameters<WriteArgs>,
     ) -> Result<Json<WriteResult>, String> {
-        io_ops::write(&self.connections, args).await
+        io_ops::write(&self.connections, &self.tx_sessions, args).await
     }
 
     #[tool(
-        description = "Read data from a serial port connection",
+        description = "Read data from a serial port connection. With no match option, reads available bytes with timeout and burst-settle. With match, accumulates future bytes until the pattern is found, timeout, max_buffered_bytes, connection close, or cancellation. The match option specifies a literal byte-substring pattern to detect; match_encoding controls how the pattern string is decoded to raw bytes.",
         title = "Read Serial Data",
         annotations(read_only_hint = true, open_world_hint = false),
         execution(task_support = "optional")
@@ -193,23 +222,16 @@ impl SerialHandler {
         peer: rmcp::Peer<RoleServer>,
         Parameters(args): Parameters<ReadArgs>,
     ) -> Result<Json<ReadResult>, String> {
-        io_ops::read(&self.connections, meta, ct, peer, args).await
-    }
-
-    #[tool(
-        description = "Read a single line (up to \\n) from a serial port. Strips trailing \\r\\n or \\n. Blocks until newline arrives or timeout. Perfect for reading line-oriented firmware logs and REPL output.",
-        title = "Read Serial Line",
-        annotations(read_only_hint = true, open_world_hint = false),
-        execution(task_support = "optional")
-    )]
-    async fn read_line(
-        &self,
-        meta: Meta,
-        ct: tokio_util::sync::CancellationToken,
-        peer: rmcp::Peer<RoleServer>,
-        Parameters(args): Parameters<ReadLineArgs>,
-    ) -> Result<Json<ReadLineResult>, String> {
-        io_ops::read_line(&self.connections, meta, ct, peer, args).await
+        io_ops::read(
+            &self.connections,
+            &self.rx_sessions,
+            &self.budget,
+            meta,
+            ct,
+            peer,
+            args,
+        )
+        .await
     }
 
     #[tool(
@@ -221,7 +243,7 @@ impl SerialHandler {
         &self,
         Parameters(args): Parameters<FlushArgs>,
     ) -> Result<Json<FlushResult>, String> {
-        io_ops::flush(&self.connections, args).await
+        io_ops::flush(&self.connections, &self.tx_sessions, args).await
     }
 
     #[tool(
@@ -241,6 +263,22 @@ impl SerialHandler {
     }
 
     #[tool(
+        description = "Change hardware/software flow control mode on an open connection. Use flow_control='none' to ignore RTS/CTS for this session.",
+        title = "Set Flow Control",
+        annotations(
+            destructive_hint = true,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn set_flow_control(
+        &self,
+        Parameters(args): Parameters<SetFlowControlArgs>,
+    ) -> Result<Json<SetFlowControlResult>, String> {
+        control_ops::set_flow_control(&self.connections, args).await
+    }
+
+    #[tool(
         description = "Assert a BREAK condition on the TX line for duration_ms milliseconds (default 250ms), then release it. Used to signal attention on some legacy serial protocols.",
         title = "Send BREAK",
         annotations(destructive_hint = true, open_world_hint = false),
@@ -257,7 +295,7 @@ impl SerialHandler {
     }
 
     #[tool(
-        description = "Subscribe to a connection: when timeout_ms is set, blocks for that duration collecting data and returns it inline. When omitted, a background task reads bytes in chunks and forwards them to the client as MCP `notifications/message` events with logger=\"serial:<connection_id>\". Replaces any prior subscription on the same connection. Stop with unsubscribe or by closing the connection.",
+        description = "Subscribe to a connection: starts a background stream that forwards received bytes as MCP `notifications/message` events with logger=\"serial:<connection_id>\". When timeout_ms is set, the stream auto-stops after that duration. When omitted, the stream runs until unsubscribe, connection close, or error. With the match option, the stream also detects the first byte-substring match, emits a final notification with matched=true and match_index, then stops. Replaces any prior subscription on the same connection. A final notification with stop_reason is emitted when the stream ends.",
         title = "Subscribe to RX Stream",
         annotations(
             destructive_hint = false,
@@ -274,7 +312,18 @@ impl SerialHandler {
         Parameters(args): Parameters<SubscribeArgs>,
         ctx: RequestContext<RoleServer>,
     ) -> Result<Json<SubscribeResult>, String> {
-        stream_ops::subscribe(&self.connections, &self.streams, args, meta, ct, peer, ctx).await
+        stream_ops::subscribe(
+            &self.connections,
+            &self.rx_sessions,
+            &self.budget,
+            &self.streams,
+            args,
+            meta,
+            ct,
+            peer,
+            ctx,
+        )
+        .await
     }
 
     #[tool(
@@ -290,23 +339,7 @@ impl SerialHandler {
         &self,
         Parameters(args): Parameters<UnsubscribeArgs>,
     ) -> Result<Json<UnsubscribeResult>, String> {
-        stream_ops::unsubscribe(&self.streams, args).await
-    }
-
-    #[tool(
-        description = "Read bytes from a connection until a pattern matches or timeout. Pattern is interpreted with pattern_encoding (utf8/hex/base64). Returns the accumulated bytes (re-encoded with response_encoding) and the byte offset where the match started. Use for prompt/response interactions, e.g. send 'reset\\r\\n' then wait_for pattern='OK>'.",
-        title = "Wait for Serial Pattern",
-        annotations(read_only_hint = true, open_world_hint = false),
-        execution(task_support = "optional")
-    )]
-    async fn wait_for(
-        &self,
-        meta: Meta,
-        ct: tokio_util::sync::CancellationToken,
-        peer: rmcp::Peer<RoleServer>,
-        Parameters(args): Parameters<WaitForArgs>,
-    ) -> Result<Json<WaitForResult>, String> {
-        pattern_ops::wait_for(&self.connections, meta, ct, peer, args).await
+        stream_ops::unsubscribe(&self.connections, &self.rx_sessions, &self.streams, args).await
     }
 }
 
@@ -427,7 +460,7 @@ impl ServerHandler for SerialHandler {
         ))
         .with_protocol_version(ProtocolVersion::V_2025_11_25)
         .with_instructions(
-            "A serial port communication MCP server. Use list_ports to discover available serial ports, then open connections to communicate with serial devices. Resources: serial://ports, serial://connections, serial://connections/{id}. Prompts: diagnose_port, interactive_terminal. Use read_line to read line-delimited firmware logs. Subscribe to live RX bytes with the subscribe tool; the server emits notifications/message events with logger=\"serial:<connection_id>\"."
+            "A serial port communication MCP server. Use list_ports to discover available serial ports, then open connections to communicate with serial devices. Resources: serial://ports, serial://connections, serial://connections/{id}. Prompts: diagnose_port, interactive_terminal. Subscribe to live RX bytes with the subscribe tool; the server emits notifications/message events with logger=\"serial:<connection_id>\"."
                 .to_string(),
         )
     }
@@ -558,11 +591,8 @@ impl ServerHandler for SerialHandler {
                     )
                 })?;
 
-                let body = serde_json::to_string_pretty(&ConnectionSummary {
-                    connection_id: conn.id().to_string(),
-                    port: conn.port().to_string(),
-                })
-                .map_err(|e| McpError::internal_error(format!("serialize: {e}"), None))?;
+                let body = serde_json::to_string_pretty(&conn.summary())
+                    .map_err(|e| McpError::internal_error(format!("serialize: {e}"), None))?;
                 Ok(ReadResourceResult::new(vec![ResourceContents::text(
                     body, uri,
                 )
@@ -575,8 +605,6 @@ impl ServerHandler for SerialHandler {
                         Some(serde_json::json!({ "uri": uri, "connection_id": id })),
                     )
                 })?;
-                let _rx_lease = SerialConnection::acquire_rx(&conn, "resource read")
-                    .map_err(|e| McpError::internal_error(e, None))?;
                 let raw_bytes = conn
                     .read_latest(256)
                     .await

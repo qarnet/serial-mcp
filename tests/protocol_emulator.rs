@@ -168,7 +168,7 @@ async fn protocol_emulator_workflow() {
         "ports must be an array"
     );
 
-    // ---- Stage 2: write + subscribe (blocking mode) ----
+    // ---- Stage 2: write + subscribe (background mode) ----
     let _flush = client
         .peer()
         .call_tool(tool_request(
@@ -198,6 +198,8 @@ async fn protocol_emulator_workflow() {
         "expected >=9 bytes written"
     );
 
+    // Subscribe is always background after PLAN 1b. Data arrives as
+    // notifications rather than inline in the tool result.
     let sub_result = client
         .peer()
         .call_tool(tool_request(
@@ -206,30 +208,58 @@ async fn protocol_emulator_workflow() {
                 "connection_id": connection_id,
                 "timeout_ms": 3000,
                 "encoding": "utf8",
+                "poll_interval_ms": 50,
             }),
         ))
         .await
         .unwrap();
     assert_ne!(sub_result.is_error, Some(true), "{sub_result:?}");
     let sub_structured = sub_result.structured_content.expect("structured");
+    // Subscribe always returns immediate ack; data/bytes_read/elapsed_ms are null.
     assert!(
-        !sub_structured["data"].is_null(),
-        "blocking subscribe must return data"
+        sub_structured["data"].is_null(),
+        "subscribe ack data must be null"
     );
-    let data = sub_structured["data"].as_str().unwrap();
-    assert!(data.contains("T=26.75"), "data must contain temp");
-    assert!(data.contains("H=53.30"), "data must contain humidity");
-    assert!(data.contains("P=980.9"), "data must contain pressure");
-    assert!(data.contains("C=409"), "data must contain co2");
-    assert!(
-        sub_structured["bytes_read"].as_u64().unwrap_or(0) > 0,
-        "bytes_read must be > 0"
-    );
-    assert!(
-        sub_structured["elapsed_ms"].as_u64().unwrap_or(0) > 0,
-        "elapsed_ms must be > 0"
-    );
-    assert_eq!(sub_structured["timeout_ms"], json!(3000));
+
+    // Collect data from background notifications.
+    let mut collected = String::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        match tokio::time::timeout(remaining, rx.recv()).await {
+            Ok(Some(event)) => {
+                if let Some(data_str) = event.data.get("data").and_then(|v| v.as_str()) {
+                    collected.push_str(data_str);
+                    if collected.contains("T=26.75")
+                        && collected.contains("H=53.30")
+                        && collected.contains("P=980.9")
+                        && collected.contains("C=409")
+                    {
+                        break;
+                    }
+                }
+            }
+            _ => break,
+        }
+    }
+    assert!(collected.contains("T=26.75"), "data must contain temp");
+    assert!(collected.contains("H=53.30"), "data must contain humidity");
+    assert!(collected.contains("P=980.9"), "data must contain pressure");
+    assert!(collected.contains("C=409"), "data must contain co2");
+
+    // Unsubscribe to stop the background stream before read
+    // competes with the pump for serial RX data.
+    client
+        .peer()
+        .call_tool(tool_request(
+            "unsubscribe",
+            json!({ "connection_id": connection_id }),
+        ))
+        .await
+        .unwrap();
 
     // ---- Stage 3: write + read (CSV) ----
     client
@@ -261,14 +291,23 @@ async fn protocol_emulator_workflow() {
             json!({
                 "connection_id": connection_id,
                 "timeout_ms": 2000,
-                "max_bytes": 256,
+                "max_buffered_bytes": 256,
                 "encoding": "utf8",
+                "match": {
+                    "pattern": "26.75;53.30;980.9;409",
+                    "config": { "mode": "literal_substring", "pattern_encoding": "utf8" }
+                }
             }),
         ))
         .await
         .unwrap();
     assert_ne!(read_result.is_error, Some(true), "{read_result:?}");
     let read_structured = read_result.structured_content.expect("structured");
+    assert_eq!(
+        read_structured["matched"],
+        json!(true),
+        "{read_structured:?}"
+    );
     let csv_data = read_structured["data"].as_str().unwrap();
     assert!(
         csv_data.contains("26.75;53.30;980.9;409"),
@@ -306,7 +345,7 @@ async fn protocol_emulator_workflow() {
             json!({
                 "connection_id": connection_id,
                 "timeout_ms": 2000,
-                "max_bytes": 256,
+                "max_buffered_bytes": 256,
                 "encoding": "hex",
             }),
         ))
@@ -323,17 +362,7 @@ async fn protocol_emulator_workflow() {
         "hex roundtrip must contain temp"
     );
 
-    // ---- Stage 5: wait_for pattern match ----
-    client
-        .peer()
-        .call_tool(tool_request(
-            "flush",
-            json!({ "connection_id": connection_id, "target": "input" }),
-        ))
-        .await
-        .unwrap();
-
-    // ---- Stage 5: wait_for pattern match ----
+    // ---- Stage 5: read with pattern match ----
     client
         .peer()
         .call_tool(tool_request(
@@ -344,7 +373,7 @@ async fn protocol_emulator_workflow() {
         .unwrap();
 
     // Write the command; the emulator responds synchronously so data
-    // will be waiting in the serial buffer when wait_for starts.
+    // will be waiting in the serial buffer when read starts.
     client
         .peer()
         .call_tool(tool_request(
@@ -358,30 +387,31 @@ async fn protocol_emulator_workflow() {
         .await
         .unwrap();
 
-    let wait_result = client
+    let match_result = client
         .peer()
         .call_tool(tool_request(
-            "wait_for",
+            "read",
             json!({
                 "connection_id": connection_id,
-                "pattern": "T=",
                 "timeout_ms": 5000,
-                "max_bytes": 1024,
+                "max_buffered_bytes": 1024,
+                "encoding": "utf8",
+                "match": { "pattern": "T=" },
             }),
         ))
         .await
         .unwrap();
-    assert_ne!(wait_result.is_error, Some(true), "{wait_result:?}");
-    let wait_structured = wait_result.structured_content.expect("structured");
-    assert_eq!(wait_structured["matched"], json!(true));
-    assert!(wait_structured["match_index"].as_u64().is_some());
-    let wait_data = wait_structured["data"].as_str().unwrap();
+    assert_ne!(match_result.is_error, Some(true), "{match_result:?}");
+    let match_structured = match_result.structured_content.expect("structured");
+    assert_eq!(match_structured["matched"], json!(true));
+    assert!(match_structured["match_index"].as_u64().is_some());
+    let match_data = match_structured["data"].as_str().unwrap();
     assert!(
-        wait_data.contains("T=26.75"),
-        "wait_for result must contain temp"
+        match_data.contains("T=26.75"),
+        "read with match result must contain temp"
     );
 
-    // ---- Stage 6: wait_for timeout ----
+    // ---- Stage 6: read with match timeout ----
     let _flush = client
         .peer()
         .call_tool(tool_request(
@@ -394,24 +424,35 @@ async fn protocol_emulator_workflow() {
     let timeout_result = client
         .peer()
         .call_tool(tool_request(
-            "wait_for",
+            "read",
             json!({
                 "connection_id": connection_id,
-                "pattern": "IMPOSSIBLE",
                 "timeout_ms": 100,
-                "max_bytes": 64,
+                "max_buffered_bytes": 64,
+                "encoding": "utf8",
+                "match": { "pattern": "IMPOSSIBLE" },
             }),
         ))
         .await
         .unwrap();
-    assert_eq!(timeout_result.is_error, Some(true), "expected timeout");
-    let content = timeout_result
-        .content
-        .first()
-        .and_then(|c| c.as_text())
-        .map(|t| t.text.as_str())
-        .unwrap_or("");
-    assert!(content.contains("timed out"), "error must mention timeout");
+    // Pattern match timeout returns isError=false with stop_reason=timeout
+    // and matched=false (pattern not found within timeout).
+    assert_ne!(
+        timeout_result.is_error,
+        Some(true),
+        "read+match timeout should not be isError: {timeout_result:?}"
+    );
+    let timeout_structured = timeout_result.structured_content.expect("structured");
+    assert_eq!(
+        timeout_structured["stop_reason"],
+        json!("timeout"),
+        "must have stop_reason=timeout"
+    );
+    assert_eq!(
+        timeout_structured["matched"],
+        json!(false),
+        "must have matched=false"
+    );
 
     // ---- Stage 7: subscribe fire-and-forget + notifications ----
     let ff_result = client
@@ -459,18 +500,6 @@ async fn protocol_emulator_workflow() {
         "notification must contain temp"
     );
 
-    let unsub_after_ff = client
-        .peer()
-        .call_tool(tool_request(
-            "unsubscribe",
-            json!({
-                "connection_id": connection_id,
-            }),
-        ))
-        .await
-        .unwrap();
-    assert_ne!(unsub_after_ff.is_error, Some(true), "{unsub_after_ff:?}");
-
     // ---- Stage 8: read timeout ----
     client
         .peer()
@@ -501,24 +530,27 @@ async fn protocol_emulator_workflow() {
             json!({
                 "connection_id": connection_id,
                 "timeout_ms": 300,
-                "max_bytes": 64,
+                "max_buffered_bytes": 64,
             }),
         ))
         .await
         .unwrap();
-    assert_eq!(rt_result.is_error, Some(true), "expected read timeout");
-    let rt_content = rt_result
-        .content
-        .first()
-        .and_then(|c| c.as_text())
-        .map(|t| t.text.as_str())
-        .unwrap_or("");
-    assert!(
-        rt_content.contains("timed out"),
-        "read timeout must mention timeout"
+    assert_ne!(
+        rt_result.is_error,
+        Some(true),
+        "read timeout should not be isError"
+    );
+    // Timeout is a normal stop reason. Verify structured content contains stop_reason.
+    let rt_structured = rt_result
+        .structured_content
+        .expect("read timeout must have structured content");
+    assert_eq!(
+        rt_structured["stop_reason"],
+        json!("timeout"),
+        "read timeout stop_reason must be 'timeout'"
     );
 
-    // ---- Stage 9: subscribe blocking with empty data ----
+    // ---- Stage 9: subscribe with timeout, no data ----
     client
         .peer()
         .call_tool(tool_request(
@@ -536,18 +568,24 @@ async fn protocol_emulator_workflow() {
                 "connection_id": connection_id,
                 "timeout_ms": 300,
                 "encoding": "utf8",
+                "poll_interval_ms": 50,
             }),
         ))
         .await
         .unwrap();
-    // Subscribe doesn't error on empty read; it returns what it collected.
+    // Subscribe always returns immediate ack with null data fields.
     assert_ne!(empty_sub.is_error, Some(true), "{empty_sub:?}");
     let empty_structured = empty_sub.structured_content.expect("structured");
-    assert_eq!(
-        empty_structured["bytes_read"].as_u64().unwrap_or(0),
-        0,
-        "expected 0 bytes for empty subscribe"
+    assert!(
+        empty_structured["data"].is_null(),
+        "subscribe ack data must be null"
     );
+    assert!(
+        empty_structured["bytes_read"].is_null(),
+        "subscribe ack bytes_read must be null"
+    );
+    // The stream will auto-stop after timeout in background, emitting a
+    // stop notification with bytes_read=0.
 
     // ---- Stage 10: flushes, DTR/RTS, break, unsubscribe ----
     let flush_out = client
@@ -733,7 +771,7 @@ async fn protocol_emulator_workflow() {
             json!({
                 "connection_id": connection_id,
                 "timeout_ms": 100,
-                "max_bytes": 64,
+                "max_buffered_bytes": 64,
             }),
         ))
         .await

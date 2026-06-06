@@ -1,143 +1,141 @@
-# AGENTS.md — Coding Guidelines for serial-mcp
+# AGENTS.md — serial-mcp
 
-## Build / Test / Lint Commands
+## Build / Test / Lint
 
 ```bash
-# Full test suite
-cargo test
+cargo test                                            # all non-ignored tests
+cargo test --lib <test_name>                          # single unit test
+cargo test --test <file_stem> <test_name>             # single integration test
+cargo build --all-targets                             # build everything
+cargo clippy --all-targets --locked -- -D warnings    # lint (CI-equivalent)
+cargo fmt --all -- --check                            # format check
 
-# Run a single unit test by name
-cargo test --lib verify_all_tool_schemas
-cargo test --lib list_ports_has_output_schema
+# Schema validation (example configs vs vendored schemas)
+cargo test --test config_schema_validation
 
-# Run a single integration test by name
-cargo test --test http_integration list_tools_returns_all_thirteen_tools
-cargo test --test serial_pty pty_wait_for_matches_real_serial_pattern
+# Schema drift check (requires network, fetches upstream schemas)
+cargo test --locked --test config_schema_validation -- --ignored
 
-# Build all targets including tests
-cargo build --all-targets
+# Hardware tests (requires loopback device on serial port)
+SERIAL_MCP_TEST_PORT=/dev/ttyACM0 cargo test --test hardware_loopback -- --ignored
+
+# Fuzz (requires nightly + cargo-fuzz; see fuzz/run.sh)
+./fuzz/run.sh [seconds_per_target]
 ```
+
+CI also runs `nix flake check` via the `nix-flake` job.
 
 ## Prerequisites
 
-- Rust stable toolchain with clippy and rustfmt components
-- `libudev-dev` and `pkg-config` packages (on Ubuntu/Debian) for `serialport`
-- CI sets `RUSTFLAGS="-D warnings"` — all warnings are treated as errors
-
-## Code Style
-
-### Imports
-Order: `std::*` first, then third-party crates alphabetically, then `crate::*`:
-```rust
-use std::collections::HashMap;
-use std::sync::Arc;
-
-use glob::Pattern;
-use rmcp::model::*;
-use serde::{Deserialize, Serialize};
-use tracing::{debug, error, info};
-
-use crate::codec::{self, Encoding};
-use crate::error::SerialError;
-```
-
-### Formatting
-- `cargo fmt` enforced in CI (no trailing commas on multi-line calls, standard Rust style)
-- Use `format!("var: {var}")` not `format!("var: {}", var)` (inlined format args)
-- Lines wrap naturally at ~100 chars
-
-### Naming
-- `snake_case`: functions, variables, fields, modules
-- `PascalCase`: types, traits, structs, enums
-- `SCREAMING_SNAKE_CASE`: constants, statics
-- Tool names: `snake_case` (e.g., `list_ports`, `wait_for`)
-- Test names: descriptive `snake_case` (e.g., `pty_wait_for_matches_real_serial_pattern`)
-
-### Types
-- Prefer concrete types over generics where possible
-- Use `rmcp::Json<T>` for tool responses (not raw strings)
-- Use `thiserror::Error` for error enums
-- `Result<T>` is the crate alias for `std::result::Result<T, SerialError>`
-
-## Error Handling
-
-**Two-tier model:**
-1. **Operational errors** (bad args, IO failure, timeout) → `CallToolResult { is_error: Some(true) }`
-2. **Protocol errors** (malformed request) → `McpError` (rmcp handles these)
-
-**SerialError** (from `src/error.rs`):
-```rust
-pub enum SerialError {
-    #[error("Failed to open port: {0}")]
-    OpenFailed(String),
-    #[error("Port already open: {0}")]
-    PortAlreadyOpen(String),
-    #[error("Connection not found: {0}")]
-    ConnectionNotFound(String),
-    #[error("Invalid baud rate: {0}")]
-    InvalidBaudRate(u32),
-    #[error("Read timeout")]
-    ReadTimeout,
-    #[error("I/O error: {0}")]
-    IoError(#[from] std::io::Error),
-}
-```
-
-**Tool error helper:**
-```rust
-fn log_tool_err<E: std::fmt::Display>(op: &str, context: &str, err: E) -> String {
-    error!("{op} failed: {err}");
-    format!("{context} - {err}")
-}
-```
+- Rust 1.88+ (pinned in `rust-toolchain.toml`) with clippy, rustfmt, rust-src, rust-analyzer
+- `libudev-dev` + `pkg-config` on Linux for `serialport` crate
+- Nix + direnv for dev shell (`use flake` in `.envrc`) — optional but recommended
+- CI sets `RUSTFLAGS="-D warnings"` — all warnings are errors
 
 ## Architecture
 
-- **Server** (`src/server.rs`): MCP surface — tools, resources, prompts
-- **Serial** (`src/serial.rs`): Data plane — `SerialConnection`, `ConnectionManager`, `SerialIo` trait
-- **Codec** (`src/codec.rs`): `Encoding` enum (utf8/text/hex/base64) with encode/decode
-- **Error** (`src/error.rs`): Single `SerialError` enum
+```
+src/
+  main.rs            entrypoint (CLI arg parsing, transport selection)
+  lib.rs             re-exports: SerialHandler, Result, SerialError
+  server.rs          MCP surface — 12 tools, 3 resources, 2 prompts, pagination
+  serial.rs          SerialConnection, ConnectionManager, port config types
+  codec.rs           Encoding enum (utf8/text/hex/base64) encode/decode
+  error.rs           SerialError enum + Result<T> alias
+  security.rs        allowlist matching ( glob patterns)
+  limits.rs          MAX_READ_BYTES, MAX_WRITE_BYTES, MAX_TIMEOUT_MS, etc.
+  match_config.rs    pattern-matching config for wait_for
+  rx_session.rs      RX session manager (shared RX buffer across read/wait_for/subscribe)
+  rx_metadata.rs     RX metadata tracking
+  tx_session.rs      TX session manager
+  buffer_budget.rs   buffer reservation for concurrent RX consumers
+  stop_controller.rs cooperative cancellation for long-running tools
+  schema_helpers.rs  custom schemars overrides (avoid non-standard "uint" format)
+  prompts/           diagnose_port, interactive_terminal
+  resources/         serial://ports, serial://connections, serial://connections/{id}
+  tools/             port_ops (list_ports, list_connections, open, close)
+                     io_ops (read, write, flush)
+                     control_ops (set_dtr_rts, set_flow_control, send_break)
+                     stream_ops (subscribe, unsubscribe)
+                     types (arg/response structs), helpers
+```
 
-## Tool Implementation Pattern
+`build.rs` injects `GIT_HASH` / `GIT_HASH_AVAILABLE` env vars at compile time.
+
+### Tool implementation pattern
 
 ```rust
 #[tool(description = "...")]
-async fn tool_name(
-    &self,
-    Parameters(args): Parameters<ToolArgs>,
-    ctx: RequestContext<RoleServer>,  // if peer access needed
-) -> Result<Json<ToolResult>, String> {
-    // 1. Parse/validate args
-    // 2. Lookup connection if needed
-    // 3. Call SerialConnection method
-    // 4. Format response
+async fn tool_name(&self, Parameters(args): Parameters<ToolArgs>) -> Result<Json<ToolResult>, String> {
+    // 1. Validate args
+    // 2. Lookup connection via self.connections
+    // 3. Call SerialConnection / session method
+    // 4. Return Json<response>
 }
 ```
 
-Long-running tools (`read`, `wait_for`, `send_break`) mark `execution(task_support = "optional")`.
+Long-running tools (`read`, `subscribe`) mark `execution(task_support = "optional")`.
+
+## Error Handling
+
+Two-tier model:
+1. **Operational errors** (bad args, IO, timeout) → `CallToolResult { is_error: Some(true) }`
+2. **Protocol errors** (malformed request) → `McpError` (rmcp handles these)
+
+`SerialError` (`src/error.rs`): `OpenFailed`, `PortAlreadyOpen{port,connection_id,name}`, `PortAlreadyOpening`, `ConnectionNotFound`, `ConnectionClosed`, `InvalidBaudRate`, `ReadTimeout`, `IoError`.  
+`Result<T>` = `std::result::Result<T, SerialError>`.
+
+## Code Style
+
+- **Imports**: `std::*` → third-party alphabetically → `crate::*`
+- **Format**: `cargo fmt`; inline format args (`{var}` not `{}, var}`)
+- **Naming**: snake_case (fns/vars), PascalCase (types), SCREAMING_SNAKE (consts), tool names snake_case
+- **Types**: concrete over generic; `rmcp::Json<T>` for tool responses; `thiserror::Error` for enums
 
 ## Key Conventions
 
-- **No unwrap/expect in production code** — use `?` or return errors
-- **No `println!`** — use `tracing` (debug! / info! / error!)
-- **No `todo!()` or `unimplemented!()`** in committed code
-- **Resource notifications**: Fire `notify_resource_list_changed()` on open/close
-- **Allowlist check**: In `open` tool, before `ConnectionManager::open()`
-- **Tests**: Layered (unit → HTTP integration → PTY → stdio → allowlist → hardware)
+- No `unwrap`/`expect` in production code — use `?` or return errors
+- No `println!` — use `tracing` (debug! / info! / error!)
+- No `todo!()` / `unimplemented!()` in committed code
+- Resource notifications: fire `notify_resource_list_changed()` on open/close
+- Allowlist check in `open` tool before `ConnectionManager::open()`
+- Tool output schemas must not use non-standard `"format":"uint"` (see `schema_helpers.rs`)
+- All 12 tools must have `output_schema` and `title` (verified by `verify_all_tool_schemas` test)
+
+## Test Layers
+
+1. Unit tests (`cargo test --lib`) — schema validation, codec, internal logic
+2. HTTP integration (`--test http_integration`) — in-process MCP client via axum + loopback
+3. PTY (`--test serial_pty`) — pseudo-terminal loopback
+4. stdio integration (`--test stdio_integration`) — child-process stdio transport
+5. Allowlist (`--test allowlist`) — security/glob matching
+6. Proptest (`--test proptest`) — property-based (codec, match_config)
+7. Config schema validation (`--test config_schema_validation`) — vendored + upstream schemas
+8. Hardware (`--test hardware_loopback`, `--test xiao_ble_validation`) — require physical device + `SERIAL_MCP_TEST_PORT`
 
 ## Git Conventions
 
-- **No Co-Authored-By lines** in git commits
-- Commit messages follow conventional commits: `feat:`, `fix:`, `docs:`, `test:`, `refactor:`
-- Group related changes in single commits (module-level, not phase-level)
-- Never commit secrets or credentials
+- No Co-Authored-By lines in commits
+- Conventional commits: `feat:`, `fix:`, `docs:`, `test:`, `refactor:`
+- Group related changes per module, not per phase
+- Never commit secrets
 
-## CI Requirements
+## CI (`nix flake check` + `.github/workflows/ci.yml`)
 
-All PRs must pass:
-1. `cargo fmt --all -- --check` (zero formatting issues)
-2. `cargo build --all-targets --locked` (clean build)
-3. `cargo test --all-targets --locked` (all tests pass)
-4. `cargo clippy --all-targets --locked -- -D warnings` (zero clippy warnings)
+1. `cargo fmt --all -- --check`
+2. `cargo build --all-targets --locked`
+3. `cargo test --locked`
+4. `cargo clippy --all-targets --locked -- -D warnings`
+5. Config schema validation test
 
-The CI workflow is in `.github/workflows/ci.yml`.
+## Firmware (`firmware/`)
+
+NCS/Zephyr test firmware for XIAO BLE nRF52840. Hardware path is PicoProbe UART bridge on `/dev/ttyACM0`, not XIAO USB CDC. Image must flash and link at `0x0` with `pyocd`. See `firmware/AGENTS.md` before touching firmware.
+
+## Fuzz (`fuzz/`)
+
+Targets: `tool_call_json`, `codec_roundtrip`, `clamp_bounds`. Run via `fuzz/run.sh`. Requires nightly toolchain + `cargo-fuzz`.
+
+## Schemas (`schemas/`)
+
+Vendored JSON schemas for agent config formats (Claude Code, Codex, opencode). Used by `config_schema_validation` test. Schema drift checked daily via `.github/workflows/schema-drift.yml`.

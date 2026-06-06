@@ -15,9 +15,9 @@ pub fn build_interactive_prompt(args: InteractiveTerminalArgs) -> GetPromptResul
 MCP tools. Conventions:\n\
 \n\
 - Append `{line_ending}` to every line the user wants to send.\n\
-- After each `write`, call `wait_for(connection_id=\"{id}\", pattern={prompt}, \
+- After each `write`, call `read(connection_id=\"{id}\", match={{pattern: {prompt}}}, \
 timeout_ms=2000)` to read the response up to {prompt}.\n\
-- If `wait_for` returns an error about timeout, surface the partial buffer and ask the user \
+- If the match read returns an error about timeout, surface the partial buffer and ask the user \
 how to proceed instead of retrying blindly.\n\
 - Decode the response data as UTF-8 unless it contains bytes the codec rejects, in \
 which case fall back to hex and tell the user.\n\
@@ -25,7 +25,7 @@ which case fall back to hex and tell the user.\n\
 - If the connection vanishes (tool returns Connection ID not found), tell the user \
 and stop; do not silently reopen.\n\
 \n\
-Begin by sending an empty line (write `{line_ending}` then wait_for) to surface the \
+Begin by sending an empty line (write `{line_ending}` then read with match) to surface the \
 current prompt, then report back and wait for the user's first command.",
         id = args.connection_id,
         line_ending = line_ending,

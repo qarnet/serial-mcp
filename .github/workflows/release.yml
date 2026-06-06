@@ -124,6 +124,16 @@ jobs:
             pkg_config_allow_cross: ""
             pkg_config_path: ""
 
+          - os: macos-13
+            target: x86_64-apple-darwin
+            artifact: serial-mcp
+            artifact_name_suffix: x86_64-macos
+            install: ""
+            strip: strip
+            linker: ""
+            pkg_config_allow_cross: ""
+            pkg_config_path: ""
+
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             artifact: serial-mcp.exe

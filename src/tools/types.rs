@@ -1,23 +1,21 @@
 //! Tool argument and response types for serial MCP tools.
 //!
 //! These structs define the JSON schema for tool requests and responses.
-//! Input integer fields use [`FlexibleU64`], [`FlexibleOptionU64`],
-//! [`FlexibleU32`], and [`FlexibleUsize`] wrappers so MCP clients that
-//! stringify numbers (e.g. `"5000"` instead of `5000`) still work.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::flex_deserialize::{FlexibleOptionU64, FlexibleU32, FlexibleU64, FlexibleUsize};
-use crate::serial::{FlushTarget, PortInfo};
+use crate::serial::{ConnectionSummary, FlowControl, FlushTarget, PortInfo};
 
 // ---- Argument structs ------------------------------------------------------
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct OpenArgs {
     pub port: String,
+    #[serde(default)]
+    pub name: Option<String>,
     #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
-    pub baud_rate: FlexibleU32,
+    pub baud_rate: u32,
     #[serde(default = "default_data_bits")]
     pub data_bits: String,
     #[serde(default = "default_stop_bits")]
@@ -34,6 +32,9 @@ pub struct CloseArgs {
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct ListConnectionsArgs {}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct WriteArgs {
     pub connection_id: String,
     pub data: String,
@@ -46,12 +47,23 @@ pub struct ReadArgs {
     pub connection_id: String,
     #[serde(default)]
     #[schemars(schema_with = "crate::schema_helpers::option_timeout_ms_schema")]
-    pub timeout_ms: FlexibleOptionU64,
-    #[serde(default = "default_max_bytes")]
-    #[schemars(schema_with = "crate::schema_helpers::read_max_bytes_schema")]
-    pub max_bytes: FlexibleUsize,
+    pub timeout_ms: Option<u64>,
+    /// Silence timeout in milliseconds. When set, the read stops if no new data
+    /// arrives within this window. The timer starts immediately and resets on each
+    /// received byte. Omitted or `null` means disabled. `0` is invalid.
+    #[serde(default)]
+    #[schemars(schema_with = "crate::schema_helpers::option_positive_timeout_ms_schema")]
+    pub no_new_rx_timeout_ms: Option<u64>,
+    #[serde(default = "default_max_buffered_bytes")]
+    #[schemars(schema_with = "crate::schema_helpers::read_max_buffered_bytes_schema")]
+    pub max_buffered_bytes: usize,
     #[serde(default = "default_encoding")]
     pub encoding: String,
+    /// Optional match configuration. When present, the read accumulates bytes
+    /// until the pattern is found (or another stop condition triggers). The
+    /// result includes `matched` and `match_index` fields.
+    #[serde(default)]
+    pub r#match: Option<crate::match_config::MatchRequest>,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -69,11 +81,17 @@ pub struct SetDtrRtsArgs {
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct SetFlowControlArgs {
+    pub connection_id: String,
+    pub flow_control: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct SendBreakArgs {
     pub connection_id: String,
     #[serde(default = "default_break_duration_ms")]
     #[schemars(schema_with = "crate::schema_helpers::timeout_ms_schema")]
-    pub duration_ms: FlexibleU64,
+    pub duration_ms: u64,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -81,49 +99,32 @@ pub struct SubscribeArgs {
     pub connection_id: String,
     #[serde(default)]
     #[schemars(schema_with = "crate::schema_helpers::option_timeout_ms_schema")]
-    pub timeout_ms: FlexibleOptionU64,
+    pub timeout_ms: Option<u64>,
+    /// Silence timeout in milliseconds. When set, the subscription stops if no
+    /// new data arrives within this window. The timer starts immediately and
+    /// resets on each received byte. Omitted or `null` means disabled. `0` is
+    /// invalid.
+    #[serde(default)]
+    #[schemars(schema_with = "crate::schema_helpers::option_positive_timeout_ms_schema")]
+    pub no_new_rx_timeout_ms: Option<u64>,
     #[serde(default = "default_encoding")]
     pub encoding: String,
-    #[serde(default = "default_subscribe_chunk_bytes")]
-    #[schemars(schema_with = "crate::schema_helpers::stream_chunk_bytes_schema")]
-    pub max_chunk_bytes: FlexibleUsize,
+    #[serde(default = "default_subscribe_buffered_bytes")]
+    #[schemars(schema_with = "crate::schema_helpers::stream_buffered_bytes_schema")]
+    pub max_buffered_bytes: usize,
     #[serde(default = "default_subscribe_poll_ms")]
     #[schemars(schema_with = "crate::schema_helpers::poll_interval_ms_schema")]
-    pub poll_interval_ms: FlexibleU64,
+    pub poll_interval_ms: u64,
+    /// Optional match configuration. When present, the stream detects the
+    /// first match and emits a final stop notification with `matched=true`
+    /// and `match_index`, then terminates.
+    #[serde(default)]
+    pub r#match: Option<crate::match_config::MatchRequest>,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct UnsubscribeArgs {
     pub connection_id: String,
-}
-
-#[derive(Debug, Serialize, Deserialize, JsonSchema)]
-pub struct WaitForArgs {
-    pub connection_id: String,
-    pub pattern: String,
-    #[serde(default = "default_encoding")]
-    pub pattern_encoding: String,
-    #[serde(default = "default_wait_timeout_ms")]
-    #[schemars(schema_with = "crate::schema_helpers::timeout_ms_schema")]
-    pub timeout_ms: FlexibleU64,
-    #[serde(default = "default_wait_max_bytes")]
-    #[schemars(schema_with = "crate::schema_helpers::wait_max_bytes_schema")]
-    pub max_bytes: FlexibleUsize,
-    #[serde(default = "default_encoding")]
-    pub response_encoding: String,
-}
-
-#[derive(Debug, Serialize, Deserialize, JsonSchema)]
-pub struct ReadLineArgs {
-    pub connection_id: String,
-    #[serde(default)]
-    #[schemars(schema_with = "crate::schema_helpers::option_timeout_ms_schema")]
-    pub timeout_ms: FlexibleOptionU64,
-    #[serde(default = "default_read_line_max_bytes")]
-    #[schemars(schema_with = "crate::schema_helpers::wait_max_bytes_schema")]
-    pub max_bytes: FlexibleUsize,
-    #[serde(default = "default_encoding")]
-    pub encoding: String,
 }
 
 // ---- Response structs ------------------------------------------------------
@@ -136,29 +137,31 @@ pub struct ListPortsResult {
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
-pub struct VersionResult {
-    pub name: String,
-    pub version: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub commit: Option<String>,
-}
-
-#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct OpenResult {
     pub connection_id: String,
+    pub name: Option<String>,
     pub port: String,
     #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
     pub baud_rate: u32,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct ListConnectionsResult {
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub count: usize,
+    pub connections: Vec<ConnectionSummary>,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct CloseResult {
     pub connection_id: String,
+    pub name: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct WriteResult {
     pub connection_id: String,
+    pub name: Option<String>,
     #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
     pub bytes_written: usize,
     pub encoding: String,
@@ -167,32 +170,62 @@ pub struct WriteResult {
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct ReadResult {
     pub connection_id: String,
+    pub name: Option<String>,
     #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
     pub bytes_read: usize,
     pub encoding: String,
     pub data: String,
     #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
     pub timeout_ms: u64,
+    /// Configured silence timeout in milliseconds. `null` when not set.
+    #[schemars(schema_with = "crate::schema_helpers::option_uint_schema")]
+    pub no_new_rx_timeout_ms: Option<u64>,
     #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
     pub elapsed_ms: u64,
+    pub stop_reason: String,
+    pub truncated: bool,
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub bytes_observed: usize,
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub bytes_returned: usize,
+    /// Whether the match pattern was found. `false` when no `match` option was
+    /// provided. `true` when `match` was provided and the pattern was found
+    /// before the operation stopped for another reason.
+    #[serde(default)]
+    pub matched: bool,
+    /// Byte offset within `data` where the matched pattern starts, or `null`
+    /// when no match was found or no `match` option was provided.
+    #[serde(default)]
+    #[schemars(schema_with = "crate::schema_helpers::option_uint_schema")]
+    pub match_index: Option<usize>,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct FlushResult {
     pub connection_id: String,
+    pub name: Option<String>,
     pub target: FlushTarget,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct SetDtrRtsResult {
     pub connection_id: String,
+    pub name: Option<String>,
     pub dtr: bool,
     pub rts: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct SetFlowControlResult {
+    pub connection_id: String,
+    pub name: Option<String>,
+    pub flow_control: FlowControl,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct SendBreakResult {
     pub connection_id: String,
+    pub name: Option<String>,
     #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
     pub duration_ms: u64,
     #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
@@ -202,14 +235,15 @@ pub struct SendBreakResult {
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct SubscribeResult {
     pub connection_id: String,
+    pub name: Option<String>,
     pub encoding: String,
     #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
-    pub max_chunk_bytes: usize,
+    pub max_buffered_bytes: usize,
     #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
     pub poll_interval_ms: u64,
     pub replaced_previous: bool,
-    /// Present only when timeout_ms was set. Contains all data accumulated
-    /// during the subscription window. `null` in fire-and-forget mode.
+    /// Always `null` since PLAN 1b. Subscribe is now always background;
+    /// data arrives as notifications, not inline.
     pub data: Option<String>,
     #[schemars(schema_with = "crate::schema_helpers::option_uint_schema")]
     pub bytes_read: Option<usize>,
@@ -222,34 +256,8 @@ pub struct SubscribeResult {
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct UnsubscribeResult {
     pub connection_id: String,
+    pub name: Option<String>,
     pub was_active: bool,
-}
-
-#[derive(Debug, Serialize, Deserialize, JsonSchema)]
-pub struct WaitForResult {
-    pub connection_id: String,
-    pub matched: bool,
-    pub data: String,
-    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
-    pub bytes_read: usize,
-    #[schemars(schema_with = "crate::schema_helpers::option_uint_schema")]
-    pub match_index: Option<usize>,
-    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
-    pub timeout_ms: u64,
-    pub response_encoding: String,
-}
-
-#[derive(Debug, Serialize, Deserialize, JsonSchema)]
-pub struct ReadLineResult {
-    pub connection_id: String,
-    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
-    pub bytes_read: usize,
-    pub encoding: String,
-    pub line: String,
-    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
-    pub timeout_ms: u64,
-    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
-    pub elapsed_ms: u64,
 }
 
 // ---- Default helpers -------------------------------------------------------
@@ -269,27 +277,18 @@ pub fn default_flow_control() -> String {
 pub fn default_encoding() -> String {
     "utf8".into()
 }
-pub fn default_max_bytes() -> FlexibleUsize {
-    FlexibleUsize(1024)
+pub fn default_max_buffered_bytes() -> usize {
+    2048
 }
 pub fn default_flush_target() -> FlushTarget {
     FlushTarget::Both
 }
-pub fn default_break_duration_ms() -> FlexibleU64 {
-    FlexibleU64(250)
+pub fn default_break_duration_ms() -> u64 {
+    250
 }
-pub fn default_wait_timeout_ms() -> FlexibleU64 {
-    FlexibleU64(2000)
+pub fn default_subscribe_buffered_bytes() -> usize {
+    2048
 }
-pub fn default_wait_max_bytes() -> FlexibleUsize {
-    FlexibleUsize(4096)
-}
-pub fn default_subscribe_chunk_bytes() -> FlexibleUsize {
-    FlexibleUsize(1024)
-}
-pub fn default_subscribe_poll_ms() -> FlexibleU64 {
-    FlexibleU64(200)
-}
-pub fn default_read_line_max_bytes() -> FlexibleUsize {
-    FlexibleUsize(4096)
+pub fn default_subscribe_poll_ms() -> u64 {
+    200
 }
