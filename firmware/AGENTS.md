@@ -174,7 +174,7 @@ SERIAL_MCP_TEST_PORT=/dev/ttyACM0 cargo test --test xiao_ble_validation -- --ign
 
 Known good result after latest fix:
 
-- `9 passed; 0 failed`
+- `11 passed; 0 failed`
 
 ## Important Implementation Notes
 

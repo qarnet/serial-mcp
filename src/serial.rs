@@ -305,6 +305,10 @@ impl SerialConnection {
             .expect("flow_control mutex poisoned")
     }
 
+    pub fn cancel_token(&self) -> CancellationToken {
+        self.close_token.clone()
+    }
+
     pub fn summary(&self) -> ConnectionSummary {
         ConnectionSummary {
             connection_id: self.id().to_string(),
@@ -333,9 +337,9 @@ impl SerialConnection {
         let io = io
             .as_mut()
             .ok_or_else(|| SerialError::ConnectionClosed(self.display_name()))?;
-        let written = io.write(data).await?;
+        io.write_all(data).await?;
         io.flush().await?;
-        Ok(written)
+        Ok(data.len())
     }
 
     /// Read up to `dst.len()` bytes. Returns [`SerialError::ReadTimeout`] if

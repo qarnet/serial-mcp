@@ -2,6 +2,7 @@
 
 | Version | Date | Highlights |
 |---|---|---|
+| [Unreleased](#unreleased) | — | TX session serialization for writes/flush, expanded XIAO hardware validation, firmware diagnostics for exact TX ordering checks |
 | [0.5.0](#050) | 2026-06-06 | RX redesign (Plans 1-7): session pump, unified stop controller, match options, buffer budgets, silence timeout, context shaping |
 | [0.4.1](#041) | 2026-06-04 | CI/release hardening, schema-validated config examples, docs cleanup |
 | [0.4.0](#040) | 2026-06-04 | Crate rename to `serial-mcp`, `read_line` + `get_version` tools, text encoding, RX guard, flexible args |
@@ -17,14 +18,33 @@
 
 ---
 
+## [Unreleased]
+
+Follow-up work after 0.5.0 focused on TX-path serialization and stronger live-device validation.
+
+**Added:**
+- Per-connection `TxSession` worker — `write` and output-side `flush` are serialized through a dedicated background task per open connection. This keeps TX behavior consistent even while the RX session pump is active.
+- `tests/tx_session.rs` integration coverage for TX worker ordering, close behavior, idempotent session creation, and coexistence with an active RX pump.
+- Expanded XIAO BLE hardware tests — now 11 ignored tests. New live cases cover pending-read-then-write behavior, split-write command ordering, framing-mode line assembly checks, and trace-mode exact byte ordering checks.
+- Dedicated XIAO test firmware diagnostics documented in `firmware/AGENTS.md` and `docs/TESTING.md`, including `framing on|off`, `trace on|off`, `write cmd <id> <rest>`, `arm_cmd`, and `slow`.
+
+**Changed:**
+- `SerialConnection::write()` now uses `write_all()` and returns the full input length on success.
+- XIAO hardware test docs now reference the dedicated serial-mcp UART test firmware instead of the older RTT-feedback wording.
+
+**Known gap:**
+- Real-hardware coverage for `flush(target="output")` discard semantics is still limited; PTY and loopback tests cover it better than current device firmware.
+
+---
+
 ## [0.5.0]
 
 Full RX subsystem redesign (Plans 1-7). Breaking internal change; no tool API removed except `wait_for`.
 
 **Added:**
 - Per-connection `RxSession` pump — a single background task reads from each serial port and fans bytes out to registered consumers. `read` and `subscribe` both consume from this pump; they never read the port directly and no longer race each other.
-- `match` option on `read` and `subscribe` — stops when a byte pattern (literal substring, regex, or hex) is found. `read` returns the matched data; `subscribe` emits a stop notification with `matched=true`, `match_index`, and optional shaped context.
-- `context_amount_of_matched_bytes` in match config — shapes pre-match context window: `"before"` returns N bytes before the match, `"around"` returns N bytes either side, `"none"` returns only the matched bytes.
+- `match` option on `read` and `subscribe` — stops when a byte pattern is found. Current matching mode is literal byte-substring; `pattern_encoding` controls how the pattern string is decoded (for example UTF-8 or hex). `read` returns the matched data; `subscribe` emits a stop notification with `matched=true`, `match_index`, and optional shaped context.
+- `context_amount_of_matched_bytes` in match config — shapes pre-match context window by returning up to N bytes before the matched bytes, plus the matched bytes themselves.
 - `no_new_rx_timeout_ms` on `read` and `subscribe` — silence timeout: stops when no new bytes arrive for the specified duration. Distinct from the wall-clock `timeout_ms`.
 - `--max-program-buffered-bytes` and `--max-tool-buffered-bytes` CLI flags — global buffer budget caps. Each `read`/`subscribe` call reserves from the program budget and is bounded by the tool limit. Prevents runaway memory use under high-volume streams.
 - `RxStopController` — shared stop-condition evaluator used by both `read` and `subscribe`. Guarantees identical stop semantics for timeout, silence, match, max-buffer, connection-closed, and peer-disconnect across all RX tools.

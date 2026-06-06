@@ -8,6 +8,7 @@ pub mod resources;
 pub mod rx_metadata;
 pub mod rx_session;
 pub mod schema_helpers;
+pub mod tx_session;
 pub mod security;
 pub mod serial;
 pub mod server;

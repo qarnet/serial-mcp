@@ -23,3 +23,26 @@
 - Simpler alternative to evaluate later:
   - keep one public subscription per connection but allow reconfiguration/update
     semantics instead of full replacement
+
+## XIAO test firmware diagnostics
+
+- Keep and evolve dedicated XIAO hardware-test firmware features that make TX/RX behavior observable on real hardware.
+- Existing useful diagnostics now include:
+  - `framing on|off` for committed line visibility
+  - `trace on|off` for per-byte RX ordering visibility
+  - `write cmd <id> <rest>` for command-ID based ordering/drop checks
+  - `arm_cmd <delay_ms>` and `slow on|off [<us>]` for timing and backpressure experiments
+- These firmware-side features let hardware tests prove split-write ordering and exact line assembly, not just successful command execution.
+
+## Stronger live TX flush testing support
+
+- Add firmware support for true RX holdoff or throttle so host-side queued TX can remain undelivered long enough to test `flush(target="output")` on real hardware.
+- Candidate firmware capabilities:
+  - `rx_throttle on|off`
+  - explicit UART FIFO drain pause/resume
+  - host-visible counters for delivered RX bytes vs buffered-but-uncommitted bytes
+- Goal: enable hardware tests that distinguish:
+  - fully delivered TX
+  - partially delivered TX
+  - flushed-before-delivery TX
+  - exact delivered prefix after close or flush

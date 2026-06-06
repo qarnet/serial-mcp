@@ -1,13 +1,14 @@
 //! Hardware-in-the-loop integration tests for the XIAO BLE (nRF52840) running
-//! the web-swd-flasher RTT feedback firmware (`~/repos/web-swd-flasher`).
+//! the dedicated serial-mcp UART test firmware.
 //!
-//! The firmware exposes a simple UART CLI over CDC-ACM (`/dev/ttyACM0`).
+//! The firmware exposes a simple UART CLI over the PicoProbe UART bridge on
+//! `/dev/ttyACM0`.
 //! Relevant commands:
 //!
 //! - `ping` → `pong\r\n`
 //! - `spam <bytes> hex [last_data="\r\n"] [delay=10]`
-//!     Sends `bytes` random hex chars in 256-byte packets separated by
-//!     `delay` ms, then prints `"Spam complete: N bytes sent\r\n"`.
+//!   Sends `bytes` random hex chars in 256-byte packets separated by
+//!   `delay` ms, then prints `"Spam complete: N bytes sent\r\n"`.
 //! - `spam stop` → `"Spam stopped: N bytes sent\r\n"`
 //! - `info` → `"Board: ...\r\nBuild time: ...\r\n"`
 //!
@@ -79,6 +80,25 @@ async fn write_cmd(
         .call_tool(tool_request(
             "write",
             json!({ "connection_id": connection_id, "data": format!("{cmd}\r\n") }),
+        ))
+        .await
+        .expect("write call");
+    assert_ne!(result.is_error, Some(true), "write failed: {result:?}");
+}
+
+async fn write_raw(
+    client: &rmcp::service::RunningService<
+        rmcp::service::RoleClient,
+        common::NotificationCollector,
+    >,
+    connection_id: &str,
+    data: &str,
+) {
+    let result = client
+        .peer()
+        .call_tool(tool_request(
+            "write",
+            json!({ "connection_id": connection_id, "data": data }),
         ))
         .await
         .expect("write call");
@@ -162,6 +182,223 @@ async fn xiao_ping_roundtrip() {
 }
 
 // ── Test 2: read match on spam completion ────────────────────────────────────
+
+/// read waits first, then a later write still reaches the board promptly.
+/// Exercises real-device TX while the RX session already owns the connection.
+#[tokio::test]
+#[ignore = "requires XIAO BLE on /dev/ttyACM0"]
+async fn xiao_pending_read_then_write_ping_roundtrip() {
+    let port = xiao_port();
+    let server = TestServer::start().await;
+    let (client, _rx) = connect_client(&server).await.unwrap();
+    let id = open_xiao(&client, &port).await;
+
+    flush_both(&client, &id).await;
+
+    let read_handle = {
+        let peer = client.peer().clone();
+        let id2 = id.clone();
+        tokio::spawn(async move {
+            peer.call_tool(tool_request(
+                "read",
+                json!({
+                    "connection_id": id2,
+                    "timeout_ms": 3000,
+                    "max_buffered_bytes": 128,
+                    "encoding": "utf8",
+                    "match": {
+                        "pattern": "pong",
+                        "config": { "mode": "literal_substring", "pattern_encoding": "utf8" }
+                    }
+                }),
+            ))
+            .await
+        })
+    };
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let start = tokio::time::Instant::now();
+    write_cmd(&client, &id, "ping").await;
+
+    let result = read_handle.await.unwrap().expect("read task");
+    let elapsed = start.elapsed();
+    assert_ne!(result.is_error, Some(true), "{result:?}");
+    let s = result.structured_content.expect("structured");
+    assert_eq!(s["matched"], json!(true), "expected pong: {s:?}");
+    assert_eq!(s["stop_reason"], json!("match_found"));
+    assert!(
+        elapsed < Duration::from_secs(1),
+        "write+response took too long with pending read: {elapsed:?}"
+    );
+
+    close_connection(&client, &id).await;
+    client.cancel().await.ok();
+}
+
+/// Split write calls must stay ordered on the real device so the board still
+/// sees one valid CLI command.
+#[tokio::test]
+#[ignore = "requires XIAO BLE on /dev/ttyACM0"]
+async fn xiao_split_writes_preserve_command_order() {
+    let port = xiao_port();
+    let server = TestServer::start().await;
+    let (client, _rx) = connect_client(&server).await.unwrap();
+    let id = open_xiao(&client, &port).await;
+
+    flush_both(&client, &id).await;
+
+    let read_handle = {
+        let peer = client.peer().clone();
+        let id2 = id.clone();
+        tokio::spawn(async move {
+            peer.call_tool(tool_request(
+                "read",
+                json!({
+                    "connection_id": id2,
+                    "timeout_ms": 3000,
+                    "max_buffered_bytes": 128,
+                    "encoding": "utf8",
+                    "match": {
+                        "pattern": "pong",
+                        "config": { "mode": "literal_substring", "pattern_encoding": "utf8" }
+                    }
+                }),
+            ))
+            .await
+        })
+    };
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    write_raw(&client, &id, "pi").await;
+    write_raw(&client, &id, "ng").await;
+    write_raw(&client, &id, "\r\n").await;
+
+    let result = read_handle.await.unwrap().expect("read task");
+    assert_ne!(result.is_error, Some(true), "{result:?}");
+    let s = result.structured_content.expect("structured");
+    assert_eq!(s["matched"], json!(true), "expected pong: {s:?}");
+    assert_eq!(s["stop_reason"], json!("match_found"));
+
+    close_connection(&client, &id).await;
+    client.cancel().await.ok();
+}
+
+/// Framing mode should report one committed `ping` line even when the command
+/// arrives through multiple write calls.
+#[tokio::test]
+#[ignore = "requires XIAO BLE on /dev/ttyACM0"]
+async fn xiao_framing_reports_single_split_command() {
+    let port = xiao_port();
+    let server = TestServer::start().await;
+    let (client, _rx) = connect_client(&server).await.unwrap();
+    let id = open_xiao(&client, &port).await;
+
+    flush_both(&client, &id).await;
+    write_cmd(&client, &id, "framing on").await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    flush_both(&client, &id).await;
+
+    let read_handle = {
+        let peer = client.peer().clone();
+        let id2 = id.clone();
+        tokio::spawn(async move {
+            peer.call_tool(tool_request(
+                "read",
+                json!({
+                    "connection_id": id2,
+                    "timeout_ms": 3000,
+                    "max_buffered_bytes": 512,
+                    "encoding": "utf8",
+                    "match": {
+                        "pattern": "pong",
+                        "config": { "mode": "literal_substring", "pattern_encoding": "utf8" }
+                    }
+                }),
+            ))
+            .await
+        })
+    };
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    write_raw(&client, &id, "pi").await;
+    write_raw(&client, &id, "ng").await;
+    write_raw(&client, &id, "\r\n").await;
+
+    let result = read_handle.await.unwrap().expect("read task");
+    assert_ne!(result.is_error, Some(true), "{result:?}");
+    let s = result.structured_content.expect("structured");
+    let data = s["data"].as_str().unwrap_or("");
+    assert!(
+        data.contains("LINE len=4 data=\"ping\""),
+        "expected one framed ping line, got: {data:?}"
+    );
+    assert!(data.contains("pong"), "expected pong after framed line: {data:?}");
+
+    close_connection(&client, &id).await;
+    client.cancel().await.ok();
+}
+
+/// Trace mode should expose exact RX byte order for split writes on real
+/// hardware, including CRLF terminator bytes.
+#[tokio::test]
+#[ignore = "requires XIAO BLE on /dev/ttyACM0"]
+async fn xiao_trace_reports_exact_split_byte_sequence() {
+    let port = xiao_port();
+    let server = TestServer::start().await;
+    let (client, _rx) = connect_client(&server).await.unwrap();
+    let id = open_xiao(&client, &port).await;
+
+    flush_both(&client, &id).await;
+    write_cmd(&client, &id, "trace on").await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    flush_both(&client, &id).await;
+
+    let read_handle = {
+        let peer = client.peer().clone();
+        let id2 = id.clone();
+        tokio::spawn(async move {
+            peer.call_tool(tool_request(
+                "read",
+                json!({
+                    "connection_id": id2,
+                    "timeout_ms": 3000,
+                    "max_buffered_bytes": 2048,
+                    "encoding": "utf8",
+                    "match": {
+                        "pattern": "pong",
+                        "config": { "mode": "literal_substring", "pattern_encoding": "utf8" }
+                    }
+                }),
+            ))
+            .await
+        })
+    };
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    write_raw(&client, &id, "pi").await;
+    write_raw(&client, &id, "ng").await;
+    write_raw(&client, &id, "\r\n").await;
+
+    let result = read_handle.await.unwrap().expect("read task");
+    assert_ne!(result.is_error, Some(true), "{result:?}");
+    let s = result.structured_content.expect("structured");
+    let data = s["data"].as_str().unwrap_or("");
+    for expected in [
+        "RX[0]=0x70",
+        "RX[1]=0x69",
+        "RX[2]=0x6e",
+        "RX[3]=0x67",
+        "RX[4]=0x0d",
+        "RX[5]=0x0a",
+    ] {
+        assert!(data.contains(expected), "missing trace {expected} in {data:?}");
+    }
+    assert!(data.contains("pong"), "expected pong after traced bytes: {data:?}");
+
+    close_connection(&client, &id).await;
+    client.cancel().await.ok();
+}
 
 /// read(match=...) stops on "Spam complete" after a 1024-byte hex spam.
 #[tokio::test]

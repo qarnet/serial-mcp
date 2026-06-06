@@ -8,6 +8,7 @@ use crate::codec;
 use crate::match_config::{validate_match_request, ByteMatcher};
 use crate::rx_session::RxSessionManager;
 use crate::serial::ConnectionManager;
+use crate::serial::FlushTarget;
 use crate::tools::helpers::{
     build_read_result, clamp_or_err, clamp_timeout_or_err, log_tool_err, lookup_connection,
     parse_encoding, read_bytes_via_session, require_min_or_err, MAX_READ_BYTES, MAX_TIMEOUT_MS,
@@ -15,8 +16,10 @@ use crate::tools::helpers::{
 };
 use crate::tools::types::{FlushArgs, FlushResult, ReadArgs, ReadResult, WriteArgs, WriteResult};
 
+use crate::tx_session::TxSessionManager;
 pub async fn write(
     connections: &Arc<ConnectionManager>,
+    tx_sessions: &Arc<TxSessionManager>,
     args: WriteArgs,
 ) -> Result<Json<WriteResult>, String> {
     debug!("Write to {} ({})", args.connection_id, args.encoding);
@@ -26,7 +29,10 @@ pub async fn write(
     let bytes =
         codec::decode(encoding, &args.data).map_err(|e| format!("Data decoding failed - {e}"))?;
     clamp_or_err("write.data.len()", bytes.len(), MAX_WRITE_BYTES)?;
-    let bytes_written = connection.write(&bytes).await.map_err(|e| {
+
+    let data: Arc<[u8]> = Arc::from(bytes.as_slice());
+    let session = tx_sessions.get_or_create(Arc::clone(&connection)).await;
+    let bytes_written = session.write(data).await.map_err(|e| {
         log_tool_err(
             "write",
             &format!("Data sending failed on {}", args.connection_id),
@@ -134,18 +140,50 @@ pub async fn read(
 
 pub async fn flush(
     connections: &Arc<ConnectionManager>,
+    tx_sessions: &Arc<TxSessionManager>,
     args: FlushArgs,
 ) -> Result<Json<FlushResult>, String> {
     debug!("Flush {} target={:?}", args.connection_id, args.target);
 
     let connection = lookup_connection(connections, &args.connection_id).await?;
-    connection.flush_buffers(args.target).await.map_err(|e| {
-        log_tool_err(
-            "flush",
-            &format!("Failed to flush {}", args.connection_id),
-            e,
-        )
-    })?;
+    match args.target {
+        FlushTarget::Input => {
+            connection.flush_buffers(FlushTarget::Input).await.map_err(|e| {
+                log_tool_err(
+                    "flush",
+                    &format!("Failed to flush {}", args.connection_id),
+                    e,
+                )
+            })?;
+        }
+        FlushTarget::Output => {
+            let session = tx_sessions.get_or_create(Arc::clone(&connection)).await;
+            session.flush_output().await.map_err(|e| {
+                log_tool_err(
+                    "flush",
+                    &format!("Failed to flush {}", args.connection_id),
+                    e,
+                )
+            })?;
+        }
+        FlushTarget::Both => {
+            let session = tx_sessions.get_or_create(Arc::clone(&connection)).await;
+            session.flush_output().await.map_err(|e| {
+                log_tool_err(
+                    "flush",
+                    &format!("Failed to flush {}", args.connection_id),
+                    e,
+                )
+            })?;
+            connection.flush_buffers(FlushTarget::Input).await.map_err(|e| {
+                log_tool_err(
+                    "flush",
+                    &format!("Failed to flush {}", args.connection_id),
+                    e,
+                )
+            })?;
+        }
+    }
     info!("Flushed {} ({:?})", args.connection_id, args.target);
 
     Ok(Json(FlushResult {

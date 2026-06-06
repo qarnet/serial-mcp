@@ -240,7 +240,7 @@ cargo test --test e83_live_validation -- --ignored
 
 #### XIAO BLE board (`tests/xiao_ble_validation.rs`)
 
-Requires an nRF52840 XIAO BLE running the web-swd-flasher RTT feedback firmware on `/dev/ttyACM0`. Must be run single-threaded (one port, one owner).
+Requires an nRF52840 XIAO BLE running the dedicated serial-mcp UART test firmware, reached through the PicoProbe UART bridge on `/dev/ttyACM0`. Must be run single-threaded (one port, one owner).
 
 ```bash
 cargo test --test xiao_ble_validation -- --ignored --test-threads=1
@@ -251,12 +251,16 @@ SERIAL_MCP_XIAO_PORT=/dev/ttyACM1 cargo test --test xiao_ble_validation -- --ign
 | Test | What it covers |
 |------|---------------|
 | `xiao_close_while_subscribe_active` | Close during active subscribe stream; connection count drops to 0 |
+| `xiao_framing_reports_single_split_command` | Firmware framing mode proves split writes commit as one `ping` line |
+| `xiao_pending_read_then_write_ping_roundtrip` | TX still works promptly while a `read` is already pending on the same connection |
 | `xiao_ping_roundtrip` | `read(match="pong")` finds firmware's response to `ping` |
 | `xiao_read_buffer_budget_stops_under_flood` | `read` stops at `max_buffered_bytes` under hex spam flood |
 | `xiao_read_match_on_spam_complete` | `read(match="Spam complete")` stops when spam finishes |
+| `xiao_split_writes_preserve_command_order` | Split `write` calls still form a valid `ping` command on real hardware |
 | `xiao_subscribe_match_stops_on_spam_complete` | `subscribe(match=...)` self-stops on match (exercises subscribe stop-bug fix) |
 | `xiao_subscribe_silence_timeout_after_spam` | `no_new_rx_timeout_ms` fires when spam finishes and line goes silent |
-| `xiao_subscribe_timeout_stops_under_flood` | `subscribe(timeout_ms=800)` stops on wall-clock timeout while data is flowing |
+| `xiao_subscribe_timeout_stops_under_flood` | Wall-clock `timeout_ms` stops a live subscribe stream even while data keeps flowing |
+| `xiao_trace_reports_exact_split_byte_sequence` | Firmware trace mode proves exact byte order, including `\r\n`, for split writes |
 
 ---
 

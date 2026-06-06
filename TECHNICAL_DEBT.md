@@ -47,3 +47,31 @@ Why it matters:
 
 Likely follow-up:
 - full documentation pass after PLAN 3/4 settle naming and semantics.
+
+### 4. Reduce duplicated `tx_session` test coverage
+
+Current issue:
+- `src/tx_session.rs` unit tests and `tests/tx_session.rs` integration tests cover many same cases.
+- Coverage overlap includes write ordering, close behavior, idempotent session creation, and active RX pump coexistence.
+
+Why it matters:
+- Duplicate assertions increase maintenance cost when TX behavior changes.
+- Similar failures in two layers can add noise without adding much diagnostic value.
+
+Likely follow-up:
+- keep low-level behavior checks close to `src/tx_session.rs`,
+- keep only tool-surface or cross-module wiring coverage in `tests/tx_session.rs`.
+
+### 5. Add better live coverage for TX output flush semantics
+
+Current issue:
+- PTY and loopback tests cover TX ordering and output flush behavior well.
+- Current XIAO BLE firmware does not expose command-processing states that make `flush(target="output")` easy to prove on real hardware.
+
+Why it matters:
+- New `TxSession` architecture now owns serialized writes and output-side flush behavior.
+- Real hardware tests still do not directly prove what happens to queued partial TX data on a CDC-ACM device.
+
+Likely follow-up:
+- extend test firmware with commands that expose partial-line buffering or delayed command commit,
+- add live tests that can distinguish fully delivered TX, partially queued TX, and flushed-before-delivery TX.

@@ -2,7 +2,7 @@
 
 [![GitHub Release](https://img.shields.io/github/v/release/qarnet/serial-mcp)](https://github.com/qarnet/serial-mcp/releases)
 [![crates.io](https://img.shields.io/crates/v/serial-mcp)](https://crates.io/crates/serial-mcp)
-[![Rust](https://img.shields.io/badge/rust-1.70+-orange.svg)](https://rust-lang.org)
+[![Rust](https://img.shields.io/badge/rust-1.88%2B-orange.svg)](https://rust-lang.org)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 An MCP server that lets AI assistants drive serial ports: open, inspect, read,
@@ -121,11 +121,15 @@ cargo fmt --all -- --check
 
 # Hardware tests (requires TX-RX loopback device)
 SERIAL_MCP_TEST_PORT=/dev/ttyACM0 cargo test --test hardware_loopback -- --ignored
+
+# XIAO BLE firmware validation (requires dedicated serial-mcp test firmware)
+SERIAL_MCP_XIAO_PORT=/dev/ttyACM0 cargo test --test xiao_ble_validation -- --ignored --test-threads=1
 ```
 
 ## Documentation
 
 - [Agent Configuration](docs/agent-config.md)
+- [Testing Guide](docs/TESTING.md)
 - [CHANGELOG.md](CHANGELOG.md)
 - [AGENTS.md](AGENTS.md) — contributor guidelines
 

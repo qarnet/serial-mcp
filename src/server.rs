@@ -20,6 +20,7 @@ use crate::buffer_budget::BufferBudget;
 use crate::rx_session::RxSessionManager;
 use crate::security::SecurityManager;
 use crate::serial::{ConnectionManager, PortInfo};
+use crate::tx_session::TxSessionManager;
 
 use crate::prompts::types::*;
 use crate::prompts::{diagnose, interactive};
@@ -68,6 +69,7 @@ pub struct SerialHandler {
     security: SecurityManager,
     subscribers: Arc<tokio::sync::Mutex<HashMap<String, usize>>>,
     rx_sessions: Arc<RxSessionManager>,
+    tx_sessions: Arc<TxSessionManager>,
     budget: Arc<dyn BufferBudget>,
 }
 
@@ -134,6 +136,7 @@ impl SerialHandler {
             security,
             subscribers: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             rx_sessions: Arc::new(RxSessionManager::new()),
+            tx_sessions: Arc::new(TxSessionManager::new()),
             budget,
         }
     }
@@ -186,6 +189,8 @@ impl SerialHandler {
         let result = port_ops::close(&self.connections, args).await?;
         // Shut down RX session (pump + consumers) for this connection.
         self.rx_sessions.remove(&connection_id).await;
+        // Shut down TX session (worker) for this connection.
+        self.tx_sessions.remove(&connection_id).await;
         // Abort any active RX subscription tied to this connection.
         self.streams.lock().await.remove(&connection_id);
         self.notify_resource_changed(&connection_id, &ctx).await;
@@ -201,7 +206,7 @@ impl SerialHandler {
         &self,
         Parameters(args): Parameters<WriteArgs>,
     ) -> Result<Json<WriteResult>, String> {
-        io_ops::write(&self.connections, args).await
+        io_ops::write(&self.connections, &self.tx_sessions, args).await
     }
 
     #[tool(
@@ -238,7 +243,7 @@ impl SerialHandler {
         &self,
         Parameters(args): Parameters<FlushArgs>,
     ) -> Result<Json<FlushResult>, String> {
-        io_ops::flush(&self.connections, args).await
+        io_ops::flush(&self.connections, &self.tx_sessions, args).await
     }
 
     #[tool(
