@@ -443,3 +443,81 @@ async fn pty_send_break_short_duration_timing() {
 
     client.cancel().await.ok();
 }
+
+#[tokio::test]
+async fn pty_subscribe_match_stops_without_context() {
+    let (_server, client, mut rx, mut pty, connection_id) = setup().await;
+
+    client
+        .peer()
+        .call_tool(tool_request(
+            "subscribe",
+            json!({
+                "connection_id": connection_id,
+                "poll_interval_ms": 50,
+                "match": {
+                    "pattern": "STOP",
+                    "config": {
+                        "mode": "literal_substring",
+                        "pattern_encoding": "utf8"
+                    }
+                }
+            }),
+        ))
+        .await
+        .unwrap();
+
+    pty.write_device(b"noise noise STOP tail").await.unwrap();
+
+    let mut found_match_stop = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while tokio::time::Instant::now() < deadline {
+        match next_notification(&mut rx, Duration::from_secs(2)).await {
+            Ok(event) => {
+                let data = event.data.as_object().unwrap();
+                if data.get("matched").and_then(|v| v.as_bool()) == Some(true) {
+                    found_match_stop = true;
+                    assert_eq!(data["stop_reason"], json!("match_found"));
+                    assert!(data["match_index"].as_u64().is_some(), "match_index present");
+                    break;
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    assert!(found_match_stop, "subscribe should emit match stop notification");
+    client.cancel().await.ok();
+}
+
+#[tokio::test]
+async fn pty_subscribe_silence_timeout_stops() {
+    let (_server, client, mut rx, _pty, connection_id) = setup().await;
+
+    // Subscribe with silence timeout. PTY device side is silent — no writes.
+    client
+        .peer()
+        .call_tool(tool_request(
+            "subscribe",
+            json!({
+                "connection_id": connection_id,
+                "poll_interval_ms": 50,
+                "no_new_rx_timeout_ms": 300
+            }),
+        ))
+        .await
+        .unwrap();
+
+    // Should arrive within ~600ms.
+    let event = next_notification(&mut rx, Duration::from_secs(3))
+        .await
+        .expect("subscribe should emit stop notification on silence timeout");
+
+    let data = event.data.as_object().unwrap();
+    assert_eq!(
+        data["stop_reason"],
+        json!("no_new_rx_timeout"),
+        "stop_reason should be no_new_rx_timeout: {data:?}"
+    );
+    assert_ne!(data.get("matched").and_then(|v| v.as_bool()), Some(true));
+    client.cancel().await.ok();
+}
