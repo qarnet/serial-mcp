@@ -21,7 +21,7 @@ output. Many devices print a banner on boot or when DTR toggles.\n\
 `set_dtr_rts(connection_id, dtr=true, rts=true)` to soft-reset Arduino-style boards, \
 and re-read.\n\
 5. If still silent, send a benign probe via `write(connection_id, data=\"AT\\r\\n\", \
-encoding=\"utf8\")` then `wait_for(connection_id, pattern=\"OK\", timeout_ms=1000)`. \
+encoding=\"utf8\")` then `read(connection_id, match={{pattern=\"OK\", config={{mode=\"literal_substring\", pattern_encoding=\"utf8\"}}}}, timeout_ms=1000)`. \
 Try `?\\r\\n`, `help\\r\\n`, `\\r\\n` as alternatives.\n\
 6. From the captured bytes, characterise the device: BOM/banner string, presence of \
 ANSI escapes, hex-only output, line-ending convention.\n\
