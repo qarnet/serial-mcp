@@ -2,7 +2,7 @@
 //!
 //! Exercises the hex / base64 / utf8 encoding paths with raw binary data
 //! that cannot be represented as valid UTF-8, plus large payloads and
-//! hex-pattern matching in wait_for.
+//! hex-pattern matching in read+match.
 
 #![cfg(target_os = "linux")]
 
@@ -60,6 +60,23 @@ async fn emulator_task(mut master: File) {
 
 fn assert_tool_ok(result: &rmcp::model::CallToolResult, label: &str) {
     assert_ne!(result.is_error, Some(true), "{label} failed: {result:?}");
+}
+
+fn assert_tool_err(result: &rmcp::model::CallToolResult, label: &str) {
+    assert_eq!(
+        result.is_error,
+        Some(true),
+        "expected {label} to fail: {result:?}"
+    );
+}
+
+fn get_text(result: &rmcp::model::CallToolResult) -> String {
+    result
+        .content
+        .first()
+        .and_then(|c| c.as_text())
+        .map(|t| t.text.to_string())
+        .unwrap_or_default()
 }
 
 #[tokio::test]
@@ -127,7 +144,8 @@ async fn protocol_emulator_binary_workflow() {
     let hex_structured = hex_result.structured_content.expect("structured");
     let hex_str = hex_structured["data"].as_str().unwrap();
     let decoded =
-        serial_mcp::codec::decode(serial_mcp::codec::Encoding::Hex, hex_str).expect("hex decode");
+        serial_mcp::codec::decode(serial_mcp::codec::Encoding::Hex, hex_str)
+            .expect("hex decode");
     assert_eq!(decoded.len(), 256, "expected 256 raw bytes");
     let expected: Vec<u8> = (0u8..=255).collect();
     assert_eq!(decoded, expected, "byte values must be 0x00..0xFF");
@@ -171,15 +189,16 @@ async fn protocol_emulator_binary_workflow() {
     assert_tool_ok(&b64_result, "read base64 roundtrip");
     let b64_structured = b64_result.structured_content.expect("structured");
     let b64_str = b64_structured["data"].as_str().unwrap();
-    let decoded = serial_mcp::codec::decode(serial_mcp::codec::Encoding::Base64, b64_str)
-        .expect("base64 decode");
+    let decoded =
+        serial_mcp::codec::decode(serial_mcp::codec::Encoding::Base64, b64_str)
+            .expect("base64 decode");
     assert_eq!(decoded.len(), 256, "expected 256 raw bytes");
     assert_eq!(
         decoded, expected,
         "base64 roundtrip must match original bytes"
     );
 
-    // ---- Stage 3: utf8 encoding on binary data uses replacement characters ----
+    // ---- Stage 3: utf8 encoding must fail on binary data ----
     client
         .peer()
         .call_tool(tool_request(
@@ -215,18 +234,11 @@ async fn protocol_emulator_binary_workflow() {
         ))
         .await
         .unwrap();
-    assert_tool_ok(&utf8_result, "utf8_encoding_binary_lossy");
-    let utf8_structured = utf8_result.structured_content.expect("structured");
-    let utf8_str = utf8_structured["data"].as_str().unwrap();
-    // Bytes 0x00-0x7F are valid ASCII/UTF-8; bytes 0x80-0xFF are replaced with \u{FFFD}
+    assert_tool_err(&utf8_result, "utf8_encoding_binary");
+    let err_text = get_text(&utf8_result);
     assert!(
-        utf8_str.contains('\u{FFFD}'),
-        "lossy utf8 must contain replacement characters for invalid bytes: {utf8_str}"
-    );
-    assert_eq!(
-        utf8_structured["bytes_read"].as_u64().unwrap(),
-        256,
-        "lossy utf8 must report 256 bytes read"
+        err_text.contains("encoding") || err_text.contains("utf-8") || err_text.contains("invalid"),
+        "error must mention encoding failure: {err_text}"
     );
 
     // ---- Stage 4: large payload (>3 KB) via hex read ----
@@ -273,7 +285,7 @@ async fn protocol_emulator_binary_workflow() {
         "expected >=3000 bytes for big payload, got {big_bytes}"
     );
 
-    // ---- Stage 5: wait_for with a hex pattern in binary data ----
+    // ---- Stage 5: read with hex pattern match in binary data ----
     client
         .peer()
         .call_tool(tool_request(
@@ -296,30 +308,29 @@ async fn protocol_emulator_binary_workflow() {
         .await
         .unwrap();
 
-    let wait_result = client
+    let match_result = client
         .peer()
         .call_tool(tool_request(
-            "wait_for",
+            "read",
             json!({
                 "connection_id": connection_id,
-                "pattern": "cafe c0ffee",
-                "pattern_encoding": "hex",
-                "response_encoding": "hex",
                 "timeout_ms": 3000,
                 "max_buffered_bytes": 64,
+                "encoding": "hex",
+                "match": { "pattern": "cafe c0ffee", "config": { "pattern_encoding": "hex" } },
             }),
         ))
         .await
         .unwrap();
-    assert_tool_ok(&wait_result, "wait_for hex pattern");
-    let wait_structured = wait_result.structured_content.expect("structured");
+    assert_tool_ok(&match_result, "read+match hex pattern");
+    let match_structured = match_result.structured_content.expect("structured");
     assert_eq!(
-        wait_structured["matched"],
+        match_structured["matched"],
         json!(true),
         "pattern must match"
     );
     assert!(
-        wait_structured["match_index"].as_u64().is_some(),
+        match_structured["match_index"].as_u64().is_some(),
         "match_index must be present"
     );
 
