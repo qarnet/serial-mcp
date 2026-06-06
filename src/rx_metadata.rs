@@ -22,6 +22,8 @@ pub enum RxStopReason {
     MatchFound,
     /// The max_bytes limit was reached before the operation could finish otherwise.
     MaxBufferedBytes,
+    /// No new data was received within the configured silence timeout.
+    NoNewRxTimeout,
     /// The underlying serial connection was closed.
     ConnectionClosed,
     /// The MCP request was cancelled by the client.
@@ -151,6 +153,15 @@ impl RxStopMetadata {
             truncated: false,
             bytes_observed: 0,
             bytes_returned: 0,
+        }
+    }
+
+    pub fn no_new_rx_timeout(bytes_observed: usize) -> Self {
+        Self {
+            stop_reason: RxStopReason::NoNewRxTimeout,
+            truncated: false,
+            bytes_observed,
+            bytes_returned: bytes_observed,
         }
     }
 

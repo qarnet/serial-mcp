@@ -4,6 +4,9 @@
 //! for both `read` and `subscribe`. Same inputs must yield the same stop reason
 //! regardless of which tool calls in.
 //!
+//! PLAN 6 adds silence-timeout support (`no_new_rx_timeout_ms`) so operations
+//! can stop after a period of no incoming data.
+//!
 //! The controller is *stateless* regarding event sourcing — it does not own
 //! channels, loops, or notification logic. It only tracks counters and deadlines
 //! and answers: "should the operation continue, and if not, why?"
@@ -11,10 +14,11 @@
 //! ## Normal vs Error stop reasons
 //!
 //! Normal stops (successful outcomes):
-//! - `match_found`  — pattern matched in the byte stream
-//! - `timeout`      — total wall-clock budget elapsed
+//! - `match_found`      — pattern matched in the byte stream
+//! - `timeout`          — total wall-clock budget elapsed
 //! - `max_buffered_bytes` — buffer budget reached
-//! - `data_complete` — settle phase completed (read without matcher)
+//! - `data_complete`    — settle phase completed (read without matcher)
+//! - `no_new_rx_timeout` — silence budget elapsed (no data within window)
 //!
 //! Error stops (something went wrong):
 //! - `connection_closed` — underlying serial port closed
@@ -22,10 +26,6 @@
 //! - `read_error`       — I/O error on the serial port
 //! - `channel_closed`   — RX pump channel closed (internal)
 //! - `peer_disconnected` — MCP peer went away during streaming
-//!
-//! Error stops return `Err(String)` from `read` and `wait_for`
-//! tool handlers. `subscribe` logs them as the stop reason in the
-//! final notification. Normal stops always produce `Ok` results.
 
 use std::time::Instant;
 
@@ -56,11 +56,14 @@ pub struct RxStopOutcome {
 /// Both `read` and `subscribe` call into the same controller instance for
 /// the duration of one operation. The controller tracks:
 /// - deadline (from `timeout_ms`)
+/// - silence deadline (from `no_new_rx_timeout_ms`)
 /// - byte counters (observed and returned)
 /// - max buffer limit
 /// - match state
 pub struct RxStopController {
     deadline: Option<Instant>,
+    silence_duration: Option<std::time::Duration>,
+    silence_deadline: Option<Instant>,
     max_bytes: usize,
     bytes_observed: usize,
     bytes_returned: usize,
@@ -74,10 +77,22 @@ impl RxStopController {
     /// `start` is the instant the operation began (for deadline computation).
     /// `timeout_ms` is the optional total wall-clock budget in milliseconds.
     /// `max_bytes` is the buffer budget limit.
-    pub fn new(start: Instant, timeout_ms: Option<u64>, max_bytes: usize) -> Self {
+    /// `no_new_rx_timeout_ms` is the optional silence timeout in milliseconds.
+    ///   When set, the operation stops if no data arrives within this window.
+    ///   The timer starts immediately and resets on each non-empty data event.
+    pub fn new(
+        start: Instant,
+        timeout_ms: Option<u64>,
+        max_bytes: usize,
+        no_new_rx_timeout_ms: Option<u64>,
+    ) -> Self {
         let deadline = timeout_ms.map(|ms| start + std::time::Duration::from_millis(ms));
+        let silence_duration = no_new_rx_timeout_ms.map(std::time::Duration::from_millis);
+        let silence_deadline = silence_duration.map(|d| start + d);
         Self {
             deadline,
+            silence_duration,
+            silence_deadline,
             max_bytes,
             bytes_observed: 0,
             bytes_returned: 0,
@@ -102,6 +117,37 @@ impl RxStopController {
             }
         }
         RxStopDecision::Continue
+    }
+
+    /// Check whether the silence timeout has passed.
+    ///
+    /// The silence deadline is set at operation start and reset every time
+    /// a non-empty data chunk arrives. If the deadline has passed, returns
+    /// `Stop` with `RxStopReason::NoNewRxTimeout`.
+    pub fn check_silence_timeout(&self) -> RxStopDecision {
+        if let Some(dl) = self.silence_deadline {
+            if Instant::now() >= dl {
+                return RxStopDecision::Stop(RxStopOutcome {
+                    meta: RxStopMetadata::no_new_rx_timeout(self.bytes_observed)
+                        .with_bytes(self.bytes_observed, self.bytes_returned),
+                    matched: self.matched,
+                    match_index: self.match_index,
+                });
+            }
+        }
+        RxStopDecision::Continue
+    }
+
+    /// Record that a non-empty data chunk was received, resetting the silence
+    /// timer.
+    ///
+    /// Call this for every `RxEvent::Data` chunk. This resets the silence
+    /// deadline so the silence timer starts counting from "now".
+    /// Byte value `0x00` counts as real data.
+    pub fn notify_data_received(&mut self) {
+        if let Some(dur) = self.silence_duration {
+            self.silence_deadline = Some(Instant::now() + dur);
+        }
     }
 
     /// Record incoming data and evaluate stop conditions.
@@ -275,6 +321,7 @@ pub fn is_normal_stop(reason: RxStopReason) -> bool {
             | RxStopReason::Timeout
             | RxStopReason::MaxBufferedBytes
             | RxStopReason::MatchFound
+            | RxStopReason::NoNewRxTimeout
     )
 }
 
@@ -285,7 +332,7 @@ mod tests {
     #[test]
     fn timeout_stops_at_deadline() {
         let start = Instant::now();
-        let ctrl = RxStopController::new(start, Some(0), 1024);
+        let ctrl = RxStopController::new(start, Some(0), 1024, None);
         // Deadline already passed (0ms timeout).
         let decision = ctrl.check_timeout();
         assert!(matches!(decision, RxStopDecision::Stop(_)));
@@ -299,21 +346,21 @@ mod tests {
     #[test]
     fn continue_before_deadline() {
         let start = Instant::now();
-        let ctrl = RxStopController::new(start, Some(5000), 1024);
+        let ctrl = RxStopController::new(start, Some(5000), 1024, None);
         assert!(matches!(ctrl.check_timeout(), RxStopDecision::Continue));
     }
 
     #[test]
     fn no_timeout_without_deadline() {
         let start = Instant::now();
-        let ctrl = RxStopController::new(start, None, 1024);
+        let ctrl = RxStopController::new(start, None, 1024, None);
         assert!(matches!(ctrl.check_timeout(), RxStopDecision::Continue));
     }
 
     #[test]
     fn match_found_stops_immediately() {
         let start = Instant::now();
-        let mut ctrl = RxStopController::new(start, None, 1024);
+        let mut ctrl = RxStopController::new(start, None, 1024, None);
         let decision = ctrl.push_data(5, 5, Some(MatchResult::Found(2)));
         assert!(matches!(decision, RxStopDecision::Stop(_)));
         if let RxStopDecision::Stop(outcome) = decision {
@@ -328,7 +375,7 @@ mod tests {
     #[test]
     fn no_match_continues() {
         let start = Instant::now();
-        let mut ctrl = RxStopController::new(start, None, 1024);
+        let mut ctrl = RxStopController::new(start, None, 1024, None);
         let decision = ctrl.push_data(5, 5, Some(MatchResult::NoMatch));
         assert!(matches!(decision, RxStopDecision::Continue));
         assert_eq!(ctrl.bytes_observed(), 5);
@@ -337,7 +384,7 @@ mod tests {
     #[test]
     fn max_buffered_bytes_stops() {
         let start = Instant::now();
-        let mut ctrl = RxStopController::new(start, None, 10);
+        let mut ctrl = RxStopController::new(start, None, 10, None);
         // push_data with buffered_len == max_bytes should stop.
         let decision = ctrl.push_data(10, 10, None);
         assert!(matches!(decision, RxStopDecision::Stop(_)));
@@ -349,7 +396,7 @@ mod tests {
     #[test]
     fn match_found_takes_priority_over_max_bytes() {
         let start = Instant::now();
-        let mut ctrl = RxStopController::new(start, None, 5);
+        let mut ctrl = RxStopController::new(start, None, 5, None);
         // Both match and max_bytes — match should win.
         let decision = ctrl.push_data(10, 10, Some(MatchResult::Found(3)));
         assert!(matches!(decision, RxStopDecision::Stop(_)));
@@ -361,7 +408,7 @@ mod tests {
     #[test]
     fn connection_closed_outcome() {
         let start = Instant::now();
-        let mut ctrl = RxStopController::new(start, None, 1024);
+        let mut ctrl = RxStopController::new(start, None, 1024, None);
         ctrl.record_data(100, 80);
         let outcome = ctrl.connection_closed();
         assert_eq!(outcome.meta.stop_reason, RxStopReason::ConnectionClosed);
@@ -372,7 +419,7 @@ mod tests {
     #[test]
     fn channel_closed_outcome() {
         let start = Instant::now();
-        let mut ctrl = RxStopController::new(start, None, 1024);
+        let mut ctrl = RxStopController::new(start, None, 1024, None);
         ctrl.record_data(50, 50);
         let outcome = ctrl.channel_closed();
         assert_eq!(outcome.meta.stop_reason, RxStopReason::ChannelClosed);
@@ -382,7 +429,7 @@ mod tests {
     #[test]
     fn cancelled_outcome() {
         let start = Instant::now();
-        let mut ctrl = RxStopController::new(start, None, 1024);
+        let mut ctrl = RxStopController::new(start, None, 1024, None);
         ctrl.record_data(30, 30);
         let outcome = ctrl.cancelled();
         assert_eq!(outcome.meta.stop_reason, RxStopReason::Cancelled);
@@ -392,7 +439,7 @@ mod tests {
     #[test]
     fn read_error_outcome() {
         let start = Instant::now();
-        let ctrl = RxStopController::new(start, None, 1024);
+        let ctrl = RxStopController::new(start, None, 1024, None);
         let outcome = ctrl.read_error();
         assert_eq!(outcome.meta.stop_reason, RxStopReason::ReadError);
         assert!(!outcome.matched);
@@ -401,7 +448,7 @@ mod tests {
     #[test]
     fn peer_disconnected_outcome() {
         let start = Instant::now();
-        let mut ctrl = RxStopController::new(start, None, 1024);
+        let mut ctrl = RxStopController::new(start, None, 1024, None);
         ctrl.record_data(200, 200);
         let outcome = ctrl.peer_disconnected();
         assert_eq!(outcome.meta.stop_reason, RxStopReason::PeerDisconnected);
@@ -411,7 +458,7 @@ mod tests {
     #[test]
     fn data_complete_outcome() {
         let start = Instant::now();
-        let mut ctrl = RxStopController::new(start, None, 1024);
+        let mut ctrl = RxStopController::new(start, None, 1024, None);
         ctrl.record_data(42, 42);
         let outcome = ctrl.data_complete();
         assert_eq!(outcome.meta.stop_reason, RxStopReason::DataComplete);
@@ -436,7 +483,7 @@ mod tests {
     #[test]
     fn push_data_without_matcher_accumulates() {
         let start = Instant::now();
-        let mut ctrl = RxStopController::new(start, None, 1024);
+        let mut ctrl = RxStopController::new(start, None, 1024, None);
         // No matcher: pass None
         let decision = ctrl.push_data(10, 10, None);
         assert!(matches!(decision, RxStopDecision::Continue));
@@ -452,7 +499,7 @@ mod tests {
     fn timeout_preserves_match_state_from_earlier_data() {
         let start = Instant::now();
         // 0ms timeout means deadline has already passed.
-        let mut ctrl = RxStopController::new(start, Some(0), 1024);
+        let mut ctrl = RxStopController::new(start, Some(0), 1024, None);
         // Record some data but don't find match yet (this simulates
         // a scenario where data arrived before timeout was checked).
         ctrl.record_data(5, 5);
@@ -470,7 +517,7 @@ mod tests {
     #[test]
     fn check_max_buffered_bytes_after_record_data() {
         let start = Instant::now();
-        let mut ctrl = RxStopController::new(start, None, 10);
+        let mut ctrl = RxStopController::new(start, None, 10, None);
         ctrl.record_data(10, 10);
         let decision = ctrl.check_max_buffered_bytes();
         assert!(matches!(decision, RxStopDecision::Stop(_)));
@@ -482,7 +529,7 @@ mod tests {
     #[test]
     fn record_data_does_not_trigger_stops() {
         let start = Instant::now();
-        let mut ctrl = RxStopController::new(start, None, 5);
+        let mut ctrl = RxStopController::new(start, None, 5, None);
         ctrl.record_data(100, 100);
         // record_data just updates counters; caller must check separately.
         assert_eq!(ctrl.bytes_observed(), 100);
@@ -490,5 +537,106 @@ mod tests {
         // But check_max_buffered_bytes should now stop.
         let decision = ctrl.check_max_buffered_bytes();
         assert!(matches!(decision, RxStopDecision::Stop(_)));
+    }
+
+    #[test]
+    fn silence_timeout_stops_when_expired() {
+        let start = Instant::now();
+        // 0ms silence timeout means it's already expired.
+        let ctrl = RxStopController::new(start, None, 1024, Some(0));
+        let decision = ctrl.check_silence_timeout();
+        assert!(matches!(decision, RxStopDecision::Stop(_)));
+        if let RxStopDecision::Stop(outcome) = decision {
+            assert_eq!(outcome.meta.stop_reason, RxStopReason::NoNewRxTimeout);
+            assert!(!outcome.matched);
+            assert!(outcome.match_index.is_none());
+        }
+    }
+
+    #[test]
+    fn silence_timeout_continues_with_future_deadline() {
+        let start = Instant::now();
+        let ctrl = RxStopController::new(start, None, 1024, Some(5000));
+        assert!(matches!(
+            ctrl.check_silence_timeout(),
+            RxStopDecision::Continue
+        ));
+    }
+
+    #[test]
+    fn silence_timeout_disabled_when_none() {
+        let start = Instant::now();
+        let ctrl = RxStopController::new(start, None, 1024, None);
+        assert!(matches!(
+            ctrl.check_silence_timeout(),
+            RxStopDecision::Continue
+        ));
+    }
+
+    #[test]
+    fn notify_data_received_resets_silence_deadline() {
+        let start = Instant::now();
+        let mut ctrl = RxStopController::new(start, None, 1024, Some(5000));
+        // Before data, silence deadline is start + 5s.
+        assert!(matches!(
+            ctrl.check_silence_timeout(),
+            RxStopDecision::Continue
+        ));
+        // After receiving data, deadline resets to now + 5s.
+        ctrl.notify_data_received();
+        // Still continues since we just reset it.
+        assert!(matches!(
+            ctrl.check_silence_timeout(),
+            RxStopDecision::Continue
+        ));
+    }
+
+    #[test]
+    fn silence_timeout_is_normal_stop() {
+        assert!(is_normal_stop(RxStopReason::NoNewRxTimeout));
+    }
+
+    #[test]
+    fn silence_timeout_with_data_produces_bytes_in_outcome() {
+        let start = Instant::now();
+        let mut ctrl = RxStopController::new(start, None, 1024, Some(0));
+        ctrl.record_data(100, 80);
+        let decision = ctrl.check_silence_timeout();
+        if let RxStopDecision::Stop(outcome) = decision {
+            assert_eq!(outcome.meta.stop_reason, RxStopReason::NoNewRxTimeout);
+            assert_eq!(outcome.meta.bytes_observed, 100);
+            assert_eq!(outcome.meta.bytes_returned, 80);
+        } else {
+            panic!("expected Stop decision");
+        }
+    }
+
+    #[test]
+    fn both_timeouts_can_be_set_independently() {
+        let start = Instant::now();
+        // Total timeout of 10s, silence timeout of 1s.
+        let ctrl = RxStopController::new(start, Some(10000), 1024, Some(1000));
+        assert!(matches!(ctrl.check_timeout(), RxStopDecision::Continue));
+        assert!(matches!(
+            ctrl.check_silence_timeout(),
+            RxStopDecision::Continue
+        ));
+    }
+
+    #[test]
+    fn no_new_rx_timeout_metadata_preserves_bytes() {
+        let meta = RxStopMetadata::no_new_rx_timeout(42);
+        assert_eq!(meta.stop_reason, RxStopReason::NoNewRxTimeout);
+        assert_eq!(meta.bytes_observed, 42);
+        assert_eq!(meta.bytes_returned, 42);
+        assert!(!meta.truncated);
+    }
+
+    #[test]
+    fn no_new_rx_timeout_with_bytes() {
+        let meta = RxStopMetadata::no_new_rx_timeout(100).with_bytes(100, 80);
+        assert_eq!(meta.bytes_observed, 100);
+        assert_eq!(meta.bytes_returned, 80);
+        assert!(meta.truncated);
     }
 }
