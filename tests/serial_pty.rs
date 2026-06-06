@@ -157,28 +157,31 @@ async fn pty_subscribe_streams_device_writes_as_notifications() {
 async fn pty_read_match_finds_real_serial_pattern() {
     let (_server, client, _rx, mut pty, connection_id) = setup().await;
 
-    let writer = tokio::spawn(async move {
-        // Slow-feed bytes to exercise the read+match accumulator.
-        pty.write_device(b"warming up... ").await.unwrap();
-        tokio::time::sleep(Duration::from_millis(40)).await;
-        pty.write_device(b"OK> ready").await.unwrap();
-    });
+    let read_handle = {
+        let peer = client.peer().clone();
+        let id = connection_id.clone();
+        tokio::spawn(async move {
+            peer.call_tool(tool_request(
+                "read",
+                json!({
+                    "connection_id": id,
+                    "timeout_ms": 8000,
+                    "max_buffered_bytes": 4096,
+                    "encoding": "utf8",
+                    "match": { "pattern": "OK>" },
+                }),
+            ))
+            .await
+        })
+    };
 
-    let result = client
-        .peer()
-        .call_tool(tool_request(
-            "read",
-            json!({
-                "connection_id": connection_id,
-                "timeout_ms": 8000,
-                "max_buffered_bytes": 4096,
-                "encoding": "utf8",
-                "match": { "pattern": "OK>" },
-            }),
-        ))
-        .await
-        .unwrap();
-    writer.await.unwrap();
+    // Slow-feed bytes to exercise the read+match accumulator.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    pty.write_device(b"warming up... ").await.unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    pty.write_device(b"OK> ready").await.unwrap();
+
+    let result = read_handle.await.unwrap().unwrap();
     assert_ne!(result.is_error, Some(true), "{result:?}");
     let structured = result.structured_content.expect("structured");
     assert!(structured.get("timed_out").is_none(), "{structured:?}");

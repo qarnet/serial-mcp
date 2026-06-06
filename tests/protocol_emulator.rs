@@ -293,12 +293,21 @@ async fn protocol_emulator_workflow() {
                 "timeout_ms": 2000,
                 "max_buffered_bytes": 256,
                 "encoding": "utf8",
+                "match": {
+                    "pattern": "26.75;53.30;980.9;409",
+                    "config": { "mode": "literal_substring", "pattern_encoding": "utf8" }
+                }
             }),
         ))
         .await
         .unwrap();
     assert_ne!(read_result.is_error, Some(true), "{read_result:?}");
     let read_structured = read_result.structured_content.expect("structured");
+    assert_eq!(
+        read_structured["matched"],
+        json!(true),
+        "{read_structured:?}"
+    );
     let csv_data = read_structured["data"].as_str().unwrap();
     assert!(
         csv_data.contains("26.75;53.30;980.9;409"),
