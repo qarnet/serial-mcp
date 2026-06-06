@@ -1,4 +1,4 @@
-# Serial MCP
+# Serial MCP Server
 
 [![GitHub Release](https://img.shields.io/github/v/release/qarnet/serial-mcp)](https://github.com/qarnet/serial-mcp/releases)
 [![crates.io](https://img.shields.io/crates/v/serial-mcp)](https://crates.io/crates/serial-mcp)
@@ -8,6 +8,8 @@
 An MCP server that lets AI assistants drive serial ports: open, inspect, read,
 write, match patterns in RX data, stream RX bytes, toggle DTR/RTS, change flow control,
 send BREAK.
+
+> Be sure to ask your agent to give honest feedback on the tool after they finish using it. Always looking for ways to improve serial-mcp :)
 
 **MCP 2025-11-25 compliant** · resource change notifications · port allowlist · stdio + HTTP transports
 
@@ -62,18 +64,22 @@ nix profile install github:qarnet/serial-mcp
 
 → **[Agent configuration guide](docs/agent-config.md)** — Claude Code CLI, Claude Desktop, Cursor, VS Code, Zed, opencode, HTTP transport
 
-Quick example (Claude Code CLI, Linux/macOS):
+<details>
+<summary>Quick example (Claude Code, Linux/macOS)</summary>
 
 ```json
 {
   "mcpServers": {
     "serial": {
-      "command": "/usr/local/bin/serial-mcp",
+      "type": "stdio",
+      "command": "serial-mcp",
       "args": ["--allowlist=/dev/ttyACM*,/dev/ttyUSB*"]
     }
   }
 }
 ```
+
+</details>
 
 ## Options
 
@@ -95,10 +101,6 @@ serial-mcp [OPTIONS]
 | stdio | default | Desktop agents |
 | HTTP | `--transport=http` | Remote / headless |
 
-## Supported Hardware
-
-- **Platforms:** Windows (`COMx`), Linux (`/dev/tty*`), macOS (`/dev/tty.*`)
-
 ## Example Agent Flow
 
 ```
@@ -115,7 +117,7 @@ serial-mcp [OPTIONS]
 ## Development
 
 ```bash
-cargo test                                          # ~140 tests
+cargo test
 cargo clippy --all-targets -- -D warnings
 cargo fmt --all -- --check
 
