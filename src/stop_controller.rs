@@ -181,7 +181,7 @@ impl RxStopController {
             });
         }
 
-        if buffered_len >= self.max_bytes {
+        if self.max_bytes > 0 && buffered_len >= self.max_bytes {
             let meta = RxStopMetadata::max_buffered_bytes(self.bytes_observed, self.bytes_returned);
             return RxStopDecision::Stop(RxStopOutcome {
                 meta,

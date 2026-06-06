@@ -11,7 +11,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::buffer_budget::BufferBudget;
 use crate::codec;
-use crate::match_config::{shape_match_context, validate_match_request, ByteMatcher, MatchResult};
+use crate::match_config::{shape_match_context, validate_match_request, ByteMatcher};
 use crate::rx_metadata::RxStopMetadata;
 use crate::rx_session::{RxEvent, RxSessionManager};
 use crate::serial::ConnectionManager;
@@ -315,20 +315,8 @@ async fn stream_rx_via_session(
                         m.truncate_front(cap);
                     }
                 }
-                ctrl.record_data(n, n);
-
-                // If matcher found a match, set stop outcome.
-                if let Some(MatchResult::Found(_idx)) = match_result {
-                    // Build the match-found outcome through the controller's
-                    // push_data path for consistent metadata, then override
-                    // with the actual match index from the matcher.
-                    // Since we already called record_data, we use a no-op
-                    // push_data (0 bytes observed delta) to get the outcome.
-                    if let RxStopDecision::Stop(outcome) =
-                        ctrl.push_data(0, ctrl.bytes_returned(), match_result)
-                    {
-                        stop_outcome = Some(outcome);
-                    }
+                if let RxStopDecision::Stop(outcome) = ctrl.push_data(n, n, match_result) {
+                    stop_outcome = Some(outcome);
                 }
 
                 // Emit data notification regardless (including on match).
