@@ -9,3 +9,4 @@ STATUS.md
 .idea/
 .vscode/
 .schemas/
+.envrc
