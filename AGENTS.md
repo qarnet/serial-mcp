@@ -44,8 +44,8 @@ src/
   error.rs           SerialError enum + Result<T> alias
   security.rs        allowlist matching ( glob patterns)
   limits.rs          MAX_READ_BYTES, MAX_WRITE_BYTES, MAX_TIMEOUT_MS, etc.
-  match_config.rs    pattern-matching config for wait_for
-  rx_session.rs      RX session manager (shared RX buffer across read/wait_for/subscribe)
+  match_config.rs    pattern-matching config for read/subscribe match option
+  rx_session.rs      RX session manager (shared RX buffer across read/subscribe)
   rx_metadata.rs     RX metadata tracking
   tx_session.rs      TX session manager
   buffer_budget.rs   buffer reservation for concurrent RX consumers
