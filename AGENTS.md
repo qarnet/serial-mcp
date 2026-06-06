@@ -130,7 +130,75 @@ Two-tier model:
 
 ## Firmware (`firmware/`)
 
-NCS/Zephyr test firmware for XIAO BLE nRF52840. Hardware path is PicoProbe UART bridge on `/dev/ttyACM0`, not XIAO USB CDC. Image must flash and link at `0x0` with `pyocd`. See `firmware/AGENTS.md` before touching firmware.
+NCS/Zephyr test firmware for XIAO BLE nRF52840, used by `tests/xiao_ble_validation.rs`.
+
+### Critical truths
+
+- Transport is **physical `uart0`**, not USB CDC-ACM.
+- Host port `/dev/ttyACM0` is the **PicoProbe USB serial bridge** — not XIAO native USB.
+- XIAO TX/RX pins talk through PicoProbe at `115200 8N1`.
+- Flash with `pyocd` at **`0x0`**. If linker shows `0x27000`, the board `pm_static.yml` won.
+- `firmware/pm_static.yml` overrides board default. Do not remove it.
+
+### Do not drift
+
+- Do **not** add USB CDC-ACM (`zephyr_cdc_acm_uart`).
+- Do **not** wait for DTR, re-enable `CONFIG_CONSOLE` or `CONFIG_UART_CONSOLE`.
+- Do **not** use `west flash` — use `pyocd`.
+- Do **not** use `CONFIG_BUILD_OUTPUT_UF2=y` or `CONFIG_USE_DT_CODE_PARTITION=y`.
+
+### Build and flash
+
+```bash
+# Build (pristine)
+nrfutil sdk-manager toolchain launch --ncs-version v3.3.0 --chdir ~/ncs/v3.3.0/nrf -- \
+  west build -b xiao_ble /path/to/serial-mcp/firmware --pristine
+
+# Verify link origin is 0x0, then flash
+pyocd flash -t nrf52840 ~/ncs/v3.3.0/nrf/build/firmware/zephyr/zephyr.hex
+```
+
+### Architecture
+
+```
+src/
+  main.c        super loop, command dispatch
+  uart_drv.c/h  physical uart0 IRQ RX + ringbuf TX
+  command.c/h   all commands, spam timer, app state
+```
+
+### Command reference
+
+| Command | Response |
+|---------|----------|
+| `ping` | `pong\r\n` |
+| `info` | `board=XIAO_BLE_nRF52840 build=0.1.0 <date> <time>\r\n` |
+| `spam <N> hex [delay=<ms>]` | `spam start count=N delay=N\r\n` then hex payload |
+| `spam stop` | `Spam stopped: N bytes sent\r\n` |
+| `rxbuf status/clear` | inspect or clear partial line buffer |
+| `trace on/off` | emit `RX[n]=0xXX` per byte |
+| `slow on [<us>]` | sleep before command dispatch |
+
+Tests match on exact string `Spam complete`. Run with `--test-threads=1` (one port, one owner).
+
+### Known pitfalls
+
+- **Silent on `/dev/ttyACM0`** — USB CDC path still active; check `uart_drv.c` binds `uart0`.
+- **Linker at `0x27000`** — `firmware/pm_static.yml` missing or not picked up.
+- **`>` prompt or echoed commands** — `CONFIG_CONSOLE` or shell got re-enabled.
+- **Random hex instead of `pong`** — prior spam flood still draining; `spam stop` clears TX ring.
+
+### Recovery checklist
+
+1. Confirm `prj.conf` has `CONFIG_BUILD_OUTPUT_UF2=n` and `CONFIG_USE_DT_CODE_PARTITION=n`
+2. Confirm `firmware/pm_static.yml` sets `address: 0x0`
+3. Build with `nrfutil sdk-manager toolchain launch --ncs-version v3.3.0`
+4. Verify linker origin is `0x0`
+5. Flash with `pyocd flash -t nrf52840 .../zephyr.hex`
+6. Test `ping` on `/dev/ttyACM0`
+7. Run `cargo test --test xiao_ble_validation -- --ignored --test-threads=1`
+
+Full detail in `firmware/AGENTS.md`.
 
 ## Fuzz (`fuzz/`)
 
