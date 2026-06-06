@@ -381,13 +381,14 @@ async fn xiao_read_buffer_budget_stops_under_flood() {
     client.cancel().await.ok();
 }
 
-// ── Test 6: subscribe match with spam stop ───────────────────────────────────
+// ── Test 6: subscribe wall-clock timeout stops under active flood ─────────────
 
-/// Start a large spam. subscribe(match="Spam stopped"). Send spam stop.
-/// Subscribe should self-stop when "Spam stopped" appears in the stream.
+/// subscribe(timeout_ms=800) stops on wall-clock timeout even while spam data
+/// is actively flowing. Verifies that the timeout stop condition fires correctly
+/// when the stream is not silent (complementary to the silence-timeout test).
 #[tokio::test]
 #[ignore = "requires XIAO BLE on /dev/ttyACM0"]
-async fn xiao_subscribe_match_on_spam_stop_command() {
+async fn xiao_subscribe_timeout_stops_under_flood() {
     let port = xiao_port();
     let server = TestServer::start().await;
     let (client, mut rx) = connect_client(&server).await.unwrap();
@@ -395,7 +396,7 @@ async fn xiao_subscribe_match_on_spam_stop_command() {
 
     flush_both(&client, &id).await;
 
-    // Subscribe waiting for the "stopped" phrase.
+    // Subscribe with a 800ms wall-clock timeout (no match, no silence condition).
     client
         .peer()
         .call_tool(tool_request(
@@ -404,46 +405,41 @@ async fn xiao_subscribe_match_on_spam_stop_command() {
                 "connection_id": id,
                 "poll_interval_ms": 50,
                 "max_buffered_bytes": 16384,
-                "match": {
-                    "pattern": "Spam stopped",
-                    "config": {
-                        "mode": "literal_substring",
-                        "pattern_encoding": "utf8"
-                    }
-                }
+                "timeout_ms": 800,
             }),
         ))
         .await
         .unwrap();
 
-    // Large spam so it doesn't finish before we stop it.
-    write_cmd(&client, &id, "spam 1000000 hex delay=5").await;
-    // Let a few packets arrive so the subscribe sees some data.
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    // Stop it.
-    write_cmd(&client, &id, "spam stop").await;
+    // Large spam — should not finish within the 800ms window.
+    write_cmd(&client, &id, "spam 1000000 hex").await;
 
-    let mut found_match_stop = false;
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    // Collect notifications until stop.
+    let mut total_bytes: u64 = 0;
+    let mut stop_reason = String::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     while tokio::time::Instant::now() < deadline {
         match next_notification(&mut rx, Duration::from_secs(3)).await {
             Ok(event) => {
                 let data = event.data.as_object().unwrap();
-                if data.get("matched").and_then(|v| v.as_bool()) == Some(true) {
-                    found_match_stop = true;
-                    assert_eq!(data["stop_reason"], json!("match_found"), "{data:?}");
-                    let shaped = data.get("data").and_then(|v| v.as_str()).unwrap_or("");
-                    assert!(
-                        shaped.contains("Spam stopped"),
-                        "payload should contain stop phrase: {shaped:?}"
-                    );
+                if let Some(n) = data.get("bytes_read").and_then(|v| v.as_u64()) {
+                    total_bytes += n;
+                }
+                if let Some(reason) = data.get("stop_reason").and_then(|v| v.as_str()) {
+                    stop_reason = reason.to_string();
                     break;
                 }
             }
             Err(_) => break,
         }
     }
-    assert!(found_match_stop, "subscribe should emit match_found on 'Spam stopped'");
+
+    assert_eq!(stop_reason, "timeout", "expected timeout stop: {stop_reason:?}");
+    assert!(total_bytes > 0, "should have received some bytes before timeout");
+
+    // Stop the flood so subsequent tests start clean.
+    write_cmd(&client, &id, "spam stop").await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
 
     close_connection(&client, &id).await;
     client.cancel().await.ok();
@@ -478,6 +474,12 @@ async fn xiao_close_while_subscribe_active() {
 
     write_cmd(&client, &id, "spam 1000000 hex delay=5").await;
     tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Stop the spam before closing so the firmware is quiet for subsequent tests.
+    // "Spam stopped" is never printed by the firmware (spam_tick returns early when
+    // spam_running=false), but the flood does stop.
+    write_cmd(&client, &id, "spam stop").await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
 
     close_connection(&client, &id).await;
 
