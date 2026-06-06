@@ -8,7 +8,9 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
 use std::time::{Duration, Instant};
 
 use schemars::JsonSchema;
@@ -18,6 +20,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::Mutex;
 use tokio::time::timeout;
 use tokio_serial::{ClearBuffer, SerialPort, SerialPortBuilderExt, SerialStream};
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::error::{Result, SerialError};
@@ -86,7 +89,7 @@ impl From<Parity> for serialport::Parity {
     }
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum FlowControl {
     None,
@@ -108,6 +111,7 @@ impl From<FlowControl> for serialport::FlowControl {
 #[derive(Debug, Clone, JsonSchema)]
 pub struct ConnectionConfig {
     pub port: String,
+    pub name: Option<String>,
     pub baud_rate: u32,
     pub data_bits: DataBits,
     pub stop_bits: StopBits,
@@ -176,12 +180,13 @@ fn describe_port(port: &SerialPortInfo) -> String {
 /// without any hardware.
 ///
 /// Control-line operations (`clear_os_buffers`, `set_dtr_rts`,
-/// `set_break_state`) are required methods so the trait can stay
+/// `set_flow_control`, `set_break_state`) are required methods so the trait can stay
 /// object-safe even when the backend doesn't have a real port behind it;
 /// in-memory backends typically implement them as no-ops.
 pub trait SerialIo: AsyncRead + AsyncWrite + Send + Unpin {
     fn clear_os_buffers(&self, target: FlushTarget) -> std::io::Result<()>;
     fn set_dtr_rts(&mut self, dtr: bool, rts: bool) -> std::io::Result<()>;
+    fn set_flow_control(&mut self, flow_control: FlowControl) -> std::io::Result<()>;
     fn set_break_state(&self, asserted: bool) -> std::io::Result<()>;
 }
 
@@ -195,6 +200,10 @@ impl SerialIo for SerialStream {
             .map_err(io_error_from_serialport)?;
         self.write_request_to_send(rts)
             .map_err(io_error_from_serialport)
+    }
+
+    fn set_flow_control(&mut self, flow_control: FlowControl) -> std::io::Result<()> {
+        SerialPort::set_flow_control(self, flow_control.into()).map_err(io_error_from_serialport)
     }
 
     fn set_break_state(&self, asserted: bool) -> std::io::Result<()> {
@@ -217,29 +226,12 @@ fn io_error_from_serialport(err: serialport::Error) -> std::io::Error {
 pub struct SerialConnection {
     id: String,
     port: String,
-    rx_owner: StdMutex<Option<&'static str>>,
-    state: Mutex<SerialState>,
-}
-
-#[derive(Debug)]
-pub struct SerialRxLease {
-    connection: Arc<SerialConnection>,
-    owner: &'static str,
-}
-
-impl Drop for SerialRxLease {
-    fn drop(&mut self) {
-        if let Ok(mut current) = self.connection.rx_owner.lock() {
-            if current.as_ref() == Some(&self.owner) {
-                *current = None;
-            }
-        }
-    }
-}
-
-struct SerialState {
-    io: Box<dyn SerialIo>,
-    unread: Vec<u8>,
+    name: Option<String>,
+    baud_rate: u32,
+    flow_control: StdMutex<FlowControl>,
+    io: Mutex<Option<Box<dyn SerialIo>>>,
+    close_token: CancellationToken,
+    closed: AtomicBool,
 }
 
 impl fmt::Debug for SerialConnection {
@@ -247,6 +239,7 @@ impl fmt::Debug for SerialConnection {
         f.debug_struct("SerialConnection")
             .field("id", &self.id)
             .field("port", &self.port)
+            .field("name", &self.name)
             .finish()
     }
 }
@@ -256,20 +249,36 @@ impl SerialConnection {
     pub async fn open(config: ConnectionConfig) -> Result<Self> {
         ensure_valid_baud_rate(config.baud_rate)?;
         let stream = build_stream(&config)?;
-        Ok(Self::from_io(config.port, Box::new(stream)))
+        Ok(Self::from_io_with_config(config, Box::new(stream)))
     }
 
     /// Build a connection from an arbitrary [`SerialIo`] backend. Used by
     /// tests to inject an in-memory duplex stream.
     pub fn from_io(port: String, io: Box<dyn SerialIo>) -> Self {
+        Self::from_io_with_config(
+            ConnectionConfig {
+                port,
+                name: None,
+                baud_rate: 115200,
+                data_bits: DataBits::Eight,
+                stop_bits: StopBits::One,
+                parity: Parity::None,
+                flow_control: FlowControl::None,
+            },
+            io,
+        )
+    }
+
+    pub fn from_io_with_config(config: ConnectionConfig, io: Box<dyn SerialIo>) -> Self {
         Self {
             id: Uuid::new_v4().to_string(),
-            port,
-            rx_owner: StdMutex::new(None),
-            state: Mutex::new(SerialState {
-                io,
-                unread: Vec::new(),
-            }),
+            port: config.port,
+            name: config.name,
+            baud_rate: config.baud_rate,
+            flow_control: StdMutex::new(config.flow_control),
+            io: Mutex::new(Some(io)),
+            close_token: CancellationToken::new(),
+            closed: AtomicBool::new(false),
         }
     }
 
@@ -281,45 +290,52 @@ impl SerialConnection {
         &self.port
     }
 
-    pub fn acquire_rx(
-        connection: &Arc<Self>,
-        owner: &'static str,
-    ) -> std::result::Result<SerialRxLease, String> {
-        let mut current = connection.rx_owner.lock().map_err(|_| {
-            format!(
-                "Connection busy: failed to inspect RX owner on {}",
-                connection.id
-            )
-        })?;
+    pub fn name(&self) -> Option<&str> {
+        self.name.as_deref()
+    }
 
-        if let Some(active_owner) = *current {
-            return Err(format!("Connection busy: {active_owner} already owns RX"));
+    pub fn baud_rate(&self) -> u32 {
+        self.baud_rate
+    }
+
+    pub fn flow_control(&self) -> FlowControl {
+        *self
+            .flow_control
+            .lock()
+            .expect("flow_control mutex poisoned")
+    }
+
+    pub fn summary(&self) -> ConnectionSummary {
+        ConnectionSummary {
+            connection_id: self.id().to_string(),
+            name: self.name().map(str::to_string),
+            port: self.port().to_string(),
+            baud_rate: self.baud_rate(),
+            flow_control: self.flow_control(),
         }
+    }
 
-        *current = Some(owner);
-        Ok(SerialRxLease {
-            connection: Arc::clone(connection),
-            owner,
-        })
+    fn ensure_open(&self) -> Result<()> {
+        if self.closed.load(Ordering::SeqCst) {
+            return Err(SerialError::ConnectionClosed(self.display_name()));
+        }
+        Ok(())
+    }
+
+    fn display_name(&self) -> String {
+        self.name.clone().unwrap_or_else(|| self.id.clone())
     }
 
     /// Write a byte slice, flushing before returning.
     pub async fn write(&self, data: &[u8]) -> Result<usize> {
-        let mut state = self.state.lock().await;
-        let written = state.io.write(data).await?;
-        state.io.flush().await?;
+        self.ensure_open()?;
+        let mut io = self.io.lock().await;
+        let io = io
+            .as_mut()
+            .ok_or_else(|| SerialError::ConnectionClosed(self.display_name()))?;
+        let written = io.write(data).await?;
+        io.flush().await?;
         Ok(written)
-    }
-
-    fn read_from_unread(state: &mut SerialState, dst: &mut [u8]) -> usize {
-        let to_copy = dst.len().min(state.unread.len());
-        if to_copy == 0 {
-            return 0;
-        }
-
-        dst[..to_copy].copy_from_slice(&state.unread[..to_copy]);
-        state.unread.drain(..to_copy);
-        to_copy
     }
 
     /// Read up to `dst.len()` bytes. Returns [`SerialError::ReadTimeout`] if
@@ -332,33 +348,38 @@ impl SerialConnection {
     /// request/response pattern (`wait_for` + `write`) on CDC-ACM devices.
     pub async fn read(&self, dst: &mut [u8], timeout_ms: Option<u64>) -> Result<usize> {
         const POLL_MS: u64 = 50;
-
-        {
-            let mut state = self.state.lock().await;
-            let unread = Self::read_from_unread(&mut state, dst);
-            if unread > 0 {
-                return Ok(unread);
-            }
-        }
-
+        self.ensure_open()?;
         match timeout_ms {
-            None => Ok(self.state.lock().await.io.read(dst).await?),
+            None => {
+                let mut io = self.io.lock().await;
+                let io = io
+                    .as_mut()
+                    .ok_or_else(|| SerialError::ConnectionClosed(self.display_name()))?;
+                tokio::select! {
+                    _ = self.close_token.cancelled() => Err(SerialError::ConnectionClosed(self.display_name())),
+                    res = io.read(dst) => Ok(res?),
+                }
+            }
             Some(ms) => {
                 let deadline = Instant::now() + Duration::from_millis(ms);
                 loop {
+                    if self.close_token.is_cancelled() {
+                        return Err(SerialError::ConnectionClosed(self.display_name()));
+                    }
                     let remaining = deadline.saturating_duration_since(Instant::now());
                     if remaining.is_zero() {
                         return Err(SerialError::ReadTimeout);
                     }
                     let poll_dur = remaining.min(Duration::from_millis(POLL_MS));
                     {
-                        let mut state = self.state.lock().await;
-                        let unread = Self::read_from_unread(&mut state, dst);
-                        if unread > 0 {
-                            return Ok(unread);
-                        }
-
-                        match timeout(poll_dur, state.io.read(dst)).await {
+                        let mut io = self.io.lock().await;
+                        let io = io
+                            .as_mut()
+                            .ok_or_else(|| SerialError::ConnectionClosed(self.display_name()))?;
+                        match tokio::select! {
+                            _ = self.close_token.cancelled() => return Err(SerialError::ConnectionClosed(self.display_name())),
+                            res = timeout(poll_dur, io.read(dst)) => res,
+                        } {
                             Ok(Ok(n)) if n > 0 => return Ok(n),
                             Ok(Ok(_)) => {}
                             Ok(Err(e)) => return Err(SerialError::from(e)),
@@ -382,37 +403,51 @@ impl SerialConnection {
         Ok(buf)
     }
 
-    pub async fn unread(&self, data: &[u8]) {
-        if data.is_empty() {
-            return;
-        }
-
-        let mut state = self.state.lock().await;
-        state.unread.extend_from_slice(data);
-    }
-
     /// Discard data buffered in the OS for the input, output, or both
     /// directions of this port.
     pub async fn flush_buffers(&self, target: FlushTarget) -> Result<()> {
-        let mut state = self.state.lock().await;
-        if matches!(target, FlushTarget::Input | FlushTarget::Both) {
-            state.unread.clear();
-        }
-        state.io.clear_os_buffers(target).map_err(SerialError::from)
+        self.ensure_open()?;
+        let io = self.io.lock().await;
+        io.as_ref()
+            .ok_or_else(|| SerialError::ConnectionClosed(self.display_name()))?
+            .clear_os_buffers(target)
+            .map_err(SerialError::from)
     }
 
     /// Drive the DTR and RTS control lines. Common use case: pulse DTR low
     /// to soft-reset an Arduino, or hold both low to enter the ESP32
     /// bootloader.
     pub async fn set_dtr_rts(&self, dtr: bool, rts: bool) -> Result<()> {
-        let mut state = self.state.lock().await;
-        state.io.set_dtr_rts(dtr, rts).map_err(SerialError::from)
+        self.ensure_open()?;
+        let mut io = self.io.lock().await;
+        io.as_mut()
+            .ok_or_else(|| SerialError::ConnectionClosed(self.display_name()))?
+            .set_dtr_rts(dtr, rts)
+            .map_err(SerialError::from)
+    }
+
+    pub async fn set_flow_control(&self, flow_control: FlowControl) -> Result<()> {
+        self.ensure_open()?;
+        let mut io = self.io.lock().await;
+        io.as_mut()
+            .ok_or_else(|| SerialError::ConnectionClosed(self.display_name()))?
+            .set_flow_control(flow_control)
+            .map_err(SerialError::from)?;
+        *self
+            .flow_control
+            .lock()
+            .expect("flow_control mutex poisoned") = flow_control;
+        Ok(())
     }
 
     /// Set the BREAK condition on the TX line.
     pub async fn set_break_state(&self, enabled: bool) -> Result<()> {
-        let state = self.state.lock().await;
-        state.io.set_break_state(enabled).map_err(SerialError::from)
+        self.ensure_open()?;
+        let io = self.io.lock().await;
+        io.as_ref()
+            .ok_or_else(|| SerialError::ConnectionClosed(self.display_name()))?
+            .set_break_state(enabled)
+            .map_err(SerialError::from)
     }
 
     /// Assert the BREAK condition on the TX line for `duration_ms`
@@ -421,6 +456,21 @@ impl SerialConnection {
         self.set_break_state(true).await?;
         tokio::time::sleep(Duration::from_millis(duration_ms)).await;
         self.set_break_state(false).await
+    }
+
+    pub async fn close(&self) -> Result<()> {
+        if self.closed.swap(true, Ordering::SeqCst) {
+            return Ok(());
+        }
+        self.close_token.cancel();
+
+        let mut io = self.io.lock().await;
+        if let Some(mut io) = io.take() {
+            io.clear_os_buffers(FlushTarget::Input)
+                .map_err(SerialError::from)?;
+            io.shutdown().await?;
+        }
+        Ok(())
     }
 }
 
@@ -477,6 +527,7 @@ pub struct ConnectionManager {
 struct ConnectionRegistry {
     connections: HashMap<String, Arc<SerialConnection>>,
     opening_ports: HashSet<String>,
+    closing_ports: HashSet<String>,
 }
 
 impl ConnectionManager {
@@ -489,8 +540,15 @@ impl ConnectionManager {
         let port = config.port.clone();
         {
             let mut state = self.state.lock().await;
-            if is_port_in_use(&state.connections, &port) || state.opening_ports.contains(&port) {
-                return Err(SerialError::PortAlreadyOpen(port));
+            if let Some(connection) = find_connection_by_port(&state.connections, &port) {
+                return Err(SerialError::PortAlreadyOpen {
+                    port,
+                    connection_id: Some(connection.id().to_string()),
+                    name: connection.name().map(str::to_string),
+                });
+            }
+            if state.opening_ports.contains(&port) || state.closing_ports.contains(&port) {
+                return Err(SerialError::PortAlreadyOpening(port));
             }
             state.opening_ports.insert(port.clone());
         }
@@ -512,26 +570,43 @@ impl ConnectionManager {
     /// against a fake connection without going through the OS serial layer.
     pub async fn insert(&self, connection: SerialConnection) -> Result<String> {
         let mut state = self.state.lock().await;
-        if is_port_in_use(&state.connections, connection.port())
-            || state.opening_ports.contains(connection.port())
+        if let Some(existing) = find_connection_by_port(&state.connections, connection.port()) {
+            return Err(SerialError::PortAlreadyOpen {
+                port: connection.port().to_string(),
+                connection_id: Some(existing.id().to_string()),
+                name: existing.name().map(str::to_string),
+            });
+        }
+        if state.opening_ports.contains(connection.port())
+            || state.closing_ports.contains(connection.port())
         {
-            return Err(SerialError::PortAlreadyOpen(connection.port().to_string()));
+            return Err(SerialError::PortAlreadyOpening(
+                connection.port().to_string(),
+            ));
         }
         let id = connection.id().to_string();
         state.connections.insert(id.clone(), Arc::new(connection));
         Ok(id)
     }
 
-    /// Remove a connection. The serial port is closed when the last [`Arc`]
-    /// reference is dropped, which happens here if no caller still holds one.
+    /// Remove a connection, cancel in-flight operations, flush RX, and close
+    /// the underlying port before allowing a reopen.
     pub async fn close(&self, id: &str) -> Result<()> {
-        self.state
-            .lock()
-            .await
-            .connections
-            .remove(id)
-            .ok_or_else(|| SerialError::ConnectionNotFound(id.to_string()))?;
-        Ok(())
+        let connection = {
+            let mut state = self.state.lock().await;
+            let connection = state
+                .connections
+                .remove(id)
+                .ok_or_else(|| SerialError::ConnectionNotFound(id.to_string()))?;
+            state.closing_ports.insert(connection.port().to_string());
+            connection
+        };
+
+        let port = connection.port().to_string();
+        let result = connection.close().await;
+
+        self.state.lock().await.closing_ports.remove(&port);
+        result
     }
 
     /// Look up an existing connection by id.
@@ -558,23 +633,27 @@ impl ConnectionManager {
             .await
             .connections
             .values()
-            .map(|c| ConnectionSummary {
-                connection_id: c.id().to_string(),
-                port: c.port().to_string(),
-            })
+            .map(|c| c.summary())
             .collect()
     }
 }
 
 /// Public-facing summary of an open connection.
-#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ConnectionSummary {
     pub connection_id: String,
+    pub name: Option<String>,
     pub port: String,
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub baud_rate: u32,
+    pub flow_control: FlowControl,
 }
 
-fn is_port_in_use(connections: &HashMap<String, Arc<SerialConnection>>, port: &str) -> bool {
-    connections.values().any(|c| c.port() == port)
+fn find_connection_by_port<'a>(
+    connections: &'a HashMap<String, Arc<SerialConnection>>,
+    port: &str,
+) -> Option<&'a Arc<SerialConnection>> {
+    connections.values().find(|c| c.port() == port)
 }
 
 // ---- Test support ----------------------------------------------------------
@@ -634,6 +713,9 @@ pub mod test_support {
         fn set_dtr_rts(&mut self, _dtr: bool, _rts: bool) -> std::io::Result<()> {
             Ok(())
         }
+        fn set_flow_control(&mut self, _flow_control: FlowControl) -> std::io::Result<()> {
+            Ok(())
+        }
         fn set_break_state(&self, _asserted: bool) -> std::io::Result<()> {
             Ok(())
         }
@@ -647,11 +729,19 @@ pub mod test_support {
         let conn = SerialConnection::from_io(port.to_string(), Box::new(LoopbackIo(a)));
         (conn, b)
     }
+
+    pub fn loopback_connection_with_config(
+        config: ConnectionConfig,
+    ) -> (SerialConnection, DuplexStream) {
+        let (a, b) = tokio::io::duplex(4096);
+        let conn = SerialConnection::from_io_with_config(config, Box::new(LoopbackIo(a)));
+        (conn, b)
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::test_support::loopback_connection;
+    use super::test_support::{loopback_connection, loopback_connection_with_config};
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -715,54 +805,43 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unread_bytes_are_returned_before_os_reads() {
-        let (conn, mut peer) = loopback_connection("test");
-        conn.unread(b"hello").await;
-        peer.write_all(b"world").await.unwrap();
-
-        let mut buf = [0u8; 5];
-        let n = conn.read(&mut buf, Some(100)).await.unwrap();
-        assert_eq!(n, 5);
-        assert_eq!(&buf, b"hello");
-
-        let n = conn.read(&mut buf, Some(100)).await.unwrap();
-        assert_eq!(n, 5);
-        assert_eq!(&buf, b"world");
-    }
-
-    #[tokio::test]
-    async fn flush_input_clears_unread_bytes() {
-        let (conn, _peer) = loopback_connection("test");
-        conn.unread(b"stale").await;
-        conn.flush_buffers(FlushTarget::Input).await.unwrap();
-
-        let mut buf = [0u8; 5];
-        let result = conn.read(&mut buf, Some(40)).await;
-        assert!(matches!(result, Err(SerialError::ReadTimeout)));
-    }
-
-    #[tokio::test]
-    async fn acquire_rx_reports_owner_and_releases_on_drop() {
-        let (conn, _peer) = loopback_connection("test");
-        let conn = Arc::new(conn);
-
-        let lease = SerialConnection::acquire_rx(&conn, "subscribe").unwrap();
-        let err = SerialConnection::acquire_rx(&conn, "read").unwrap_err();
-        assert_eq!(err, "Connection busy: subscribe already owns RX");
-
-        drop(lease);
-
-        SerialConnection::acquire_rx(&conn, "read").unwrap();
-    }
-
-    #[tokio::test]
     async fn manager_rejects_duplicate_port() {
         let mgr = ConnectionManager::new();
         let (c1, _p1) = loopback_connection("port-a");
         mgr.insert(c1).await.unwrap();
         let (c2, _p2) = loopback_connection("port-a");
         let err = mgr.insert(c2).await.unwrap_err();
-        assert!(matches!(err, SerialError::PortAlreadyOpen(_)));
+        assert!(matches!(err, SerialError::PortAlreadyOpen { .. }));
+    }
+
+    #[tokio::test]
+    async fn manager_duplicate_port_error_includes_owner_metadata() {
+        let mgr = ConnectionManager::new();
+        let (c1, _peer_a) = loopback_connection_with_config(ConnectionConfig {
+            port: "port-owner".into(),
+            name: Some("console".into()),
+            baud_rate: 115200,
+            data_bits: DataBits::Eight,
+            stop_bits: StopBits::One,
+            parity: Parity::None,
+            flow_control: FlowControl::None,
+        });
+        let owner_id = mgr.insert(c1).await.unwrap();
+
+        let (c2, _p2) = loopback_connection("port-owner");
+        let err = mgr.insert(c2).await.unwrap_err();
+        match err {
+            SerialError::PortAlreadyOpen {
+                port,
+                connection_id,
+                name,
+            } => {
+                assert_eq!(port, "port-owner");
+                assert_eq!(connection_id.as_deref(), Some(owner_id.as_str()));
+                assert_eq!(name.as_deref(), Some("console"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -780,5 +859,24 @@ mod tests {
         let mgr = ConnectionManager::new();
         let err = mgr.get("does-not-exist").await.unwrap_err();
         assert!(matches!(err, SerialError::ConnectionNotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn close_cancels_inflight_read() {
+        let mgr = ConnectionManager::new();
+        let (conn, _peer) = loopback_connection("port-read-close");
+        let id = mgr.insert(conn).await.unwrap();
+        let connection = mgr.get(&id).await.unwrap();
+
+        let reader = tokio::spawn(async move {
+            let mut buf = [0u8; 16];
+            connection.read(&mut buf, Some(2_000)).await
+        });
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        mgr.close(&id).await.unwrap();
+
+        let err = reader.await.unwrap().unwrap_err();
+        assert!(matches!(err, SerialError::ConnectionClosed(_)));
     }
 }

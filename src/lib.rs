@@ -1,7 +1,6 @@
 pub mod buffer_budget;
 pub mod codec;
 pub mod error;
-pub mod flex_deserialize;
 pub mod limits;
 pub mod match_config;
 pub mod prompts;

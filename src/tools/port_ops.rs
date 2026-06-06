@@ -7,7 +7,9 @@ use crate::security::SecurityManager;
 use crate::serial::{ConnectionManager, PortInfo};
 use crate::tools::helpers::log_tool_err;
 use crate::tools::helpers::parse_open_args;
-use crate::tools::types::{CloseArgs, CloseResult, ListPortsResult, OpenArgs, OpenResult};
+use crate::tools::types::{
+    CloseArgs, CloseResult, ListConnectionsResult, ListPortsResult, OpenArgs, OpenResult,
+};
 
 pub async fn list_ports() -> Result<Json<ListPortsResult>, String> {
     debug!("Listing serial ports");
@@ -20,6 +22,16 @@ pub async fn list_ports() -> Result<Json<ListPortsResult>, String> {
     }))
 }
 
+pub async fn list_connections(
+    connections: &Arc<ConnectionManager>,
+) -> Result<Json<ListConnectionsResult>, String> {
+    let summaries = connections.list_open().await;
+    Ok(Json(ListConnectionsResult {
+        count: summaries.len(),
+        connections: summaries,
+    }))
+}
+
 pub async fn open(
     connections: &Arc<ConnectionManager>,
     security: &SecurityManager,
@@ -27,6 +39,7 @@ pub async fn open(
 ) -> Result<Json<OpenResult>, String> {
     let config = parse_open_args(args)?;
     let port = config.port.clone();
+    let name = config.name.clone();
     let baud_rate = config.baud_rate;
     debug!("Opening {} @ {}", port, baud_rate);
 
@@ -45,6 +58,7 @@ pub async fn open(
 
     Ok(Json(OpenResult {
         connection_id,
+        name,
         port,
         baud_rate,
     }))
@@ -55,6 +69,11 @@ pub async fn close(
     args: CloseArgs,
 ) -> Result<Json<CloseResult>, String> {
     debug!("Closing {}", args.connection_id);
+    let name = connections
+        .get(&args.connection_id)
+        .await
+        .ok()
+        .and_then(|connection| connection.name().map(str::to_string));
 
     connections.close(&args.connection_id).await.map_err(|e| {
         log_tool_err(
@@ -67,5 +86,6 @@ pub async fn close(
 
     Ok(Json(CloseResult {
         connection_id: args.connection_id,
+        name,
     }))
 }
