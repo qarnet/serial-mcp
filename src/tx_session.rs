@@ -10,8 +10,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 
-use tokio::sync::{mpsc, oneshot};
 use tokio::sync::Mutex as AsyncMutex;
+use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info};
@@ -90,7 +90,11 @@ impl TxSession {
 
     pub async fn shutdown_and_join(&self) {
         let _ = self.tx.lock().expect("tx mutex poisoned").take();
-        let handle = self.worker_task.lock().expect("worker_task mutex poisoned").take();
+        let handle = self
+            .worker_task
+            .lock()
+            .expect("worker_task mutex poisoned")
+            .take();
         if let Some(h) = handle {
             let _ = h.await;
         }

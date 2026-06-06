@@ -333,7 +333,10 @@ async fn xiao_framing_reports_single_split_command() {
         data.contains("LINE len=4 data=\"ping\""),
         "expected one framed ping line, got: {data:?}"
     );
-    assert!(data.contains("pong"), "expected pong after framed line: {data:?}");
+    assert!(
+        data.contains("pong"),
+        "expected pong after framed line: {data:?}"
+    );
 
     close_connection(&client, &id).await;
     client.cancel().await.ok();
@@ -392,9 +395,15 @@ async fn xiao_trace_reports_exact_split_byte_sequence() {
         "RX[4]=0x0d",
         "RX[5]=0x0a",
     ] {
-        assert!(data.contains(expected), "missing trace {expected} in {data:?}");
+        assert!(
+            data.contains(expected),
+            "missing trace {expected} in {data:?}"
+        );
     }
-    assert!(data.contains("pong"), "expected pong after traced bytes: {data:?}");
+    assert!(
+        data.contains("pong"),
+        "expected pong after traced bytes: {data:?}"
+    );
 
     close_connection(&client, &id).await;
     client.cancel().await.ok();
@@ -444,7 +453,10 @@ async fn xiao_read_match_on_spam_complete() {
     assert_eq!(s["stop_reason"], json!("match_found"));
     assert_eq!(s["name"], json!(NAME));
     let data = s["data"].as_str().unwrap_or("");
-    assert!(data.contains("Spam complete"), "data should contain stop phrase: {data:?}");
+    assert!(
+        data.contains("Spam complete"),
+        "data should contain stop phrase: {data:?}"
+    );
 
     close_connection(&client, &id).await;
     client.cancel().await.ok();
@@ -498,7 +510,10 @@ async fn xiao_subscribe_match_stops_on_spam_complete() {
                 if data.get("matched").and_then(|v| v.as_bool()) == Some(true) {
                     found_match_stop = true;
                     assert_eq!(data["stop_reason"], json!("match_found"), "{data:?}");
-                    assert!(data["match_index"].as_u64().is_some(), "match_index present");
+                    assert!(
+                        data["match_index"].as_u64().is_some(),
+                        "match_index present"
+                    );
                     let shaped = data.get("data").and_then(|v| v.as_str()).unwrap_or("");
                     assert!(
                         shaped.contains("Spam complete"),
@@ -510,7 +525,10 @@ async fn xiao_subscribe_match_stops_on_spam_complete() {
             Err(_) => break,
         }
     }
-    assert!(found_match_stop, "subscribe should have emitted match_found stop notification");
+    assert!(
+        found_match_stop,
+        "subscribe should have emitted match_found stop notification"
+    );
 
     close_connection(&client, &id).await;
     client.cancel().await.ok();
@@ -608,7 +626,11 @@ async fn xiao_read_buffer_budget_stops_under_flood() {
     let s = result.structured_content.expect("structured");
     assert_eq!(s["stop_reason"], json!("max_buffered_bytes"), "{s:?}");
     let data = s["data"].as_str().unwrap_or("");
-    assert!(data.len() <= 256, "data should be ≤ 256 bytes, got {}", data.len());
+    assert!(
+        data.len() <= 256,
+        "data should be ≤ 256 bytes, got {}",
+        data.len()
+    );
 
     // Stop the flood.
     write_cmd(&client, &id, "spam stop").await;
@@ -671,8 +693,14 @@ async fn xiao_subscribe_timeout_stops_under_flood() {
         }
     }
 
-    assert_eq!(stop_reason, "timeout", "expected timeout stop: {stop_reason:?}");
-    assert!(total_bytes > 0, "should have received some bytes before timeout");
+    assert_eq!(
+        stop_reason, "timeout",
+        "expected timeout stop: {stop_reason:?}"
+    );
+    assert!(
+        total_bytes > 0,
+        "should have received some bytes before timeout"
+    );
 
     // Stop the flood so subsequent tests start clean.
     write_cmd(&client, &id, "spam stop").await;
@@ -727,7 +755,11 @@ async fn xiao_close_while_subscribe_active() {
         .expect("list_connections");
     assert_ne!(list.is_error, Some(true), "{list:?}");
     let s = list.structured_content.expect("structured");
-    assert_eq!(s["count"], json!(0), "expected 0 connections after close: {s:?}");
+    assert_eq!(
+        s["count"],
+        json!(0),
+        "expected 0 connections after close: {s:?}"
+    );
 
     client.cancel().await.ok();
 }

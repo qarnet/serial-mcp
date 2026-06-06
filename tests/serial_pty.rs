@@ -478,14 +478,20 @@ async fn pty_subscribe_match_stops_without_context() {
                 if data.get("matched").and_then(|v| v.as_bool()) == Some(true) {
                     found_match_stop = true;
                     assert_eq!(data["stop_reason"], json!("match_found"));
-                    assert!(data["match_index"].as_u64().is_some(), "match_index present");
+                    assert!(
+                        data["match_index"].as_u64().is_some(),
+                        "match_index present"
+                    );
                     break;
                 }
             }
             Err(_) => break,
         }
     }
-    assert!(found_match_stop, "subscribe should emit match stop notification");
+    assert!(
+        found_match_stop,
+        "subscribe should emit match stop notification"
+    );
     client.cancel().await.ok();
 }
 

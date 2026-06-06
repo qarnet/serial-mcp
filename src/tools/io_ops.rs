@@ -148,13 +148,16 @@ pub async fn flush(
     let connection = lookup_connection(connections, &args.connection_id).await?;
     match args.target {
         FlushTarget::Input => {
-            connection.flush_buffers(FlushTarget::Input).await.map_err(|e| {
-                log_tool_err(
-                    "flush",
-                    &format!("Failed to flush {}", args.connection_id),
-                    e,
-                )
-            })?;
+            connection
+                .flush_buffers(FlushTarget::Input)
+                .await
+                .map_err(|e| {
+                    log_tool_err(
+                        "flush",
+                        &format!("Failed to flush {}", args.connection_id),
+                        e,
+                    )
+                })?;
         }
         FlushTarget::Output => {
             let session = tx_sessions.get_or_create(Arc::clone(&connection)).await;
@@ -175,13 +178,16 @@ pub async fn flush(
                     e,
                 )
             })?;
-            connection.flush_buffers(FlushTarget::Input).await.map_err(|e| {
-                log_tool_err(
-                    "flush",
-                    &format!("Failed to flush {}", args.connection_id),
-                    e,
-                )
-            })?;
+            connection
+                .flush_buffers(FlushTarget::Input)
+                .await
+                .map_err(|e| {
+                    log_tool_err(
+                        "flush",
+                        &format!("Failed to flush {}", args.connection_id),
+                        e,
+                    )
+                })?;
         }
     }
     info!("Flushed {} ({:?})", args.connection_id, args.target);
