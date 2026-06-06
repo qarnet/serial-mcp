@@ -328,6 +328,7 @@ pub fn is_normal_stop(reason: RxStopReason) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     #[test]
     fn timeout_stops_at_deadline() {
@@ -638,5 +639,69 @@ mod tests {
         assert_eq!(meta.bytes_observed, 100);
         assert_eq!(meta.bytes_returned, 80);
         assert!(meta.truncated);
+    }
+
+    #[test]
+    fn notify_data_received_resets_expired_silence_deadline() {
+        // start 200ms in the past + 50ms silence window → deadline is 150ms ago (expired).
+        let past = Instant::now() - Duration::from_millis(200);
+        let mut ctrl = RxStopController::new(past, None, 1024, Some(50));
+        assert!(matches!(ctrl.check_silence_timeout(), RxStopDecision::Stop(_)));
+        // notify_data_received resets deadline to now+50ms (future).
+        ctrl.notify_data_received();
+        assert!(matches!(ctrl.check_silence_timeout(), RxStopDecision::Continue));
+    }
+
+    #[test]
+    fn check_max_buffered_bytes_continues_when_buffer_not_full() {
+        let start = Instant::now();
+        let mut ctrl = RxStopController::new(start, None, 100, None);
+        // bytes_observed > 0 but bytes_returned < max_bytes — must continue.
+        ctrl.record_data(5, 5);
+        assert!(matches!(ctrl.check_max_buffered_bytes(), RxStopDecision::Continue));
+    }
+
+    #[test]
+    fn check_max_buffered_bytes_continues_when_no_data_observed() {
+        let start = Instant::now();
+        // max_bytes=0 means unlimited in push_data, but check_max_buffered_bytes
+        // still requires bytes_observed > 0 before stopping.
+        let ctrl = RxStopController::new(start, None, 0, None);
+        // bytes_returned(0) >= max_bytes(0) is true, but bytes_observed==0 → Continue.
+        assert!(matches!(ctrl.check_max_buffered_bytes(), RxStopDecision::Continue));
+    }
+
+    #[test]
+    fn matched_getter_reflects_match_state() {
+        let start = Instant::now();
+        let mut ctrl = RxStopController::new(start, None, 1024, None);
+        assert!(!ctrl.matched());
+        ctrl.push_data(5, 5, Some(MatchResult::Found(2)));
+        assert!(ctrl.matched());
+    }
+
+    #[test]
+    fn match_index_getter_reflects_found_index() {
+        let start = Instant::now();
+        let mut ctrl = RxStopController::new(start, None, 1024, None);
+        assert_eq!(ctrl.match_index(), None);
+        ctrl.push_data(5, 5, Some(MatchResult::Found(3)));
+        assert_eq!(ctrl.match_index(), Some(3));
+    }
+
+    #[test]
+    fn max_bytes_getter_returns_configured_limit() {
+        let start = Instant::now();
+        let ctrl = RxStopController::new(start, None, 512, None);
+        assert_eq!(ctrl.max_bytes(), 512);
+    }
+
+    #[test]
+    fn deadline_getter_returns_configured_deadline() {
+        let start = Instant::now();
+        let ctrl = RxStopController::new(start, Some(5000), 1024, None);
+        assert!(ctrl.deadline().is_some());
+        let ctrl_no_deadline = RxStopController::new(start, None, 1024, None);
+        assert!(ctrl_no_deadline.deadline().is_none());
     }
 }
