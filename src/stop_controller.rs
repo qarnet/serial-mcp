@@ -646,10 +646,16 @@ mod tests {
         // start 200ms in the past + 50ms silence window → deadline is 150ms ago (expired).
         let past = Instant::now() - Duration::from_millis(200);
         let mut ctrl = RxStopController::new(past, None, 1024, Some(50));
-        assert!(matches!(ctrl.check_silence_timeout(), RxStopDecision::Stop(_)));
+        assert!(matches!(
+            ctrl.check_silence_timeout(),
+            RxStopDecision::Stop(_)
+        ));
         // notify_data_received resets deadline to now+50ms (future).
         ctrl.notify_data_received();
-        assert!(matches!(ctrl.check_silence_timeout(), RxStopDecision::Continue));
+        assert!(matches!(
+            ctrl.check_silence_timeout(),
+            RxStopDecision::Continue
+        ));
     }
 
     #[test]
@@ -658,7 +664,10 @@ mod tests {
         let mut ctrl = RxStopController::new(start, None, 100, None);
         // bytes_observed > 0 but bytes_returned < max_bytes — must continue.
         ctrl.record_data(5, 5);
-        assert!(matches!(ctrl.check_max_buffered_bytes(), RxStopDecision::Continue));
+        assert!(matches!(
+            ctrl.check_max_buffered_bytes(),
+            RxStopDecision::Continue
+        ));
     }
 
     #[test]
@@ -668,7 +677,10 @@ mod tests {
         // still requires bytes_observed > 0 before stopping.
         let ctrl = RxStopController::new(start, None, 0, None);
         // bytes_returned(0) >= max_bytes(0) is true, but bytes_observed==0 → Continue.
-        assert!(matches!(ctrl.check_max_buffered_bytes(), RxStopDecision::Continue));
+        assert!(matches!(
+            ctrl.check_max_buffered_bytes(),
+            RxStopDecision::Continue
+        ));
     }
 
     #[test]
