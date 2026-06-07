@@ -10,3 +10,5 @@ STATUS.md
 .vscode/
 .schemas/
 .envrc
+mutants.out/
+mutants.out.old/

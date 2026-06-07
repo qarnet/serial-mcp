@@ -185,6 +185,7 @@ impl ByteMatcher {
     /// Truncate the internal window to `len` bytes from the front.  Call this
     /// after consuming match data or after `max_buffered_bytes` is reached,
     /// keeping only the tail that could still be part of a subsequent match.
+    #[cfg_attr(mutants, mutants::skip)] // drain(..0) is a no-op; `> 0` and `>= 0` are equivalent
     pub fn truncate_front(&mut self, keep: usize) {
         let drop = self.window.len().saturating_sub(keep);
         if drop > 0 {
@@ -408,6 +409,19 @@ mod tests {
     fn byte_matcher_with_context_none_same_as_new() {
         let m = ByteMatcher::with_context(b"OK>".to_vec(), None).unwrap();
         assert_eq!(m.context_amount(), None);
+    }
+
+    #[test]
+    fn byte_matcher_is_empty_on_fresh_instance() {
+        let m = ByteMatcher::new(b"OK>".to_vec()).unwrap();
+        assert!(m.is_empty());
+    }
+
+    #[test]
+    fn byte_matcher_is_not_empty_after_push() {
+        let mut m = ByteMatcher::new(b"OK>".to_vec()).unwrap();
+        m.push(b"hello");
+        assert!(!m.is_empty());
     }
 
     #[test]

@@ -393,6 +393,22 @@ mod tests {
     }
 
     #[test]
+    fn atomic_budget_reserve_at_exact_tool_limit() {
+        // bytes == tool_limit must succeed; > not >=.
+        let budget = AtomicBudget::new(1024, 512);
+        let r = budget.try_reserve(512).unwrap();
+        assert_eq!(r.bytes(), 512);
+        assert_eq!(budget.available(), 512);
+    }
+
+    #[test]
+    fn atomic_budget_reports_configured_limits() {
+        let budget = AtomicBudget::new(1024, 512);
+        assert_eq!(budget.tool_limit(), 512);
+        assert_eq!(budget.program_limit(), 1024);
+    }
+
+    #[test]
     fn fake_budget_basic() {
         let budget = FakeBudget::new(1024, 512);
         let r = budget.try_reserve(256).unwrap();
@@ -416,6 +432,33 @@ mod tests {
     }
 
     #[test]
+    fn fake_budget_reports_configured_limits() {
+        let budget = FakeBudget::new(1024, 512);
+        assert_eq!(budget.tool_limit(), 512);
+        assert_eq!(budget.program_limit(), 1024);
+    }
+
+    #[test]
+    fn fake_budget_reservation_bytes_matches_request() {
+        let budget = FakeBudget::new(1024, 512);
+        let r = budget.try_reserve(256).unwrap();
+        assert_eq!(r.bytes(), 256);
+    }
+
+    #[test]
+    fn fake_budget_reset_restores_available() {
+        let budget = FakeBudget::new(512, 512);
+        let _r = budget.try_reserve(512).unwrap();
+        assert_eq!(budget.available(), 0);
+        assert!(budget.try_reserve(1).is_err());
+        budget.reset();
+        assert_eq!(budget.available(), 512);
+        // Can reserve again after reset.
+        let r2 = budget.try_reserve(256).unwrap();
+        assert_eq!(r2.bytes(), 256);
+    }
+
+    #[test]
     fn unlimited_budget_always_succeeds() {
         let budget = UnlimitedBudget::new(1024);
         let r = budget.try_reserve(1024).unwrap();
@@ -436,5 +479,12 @@ mod tests {
         let budget = UnlimitedBudget::new(1024);
         let err = budget.try_reserve(0).unwrap_err();
         assert!(matches!(err, BufferBudgetError::ZeroRequest));
+    }
+
+    #[test]
+    fn unlimited_budget_reports_configured_limits() {
+        let budget = UnlimitedBudget::new(1024);
+        assert_eq!(budget.tool_limit(), 1024);
+        assert_eq!(budget.program_limit(), usize::MAX);
     }
 }
