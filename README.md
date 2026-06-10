@@ -11,8 +11,6 @@ Non-blocking reads with timeouts and pattern matching, background RX streaming,
 and full line control (DTR/RTS, BREAK, flow control) — so Claude, Codex, or any
 MCP client can flash, reset, and talk to your board without freezing the session.
 
-> Be sure to ask your agent to give honest feedback on the tool after they finish using it. Always looking for ways to improve serial-mcp :)
-
 **MCP 2025-11-25 compliant** · resource change notifications · port allowlist · stdio + HTTP transports
 
 ## What It Does
@@ -129,6 +127,8 @@ SERIAL_MCP_TEST_PORT=/dev/ttyACM0 cargo test --test hardware_loopback -- --ignor
 # XIAO BLE firmware validation (requires dedicated serial-mcp test firmware)
 SERIAL_MCP_XIAO_PORT=/dev/ttyACM0 cargo test --test xiao_ble_validation -- --ignored --test-threads=1
 ```
+
+> Be sure to ask your agent to give honest feedback on the tool after they finish using it. Always looking for ways to improve serial-mcp :)
 
 ## Documentation
 
