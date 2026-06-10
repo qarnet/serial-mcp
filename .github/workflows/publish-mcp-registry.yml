@@ -1,0 +1,48 @@
+name: Publish to MCP Registry
+
+on:
+  push:
+    tags: ['v*']
+
+# OIDC token required for mcp-publisher login github-oidc (no extra secrets needed)
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    name: Publish to MCP Registry
+    runs-on: ubuntu-latest
+    if: github.repository == 'qarnet/serial-mcp'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@v16
+
+      - name: Cache Nix store
+        uses: DeterminateSystems/magic-nix-cache-action@v8
+
+      - name: Extract version from tag
+        id: version
+        run: echo "value=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Stamp server.json with release version
+        run: |
+          VERSION="${{ steps.version.outputs.value }}"
+          jq --arg v "$VERSION" '.version = $v | .packages[0].version = $v' server.json > server.json.tmp
+          mv server.json.tmp server.json
+
+      - name: Validate server.json against schema
+        run: |
+          curl -sL https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json \
+            -o /tmp/mcp-server.schema.json
+          nix develop .# --command \
+            jsonschema-cli validate /tmp/mcp-server.schema.json -i server.json
+
+      - name: Login to MCP Registry (GitHub OIDC)
+        run: nix run .#mcp-publisher -- login github-oidc
+
+      - name: Publish to MCP Registry
+        run: nix run .#mcp-publisher -- publish

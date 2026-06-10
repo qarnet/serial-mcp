@@ -137,6 +137,12 @@ SERIAL_MCP_XIAO_PORT=/dev/ttyACM0 cargo test --test xiao_ble_validation -- --ign
 - [CHANGELOG.md](CHANGELOG.md)
 - [AGENTS.md](AGENTS.md) — contributor guidelines
 
+## MCP Registry
+
+Available on the [MCP Registry](https://mcp.run) as:
+
+mcp-name: io.github.qarnet/serial-mcp
+
 ## License
 
 MIT. See [LICENSE](LICENSE).
