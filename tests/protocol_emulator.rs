@@ -260,6 +260,10 @@ async fn protocol_emulator_workflow() {
         ))
         .await
         .unwrap();
+    // Yield briefly so the subscribe pump task fully stops before Stage 3
+    // issues a write. Without this, slow schedulers (e.g. ARM) can leave
+    // the pump running long enough to consume the CSV response.
+    tokio::time::sleep(Duration::from_millis(50)).await;
 
     // ---- Stage 3: write + read (CSV) ----
     client
