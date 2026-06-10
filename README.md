@@ -5,11 +5,11 @@
 [![Rust](https://img.shields.io/badge/rust-1.88%2B-orange.svg)](https://rust-lang.org)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
-An MCP server that lets AI assistants drive serial ports: open, inspect, read,
-write, match patterns in RX data, stream RX bytes, toggle DTR/RTS, change flow control,
-send BREAK.
+**Serial monitors are something agents can't work with well natively. serial-mcp fixes this by giving agents powerful tools for reading, writing and subscribing to serial ports.**
 
-> Be sure to ask your agent to give honest feedback on the tool after they finish using it. Always looking for ways to improve serial-mcp :)
+Non-blocking reads with timeouts and pattern matching, background RX streaming,
+and full line control (DTR/RTS, BREAK, flow control) — so Claude, Codex, or any
+MCP client can flash, reset, and talk to your board without freezing the session.
 
 **MCP 2025-11-25 compliant** · resource change notifications · port allowlist · stdio + HTTP transports
 
@@ -128,12 +128,20 @@ SERIAL_MCP_TEST_PORT=/dev/ttyACM0 cargo test --test hardware_loopback -- --ignor
 SERIAL_MCP_XIAO_PORT=/dev/ttyACM0 cargo test --test xiao_ble_validation -- --ignored --test-threads=1
 ```
 
+> Be sure to ask your agent to give honest feedback on the tool after they finish using it. Always looking for ways to improve serial-mcp :)
+
 ## Documentation
 
 - [Agent Configuration](docs/agent-config.md)
 - [Testing Guide](docs/TESTING.md)
 - [CHANGELOG.md](CHANGELOG.md)
 - [AGENTS.md](AGENTS.md) — contributor guidelines
+
+## MCP Registry
+
+Available on the [MCP Registry](https://mcp.run) as:
+
+mcp-name: io.github.qarnet/serial-mcp
 
 ## License
 

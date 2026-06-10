@@ -1,0 +1,71 @@
+name: Publish to MCP Registry
+
+on:
+  workflow_run:
+    workflows: ["Release"]
+    types: [completed]
+
+# OIDC token required for mcp-publisher login github-oidc (no extra secrets needed)
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    name: Publish to MCP Registry
+    runs-on: ubuntu-latest
+    if: >-
+      github.repository == 'qarnet/serial-mcp' &&
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.head_branch == 'main'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@v16
+
+      - name: Cache Nix store
+        uses: DeterminateSystems/magic-nix-cache-action@v8
+
+      - name: Extract version from Cargo.toml
+        id: version
+        run: |
+          VER=$(python3 -c "import tomllib; print(tomllib.load(open('Cargo.toml','rb'))['package']['version'])")
+          echo "value=$VER" >> "$GITHUB_OUTPUT"
+
+      - name: Verify release tag exists (skip dry-run releases)
+        id: tag_check
+        run: |
+          TAG="v${{ steps.version.outputs.value }}"
+          if git ls-remote --tags origin "refs/tags/$TAG" | grep -q .; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "Tag $TAG not found — this was a dry-run release, skipping."
+          fi
+
+      - name: Stamp server.json with release version
+        if: steps.tag_check.outputs.exists == 'true'
+        run: |
+          VERSION="${{ steps.version.outputs.value }}"
+          jq --arg v "$VERSION" '.version = $v | .packages[0].version = $v' server.json > server.json.tmp
+          mv server.json.tmp server.json
+
+      - name: Validate server.json against schema
+        if: steps.tag_check.outputs.exists == 'true'
+        run: |
+          curl -sL https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json \
+            -o /tmp/mcp-server.schema.json
+          nix develop .# --command \
+            jsonschema-cli validate /tmp/mcp-server.schema.json -i server.json
+
+      - name: Login to MCP Registry (GitHub OIDC)
+        if: steps.tag_check.outputs.exists == 'true'
+        run: nix run .#mcp-publisher -- login github-oidc
+
+      - name: Publish to MCP Registry
+        if: steps.tag_check.outputs.exists == 'true'
+        run: nix run .#mcp-publisher -- publish

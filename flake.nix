@@ -61,6 +61,50 @@
         # only rebuild your own crate.
         cargoArtifacts = craneLib.buildDepsOnly commonArgs;
 
+        # ─── mcp-publisher (pre-built binary from GitHub releases) ────────────
+        mcpPublisherVersion = "1.7.9";
+        mcpPublisherSrc =
+          {
+            x86_64-linux = {
+              suffix = "linux_amd64";
+              hash = "sha256-qxKBYrBhYJC0fPJFr+CiPz7wiTb9zhkHT1ugpEaSgaw=";
+            };
+            aarch64-linux = {
+              suffix = "linux_arm64";
+              hash = "sha256-BPUZmz3u+Ob8TW7ZjFanT3md71Ptyj/m1IYuzUOXwXI=";
+            };
+            x86_64-darwin = {
+              suffix = "darwin_amd64";
+              hash = "sha256-glC2HHUwlg+7VPmdqpEAEATjZcYEyzBbE/wHLqP1zKk=";
+            };
+            aarch64-darwin = {
+              suffix = "darwin_arm64";
+              hash = "sha256-WSXI0slCsqAzC5eVMLXXAoTDvbA4UKPNEDJoW4DdwuM=";
+            };
+          }
+          .${system} or (throw "mcp-publisher: unsupported system ${system}");
+
+        mcp-publisher = pkgs.stdenvNoCC.mkDerivation {
+          pname = "mcp-publisher";
+          version = mcpPublisherVersion;
+          src = pkgs.fetchurl {
+            url = "https://github.com/modelcontextprotocol/registry/releases/download/v${mcpPublisherVersion}/mcp-publisher_${mcpPublisherSrc.suffix}.tar.gz";
+            hash = mcpPublisherSrc.hash;
+          };
+          # The tarball has no subdirectory; extract manually to avoid sourceRoot issues.
+          dontUnpack = true;
+          # Patch the ELF interpreter on Linux so glibc is found via the Nix store.
+          nativeBuildInputs = pkgs.lib.optionals pkgs.stdenv.isLinux [ pkgs.autoPatchelfHook ];
+          buildInputs = pkgs.lib.optionals pkgs.stdenv.isLinux [ pkgs.glibc ];
+          installPhase = ''
+            runHook preInstall
+            mkdir -p $out/bin
+            tar -xOf $src mcp-publisher > $out/bin/mcp-publisher
+            chmod +x $out/bin/mcp-publisher
+            runHook postInstall
+          '';
+        };
+
         serial-mcp = craneLib.buildPackage (
           commonArgs
           // {
@@ -105,6 +149,7 @@
           default = serial-mcp;
           serial-mcp = serial-mcp;
           serial-mcp-aarch64 = serial-mcp-aarch64;
+          inherit mcp-publisher;
         };
 
         # `nix run .#<name>` — entry points for each binary.
@@ -126,6 +171,7 @@
             cargo-edit
             cargo-nextest
             jsonschema-cli
+            mcp-publisher
           ];
 
           env.RUST_SRC_PATH = "${rustToolchain}/lib/rustlib/src/rust/library";
