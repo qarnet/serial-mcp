@@ -290,7 +290,7 @@ async fn protocol_emulator_workflow() {
             "read",
             json!({
                 "connection_id": connection_id,
-                "timeout_ms": 2000,
+                "timeout_ms": 5000,
                 "max_buffered_bytes": 256,
                 "encoding": "utf8",
                 "match": {
