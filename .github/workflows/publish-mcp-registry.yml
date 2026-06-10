@@ -47,11 +47,40 @@ jobs:
             echo "Tag $TAG not found — this was a dry-run release, skipping."
           fi
 
-      - name: Stamp server.json with release version
+      - name: Build server.json from release binaries
         if: steps.tag_check.outputs.exists == 'true'
         run: |
           VERSION="${{ steps.version.outputs.value }}"
-          jq --arg v "$VERSION" '.version = $v | .packages[0].version = $v' server.json > server.json.tmp
+          BASE="https://github.com/qarnet/serial-mcp/releases/download/v${VERSION}"
+
+          declare -A ASSETS=(
+            ["x86_64-linux"]="serial-mcp-${VERSION}-x86_64-linux"
+            ["aarch64-linux"]="serial-mcp-${VERSION}-aarch64-linux"
+            ["aarch64-macos"]="serial-mcp-${VERSION}-aarch64-macos"
+            ["x86_64-windows"]="serial-mcp-${VERSION}-x86_64-windows.exe"
+          )
+
+          PACKAGES="[]"
+          for PLATFORM in x86_64-linux aarch64-linux aarch64-macos x86_64-windows; do
+            ASSET="${ASSETS[$PLATFORM]}"
+            URL="${BASE}/${ASSET}"
+            echo "Hashing ${ASSET}..."
+            SHA=$(curl -sL "$URL" | sha256sum | cut -d' ' -f1)
+            PACKAGES=$(echo "$PACKAGES" | jq \
+              --arg url "$URL" \
+              --arg ver "$VERSION" \
+              --arg sha "$SHA" \
+              '. + [{
+                "registryType": "mcpb",
+                "identifier": $url,
+                "version": $ver,
+                "fileSha256": $sha,
+                "transport": {"type": "stdio"}
+              }]')
+          done
+
+          jq --arg v "$VERSION" --argjson pkgs "$PACKAGES" \
+            '.version = $v | .packages = $pkgs' server.json > server.json.tmp
           mv server.json.tmp server.json
 
       - name: Validate server.json against schema
