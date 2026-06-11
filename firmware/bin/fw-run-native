@@ -5,7 +5,7 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=firmware/bin/fw-common.sh
 source "$SCRIPT_DIR/fw-common.sh"
 
-EXE_PATH="$(_fw_build_dir)/zephyr/zephyr.exe"
+EXE_PATH="$(_fw_build_dir)/firmware/zephyr/zephyr.exe"
 
 if [ ! -x "$EXE_PATH" ]; then
   printf 'Missing native_sim binary: %s\n' "$EXE_PATH" >&2

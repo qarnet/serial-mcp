@@ -399,7 +399,7 @@ Tier 4: XIAO BLE hardware + native USB CDC   (CI with hardware)
 | 5 | `tests/bootloader_touch_emulated.rs` | ❌ Not started |
 | 6 | pm_static.yml update | ✅ Done |
 | 7 | AGENTS.md rewrite | ✅ Done |
-| 8 | Build verification | ⚠️ Blocked (NixOS 32-bit) |
+| 8 | Build verification | ✅ Done (gccMultiStdenv + glibc-multi + _GNU_SOURCE) |
 | 9 | CI integration | ❌ Not started |
 | 10 | Hardware UF2 bootloader | ⏸️ Paused |
 
@@ -500,33 +500,40 @@ checklist.
 
 ## Remaining Work
 
-### Step 8: Fix native_sim build on NixOS 🔴 BLOCKER
+### Step 8: Fix native_sim build on NixOS ✅ RESOLVED
 
-native_sim compiles as a 32-bit x86 executable (`-m32`). The Nix-provided glibc
-lacks 32-bit multilib headers (`gnu/stubs-32.h` not found). The Kconfig and
-CMake configuration stages pass; the build fails at the first C compilation.
+native_sim compiles as a 32-bit x86 executable (`-m32`). Two issues resolved:
 
-**Options to resolve (user to decide):**
-1. Add 32-bit glibc to the Nix flake (`glibc_multi` or `pkgsCross.gnu32`)
-2. Build outside Nix (Ubuntu/Debian with `gcc-multilib`, or Docker container)
-3. Use `nrfutil sdk-manager toolchain launch` wrapper which provides a complete
-   sysroot (if it supports native_sim)
+1. **32-bit glibc headers missing**: The `nix develop` flake now includes
+   `pkgs.gccMultiStdenv.cc` (multilib GCC) and the `CC`/`CXX` env vars point
+   to it. The Nix wrapper automatically links against `glibc-multi` which
+   provides `gnu/stubs-32.h` and the 32-bit dynamic linker
+   (`lib/32/ld-linux.so.2`). Verified: `glibc-multi-2.42-61-dev` is used.
 
-Build command that reaches Kconfig but fails at compile:
+2. **`strtok_r` implicit declaration**: The native_sim build uses `-std=c17`
+   which does not expose POSIX extensions like `strtok_r`. Added
+   `target_compile_definitions(app PRIVATE _GNU_SOURCE)` to
+   `firmware/CMakeLists.txt`.
+
+Build command (inside `nix develop`):
 ```bash
-export LD_LIBRARY_PATH="<ncs-toolchain>/usr/local/lib:<ncs-toolchain>/usr/lib/x86_64-linux-gnu"
-export PATH="<ncs-toolchain>/usr/local/bin:$PATH"
-export ZEPHYR_BASE="$HOME/ncs/v3.3.0/zephyr"
-export ZEPHYR_SDK_INSTALL_DIR="<ncs-toolchain>/opt/zephyr-sdk"
-west build -b native_sim firmware/ -d /tmp/native_sim_build
+west build -b native_sim firmware/
 ```
 
-**After build is fixed, verify with:**
+Build output is at `build/firmware/zephyr/zephyr.exe` (32-bit ELF).
+
+Verify:
 ```bash
-./build/zephyr/zephyr.exe
-# Stderr: UART_0 connected to pseudotty: /dev/pts/N
+./build/firmware/zephyr/zephyr.exe
+# Prints: uart connected to pseudotty: /dev/pts/N
 # Connect: screen /dev/pts/N
 # Type: ping<Enter> → pong
+```
+
+Helper scripts:
+```bash
+fw-build-native   # build
+fw-run-native     # run (reads build/firmware/zephyr/zephyr.exe)
 ```
 
 ### Step 4: Write `tests/native_sim_validation.rs` (Tier 1)

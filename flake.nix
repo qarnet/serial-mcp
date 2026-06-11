@@ -168,6 +168,10 @@
             drv = serial-mcp;
             name = "serial-mcp";
           };
+          serial-mcp-dev = flake-utils.lib.mkApp {
+            drv = serial-mcp;
+            name = "serial-mcp";
+          };
         };
 
         # `nix develop`
@@ -213,7 +217,7 @@
                 export ZEPHYR_BASE="$NCS_ROOT/v3.3.0/zephyr"
               fi
 
-              export PATH="$PWD/firmware/bin:$PATH"
+              export PATH="$PWD/scripts:$PWD/firmware/bin:$PATH"
               export PATH="${pkgs.gccMultiStdenv.cc}/bin:$PATH"
               export CC="${pkgs.gccMultiStdenv.cc}/bin/gcc"
               export CXX="${pkgs.gccMultiStdenv.cc}/bin/g++"
