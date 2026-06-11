@@ -3,19 +3,18 @@
  * SPDX-License-Identifier: MIT
  *
  * Main entry point for serial-mcp test firmware.
- * Builds for both:
- *   - XIAO BLE nRF52840 (physical uart0, PicoProbe-bridged)
- *   - native_sim       (PTY-backed uart0, testable without hardware)
  *
- * The command channel uses DT_CHOSEN(zephyr_console) which is:
- *   - &uart0 on xiao_ble (nrf-uarte, 115200 8N1)
- *   - &uart0 on native_sim (zephyr,native-pty-uart)
+ * Runs on the Zephyr `native_sim` POSIX emulator. The command channel
+ * rides on the PTY-backed uart0 device that `native_sim` exposes. The
+ * PTY path is printed to stdout at boot so the host can `open` it via
+ * serial-mcp's `open` tool.
  *
- * USB CDC-ACM is OPTIONAL. When boards/<board>_usb.conf is applied,
- * CONFIG_USB_DEVICE_STACK_NEXT=y and usb_cdc_init() brings up a
- * native USB CDC-ACM UART for the 1200-baud touch → UF2 bootloader
- * entry flow. Without it, usb_cdc_init() returns -ENODEV and is
- * ignored.
+ * USB CDC-ACM is OPTIONAL. When `boards/native_sim_usb.conf` is
+ * applied, `CONFIG_USB_DEVICE_STACK=y` and `usb_cdc_init()` brings up
+ * a CDC-ACM UART exposed via the native_posix USB/IP controller
+ * (default port 3240, overridden to 3241 via the `USBIP_PORT` macro).
+ * The CDC-ACM port is used to validate the 1200-baud touch →
+ * `exit(42)` flow in software.
  */
 
 #include "command.h"
@@ -42,8 +41,8 @@ int main(void)
 	}
 
 	/* Try to bring up USB CDC-ACM. Returns -ENODEV if not configured
-	 * (no CONFIG_USB_DEVICE_STACK_NEXT). That's expected on the
-	 * no-USB build; log at debug level only.
+	 * (no `boards/native_sim_usb.conf` applied). That's expected on
+	 * the no-USB build; log at debug level only.
 	 */
 	ret = usb_cdc_init();
 	if (ret == 0) {

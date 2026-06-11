@@ -28,7 +28,6 @@
           inherit system overlays;
           config = {
             allowUnfree = true;
-            segger-jlink.acceptLicense = true;
           };
         };
 
@@ -124,7 +123,6 @@
           inherit system overlays;
           config = {
             allowUnfree = true;
-            segger-jlink.acceptLicense = true;
           };
           crossSystem.config = "aarch64-unknown-linux-gnu";
         };
@@ -188,7 +186,6 @@
               jsonschema-cli
               mcp-publisher
               nrfutil
-              pyocd
             ])
             ++ pkgs.lib.optionals pkgs.stdenv.isLinux [
               # native_sim builds pass -m32 on x86_64-linux. Use multilib GCC in

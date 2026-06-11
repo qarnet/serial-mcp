@@ -2,7 +2,7 @@
 
 | Version | Date | Highlights |
 |---|---|---|
-| [Unreleased](#unreleased) | — | TX session serialization for writes/flush, expanded XIAO hardware validation, firmware diagnostics for exact TX ordering checks |
+| [Unreleased](#unreleased) | — | Software-only test migration: XIAO/E83/hardware-loopback tests replaced by native_sim + USB/IP; CI now runs without any hardware |
 | [0.5.0](#050) | 2026-06-06 | RX redesign (Plans 1-7): session pump, unified stop controller, match options, buffer budgets, silence timeout, context shaping |
 | [0.4.1](#041) | 2026-06-04 | CI/release hardening, schema-validated config examples, docs cleanup |
 | [0.4.0](#040) | 2026-06-04 | Crate rename to `serial-mcp`, `read_line` + `get_version` tools, text encoding, RX guard, flexible args |
@@ -20,20 +20,42 @@
 
 ## [Unreleased]
 
-Follow-up work after 0.5.0 focused on TX-path serialization and stronger live-device validation.
+Migration to software-only validation. No physical hardware, board
+bring-up, USB-serial adapters, or `pyocd`/`PicoProbe` workflows
+required to validate the server. See `docs/SOFTWARE_ONLY_TEST_MIGRATION_PLAN.md`
+for the staged plan.
 
 **Added:**
-- Per-connection `TxSession` worker — `write` and output-side `flush` are serialized through a dedicated background task per open connection. This keeps TX behavior consistent even while the RX session pump is active.
-- `tests/tx_session.rs` integration coverage for TX worker ordering, close behavior, idempotent session creation, and coexistence with an active RX pump.
-- Expanded XIAO BLE hardware tests — now 11 ignored tests. New live cases cover pending-read-then-write behavior, split-write command ordering, framing-mode line assembly checks, and trace-mode exact byte ordering checks.
-- Dedicated XIAO test firmware diagnostics documented in `firmware/AGENTS.md` and `docs/TESTING.md`, including `framing on|off`, `trace on|off`, `write cmd <id> <rest>`, `arm_cmd`, and `slow`.
+- `tests/native_sim_connection_lifecycle.rs` — 6 new software-only
+  tests covering named-connection bookkeeping in `list_connections`,
+  `set_flow_control` round-trip, close-while-read behavior, and
+  PTY reopen. Run with `--test-threads=1`.
+- `docs/SOFTWARE_ONLY_TEST_MIGRATION_PLAN.md` capturing the staged
+  removal of hardware-only tests, board files, and helpers.
+- CI job `native_sim firmware + test` (already present) now validated
+  end-to-end on ubuntu-latest without NOPASSWD sudoers for production
+  runs; the USB/IP path remains opt-in.
+
+**Removed:**
+- `tests/xiao_ble_validation.rs` — XIAO BLE hardware test suite
+- `tests/hardware_loopback.rs` — USB-serial loopback test suite
+- `tests/e83_live_validation.rs` — E83 live board test suite
+- `firmware/boards/xiao_ble.conf`, `xiao_ble_usb.conf`, `xiao_ble_usb.overlay`
+- `firmware/pm_static.yml`
+- `firmware/bin/fw-build-xiao`, `fw-build-xiao-usb`, `fw-flash-xiao`
+- `firmware/bootloader/Seeed_XIAO_nRF52840_bootloader-0.6.1_s140_7.3.0.hex`
+- `firmware/UF2_BOOTLOADER_PLAN.md`, `firmware/UNIFIED_FIRMWARE_PLAN.md`
+- `pyocd` and `segger-jlink` from `flake.nix`
 
 **Changed:**
-- `SerialConnection::write()` now uses `write_all()` and returns the full input length on success.
-- XIAO hardware test docs now reference the dedicated serial-mcp UART test firmware instead of the older RTT-feedback wording.
-
-**Known gap:**
-- Real-hardware coverage for `flush(target="output")` discard semantics is still limited; PTY and loopback tests cover it better than current device firmware.
+- `firmware/src/usb_cdc.c` simplified to native_sim legacy USB stack
+  only. Device-next / GPREGRET / NVIC reset code paths removed.
+- `firmware/src/main.c` and `firmware/src/usb_cdc.h` comments updated
+  to reflect native_sim-only target.
+- `firmware/AGENTS.md` rewritten to drop xiao_ble / UF2 / PicoProbe
+  workflows.
+- `firmware/prj.conf` comments updated to reference only native_sim
+  conf fragments.
 
 ---
 

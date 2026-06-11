@@ -93,7 +93,7 @@ static void cmd_ping(struct app_state *state)
 static void cmd_info(struct app_state *state)
 {
 	uart_drv_printf(state->uart,
-		"board=XIAO_BLE_nRF52840 build=0.1.0 " __DATE__ " " __TIME__ "\r\n");
+		"board=native_sim build=0.1.0 " __DATE__ " " __TIME__ "\r\n");
 }
 
 static void cmd_spam_start(struct app_state *state, char *count_str, char *rest)

@@ -121,11 +121,10 @@ cargo test
 cargo clippy --all-targets -- -D warnings
 cargo fmt --all -- --check
 
-# Hardware tests (requires TX-RX loopback device)
-SERIAL_MCP_TEST_PORT=/dev/ttyACM0 cargo test --test hardware_loopback -- --ignored
-
-# XIAO BLE firmware validation (requires dedicated serial-mcp test firmware)
-SERIAL_MCP_XIAO_PORT=/dev/ttyACM0 cargo test --test xiao_ble_validation -- --ignored --test-threads=1
+# Firmware-based tests (require native_sim firmware, see firmware/AGENTS.md)
+cargo test --test native_sim_validation -- --ignored
+cargo test --test native_sim_connection_lifecycle -- --ignored --test-threads=1
+cargo test --test bootloader_touch_emulated -- --ignored --test-threads=1
 ```
 
 > Be sure to ask your agent to give honest feedback on the tool after they finish using it. Always looking for ways to improve serial-mcp :)

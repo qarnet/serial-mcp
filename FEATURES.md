@@ -24,15 +24,18 @@
   - keep one public subscription per connection but allow reconfiguration/update
     semantics instead of full replacement
 
-## XIAO test firmware diagnostics
+## native_sim test firmware diagnostics
 
-- Keep and evolve dedicated XIAO hardware-test firmware features that make TX/RX behavior observable on real hardware.
+- Keep and evolve the test firmware features that make TX/RX behavior
+  observable from a software-only test harness (native_sim + USB/IP).
 - Existing useful diagnostics now include:
   - `framing on|off` for committed line visibility
   - `trace on|off` for per-byte RX ordering visibility
   - `write cmd <id> <rest>` for command-ID based ordering/drop checks
   - `arm_cmd <delay_ms>` and `slow on|off [<us>]` for timing and backpressure experiments
-- These firmware-side features let hardware tests prove split-write ordering and exact line assembly, not just successful command execution.
+- These firmware-side features let software tests prove split-write
+  ordering and exact line assembly, not just successful command
+  execution.
 
 ## Stronger live TX flush testing support
 

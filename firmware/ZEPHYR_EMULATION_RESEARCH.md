@@ -93,7 +93,10 @@ Zephyr supports building the same application for multiple boards:
 
 This means one `firmware/` directory can produce:
 - `native_sim` → Linux executable with PTY UART + optional USB CDC-ACM
-- `xiao_ble` → ARM hex with `nrf-uarte` on physical `uart0` + optional USB CDC-ACM
+
+The `xiao_ble` target was removed in the software-only migration; the
+remaining native_sim-only build no longer needs a multi-target CMakeLists
+or `pm_static.yml`.
 
 ## Build Commands
 
@@ -101,10 +104,7 @@ This means one `firmware/` directory can produce:
 # Build for native_sim
 west build -b native_sim firmware/
 
-# Build for XIAO BLE
-west build -b xiao_ble firmware/ --pristine
-
-# Build with USB CDC-ACM enabled (either target)
+# Build with USB CDC-ACM enabled
 west build -b native_sim firmware/ -- -DEXTRA_CONF_FILE=overlay-usb-cdc.conf
 ```
 
