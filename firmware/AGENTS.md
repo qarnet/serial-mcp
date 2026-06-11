@@ -60,6 +60,12 @@ west build -b native_sim firmware/
 # Connect to the PTY printed on stdout, e.g. /dev/pts/5
 ```
 
+Inside `nix develop`, helper also available:
+
+```bash
+fw-build-native
+```
+
 ### native_sim (with USB — Tier 2 test, emulated 1200-baud touch)
 
 ```bash
@@ -80,6 +86,13 @@ sudo usbip attach -r 127.0.0.1 -b 1-1
 ```bash
 nrfutil sdk-manager toolchain launch --ncs-version v3.3.0 --chdir ~/ncs/v3.3.0/nrf -- \
   west build -b xiao_ble firmware/ --pristine
+```
+
+Inside `nix develop`, shell auto-loads NCS toolchain env. No wrapper needed:
+
+```bash
+fw-build-xiao
+# or: west build -b xiao_ble firmware/ --pristine
 ```
 
 ### xiao_ble (with USB — Tier 4 test, real 1200-baud touch)

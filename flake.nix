@@ -24,7 +24,13 @@
       system:
       let
         overlays = [ (import rust-overlay) ];
-        pkgs = import nixpkgs { inherit system overlays; };
+        pkgs = import nixpkgs {
+          inherit system overlays;
+          config = {
+            allowUnfree = true;
+            segger-jlink.acceptLicense = true;
+          };
+        };
 
         # Pinned via rust-toolchain.toml. Includes rust-src + rust-analyzer
         # because we declare them in that file (see below).
@@ -116,6 +122,10 @@
         # Only meaningful when building from x86_64-linux.
         pkgsCross = import nixpkgs {
           inherit system overlays;
+          config = {
+            allowUnfree = true;
+            segger-jlink.acceptLicense = true;
+          };
           crossSystem.config = "aarch64-unknown-linux-gnu";
         };
 
@@ -166,19 +176,58 @@
           inputsFrom = [ serial-mcp ];
 
           # Extras only useful at dev time, not for builds.
-          packages = with pkgs; [
-            cargo-watch
-            cargo-edit
-            cargo-nextest
-            jsonschema-cli
-            mcp-publisher
-          ];
+          packages =
+            (with pkgs; [
+              cargo-watch
+              cargo-edit
+              cargo-nextest
+              jsonschema-cli
+              mcp-publisher
+              nrfutil
+              pyocd
+            ])
+            ++ pkgs.lib.optionals pkgs.stdenv.isLinux [
+              # native_sim builds pass -m32 on x86_64-linux. Use multilib GCC in
+              # shell so Zephyr host builds work on NixOS too.
+              pkgs.gccMultiStdenv.cc
+            ];
 
-          env.RUST_SRC_PATH = "${rustToolchain}/lib/rustlib/src/rust/library";
+          env = {
+            RUST_SRC_PATH = "${rustToolchain}/lib/rustlib/src/rust/library";
+          }
+          // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
+            CC = "${pkgs.gccMultiStdenv.cc}/bin/gcc";
+            CXX = "${pkgs.gccMultiStdenv.cc}/bin/g++";
+          };
 
           shellHook = ''
+            ${pkgs.lib.optionalString pkgs.stdenv.isLinux ''
+              # Pull full NCS toolchain env into shell so `west` works without
+              # wrapping every command in `nrfutil sdk-manager toolchain launch`.
+              if command -v nrfutil >/dev/null 2>&1; then
+                eval "$(nrfutil sdk-manager toolchain env --ncs-version v3.3.0 --as-script sh 2>/dev/null)"
+              fi
+
+              if [ -n "''${ZEPHYR_SDK_INSTALL_DIR:-}" ]; then
+                NCS_ROOT="$(dirname "$(dirname "$(dirname "$(dirname "$ZEPHYR_SDK_INSTALL_DIR")")")")"
+                export ZEPHYR_BASE="$NCS_ROOT/v3.3.0/zephyr"
+              fi
+
+              export PATH="$PWD/firmware/bin:$PATH"
+              export PATH="${pkgs.gccMultiStdenv.cc}/bin:$PATH"
+              export CC="${pkgs.gccMultiStdenv.cc}/bin/gcc"
+              export CXX="${pkgs.gccMultiStdenv.cc}/bin/g++"
+            ''}
             echo "serial-mcp dev shell"
             echo "rustc: $(rustc --version)"
+            ${pkgs.lib.optionalString pkgs.stdenv.isLinux ''
+              if command -v west >/dev/null 2>&1; then
+                echo "west: $(west --version 2>/dev/null | head -n 1)"
+              fi
+              if [ -n "''${ZEPHYR_BASE:-}" ]; then
+                echo "ZEPHYR_BASE: $ZEPHYR_BASE"
+              fi
+            ''}
           '';
         };
 
