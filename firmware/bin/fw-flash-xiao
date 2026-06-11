@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=firmware/bin/fw-common.sh
+source "$SCRIPT_DIR/fw-common.sh"
+
+HEX_PATH="$(_fw_build_dir)/zephyr/zephyr.hex"
+
+if [ ! -f "$HEX_PATH" ]; then
+  printf 'Missing firmware hex: %s\n' "$HEX_PATH" >&2
+  printf 'Build first. Example: fw-build-xiao\n' >&2
+  exit 1
+fi
+
+exec pyocd flash -t nrf52840 --base-address 0x27000 "$HEX_PATH"

@@ -1,57 +1,130 @@
-//! Hardware-in-the-loop integration tests for the XIAO BLE (nRF52840) running
-//! the dedicated serial-mcp UART test firmware.
+//! Software-in-the-loop integration tests for the serial-mcp test firmware
+//! running on `native_sim` (POSIX emulator, PTY-backed UART).
 //!
-//! The firmware exposes a simple UART CLI over the PicoProbe UART bridge on
-//! `/dev/ttyACM0`.
-//! Relevant commands:
-//!
-//! - `ping` → `pong\r\n`
-//! - `spam <bytes> hex [last_data="\r\n"] [delay=10]`
-//!   Sends `bytes` random hex chars in 256-byte packets separated by
-//!   `delay` ms, then prints `"Spam complete: N bytes sent\r\n"`.
-//! - `spam stop` → `"Spam stopped: N bytes sent\r\n"`
-//! - `info` → `"Board: ...\r\nBuild time: ...\r\n"`
-//!
-//! These tests are marked `#[ignore]` and skipped in CI. Run explicitly:
+//! Each test spawns its own `zephyr.exe` instance with a fresh PTY.
+//! No shared state — `--test-threads=N` is safe.
 //!
 //! ```sh
-//! cargo test --test xiao_ble_validation -- --ignored
-//! # or with a custom port:
-//! SERIAL_MCP_XIAO_PORT=/dev/ttyACM1 cargo test --test xiao_ble_validation -- --ignored
+//! cargo test --test native_sim_validation -- --ignored
+//! # or with a custom binary:
+//! SERIAL_MCP_NATIVE_SIM_BIN=/path/to/zephyr.exe cargo test --test native_sim_validation -- --ignored
 //! ```
 
 use std::time::Duration;
 
+use anyhow::Context;
 use serde_json::json;
+use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::process::Command;
 
 mod common;
 use common::{args_object, connect_client, next_notification, tool_request, TestServer};
 
-const PORT_ENV: &str = "SERIAL_MCP_XIAO_PORT";
-const DEFAULT_PORT: &str = "/dev/ttyACM0";
-const BAUD_RATE: u32 = 115200;
-const NAME: &str = "xiao-uart";
+// ── Firmware process management ──────────────────────────────────────────────
 
-fn xiao_port() -> String {
-    std::env::var(PORT_ENV)
+const DEFAULT_BIN: &str = "build/firmware/zephyr/zephyr.exe";
+
+fn zephyr_bin() -> String {
+    std::env::var("SERIAL_MCP_NATIVE_SIM_BIN")
         .ok()
         .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| DEFAULT_PORT.to_string())
+        .unwrap_or_else(|| DEFAULT_BIN.to_string())
 }
 
-async fn open_xiao(
+/// A running native_sim firmware instance with a known PTY path.
+/// Spawns `zephyr.exe`, parses the PTY path from stdout, and
+/// drains remaining output in a background task. Kills the
+/// process on drop.
+struct NativeSimFirmware {
+    child: tokio::process::Child,
+    pty_path: String,
+    _stdout_drain: tokio::task::JoinHandle<()>,
+}
+
+impl NativeSimFirmware {
+    /// Spawn `zephyr.exe`, parse the PTY path from its stdout.
+    async fn spawn() -> anyhow::Result<Self> {
+        let bin = zephyr_bin();
+        let mut child = Command::new(&bin)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .with_context(|| format!("Failed to spawn {bin}"))?;
+
+        let stdout = child.stdout.take().context("stdout not piped")?;
+        let mut reader = BufReader::new(stdout).lines();
+
+        // Read until we find the PTY path line:
+        //   uart connected to pseudotty: /dev/pts/N
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        let mut pty_path: Option<String> = None;
+
+        while tokio::time::Instant::now() < deadline {
+            match tokio::time::timeout(Duration::from_millis(500), reader.next_line()).await {
+                Ok(Ok(Some(line))) => {
+                    if let Some(pos) = line.find("uart connected to pseudotty:") {
+                        if let Some(path_start) = line[pos..].find("/dev/pts/") {
+                            pty_path = Some(line[pos + path_start..].to_string());
+                            break;
+                        }
+                    }
+                }
+                Ok(Ok(None)) => break, // stdout closed
+                Ok(Err(e)) => {
+                    anyhow::bail!("Error reading zephyr stdout: {e}");
+                }
+                Err(_elapsed) => continue, // timeout, poll again
+            }
+        }
+
+        let pty_path = pty_path
+            .ok_or_else(|| anyhow::anyhow!("zephyr.exe did not print PTY path within 5s"))?;
+
+        // Drain remaining stdout in background so the pipe buffer doesn't fill.
+        let drain = tokio::spawn(async move {
+            while let Ok(Some(_line)) = reader.next_line().await {
+                // drain
+            }
+        });
+
+        Ok(Self {
+            child,
+            pty_path,
+            _stdout_drain: drain,
+        })
+    }
+
+    fn pty_path(&self) -> &str {
+        &self.pty_path
+    }
+}
+
+impl Drop for NativeSimFirmware {
+    fn drop(&mut self) {
+        // start_kill sends SIGKILL, best-effort cleanup.
+        self.child.start_kill().ok();
+    }
+}
+
+// ── MCP helper functions ─────────────────────────────────────────────────────
+
+const BAUD_RATE: u32 = 115200;
+const NAME: &str = "native-sim-uart";
+
+async fn open_pty(
     client: &rmcp::service::RunningService<
         rmcp::service::RoleClient,
         common::NotificationCollector,
     >,
-    port: &str,
+    pty_path: &str,
 ) -> String {
     let result = client
         .peer()
         .call_tool(tool_request(
             "open",
             json!({
-                "port": port,
+                "port": pty_path,
                 "name": NAME,
                 "baud_rate": BAUD_RATE,
             }),
@@ -122,22 +195,6 @@ async fn flush_both(
         .expect("flush call");
 }
 
-async fn reset_firmware_state(
-    client: &rmcp::service::RunningService<
-        rmcp::service::RoleClient,
-        common::NotificationCollector,
-    >,
-    connection_id: &str,
-) {
-    // Disable trace/framing modes that may have been left on by prior tests.
-    write_cmd(client, connection_id, "trace off").await;
-    write_cmd(client, connection_id, "framing off").await;
-    write_cmd(client, connection_id, "spam stop").await;
-    write_cmd(client, connection_id, "rxbuf clear").await;
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    flush_both(client, connection_id).await;
-}
-
 async fn close_connection(
     client: &rmcp::service::RunningService<
         rmcp::service::RoleClient,
@@ -156,18 +213,50 @@ async fn close_connection(
     assert_ne!(result.is_error, Some(true), "close failed: {result:?}");
 }
 
+/// Read until the firmware's boot banner ("serial-mcp test firmware ready")
+/// then flush. Ensures we start from a clean, known state.
+async fn sync_boot(
+    client: &rmcp::service::RunningService<
+        rmcp::service::RoleClient,
+        common::NotificationCollector,
+    >,
+    connection_id: &str,
+) {
+    let result = client
+        .peer()
+        .call_tool(tool_request(
+            "read",
+            json!({
+                "connection_id": connection_id,
+                "timeout_ms": 3000,
+                "max_buffered_bytes": 256,
+                "encoding": "utf8",
+                "match": {
+                    "pattern": "test firmware ready",
+                    "config": { "mode": "literal_substring", "pattern_encoding": "utf8" }
+                }
+            }),
+        ))
+        .await
+        .expect("sync_boot read");
+    assert_ne!(result.is_error, Some(true), "sync_boot: {result:?}");
+    flush_both(client, connection_id).await;
+}
+
 // ── Test 1: ping roundtrip ───────────────────────────────────────────────────
 
-/// Verify the board is alive and read responds correctly.
+/// Verify the firmware is alive: `ping` → `pong`.
 #[tokio::test]
-#[ignore = "requires XIAO BLE on /dev/ttyACM0"]
-async fn xiao_ping_roundtrip() {
-    let port = xiao_port();
+#[ignore = "requires native_sim firmware binary"]
+async fn native_ping_roundtrip() {
+    let fw = NativeSimFirmware::spawn().await.expect("spawn zephyr.exe");
+    let pty_path = fw.pty_path().to_string();
+
     let server = TestServer::start().await;
     let (client, _rx) = connect_client(&server).await.unwrap();
-    let id = open_xiao(&client, &port).await;
+    let id = open_pty(&client, &pty_path).await;
 
-    reset_firmware_state(&client, &id).await;
+    sync_boot(&client, &id).await;
     write_cmd(&client, &id, "ping").await;
 
     let result = client
@@ -195,21 +284,23 @@ async fn xiao_ping_roundtrip() {
 
     close_connection(&client, &id).await;
     client.cancel().await.ok();
+    drop(fw);
 }
 
-// ── Test 2: read match on spam completion ────────────────────────────────────
+// ── Test 2: pending read then write ping ─────────────────────────────────────
 
-/// read waits first, then a later write still reaches the board promptly.
-/// Exercises real-device TX while the RX session already owns the connection.
+/// read with match waits first, then a later write still reaches the
+/// firmware promptly.
 #[tokio::test]
-#[ignore = "requires XIAO BLE on /dev/ttyACM0"]
-async fn xiao_pending_read_then_write_ping_roundtrip() {
-    let port = xiao_port();
+#[ignore = "requires native_sim firmware binary"]
+async fn native_pending_read_then_write_ping_roundtrip() {
+    let fw = NativeSimFirmware::spawn().await.expect("spawn zephyr.exe");
+    let pty_path = fw.pty_path().to_string();
+
     let server = TestServer::start().await;
     let (client, _rx) = connect_client(&server).await.unwrap();
-    let id = open_xiao(&client, &port).await;
-
-    reset_firmware_state(&client, &id).await;
+    let id = open_pty(&client, &pty_path).await;
+    sync_boot(&client, &id).await;
 
     let read_handle = {
         let peer = client.peer().clone();
@@ -233,7 +324,6 @@ async fn xiao_pending_read_then_write_ping_roundtrip() {
     };
 
     tokio::time::sleep(Duration::from_millis(100)).await;
-
     let start = tokio::time::Instant::now();
     write_cmd(&client, &id, "ping").await;
 
@@ -250,19 +340,23 @@ async fn xiao_pending_read_then_write_ping_roundtrip() {
 
     close_connection(&client, &id).await;
     client.cancel().await.ok();
+    drop(fw);
 }
 
-/// Split write calls must stay ordered on the real device so the board still
-/// sees one valid CLI command.
+// ── Test 3: split writes preserve command order ──────────────────────────────
+
+/// Split write calls must stay ordered so the firmware still sees one
+/// valid command.
 #[tokio::test]
-#[ignore = "requires XIAO BLE on /dev/ttyACM0"]
-async fn xiao_split_writes_preserve_command_order() {
-    let port = xiao_port();
+#[ignore = "requires native_sim firmware binary"]
+async fn native_split_writes_preserve_command_order() {
+    let fw = NativeSimFirmware::spawn().await.expect("spawn zephyr.exe");
+    let pty_path = fw.pty_path().to_string();
+
     let server = TestServer::start().await;
     let (client, _rx) = connect_client(&server).await.unwrap();
-    let id = open_xiao(&client, &port).await;
-
-    reset_firmware_state(&client, &id).await;
+    let id = open_pty(&client, &pty_path).await;
+    sync_boot(&client, &id).await;
 
     let read_handle = {
         let peer = client.peer().clone();
@@ -298,19 +392,24 @@ async fn xiao_split_writes_preserve_command_order() {
 
     close_connection(&client, &id).await;
     client.cancel().await.ok();
+    drop(fw);
 }
 
-/// Framing mode should report one committed `ping` line even when the command
+// ── Test 4: framing reports single split command ─────────────────────────────
+
+/// Framing mode should report one committed line even when the command
 /// arrives through multiple write calls.
 #[tokio::test]
-#[ignore = "requires XIAO BLE on /dev/ttyACM0"]
-async fn xiao_framing_reports_single_split_command() {
-    let port = xiao_port();
+#[ignore = "requires native_sim firmware binary"]
+async fn native_framing_reports_single_split_command() {
+    let fw = NativeSimFirmware::spawn().await.expect("spawn zephyr.exe");
+    let pty_path = fw.pty_path().to_string();
+
     let server = TestServer::start().await;
     let (client, _rx) = connect_client(&server).await.unwrap();
-    let id = open_xiao(&client, &port).await;
+    let id = open_pty(&client, &pty_path).await;
+    sync_boot(&client, &id).await;
 
-    reset_firmware_state(&client, &id).await;
     write_cmd(&client, &id, "framing on").await;
     tokio::time::sleep(Duration::from_millis(50)).await;
     flush_both(&client, &id).await;
@@ -356,19 +455,24 @@ async fn xiao_framing_reports_single_split_command() {
 
     close_connection(&client, &id).await;
     client.cancel().await.ok();
+    drop(fw);
 }
 
-/// Trace mode should expose exact RX byte order for split writes on real
-/// hardware, including CRLF terminator bytes.
+// ── Test 5: trace reports exact split byte sequence ──────────────────────────
+
+/// Trace mode should expose exact RX byte order for split writes,
+/// including CRLF terminator bytes.
 #[tokio::test]
-#[ignore = "requires XIAO BLE on /dev/ttyACM0"]
-async fn xiao_trace_reports_exact_split_byte_sequence() {
-    let port = xiao_port();
+#[ignore = "requires native_sim firmware binary"]
+async fn native_trace_reports_exact_split_byte_sequence() {
+    let fw = NativeSimFirmware::spawn().await.expect("spawn zephyr.exe");
+    let pty_path = fw.pty_path().to_string();
+
     let server = TestServer::start().await;
     let (client, _rx) = connect_client(&server).await.unwrap();
-    let id = open_xiao(&client, &port).await;
+    let id = open_pty(&client, &pty_path).await;
+    sync_boot(&client, &id).await;
 
-    reset_firmware_state(&client, &id).await;
     write_cmd(&client, &id, "trace on").await;
     tokio::time::sleep(Duration::from_millis(50)).await;
     flush_both(&client, &id).await;
@@ -423,20 +527,23 @@ async fn xiao_trace_reports_exact_split_byte_sequence() {
 
     close_connection(&client, &id).await;
     client.cancel().await.ok();
+    drop(fw);
 }
+
+// ── Test 6: read match on spam completion ────────────────────────────────────
 
 /// read(match=...) stops on "Spam complete" after a 1024-byte hex spam.
 #[tokio::test]
-#[ignore = "requires XIAO BLE on /dev/ttyACM0"]
-async fn xiao_read_match_on_spam_complete() {
-    let port = xiao_port();
+#[ignore = "requires native_sim firmware binary"]
+async fn native_read_match_on_spam_complete() {
+    let fw = NativeSimFirmware::spawn().await.expect("spawn zephyr.exe");
+    let pty_path = fw.pty_path().to_string();
+
     let server = TestServer::start().await;
     let (client, _rx) = connect_client(&server).await.unwrap();
-    let id = open_xiao(&client, &port).await;
+    let id = open_pty(&client, &pty_path).await;
+    sync_boot(&client, &id).await;
 
-    flush_both(&client, &id).await;
-
-    // Spawn the read first so it's waiting when spam data arrives.
     let read_handle = {
         let peer = client.peer().clone();
         let id2 = id.clone();
@@ -459,7 +566,6 @@ async fn xiao_read_match_on_spam_complete() {
     };
 
     tokio::time::sleep(Duration::from_millis(50)).await;
-    // 1024 hex bytes, 4 × 256-byte packets at 10ms interval → ~40ms total.
     write_cmd(&client, &id, "spam 1024 hex").await;
 
     let result = read_handle.await.unwrap().expect("read task");
@@ -476,21 +582,23 @@ async fn xiao_read_match_on_spam_complete() {
 
     close_connection(&client, &id).await;
     client.cancel().await.ok();
+    drop(fw);
 }
 
-// ── Test 3: subscribe match stops on spam completion ─────────────────────────
+// ── Test 7: subscribe match stops on spam completion ─────────────────────────
 
 /// subscribe(match=...) self-stops with match_found when "Spam complete"
-/// appears mid-stream. Exercises the subscribe match stop bug fix.
+/// appears mid-stream.
 #[tokio::test]
-#[ignore = "requires XIAO BLE on /dev/ttyACM0"]
-async fn xiao_subscribe_match_stops_on_spam_complete() {
-    let port = xiao_port();
+#[ignore = "requires native_sim firmware binary"]
+async fn native_subscribe_match_stops_on_spam_complete() {
+    let fw = NativeSimFirmware::spawn().await.expect("spawn zephyr.exe");
+    let pty_path = fw.pty_path().to_string();
+
     let server = TestServer::start().await;
     let (client, mut rx) = connect_client(&server).await.unwrap();
-    let id = open_xiao(&client, &port).await;
-
-    flush_both(&client, &id).await;
+    let id = open_pty(&client, &pty_path).await;
+    sync_boot(&client, &id).await;
 
     // Subscribe with match on the completion phrase.
     client
@@ -514,7 +622,6 @@ async fn xiao_subscribe_match_stops_on_spam_complete() {
         .await
         .unwrap();
 
-    // Small spam — 1024 hex bytes, done in ~40ms. Subscribe should auto-stop.
     write_cmd(&client, &id, "spam 1024 hex").await;
 
     let mut found_match_stop = false;
@@ -548,29 +655,30 @@ async fn xiao_subscribe_match_stops_on_spam_complete() {
 
     close_connection(&client, &id).await;
     client.cancel().await.ok();
+    drop(fw);
 }
 
-// ── Test 4: subscribe silence timeout after spam ends ────────────────────────
+// ── Test 8: subscribe silence timeout after spam ends ────────────────────────
 
 /// subscribe(no_new_rx_timeout_ms=500) stops with no_new_rx_timeout once
 /// the spam finishes and the board goes silent.
 #[tokio::test]
-#[ignore = "requires XIAO BLE on /dev/ttyACM0"]
-async fn xiao_subscribe_silence_timeout_after_spam() {
-    let port = xiao_port();
+#[ignore = "requires native_sim firmware binary"]
+async fn native_subscribe_silence_timeout_after_spam() {
+    let fw = NativeSimFirmware::spawn().await.expect("spawn zephyr.exe");
+    let pty_path = fw.pty_path().to_string();
+
     let server = TestServer::start().await;
     let (client, mut rx) = connect_client(&server).await.unwrap();
-    let id = open_xiao(&client, &port).await;
+    let id = open_pty(&client, &pty_path).await;
+    sync_boot(&client, &id).await;
 
-    flush_both(&client, &id).await;
-
-    // Run a small spam first to produce data, then let the board go silent.
+    // Run a small spam first to produce data, then let the firmware go silent.
     write_cmd(&client, &id, "spam 512 hex").await;
-    // Wait for spam to complete (~20ms data + some margin).
     tokio::time::sleep(Duration::from_millis(300)).await;
     flush_both(&client, &id).await;
 
-    // Now subscribe with silence timeout — board is quiet.
+    // Now subscribe with silence timeout — firmware is quiet.
     client
         .peer()
         .call_tool(tool_request(
@@ -585,7 +693,6 @@ async fn xiao_subscribe_silence_timeout_after_spam() {
         .await
         .unwrap();
 
-    // Stop notification should arrive within ~1s.
     let event = next_notification(&mut rx, Duration::from_secs(5))
         .await
         .expect("subscribe should emit stop notification");
@@ -600,21 +707,23 @@ async fn xiao_subscribe_silence_timeout_after_spam() {
 
     close_connection(&client, &id).await;
     client.cancel().await.ok();
+    drop(fw);
 }
 
-// ── Test 5: buffer budget under hex flood ────────────────────────────────────
+// ── Test 9: buffer budget under hex flood ────────────────────────────────────
 
 /// read(max_buffered_bytes=256) stops cleanly with max_buffered_bytes
-/// while a large hex flood is in progress.
+/// while a hex flood is in progress.
 #[tokio::test]
-#[ignore = "requires XIAO BLE on /dev/ttyACM0"]
-async fn xiao_read_buffer_budget_stops_under_flood() {
-    let port = xiao_port();
+#[ignore = "requires native_sim firmware binary"]
+async fn native_read_buffer_budget_stops_under_flood() {
+    let fw = NativeSimFirmware::spawn().await.expect("spawn zephyr.exe");
+    let pty_path = fw.pty_path().to_string();
+
     let server = TestServer::start().await;
     let (client, _rx) = connect_client(&server).await.unwrap();
-    let id = open_xiao(&client, &port).await;
-
-    flush_both(&client, &id).await;
+    let id = open_pty(&client, &pty_path).await;
+    sync_boot(&client, &id).await;
 
     let read_handle = {
         let peer = client.peer().clone();
@@ -634,7 +743,6 @@ async fn xiao_read_buffer_budget_stops_under_flood() {
     };
 
     tokio::time::sleep(Duration::from_millis(50)).await;
-    // Large spam — 65536 hex bytes at 10ms/packet — will outlast the read.
     write_cmd(&client, &id, "spam 65536 hex").await;
 
     let result = read_handle.await.unwrap().expect("read task");
@@ -654,24 +762,25 @@ async fn xiao_read_buffer_budget_stops_under_flood() {
 
     close_connection(&client, &id).await;
     client.cancel().await.ok();
+    drop(fw);
 }
 
-// ── Test 6: subscribe wall-clock timeout stops under active flood ─────────────
+// ── Test 10: subscribe wall-clock timeout stops under active flood ───────────
 
-/// subscribe(timeout_ms=800) stops on wall-clock timeout even while spam data
-/// is actively flowing. Verifies that the timeout stop condition fires correctly
-/// when the stream is not silent (complementary to the silence-timeout test).
+/// subscribe(timeout_ms=800) stops on wall-clock timeout even while spam
+/// data is actively flowing.
 #[tokio::test]
-#[ignore = "requires XIAO BLE on /dev/ttyACM0"]
-async fn xiao_subscribe_timeout_stops_under_flood() {
-    let port = xiao_port();
+#[ignore = "requires native_sim firmware binary"]
+async fn native_subscribe_timeout_stops_under_flood() {
+    let fw = NativeSimFirmware::spawn().await.expect("spawn zephyr.exe");
+    let pty_path = fw.pty_path().to_string();
+
     let server = TestServer::start().await;
     let (client, mut rx) = connect_client(&server).await.unwrap();
-    let id = open_xiao(&client, &port).await;
+    let id = open_pty(&client, &pty_path).await;
+    sync_boot(&client, &id).await;
 
-    flush_both(&client, &id).await;
-
-    // Subscribe with a 800ms wall-clock timeout (no match, no silence condition).
+    // Subscribe with 800ms wall-clock timeout.
     client
         .peer()
         .call_tool(tool_request(
@@ -686,10 +795,8 @@ async fn xiao_subscribe_timeout_stops_under_flood() {
         .await
         .unwrap();
 
-    // Large spam — should not finish within the 800ms window.
     write_cmd(&client, &id, "spam 1000000 hex").await;
 
-    // Collect notifications until stop.
     let mut total_bytes: u64 = 0;
     let mut stop_reason = String::new();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
@@ -718,27 +825,29 @@ async fn xiao_subscribe_timeout_stops_under_flood() {
         "should have received some bytes before timeout"
     );
 
-    // Stop the flood so subsequent tests start clean.
+    // Stop the flood so the process is clean.
     write_cmd(&client, &id, "spam stop").await;
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     close_connection(&client, &id).await;
     client.cancel().await.ok();
+    drop(fw);
 }
 
-// ── Test 7: close while subscribe active ─────────────────────────────────────
+// ── Test 11: close while subscribe active ────────────────────────────────────
 
 /// Close the connection while a subscribe is streaming hex flood.
 /// Connection cleanup should be clean; list_connections returns 0.
 #[tokio::test]
-#[ignore = "requires XIAO BLE on /dev/ttyACM0"]
-async fn xiao_close_while_subscribe_active() {
-    let port = xiao_port();
+#[ignore = "requires native_sim firmware binary"]
+async fn native_close_while_subscribe_active() {
+    let fw = NativeSimFirmware::spawn().await.expect("spawn zephyr.exe");
+    let pty_path = fw.pty_path().to_string();
+
     let server = TestServer::start().await;
     let (client, _rx) = connect_client(&server).await.unwrap();
-    let id = open_xiao(&client, &port).await;
-
-    flush_both(&client, &id).await;
+    let id = open_pty(&client, &pty_path).await;
+    sync_boot(&client, &id).await;
 
     client
         .peer()
@@ -756,9 +865,6 @@ async fn xiao_close_while_subscribe_active() {
     write_cmd(&client, &id, "spam 1000000 hex delay=5").await;
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    // Stop the spam before closing so the firmware is quiet for subsequent tests.
-    // "Spam stopped" is never printed by the firmware (spam_tick returns early when
-    // spam_running=false), but the flood does stop.
     write_cmd(&client, &id, "spam stop").await;
     tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -778,4 +884,5 @@ async fn xiao_close_while_subscribe_active() {
     );
 
     client.cancel().await.ok();
+    drop(fw);
 }

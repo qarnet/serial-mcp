@@ -1,0 +1,18 @@
+/*
+ * SPDX-License-Identifier: MIT
+ *
+ * Add a CDC-ACM UART node to native_sim's zephyr_udc0.
+ * The board's zephyr_udc0 (zephyr,native-posix-udc) is already declared;
+ * this overlay just attaches the CDC class instance to it.
+ *
+ * The CDC-ACM node's compatible is "zephyr,cdc-acm-uart" which the
+ * USBD_CDC_ACM_CLASS driver binds to. usb_cdc.c uses
+ * usbd_register_class(&ctx, "cdc_acm_0") to bind to the instance by name.
+ */
+
+&zephyr_udc0 {
+	cdc_acm_0: cdc_acm_0 {
+		compatible = "zephyr,cdc-acm-uart";
+		label = "serial-mcp CDC-ACM";
+	};
+};

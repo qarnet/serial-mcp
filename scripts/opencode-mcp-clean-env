@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+unset LD_LIBRARY_PATH
+unset PYTHONHOME
+unset PYTHONPATH
+unset PYTHONNOUSERSITE
+unset _PYTHON_HOST_PLATFORM
+unset _PYTHON_SYSCONFIGDATA_NAME
+
+clean_path=()
+IFS=':' read -r -a path_parts <<<"${PATH:-}"
+for part in "${path_parts[@]}"; do
+  case "$part" in
+    "$HOME"/ncs/toolchains/*) ;;
+    *) clean_path+=("$part") ;;
+  esac
+done
+PATH="$(IFS=:; printf '%s' "${clean_path[*]}")"
+export PATH
+
+exec "$@"

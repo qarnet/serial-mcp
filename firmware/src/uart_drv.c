@@ -72,10 +72,10 @@ static void uart_isr(const struct device *dev, void *user_data)
 int uart_drv_init(struct uart_drv *drv)
 {
 	memset(drv, 0, sizeof(*drv));
-	drv->dev = DEVICE_DT_GET(DT_NODELABEL(uart0));
+	drv->dev = DEVICE_DT_GET(DT_CHOSEN(zephyr_console));
 
 	if (!device_is_ready(drv->dev)) {
-		LOG_ERR("UART0 device not ready");
+		LOG_ERR("Console UART device not ready");
 		return -ENODEV;
 	}
 

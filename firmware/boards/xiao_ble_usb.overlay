@@ -1,0 +1,23 @@
+/*
+ * SPDX-License-Identifier: MIT
+ *
+ * USB CDC-ACM overlay for xiao_ble.
+ *
+ * The xiao_ble board's common DTSI already includes cdc_acm_serial.dtsi
+ * which:
+ *   - creates a `board_cdc_acm_uart` node on zephyr_udc0
+ *   - sets zephyr,console = &board_cdc_acm_uart
+ *
+ * We override zephyr,console back to &uart0 (the physical UART) because
+ * the command channel must go through the physical UART (PicoProbe →
+ * /dev/ttyACM0), not the USB CDC-ACM port. The CDC-ACM port is for the
+ * 1200-baud touch ONLY.
+ */
+
+/ {
+	chosen {
+		zephyr,console = &uart0;
+		zephyr,shell-uart = &uart0;
+		zephyr,uart-mcumgr = &uart0;
+	};
+};
