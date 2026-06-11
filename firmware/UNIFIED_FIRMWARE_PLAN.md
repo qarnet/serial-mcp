@@ -396,11 +396,11 @@ Tier 4: XIAO BLE hardware + native USB CDC   (CI with hardware)
 | 2 | Device-agnostic UART driver | ✅ Done |
 | 3 | USB CDC-ACM driver | ✅ Done (dual-stack: legacy for native_sim, device-next for xiao_ble) |
 | 4 | `tests/native_sim_validation.rs` | ✅ Done |
-| 5 | `tests/bootloader_touch_emulated.rs` | ✅ Written (needs sudo for USB/IP) |
+| 5 | `tests/bootloader_touch_emulated.rs` | ✅ Tested (8.6s, NOPASSWD sudoers) |
 | 6 | pm_static.yml update | ✅ Done |
 | 7 | AGENTS.md rewrite | ✅ Done |
 | 8 | Build verification | ✅ Done (gccMultiStdenv + glibc-multi + _GNU_SOURCE) |
-| 9 | CI integration | ❌ Not started |
+| 9 | CI integration | 🚧 Implemented (native-sim job added, pending CI verification) |
 | 10 | Hardware UF2 bootloader | ⏸️ Paused |
 
 ## Completed Steps (0-3, 6-7)
@@ -612,14 +612,22 @@ SERIAL_MCP_NATIVE_SIM_USB_BIN=/path/to/zephyr.exe \
   cargo test --test bootloader_touch_emulated -- --ignored --test-threads=1
 ```
 
-### Step 9: CI integration
+### Step 9: CI integration 🚧 Implemented
 
-Add native_sim builds and tests to `.github/workflows/ci.yml`.
+Added `native-sim` job to `.github/workflows/ci.yml` for Tier 1 testing.
+
+**Implementation:**
+- New job `native-sim` runs on `ubuntu-latest` in parallel with other CI jobs
+- Installs `nrfutil` via pip and uses `nrfutil sdk-manager install --ncs-version v3.3.0` for NCS SDK + toolchain
+- Caches `~/ncs/` and `~/.nrfutil/` via `actions/cache@v4` — first run downloads ~3GB, subsequent runs hit cache
+- Builds native_sim firmware with `west build -b native_sim firmware/`
+- Runs `cargo test --test native_sim_validation -- --ignored`
 
 **Tier 1 (no USB, fast):**
-- Build native_sim firmware (`west build -b native_sim firmware/`)
-- Run `cargo test --test native_sim_validation -- --ignored`
-- Cache `zephyr.exe` as build artifact
+- ✅ Implemented as `native-sim` CI job
+- Builds native_sim firmware (`west build -b native_sim firmware/`)
+- Runs `cargo test --test native_sim_validation -- --ignored`
+- Caches firmware build via NCS SDK cache
 
 **Tier 2 (with USB/IP):**
 - Requires `vhci_hcd` kernel module on runner

@@ -25,6 +25,10 @@ cargo test --test config_schema_validation
 
 # networked schema drift check
 cargo test --locked --test config_schema_validation -- --ignored
+
+# native_sim tests (needs firmware built first — see Firmware section)
+cargo test --test native_sim_validation -- --ignored
+cargo test --test bootloader_touch_emulated -- --ignored --test-threads=1
 ```
 
 - CI runs exactly: fmt -> build -> test -> clippy, plus `cargo test --locked --test config_schema_validation` on Ubuntu.
@@ -48,7 +52,9 @@ cargo test --locked --test config_schema_validation -- --ignored
 - `tests/stdio_integration.rs` spawns binary over stdin/stdout.
 - `tests/protocol_emulator*.rs` are protocol hardening tests.
 - `tests/config_schema_validation.rs` validates generated schemas against vendored examples; ignored case fetches upstream schemas.
-- Hardware env vars differ:
+- `tests/native_sim_validation.rs` — Tier 1: native_sim firmware over PTY. 11 tests, < 2s, pure software. Env: `SERIAL_MCP_NATIVE_SIM_BIN` (default `build/firmware/zephyr/zephyr.exe`).
+- `tests/bootloader_touch_emulated.rs` — Tier 2: 1200-baud USB/IP touch → exit(42). Needs `vhci_hcd` + NOPASSWD sudoers (or udev rule). Env: `SERIAL_MCP_NATIVE_SIM_USB_BIN`, `USBIP_NATIVE_SIM_ATTACH_CMD` / `USBIP_NATIVE_SIM_DETACH_CMD`. Must use `--test-threads=1`.
+- Hardware env vars:
   - `SERIAL_MCP_TEST_PORT` for `hardware_loopback` and ignored stdio hardware path.
   - `SERIAL_MCP_XIAO_PORT` for `xiao_ble_validation`.
 - `xiao_ble_validation` must stay single-threaded: `-- --ignored --test-threads=1`.
@@ -73,6 +79,7 @@ fw-flash-xiao
 - `xiao_ble` app must remain at `0x27000`; `pm_static.yml` and `boards/xiao_ble.conf` are not optional.
 - `/dev/ttyACM0` for XIAO tests is PicoProbe UART bridge, not native USB CDC.
 - Do not switch firmware command channel away from `DT_CHOSEN(zephyr_console)`.
+- native_sim tests need firmware built first: `fw-build-native` for Tier 1, `fw-build-native-usb` for Tier 2. Tier 2 also needs `vhci_hcd` kernel module + NOPASSWD sudoers for `usbip-native-sim-attach` (or a vhci_hcd udev rule).
 
 ## Release workflow
 
