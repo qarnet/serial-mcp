@@ -114,6 +114,9 @@ jobs:
       - name: Install nrfutil
         run: pip install nrfutil
 
+      - name: Install nrfutil sdk-manager command
+        run: nrfutil install sdk-manager
+
       - name: Configure nrfutil
         run: nrfutil sdk-manager config install-dir "$NCS_INSTALL_DIR"
 
