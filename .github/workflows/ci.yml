@@ -119,7 +119,7 @@ jobs:
         run: nrfutil install sdk-manager
 
       - name: Configure sdk-manager install directory
-        run: nrfutil sdk-manager config install-dir "$NCS_INSTALL_DIR"
+        run: nrfutil sdk-manager config install-dir set "$NCS_INSTALL_DIR"
 
       - name: Install NCS SDK and toolchain
         if: steps.cache-ncs.outputs.cache-hit != 'true'
