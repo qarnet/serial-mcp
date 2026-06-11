@@ -122,6 +122,22 @@ async fn flush_both(
         .expect("flush call");
 }
 
+async fn reset_firmware_state(
+    client: &rmcp::service::RunningService<
+        rmcp::service::RoleClient,
+        common::NotificationCollector,
+    >,
+    connection_id: &str,
+) {
+    // Disable trace/framing modes that may have been left on by prior tests.
+    write_cmd(client, connection_id, "trace off").await;
+    write_cmd(client, connection_id, "framing off").await;
+    write_cmd(client, connection_id, "spam stop").await;
+    write_cmd(client, connection_id, "rxbuf clear").await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    flush_both(client, connection_id).await;
+}
+
 async fn close_connection(
     client: &rmcp::service::RunningService<
         rmcp::service::RoleClient,
@@ -151,7 +167,7 @@ async fn xiao_ping_roundtrip() {
     let (client, _rx) = connect_client(&server).await.unwrap();
     let id = open_xiao(&client, &port).await;
 
-    flush_both(&client, &id).await;
+    reset_firmware_state(&client, &id).await;
     write_cmd(&client, &id, "ping").await;
 
     let result = client
@@ -193,7 +209,7 @@ async fn xiao_pending_read_then_write_ping_roundtrip() {
     let (client, _rx) = connect_client(&server).await.unwrap();
     let id = open_xiao(&client, &port).await;
 
-    flush_both(&client, &id).await;
+    reset_firmware_state(&client, &id).await;
 
     let read_handle = {
         let peer = client.peer().clone();
@@ -246,7 +262,7 @@ async fn xiao_split_writes_preserve_command_order() {
     let (client, _rx) = connect_client(&server).await.unwrap();
     let id = open_xiao(&client, &port).await;
 
-    flush_both(&client, &id).await;
+    reset_firmware_state(&client, &id).await;
 
     let read_handle = {
         let peer = client.peer().clone();
@@ -294,7 +310,7 @@ async fn xiao_framing_reports_single_split_command() {
     let (client, _rx) = connect_client(&server).await.unwrap();
     let id = open_xiao(&client, &port).await;
 
-    flush_both(&client, &id).await;
+    reset_firmware_state(&client, &id).await;
     write_cmd(&client, &id, "framing on").await;
     tokio::time::sleep(Duration::from_millis(50)).await;
     flush_both(&client, &id).await;
@@ -352,7 +368,7 @@ async fn xiao_trace_reports_exact_split_byte_sequence() {
     let (client, _rx) = connect_client(&server).await.unwrap();
     let id = open_xiao(&client, &port).await;
 
-    flush_both(&client, &id).await;
+    reset_firmware_state(&client, &id).await;
     write_cmd(&client, &id, "trace on").await;
     tokio::time::sleep(Duration::from_millis(50)).await;
     flush_both(&client, &id).await;
