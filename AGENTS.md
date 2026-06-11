@@ -111,7 +111,11 @@ Two-tier model:
 5. Allowlist (`--test allowlist`) — security/glob matching
 6. Proptest (`--test proptest`) — property-based (codec, match_config)
 7. Config schema validation (`--test config_schema_validation`) — vendored + upstream schemas
-8. Hardware (`--test hardware_loopback`, `--test xiao_ble_validation`) — require physical device + `SERIAL_MCP_TEST_PORT`
+8. Protocol emulator (`--test protocol_emulator`, `--test protocol_emulator_binary`) — emulated serial device
+9. TX session (`--test tx_session`) — write serialisation tests
+10. Resource subscriptions (`--test resource_subscriptions`) — MCP resource change notifications
+11. Hardware (`--test hardware_loopback`, `--test xiao_ble_validation`) — require physical device + `SERIAL_MCP_TEST_PORT`
+12. Planned: `native_sim_validation`, `bootloader_touch_emulated` — see `firmware/UNIFIED_FIRMWARE_PLAN.md`
 
 ## Git Conventions
 
@@ -130,75 +134,60 @@ Two-tier model:
 
 ## Firmware (`firmware/`)
 
-NCS/Zephyr test firmware for XIAO BLE nRF52840, used by `tests/xiao_ble_validation.rs`.
+NCS/Zephyr v3.3.0 test firmware. One source tree, two build targets:
+
+| Target | UART | USB CDC-ACM | Output |
+|--------|------|-------------|--------|
+| **native_sim** | PTY (`/dev/pts/N`) | opt-in via USB/IP | `zephyr.exe` (Linux 32-bit) |
+| **xiao_ble** | physical `uart0` via PicoProbe | opt-in via native USB-C | `zephyr.hex` at `0x27000` |
+
+Full architecture, command reference, build commands, and recovery checklist in
+`firmware/AGENTS.md`. High-level summary below.
 
 ### Critical truths
 
-- Transport is **physical `uart0`**, not USB CDC-ACM.
-- Host port `/dev/ttyACM0` is the **PicoProbe USB serial bridge** — not XIAO native USB.
-- XIAO TX/RX pins talk through PicoProbe at `115200 8N1`.
-- Flash with `pyocd` at **`0x0`**. If linker shows `0x27000`, the board `pm_static.yml` won.
-- `firmware/pm_static.yml` overrides board default. Do not remove it.
+- Command channel uses `DT_CHOSEN(zephyr_console)` = `&uart0` on both targets.
+- xiao_ble: Adafruit UF2 bootloader + SoftDevice s140 at `0x0`, app at `0x27000`.
+- xiao_ble: `/dev/ttyACM0` is PicoProbe bridge, NOT native USB.
+- native_sim: compiles 32-bit (`-m32`), needs multilib gcc. Blocked on NixOS.
+- USB CDC-ACM is **opt-in**: `boards/<board>_usb.conf` + matching overlay.
+- USB CDC-ACM enables 1200-baud touch → bootloader entry: native_sim `exit(42)`,
+  xiao_ble writes GPREGRET + NVIC reset.
 
-### Do not drift
-
-- Do **not** add USB CDC-ACM (`zephyr_cdc_acm_uart`).
-- Do **not** wait for DTR, re-enable `CONFIG_CONSOLE` or `CONFIG_UART_CONSOLE`.
-- Do **not** use `west flash` — use `pyocd`.
-- Do **not** use `CONFIG_BUILD_OUTPUT_UF2=y` or `CONFIG_USE_DT_CODE_PARTITION=y`.
-
-### Build and flash
+### Build
 
 ```bash
-# Build (pristine)
+# native_sim (no USB — Tier 1)
+west build -b native_sim firmware/
+
+# xiao_ble (no USB — Tier 3, requires Nordic ARM toolchain)
 nrfutil sdk-manager toolchain launch --ncs-version v3.3.0 --chdir ~/ncs/v3.3.0/nrf -- \
-  west build -b xiao_ble /path/to/serial-mcp/firmware --pristine
+  west build -b xiao_ble firmware/ --pristine
 
-# Verify link origin is 0x0, then flash
-pyocd flash -t nrf52840 ~/ncs/v3.3.0/nrf/build/firmware/zephyr/zephyr.hex
+# Flash xiao_ble app (at 0x27000)
+pyocd flash -t nrf52840 --base-address 0x27000 .../zephyr.hex
 ```
 
-### Architecture
+### Key config files
 
+| File | Role |
+|------|------|
+| `prj.conf` | Shared: `CONSOLE=n`, `UART_CONSOLE=n`, no USB |
+| `boards/native_sim.conf` | `CONSOLE=y` (overrides prj), `UART_NATIVE_PTY_0_ON_OWN_PTY=y` |
+| `boards/xiao_ble.conf` | `CONFIG_BUILD_OUTPUT_UF2=y`, `USE_DT_CODE_PARTITION=y` |
+| `pm_static.yml` | App at `0x27000` (xiao_ble only; native_sim ignores) |
+| `boards/<board>_usb.conf` | Opt-in: USB device-next + CDC-ACM |
+
+### Tests
+
+```bash
+SERIAL_MCP_TEST_PORT=/dev/ttyACM0 cargo test --test xiao_ble_validation -- --ignored --test-threads=1
 ```
-src/
-  main.c        super loop, command dispatch
-  uart_drv.c/h  physical uart0 IRQ RX + ringbuf TX
-  command.c/h   all commands, spam timer, app state
-```
 
-### Command reference
+`--test-threads=1` is mandatory — parallel tests fight over the same serial port.
 
-| Command | Response |
-|---------|----------|
-| `ping` | `pong\r\n` |
-| `info` | `board=XIAO_BLE_nRF52840 build=0.1.0 <date> <time>\r\n` |
-| `spam <N> hex [delay=<ms>]` | `spam start count=N delay=N\r\n` then hex payload |
-| `spam stop` | `Spam stopped: N bytes sent\r\n` |
-| `rxbuf status/clear` | inspect or clear partial line buffer |
-| `trace on/off` | emit `RX[n]=0xXX` per byte |
-| `slow on [<us>]` | sleep before command dispatch |
-
-Tests match on exact string `Spam complete`. Run with `--test-threads=1` (one port, one owner).
-
-### Known pitfalls
-
-- **Silent on `/dev/ttyACM0`** — USB CDC path still active; check `uart_drv.c` binds `uart0`.
-- **Linker at `0x27000`** — `firmware/pm_static.yml` missing or not picked up.
-- **`>` prompt or echoed commands** — `CONFIG_CONSOLE` or shell got re-enabled.
-- **Random hex instead of `pong`** — prior spam flood still draining; `spam stop` clears TX ring.
-
-### Recovery checklist
-
-1. Confirm `prj.conf` has `CONFIG_BUILD_OUTPUT_UF2=n` and `CONFIG_USE_DT_CODE_PARTITION=n`
-2. Confirm `firmware/pm_static.yml` sets `address: 0x0`
-3. Build with `nrfutil sdk-manager toolchain launch --ncs-version v3.3.0`
-4. Verify linker origin is `0x0`
-5. Flash with `pyocd flash -t nrf52840 .../zephyr.hex`
-6. Test `ping` on `/dev/ttyACM0`
-7. Run `cargo test --test xiao_ble_validation -- --ignored --test-threads=1`
-
-Full detail in `firmware/AGENTS.md`.
+native_sim tests (`tests/native_sim_validation.rs`, `tests/bootloader_touch_emulated.rs`)
+not yet written. See `firmware/UNIFIED_FIRMWARE_PLAN.md`.
 
 ## Fuzz (`fuzz/`)
 
