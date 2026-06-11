@@ -2,8 +2,8 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-FIRMWARE_DIR="$(dirname -- "$SCRIPT_DIR")"
-REPO_DIR="$(dirname -- "$FIRMWARE_DIR")"
+# shellcheck source=firmware/bin/fw-common.sh
+source "$SCRIPT_DIR/fw-common.sh"
 
-cd "$REPO_DIR"
+cd "$(_fw_repo_dir)"
 exec west build -b native_sim firmware/ "$@"

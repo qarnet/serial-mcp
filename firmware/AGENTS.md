@@ -64,6 +64,7 @@ Inside `nix develop`, helper also available:
 
 ```bash
 fw-build-native
+fw-run-native
 ```
 
 ### native_sim (with USB — Tier 2 test, emulated 1200-baud touch)
@@ -79,6 +80,12 @@ sudo ./build/zephyr/zephyr.exe
 sudo modprobe vhci_hcd usbip-core usbip-host
 sudo usbip attach -r 127.0.0.1 -b 1-1
 # /dev/ttyACM1 now appears
+```
+
+Inside `nix develop`, USB helper also available:
+
+```bash
+fw-build-native-usb
 ```
 
 ### xiao_ble (no USB — Tier 3 test, PicoProbe-bridged)
@@ -104,6 +111,12 @@ nrfutil sdk-manager toolchain launch --ncs-version v3.3.0 --chdir ~/ncs/v3.3.0/n
     -DEXTRA_DTC_OVERLAY_FILE=boards/xiao_ble_usb.overlay
 ```
 
+Inside `nix develop`, USB helper also available:
+
+```bash
+fw-build-xiao-usb
+```
+
 Expected post-build checks (xiao_ble):
 
 - `~/ncs/v3.3.0/nrf/build/firmware/zephyr/linker.cmd` contains
@@ -127,6 +140,12 @@ pyocd flash -t nrf52840 Seeed_XIAO_nRF52840_bootloader-0.6.1_s140_7.3.0.hex
 ```bash
 pyocd flash -t nrf52840 --base-address 0x27000 \
   ~/ncs/v3.3.0/nrf/build/firmware/zephyr/zephyr.hex
+```
+
+Inside `nix develop`, helper also available:
+
+```bash
+fw-flash-xiao
 ```
 
 Or drag-drop the `.uf2` after entering UF2 mode via 1200-baud touch.

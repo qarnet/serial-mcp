@@ -6,4 +6,7 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/fw-common.sh"
 
 cd "$(_fw_repo_dir)"
-exec west build -b xiao_ble firmware/ --pristine "$@"
+exec west build -b native_sim firmware/ --pristine -- \
+  -DEXTRA_CONF_FILE=boards/native_sim_usb.conf \
+  -DEXTRA_DTC_OVERLAY_FILE=boards/native_sim_usb.overlay \
+  "$@"
