@@ -89,7 +89,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libudev-dev pkg-config gcc-multilib
+          sudo apt-get install -y libudev-dev pkg-config gcc-multilib libusb-1.0-0
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -104,25 +104,26 @@ jobs:
           path: |
             /home/runner/ncs
             /home/runner/.nrfutil
-          key: ncs-${{ env.NCS_VERSION }}-v2
+          key: ncs-${{ env.NCS_VERSION }}-v3
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
+      - name: Download nrfutil
+        run: |
+          curl -L -o nrfutil https://files.nordicsemi.com/artifactory/swtools/external/nrfutil/executables/x86_64-unknown-linux-gnu/nrfutil
+          chmod +x nrfutil
+          sudo mv nrfutil /usr/local/bin/
 
-      - name: Install nrfutil
-        run: pip install nrfutil
+      - name: Bootstrap nrfutil core module
+        run: nrfutil self-upgrade
 
-      - name: Install nrfutil sdk-manager command
+      - name: Install sdk-manager command
         run: nrfutil install sdk-manager
 
-      - name: Configure nrfutil
+      - name: Configure sdk-manager install directory
         run: nrfutil sdk-manager config install-dir "$NCS_INSTALL_DIR"
 
       - name: Install NCS SDK and toolchain
         if: steps.cache-ncs.outputs.cache-hit != 'true'
-        run: nrfutil sdk-manager install --ncs-version "$NCS_VERSION"
+        run: nrfutil sdk-manager install "$NCS_VERSION"
 
       - name: Build native_sim firmware
         run: |
