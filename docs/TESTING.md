@@ -262,6 +262,21 @@ SERIAL_MCP_XIAO_PORT=/dev/ttyACM1 cargo test --test xiao_ble_validation -- --ign
 | `xiao_subscribe_timeout_stops_under_flood` | Wall-clock `timeout_ms` stops a live subscribe stream even while data keeps flowing |
 | `xiao_trace_reports_exact_split_byte_sequence` | Firmware trace mode proves exact byte order, including `\r\n`, for split writes |
 
+#### native_sim USB/IP bootloader touch (`tests/bootloader_touch_emulated.rs`)
+
+Requires native_sim USB firmware build plus local USB/IP attach on port `3241`.
+
+```bash
+fw-build-native-usb
+sudo -n usbip-native-sim-load-vhci
+fw-run-native-usb-attached
+
+# in another terminal:
+cargo test --test bootloader_touch_emulated -- --ignored --test-threads=1
+```
+
+If attaching manually, use `usbip --tcp-port 3241 ...`. Default port `3240` is wrong for this repo.
+
 ---
 
 ### Layer 12 — Fuzz (`fuzz/`)

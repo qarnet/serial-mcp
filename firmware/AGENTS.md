@@ -74,11 +74,16 @@ west build -b native_sim firmware/ --pristine -- \
   -DEXTRA_CONF_FILE=boards/native_sim_usb.conf \
   -DEXTRA_DTC_OVERLAY_FILE=boards/native_sim_usb.overlay
 
-# Run with USB/IP:
-sudo ./build/zephyr/zephyr.exe
-# In another terminal:
-sudo modprobe vhci_hcd usbip-core usbip-host
-sudo usbip attach -r 127.0.0.1 -b 1-1
+# One-time host prep:
+sudo -n usbip-native-sim-load-vhci
+
+# Repo-local helper:
+fw-run-native-usb-attached
+
+# Manual fallback:
+./build/firmware/zephyr/zephyr.exe
+usbip --tcp-port 3241 list -r 127.0.0.1
+usbip --tcp-port 3241 attach -r 127.0.0.1 -b 1-1
 # /dev/ttyACM1 now appears
 ```
 
@@ -86,7 +91,11 @@ Inside `nix develop`, USB helper also available:
 
 ```bash
 fw-build-native-usb
+fw-run-native-usb-attached
 ```
+
+`fw-run-native-usb-attached` starts `zephyr.exe`, waits for local USB/IP export on
+`127.0.0.1:3241`, attaches it, prints `/dev/ttyACMx`, then detaches on exit.
 
 ### xiao_ble (no USB — Tier 3 test, PicoProbe-bridged)
 
@@ -306,19 +315,22 @@ cargo test --test native_sim_validation -- --ignored --test-threads=N
 ```
 
 Each test spawns its own `zephyr.exe` with a fresh PTY. No shared state.
-`--test-threads=N` is safe. The PTY path is parsed from stderr.
+`--test-threads=N` is safe. The PTY path is parsed from stdout
+(pattern: `uart connected to pseudotty: /dev/pts/N`).
 
-Not yet implemented — see `firmware/UNIFIED_FIRMWARE_PLAN.md` Step 4.
+11 tests — same coverage as Tier 3 xiao_ble_validation. All pass in ~1.2s
+with `--test-threads=4`.
 
-### Tier 2: native_sim USB CDC-ACM via USB/IP (software, needs kernel modules)
+### Tier 2: native_sim USB CDC-ACM via USB/IP (software, needs kernel modules + sudo)
 
 ```bash
 cargo test --test bootloader_touch_emulated -- --ignored --test-threads=1
 ```
 
-Tests the 1200-baud touch → exit(42) flow. Requires `sudo modprobe vhci_hcd`.
+Tests the 1200-baud touch → exit(42) flow. Requires `sudo modprobe vhci_hcd`
+and either root or `CAP_NET_ADMIN` on zephyr.exe.
 
-Not yet implemented — see `firmware/UNIFIED_FIRMWARE_PLAN.md` Step 5.
+Written but untested — needs sudo access.
 
 ### Tier 3: XIAO BLE hardware + PicoProbe
 
@@ -378,9 +390,10 @@ goes to stdio instead). Set it in `boards/native_sim.conf`.
 
 ### Symptom: native_sim USB/IP attach fails
 
-Likely cause: `vhci_hcd` kernel module not loaded, or `zephyr.exe`
-not running with `CAP_NET_ADMIN`. Run `sudo modprobe vhci_hcd
-usbip-core usbip-host` and use `sudo ./zephyr.exe`.
+Likely cause: built wrong target, `vhci_hcd` kernel module not loaded,
+or attach command missing `--tcp-port 3241`. Rebuild with
+`fw-build-native-usb`, run `sudo -n usbip-native-sim-load-vhci`, then use
+`fw-run-native-usb-attached`.
 
 ## Minimal Recovery Checklist
 

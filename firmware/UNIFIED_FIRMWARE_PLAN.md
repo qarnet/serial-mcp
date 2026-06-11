@@ -394,9 +394,9 @@ Tier 4: XIAO BLE hardware + native USB CDC   (CI with hardware)
 | 0 | Toolchain research | ✅ Done |
 | 1 | native_sim board support | ✅ Done (see divergences) |
 | 2 | Device-agnostic UART driver | ✅ Done |
-| 3 | USB CDC-ACM driver | ✅ Done |
-| 4 | `tests/native_sim_validation.rs` | ❌ Not started |
-| 5 | `tests/bootloader_touch_emulated.rs` | ❌ Not started |
+| 3 | USB CDC-ACM driver | ✅ Done (dual-stack: legacy for native_sim, device-next for xiao_ble) |
+| 4 | `tests/native_sim_validation.rs` | ✅ Done |
+| 5 | `tests/bootloader_touch_emulated.rs` | ✅ Written (needs sudo for USB/IP) |
 | 6 | pm_static.yml update | ✅ Done |
 | 7 | AGENTS.md rewrite | ✅ Done |
 | 8 | Build verification | ✅ Done (gccMultiStdenv + glibc-multi + _GNU_SOURCE) |
@@ -460,30 +460,32 @@ No other code changes needed — the Zephyr UART API (`uart_irq_callback_set`,
 
 ### Step 3: Add USB CDC-ACM support ✅
 
+**Major divergence from plan:** The device-next USB stack (`CONFIG_USB_DEVICE_STACK_NEXT`)
+has **no UDC driver for native_sim**. Only legacy `USB_NATIVE_POSIX` exists.
+Solution: dual-stack `usb_cdc.c`:
+- `#ifdef CONFIG_USB_DEVICE_STACK_NEXT` — device-next API (xiao_ble, has `udc_nrf`)
+- `#elif defined(CONFIG_USB_DEVICE_STACK)` — legacy API (native_sim, has `USB_NATIVE_POSIX`)
+
+Legacy stack uses:
+- `cdc_acm_dte_rate_callback_set()` for baud rate changes (polling-based)
+- `k_work_delayable` polling every 50ms for DTR state via `uart_line_ctrl_get()`
+- `CDC_ACM_DTE_RATE_CALLBACK_SUPPORT=y` Kconfig
+
 Created `firmware/src/usb_cdc.c` and `firmware/src/usb_cdc.h`.
 
-**Divergence from plan:** The implementation uses the **device-next** USB stack
-(`CONFIG_USB_DEVICE_STACK_NEXT`) rather than the legacy stack (`CONFIG_USB_DEVICE_STACK`).
-This affects:
-- API: `usbd_init()` / `usbd_enable()` instead of `usbd_init_device()` / `usbd_enable()`
-- Macro: `USBD_DEVICE_DEFINE()` with explicit VID/PID registration
-- Callback: `usbd_msg_register_cb()` instead of passing callback to init
-- Guard: `#ifdef CONFIG_USB_DEVICE_STACK_NEXT`
-
 Key behaviors:
-- `usb_cdc_init()` returns `-ENODEV` when USB is disabled (stub in `#else` branch)
-- `usb_msg_cb` watches `USBD_MSG_CDC_ACM_CONTROL_LINE_STATE` (DTR) and
-  `USBD_MSG_CDC_ACM_LINE_CODING` (baud rate)
+- `usb_cdc_init()` returns `-ENODEV` when no USB stack is configured
+- Device-next: event-driven DTR/baud via `usbd_msg_register_cb()`
+- Legacy: polling-driven DTR/baud via timer work item
 - DTR falling edge at 1200 baud → `do_bootloader_entry()`
   - native_sim: `sim_gpregret = 0x57; exit(42)`
   - xiao_ble: direct register writes to GPREGRET (0x4000051C) and AIRCR (0xE000ED0C)
-- `main.c` calls `usb_cdc_init()` unconditionally; logs success, ignores `-ENODEV`
 
 Created board files for USB opt-in:
-- `firmware/boards/native_sim_usb.conf` — USB device-next + CDC-ACM + native-posix-udc
+- `firmware/boards/native_sim_usb.conf` — legacy USB stack + CDC-ACM + rate callback
 - `firmware/boards/native_sim_usb.overlay` — `cdc_acm_0` node on `zephyr_udc0`
-- `firmware/boards/xiao_ble_usb.conf` — USB device-next + CDC-ACM (nrf-usbd auto-selected)
-- `firmware/boards/xiao_ble_usb.overlay` — `cdc_acm_0` node on `zephyr_udc0`
+- `firmware/boards/xiao_ble_usb.conf` — device-next USB + CDC-ACM (nrf-usbd auto-selected)
+- `firmware/boards/xiao_ble_usb.overlay` — override `zephyr,console` to `&uart0`
 
 ### Step 6: Update firmware/pm_static.yml ✅
 
@@ -536,99 +538,70 @@ fw-build-native   # build
 fw-run-native     # run (reads build/firmware/zephyr/zephyr.exe)
 ```
 
-### Step 4: Write `tests/native_sim_validation.rs` (Tier 1)
+### Step 4: Write `tests/native_sim_validation.rs` (Tier 1) ✅ DONE
 
-Create a self-contained integration test that exercises the native_sim firmware
-through its PTY. No hardware needed.
+Self-contained integration test exercises the native_sim firmware through its
+PTY. No hardware needed.
 
-**Prerequisites:** native_sim build must work (Step 8).
-
-**Test structure:**
-```rust
-// tests/native_sim_validation.rs
-// Build: cargo test --test native_sim_validation -- --ignored
-
-use std::process::{Command, Child};
-use std::io::BufRead;
-
-struct NativeSimFirmware {
-    child: Child,
-    pty_path: String,
-}
-
-impl NativeSimFirmware {
-    fn spawn() -> Self {
-        // 1. Spawn zephyr.exe, capturing stderr for PTY path
-        // 2. Read stderr lines until "UART_0 connected to pseudotty: /dev/pts/N"
-        // 3. Extract PTY path, return handle
-    }
-}
-
-impl Drop for NativeSimFirmware {
-    fn drop(&mut self) {
-        // Kill child process, wait for exit
-    }
-}
-
-// Test cases (model after xiao_ble_validation.rs):
-// - native_ping_roundtrip
-// - native_spam_roundtrip
-// - native_trace_reports_bytes
-// - native_framing_reports_lines
-// - native_split_writes_preserve_order
-```
-
-**Key differences from xiao_ble_validation.rs:**
-- No `SERIAL_MCP_TEST_PORT` env var — firmware spawns its own process, PTY path
-  is parsed from stderr
-- Each test spawns its own `zephyr.exe` instance with fresh PTY → no shared
-  state, supports `--test-threads=N`
-- `NativeSimFirmware::drop()` performs cleanup (kill child)
-
-**PTY path parsing:** The native_sim firmware prints to stderr:
-```
-UART_0 connected to pseudotty: /dev/pts/5
-```
-Parse this line with a regex: `r"UART_0 connected to pseudotty: (/dev/pts/\d+)"`
+**Divergence from plan:**
+- PTY path is printed to **stdout** (not stderr) in format `uart connected to pseudotty: /dev/pts/N`
+- Uses `tokio::process::Command` for async spawn + `BufReader::lines()` to parse PTY path
+- Spawns a background drain task for stdout to prevent pipe buffer from filling
+- Each test spawns its own `zephyr.exe` + `TestServer`, supporting `--test-threads=N`
+- Uses `kill_on_drop(true)` + `start_kill()` for cleanup
+- Uses existing `TestServer` / `connect_client` from `tests/common/mod.rs` (same pattern as xiao_ble_validation)
+- 11 test cases ported from xiao_ble_validation:
+  1. `native_ping_roundtrip`
+  2. `native_pending_read_then_write_ping_roundtrip`
+  3. `native_split_writes_preserve_command_order`
+  4. `native_framing_reports_single_split_command`
+  5. `native_trace_reports_exact_split_byte_sequence`
+  6. `native_read_match_on_spam_complete`
+  7. `native_subscribe_match_stops_on_spam_complete`
+  8. `native_subscribe_silence_timeout_after_spam`
+  9. `native_read_buffer_budget_stops_under_flood`
+  10. `native_subscribe_timeout_stops_under_flood`
+  11. `native_close_while_subscribe_active`
 
 **Running:**
 ```bash
 cargo test --test native_sim_validation -- --ignored --test-threads=4
+# All 11 tests pass in ~1.2s on native_sim
 ```
 
-### Step 5: Write `tests/bootloader_touch_emulated.rs` (Tier 2)
+**Binary path:** Defaults to `build/firmware/zephyr/zephyr.exe` (repo-relative).
+Override with `SERIAL_MCP_NATIVE_SIM_BIN` env var.
 
-Test the full 1200-baud touch → bootloader entry flow in software via USB/IP.
+### Step 5: Write `tests/bootloader_touch_emulated.rs` (Tier 2) ✅ Written
 
-**Prerequisites:**
-- native_sim USB CDC-ACM firmware built (Step 8 + USB conf)
-- `sudo modprobe vhci_hcd usbip-core usbip-host` on test host
-- `zephyr.exe` run with `sudo` (needs `CAP_NET_ADMIN` for USB/IP server)
+Tests the full 1200-baud touch → bootloader entry flow via USB/IP on native_sim.
 
-**Test structure:**
-```rust
-// tests/bootloader_touch_emulated.rs
+**Prerequisites (must be met before running):**
+- USB firmware built: `west build -b native_sim firmware/ -- -DEXTRA_CONF_FILE=boards/native_sim_usb.conf -DEXTRA_DTC_OVERLAY_FILE=boards/native_sim_usb.overlay`
+- Kernel modules: `modprobe vhci_hcd usbip-core usbip-host`
+- Sudo or CAP_NET_ADMIN on zephyr.exe: `sudo setcap cap_net_admin=ep build/firmware/zephyr/zephyr.exe`
 
-// 1. Build USB firmware:
-//    west build -b native_sim firmware/ --pristine -- \
-//      -DEXTRA_CONF_FILE=boards/native_sim_usb.conf \
-//      -DEXTRA_DTC_OVERLAY_FILE=boards/native_sim_usb.overlay
+**Test: `bootloader_touch_via_usbip_exits_with_42`:**
+1. Load kernel modules (best-effort via sudo modprobe)
+2. Spawn zephyr.exe with sudo/CAP_NET_ADMIN, parse PTY path
+3. `usbip attach -r 127.0.0.1 -b <bus>`
+4. Find /dev/ttyACMx device
+5. serial-mcp open at 1200 baud
+6. `set_dtr_rts(dtr=true)`, then `set_dtr_rts(dtr=false)`
+7. Verify zephyr.exe exits with code 42
+8. `usbip detach`, cleanup
 
-// 2. Spawn sudo zephyr.exe
-// 3. usbip attach -r 127.0.0.1 -b 1-1
-// 4. Find the new /dev/ttyACMx device
-// 5. serial-mcp open at 1200 baud
-// 6. set_dtr_rts(dtr=true)
-// 7. set_dtr_rts(dtr=false)  ← triggers bootloader
-// 8. Verify child process exited with code 42
-// 9. usbip detach -p 0
+**Status:** Test compiles and links. Cannot execute without sudo access for USB/IP.
+
+**Running:**
+```bash
+# Option 1: run test as root
+sudo -E cargo test --test bootloader_touch_emulated -- --ignored --test-threads=1
+
+# Option 2: setcap + run as normal user
+sudo setcap cap_net_admin=ep build/firmware/zephyr/zephyr.exe
+cargo test --test bootloader_touch_emulated -- --ignored --test-threads=1
 ```
-
-**Simpler alternative (no USB/IP, for CI without kernel modules):**
-Add a `bootloader_touch` command to the firmware that simulates the USB CDC
-control line sequence internally. Call `bootloader_touch 1200 1 0` over the
-PTY to trigger `do_bootloader_entry()`. Verify exit code 42. Less realistic
-but runs in any CI environment without kernel modules.
 
 ### Step 9: CI integration
 

@@ -4,15 +4,16 @@
  *
  * USB CDC-ACM device stack initialization + 1200-baud touch handler.
  *
+ * Supports two USB stacks depending on Kconfig:
+ *   - CONFIG_USB_DEVICE_STACK_NEXT  → device-next API (xiao_ble)
+ *   - CONFIG_USB_DEVICE_STACK       → legacy API (native_sim; the only
+ *     stack that has USB_NATIVE_POSIX / USB/IP support on native_sim)
+ *
  * When the host opens the CDC-ACM port at 1200 baud and pulses DTR
  * (assert → de-assert), this module triggers bootloader entry:
  *   - xiao_ble: writes NRF_POWER->GPREGRET = 0x57, then NVIC_SystemReset()
  *   - native_sim: writes 0x57 to a global, then exit(42) so the test
  *                process can verify the magic exit code.
- *
- * The whole file is conditional on CONFIG_USB_DEVICE_STACK_NEXT which
- * is set by boards/<board>_usb.conf. Without that, a stub
- * usb_cdc_init() returns -ENODEV.
  */
 
 #include "usb_cdc.h"
@@ -21,6 +22,40 @@
 #include <stdlib.h>
 #include <errno.h>
 
+LOG_MODULE_REGISTER(usb_cdc, LOG_LEVEL_INF);
+
+#define GPREGRET_BOOTLOADER_MAGIC 0x57
+#define TOUCH_BAUD_RATE 1200
+
+/* Visible to tests: a global that the native_sim bootloader-entry
+ * handler writes to. Tests can verify the magic value.
+ */
+volatile uint8_t sim_gpregret;
+
+/* ── Shared: bootloader entry (target-specific) ─────────────────────── */
+
+static inline void do_bootloader_entry(void)
+{
+#if defined(CONFIG_BOARD_NATIVE_SIM) || defined(CONFIG_BOARD_NATIVE_SIM_64) || \
+	defined(CONFIG_SOC_NATIVE_SIM)
+	sim_gpregret = GPREGRET_BOOTLOADER_MAGIC;
+	LOG_INF("Bootloader entry: sim_gpregret=0x57, exit(42)");
+	exit(42);
+#else
+	/* xiao_ble / nRF52840: write GPREGRET and reset. */
+	volatile uint32_t *gpregret = (volatile uint32_t *)0x4000051CUL;
+	*gpregret = GPREGRET_BOOTLOADER_MAGIC;
+	LOG_INF("Bootloader entry: GPREGRET=0x57, NVIC reset");
+	volatile uint32_t *aircr = (volatile uint32_t *)0xE000ED0CUL;
+	*aircr = 0x05FA0004;
+	for (;;) {
+		__asm__ volatile("wfi");
+	}
+#endif
+}
+
+/* ── Device-next stack (CONFIG_USB_DEVICE_STACK_NEXT) ──────────────── */
+
 #ifdef CONFIG_USB_DEVICE_STACK_NEXT
 
 #include <zephyr/device.h>
@@ -28,50 +63,7 @@
 #include <zephyr/usb/usbd.h>
 #include <zephyr/usb/usbd_msg.h>
 
-LOG_MODULE_REGISTER(usb_cdc, LOG_LEVEL_INF);
-
-#define GPREGRET_BOOTLOADER_MAGIC 0x57
-#define TOUCH_BAUD_RATE 1200
-
-/* Visible to tests: a global that the native_sim bootloader-entry
- * handler writes to. Tests can read it via /proc/<pid>/maps or by
- * reading the firmware's stdout at shutdown. For now, it is only
- * inspected via the process exit code.
- */
-volatile uint8_t sim_gpregret;
-
 static struct usbd_context *usbd;
-
-static inline void do_bootloader_entry(void)
-{
-#if defined(CONFIG_BOARD_NATIVE_SIM) || defined(CONFIG_BOARD_NATIVE_SIM_64) || \
-	defined(CONFIG_SOC_NATIVE_SIM)
-	/* native_sim: write the magic into a volatile global, then exit
-	 * with a recognizable code so the test harness can verify
-	 * bootloader entry without needing GPREGRET hardware.
-	 */
-	sim_gpregret = GPREGRET_BOOTLOADER_MAGIC;
-	LOG_INF("Bootloader entry: sim_gpregret=0x57, exit(42)");
-	exit(42);
-#else
-	/* xiao_ble / nRF52840: write GPREGRET and reset. The Adafruit UF2
-	 * bootloader checks GPREGRET at boot and enters UF2 mode if it
-	 * sees 0x57.
-	 */
-	extern void NRF_POWER_REG_RESET(void);
-	/* Direct register write — GPREGRET is at offset 0x51C in NRF_POWER. */
-	volatile uint32_t *gpregret = (volatile uint32_t *)0x4000051CUL;
-	*gpregret = GPREGRET_BOOTLOADER_MAGIC;
-	LOG_INF("Bootloader entry: GPREGRET=0x57, NVIC reset");
-	/* System reset request via ARM AIRCR */
-	volatile uint32_t *aircr = (volatile uint32_t *)0xE000ED0CUL;
-	*aircr = 0x05FA0004;
-	/* Should not reach here */
-	for (;;) {
-		__asm__ volatile("wfi");
-	}
-#endif
-}
 
 static void usb_msg_cb(struct usbd_context *const ctx, const struct usbd_msg *const msg)
 {
@@ -92,10 +84,6 @@ static void usb_msg_cb(struct usbd_context *const ctx, const struct usbd_msg *co
 
 		LOG_INF("CDC control line state: DTR=%u baud=%u", dtr, baud);
 
-		/* 1200-baud touch: DTR de-asserted while baud is 1200.
-		 * Only trigger on the falling edge of DTR (was set,
-		 * now cleared).
-		 */
 		static bool prev_dtr;
 		if (prev_dtr && !dtr && baud == TOUCH_BAUD_RATE) {
 			LOG_INF("1200-baud touch detected");
@@ -137,10 +125,6 @@ int usb_cdc_init(void)
 	}
 
 	if (IS_ENABLED(CONFIG_USBD_CDC_ACM_CLASS)) {
-		/* Register all CDC-ACM class instances from devicetree.
-		 * (Both the board's board_cdc_acm_uart and any
-		 * user-defined nodes will be picked up.)
-		 */
 		err = usbd_register_all_classes(&usb_cdc_usbd, USBD_SPEED_FS,
 						1, blocklist);
 		if (err) {
@@ -170,15 +154,90 @@ int usb_cdc_init(void)
 	}
 
 	usbd = &usb_cdc_usbd;
-	LOG_INF("USB CDC-ACM device initialized");
+	LOG_INF("USB CDC-ACM device initialized (device-next)");
 	return 0;
 }
 
-#else /* !CONFIG_USB_DEVICE_STACK_NEXT */
+/* ── Legacy stack (CONFIG_USB_DEVICE_STACK) ────────────────────────── */
+
+#elif defined(CONFIG_USB_DEVICE_STACK)
+
+#include <zephyr/device.h>
+#include <zephyr/drivers/uart.h>
+#include <zephyr/drivers/uart/cdc_acm.h>
+#include <zephyr/usb/usb_device.h>
+
+/* CDC-ACM UART node from our overlay (cdc_acm_0 on zephyr_udc0). */
+#define CDC_DEV DEVICE_DT_GET(DT_NODELABEL(cdc_acm_0))
+
+static uint32_t current_baud = 115200;
+static bool dtr_prev_state;
+static struct k_work_delayable dtr_poll_work;
+
+/* Periodic DTR poll — the legacy CDC-ACM driver does not fire a callback
+ * on DTR changes, so we sample uart_line_ctrl_get(UART_LINE_CTRL_DTR)
+ * every 50 ms.
+ */
+static void dtr_poll_fn(struct k_work *work)
+{
+	uint32_t dtr = 0;
+
+	if (uart_line_ctrl_get(CDC_DEV, UART_LINE_CTRL_DTR, &dtr) == 0) {
+		bool dtr_high = (dtr != 0);
+
+		if (dtr_prev_state && !dtr_high &&
+		    current_baud == TOUCH_BAUD_RATE) {
+			LOG_INF("1200-baud touch detected (legacy)");
+			do_bootloader_entry();
+		}
+		dtr_prev_state = dtr_high;
+	}
+
+	k_work_schedule(&dtr_poll_work, K_MSEC(50));
+}
+
+/* Baud rate change callback (CDC_ACM_DTE_RATE_CALLBACK_SUPPORT). */
+static void baud_rate_cb(const struct device *dev, uint32_t rate)
+{
+	LOG_INF("CDC baud rate changed to %u", rate);
+	current_baud = rate;
+}
+
+int usb_cdc_init(void)
+{
+	int err;
+
+	if (!device_is_ready(CDC_DEV)) {
+		LOG_ERR("CDC ACM device not ready");
+		return -ENODEV;
+	}
+
+	cdc_acm_dte_rate_callback_set(CDC_DEV, baud_rate_cb);
+
+	k_work_init_delayable(&dtr_poll_work, dtr_poll_fn);
+	k_work_schedule(&dtr_poll_work, K_MSEC(100));
+
+	/* Enable the USB device stack.  This triggers usb_dc_attach() on
+	 * the native_posix controller, which starts the USB/IP server
+	 * on port 3240.
+	 */
+	err = usb_enable(NULL);
+	if (err) {
+		LOG_ERR("Failed to enable USB device support: %d", err);
+		return err;
+	}
+
+	LOG_INF("USB CDC-ACM ready (legacy stack)");
+	return 0;
+}
+
+/* ── No USB configured ─────────────────────────────────────────────── */
+
+#else
 
 int usb_cdc_init(void)
 {
 	return -ENODEV;
 }
 
-#endif /* CONFIG_USB_DEVICE_STACK_NEXT */
+#endif /* CONFIG_USB_DEVICE_STACK_NEXT / CONFIG_USB_DEVICE_STACK */

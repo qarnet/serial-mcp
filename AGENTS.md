@@ -63,6 +63,7 @@ cargo test --locked --test config_schema_validation -- --ignored
 fw-build-native
 fw-build-native-usb
 fw-run-native
+fw-run-native-usb-attached
 fw-build-xiao
 fw-build-xiao-usb
 fw-flash-xiao
