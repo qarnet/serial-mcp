@@ -267,26 +267,39 @@ Hardware tests match on exact phrase `Spam complete`.
 
 ## Test Expectations
 
-Primary hardware test command:
-
-```bash
-SERIAL_MCP_TEST_PORT=/dev/ttyACM0 cargo test --test xiao_ble_validation -- --ignored --test-threads=1
-```
-
-`--test-threads=1` matters. Parallel tests fight over same serial port.
-
-Native_sim test command (TBD — needs `tests/native_sim_validation.rs`):
+### Tier 1: native_sim PTY UART (software, fast CI)
 
 ```bash
 cargo test --test native_sim_validation -- --ignored --test-threads=N
 ```
 
-Bootloader-entry emulated test (TBD — needs
-`tests/bootloader_touch_emulated.rs`):
+Each test spawns its own `zephyr.exe` with a fresh PTY. No shared state.
+`--test-threads=N` is safe. The PTY path is parsed from stderr.
+
+Not yet implemented — see `firmware/UNIFIED_FIRMWARE_PLAN.md` Step 4.
+
+### Tier 2: native_sim USB CDC-ACM via USB/IP (software, needs kernel modules)
 
 ```bash
 cargo test --test bootloader_touch_emulated -- --ignored --test-threads=1
 ```
+
+Tests the 1200-baud touch → exit(42) flow. Requires `sudo modprobe vhci_hcd`.
+
+Not yet implemented — see `firmware/UNIFIED_FIRMWARE_PLAN.md` Step 5.
+
+### Tier 3: XIAO BLE hardware + PicoProbe
+
+```bash
+SERIAL_MCP_TEST_PORT=/dev/ttyACM0 cargo test --test xiao_ble_validation -- --ignored --test-threads=1
+```
+
+`--test-threads=1` matters — parallel tests fight over the same serial port.
+
+### Tier 4: XIAO BLE hardware + native USB CDC (paused)
+
+See `firmware/UF2_BOOTLOADER_PLAN.md`. Requires SWD recovery and native USB-C
+connection to host.
 
 ## Important Implementation Notes
 
