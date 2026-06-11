@@ -1,71 +1,142 @@
 # serial-mcp Test Firmware
 
-NCS/Zephyr firmware for XIAO BLE nRF52840 used by `tests/xiao_ble_validation.rs`.
+NCS/Zephyr firmware for XIAO BLE nRF52840 and the `native_sim` POSIX
+emulator. Used by `tests/xiao_ble_validation.rs` (hardware) and
+`tests/native_sim_validation.rs` (software).
 
 ## First Truths
 
-- **Transport is physical `uart0`, not USB CDC-ACM.**
-- Host test port `/dev/ttyACM0` is **PicoProbe USB serial**, not XIAO native USB.
-- XIAO TX/RX pins talk through PicoProbe UART bridge at `115200 8N1`.
-- **No bootloader flow here.** Flash directly with SWD.
-- This firmware must link at **`0x0`**. If it links at `0x27000`, agents drifted into XIAO UF2 partition config again.
+- **Two build targets share one source tree:**
+  - `native_sim` — runs as a Linux process, PTY-backed UART
+  - `xiao_ble`   — nRF52840 hardware, real UART + native USB
+- **Two transports, opt-in via separate conf fragments:**
+  - **Always-on:** command channel on the physical/PTY `uart0`
+  - **Opt-in (USB conf):** native USB CDC-ACM for 1200-baud touch
+- The command channel uses `DT_CHOSEN(zephyr_console)`, which is
+  `&uart0` on both targets. Device-agnostic.
+- xiao_ble's CDC-ACM port is the entry point for the 1200-baud
+  touch → UF2 bootloader sequence.
+- The Adafruit UF2 bootloader (+ SoftDevice s140) lives at the top
+  of flash on xiao_ble. **Application links at `0x27000`**.
+- Flashing strategy for xiao_ble:
+  - Bootloader: full-chip erase + pyocd flash of the hex
+  - Application: pyocd flash of `zephyr.hex` at `0x27000`, or
+    drag-drop `.uf2`
 
-## Do Not Drift
+## File Tree
 
-- Do **not** add USB CDC-ACM.
-- Do **not** use `zephyr_cdc_acm_uart`.
-- Do **not** wait for DTR.
-- Do **not** re-enable `CONFIG_CONSOLE` or `CONFIG_UART_CONSOLE`.
-- Do **not** use `west flash` here.
-- Do **not** fetch bootloaders, UF2 images, SoftDevice blobs, or external recovery files.
-- Do **not** remove `pm_static.yml` unless you replace it with another verified `0x0` flash layout.
-
-Those paths caused dead ends before:
-
-- USB path made firmware silent on Pico UART.
-- Board default partition config pushed app to `0x27000`.
-- Full-chip erase plus bootloader assumptions wasted time.
+```
+firmware/
+├── CMakeLists.txt              # Zephyr build entry
+├── prj.conf                    # SHARED Kconfig (both targets)
+├── pm_static.yml               # xiao_ble flash layout (ignored by native_sim)
+│
+├── src/                        # SHARED source (both targets)
+│   ├── main.c                  # super loop, command dispatch
+│   ├── uart_drv.c              # Zephyr UART API (device-agnostic)
+│   ├── uart_drv.h
+│   ├── command.c               # ping, spam, trace, framing, etc.
+│   ├── command.h
+│   ├── usb_cdc.c               # USB CDC init + 1200-baud touch (guarded)
+│   └── usb_cdc.h
+│
+└── boards/
+    ├── native_sim.conf         # PTY UART Kconfig (always applied)
+    ├── native_sim_usb.conf     # OPT-IN: USB device-next + CDC-ACM
+    ├── native_sim_usb.overlay  # OPT-IN: CDC-ACM node
+    ├── xiao_ble.conf           # UF2 output, flash partitions
+    ├── xiao_ble_usb.conf       # OPT-IN: USB device-next + CDC-ACM
+    └── xiao_ble_usb.overlay    # OPT-IN: force console back to uart0
+```
 
 ## Build
 
-Only use this command style:
+### native_sim (no USB — Tier 1 test)
+
+```bash
+west build -b native_sim firmware/
+# Run: ./build/zephyr/zephyr.exe
+# Or:  west build -t run
+# Connect to the PTY printed on stdout, e.g. /dev/pts/5
+```
+
+### native_sim (with USB — Tier 2 test, emulated 1200-baud touch)
+
+```bash
+west build -b native_sim firmware/ --pristine -- \
+  -DEXTRA_CONF_FILE=boards/native_sim_usb.conf \
+  -DEXTRA_DTC_OVERLAY_FILE=boards/native_sim_usb.overlay
+
+# Run with USB/IP:
+sudo ./build/zephyr/zephyr.exe
+# In another terminal:
+sudo modprobe vhci_hcd usbip-core usbip-host
+sudo usbip attach -r 127.0.0.1 -b 1-1
+# /dev/ttyACM1 now appears
+```
+
+### xiao_ble (no USB — Tier 3 test, PicoProbe-bridged)
 
 ```bash
 nrfutil sdk-manager toolchain launch --ncs-version v3.3.0 --chdir ~/ncs/v3.3.0/nrf -- \
-  west build -b xiao_ble /home/thomas-workstation/repos/serial-mcp/firmware --pristine
+  west build -b xiao_ble firmware/ --pristine
 ```
 
-Incremental rebuild:
+### xiao_ble (with USB — Tier 4 test, real 1200-baud touch)
 
 ```bash
 nrfutil sdk-manager toolchain launch --ncs-version v3.3.0 --chdir ~/ncs/v3.3.0/nrf -- \
-  west build -b xiao_ble /home/thomas-workstation/repos/serial-mcp/firmware
+  west build -b xiao_ble firmware/ --pristine -- \
+    -DEXTRA_CONF_FILE=boards/xiao_ble_usb.conf \
+    -DEXTRA_DTC_OVERLAY_FILE=boards/xiao_ble_usb.overlay
 ```
 
-Expected post-build checks:
+Expected post-build checks (xiao_ble):
 
-- `~/ncs/v3.3.0/nrf/build/firmware/zephyr/linker.cmd` contains `FLASH (rx) : ORIGIN = 0x0`
-- `~/ncs/v3.3.0/nrf/build/firmware/zephyr/include/generated/pm_config.h` contains:
-  - `PM_APP_ADDRESS 0x0`
-  - `PM_ADDRESS 0x0`
+- `~/ncs/v3.3.0/nrf/build/firmware/zephyr/linker.cmd` contains
+  `FLASH (rx) : ORIGIN = 0x27000`
+- `~/ncs/v3.3.0/nrf/build/firmware/zephyr/include/generated/pm_config.h`
+  contains `PM_APP_ADDRESS 0x27000`
 
-If build still lands at `0x27000`, inspect `pm_static.yml` first.
+If build lands at `0x0`, inspect `pm_static.yml` first.
 
-## Flash
+## Flash (xiao_ble only)
 
-Only use `pyocd`:
+### Bootloader (one-time / recovery)
 
 ```bash
-pyocd flash -t nrf52840 ~/ncs/v3.3.0/nrf/build/firmware/zephyr/zephyr.hex
+pyocd erase -t nrf52840 --chip
+pyocd flash -t nrf52840 Seeed_XIAO_nRF52840_bootloader-0.6.1_s140_7.3.0.hex
 ```
 
-This project is intentionally configured for direct flash-at-`0x0` image.
+### Application
+
+```bash
+pyocd flash -t nrf52840 --base-address 0x27000 \
+  ~/ncs/v3.3.0/nrf/build/firmware/zephyr/zephyr.hex
+```
+
+Or drag-drop the `.uf2` after entering UF2 mode via 1200-baud touch.
+
+## Do Not Drift
+
+- Do **not** use `DT_NODELABEL(uart0)` directly. Use
+  `DT_CHOSEN(zephyr_console)`. Both targets route this to `uart0` but
+  the device driver differs.
+- Do **not** link the app at `0x0` on xiao_ble (overwrites bootloader).
+- Do **not** use `west flash` — use `pyocd` for both bootloader and app.
+- Do **not** re-enable `CONFIG_CONSOLE` or `CONFIG_UART_CONSOLE`.
+  They steal bytes from the command channel.
+- Do **not** remove `pm_static.yml` — without it the app lands at
+  the wrong offset.
+- Do **not** add a second `USBD_DEVICE_DEFINE()` instance. The single
+  one in `usb_cdc.c` registers all CDC-ACM classes from devicetree.
+- Do **not** put `#include "usb_cdc.h"` calls behind Kconfig in app
+  code. The header's stub `usb_cdc_init()` is always available.
 
 ## Config Files That Matter
 
-### `prj.conf`
-
-These settings are deliberate:
+### `prj.conf` (shared)
 
 ```ini
 CONFIG_SERIAL=y
@@ -76,56 +147,88 @@ CONFIG_HWINFO=y
 CONFIG_LOG=y
 CONFIG_CONSOLE=n
 CONFIG_UART_CONSOLE=n
-CONFIG_BUILD_OUTPUT_UF2=n
-CONFIG_USE_DT_CODE_PARTITION=n
+# USB disabled by default — enable per-target via boards/<board>_usb.conf
+# CONFIG_USB_DEVICE_STACK_NEXT is not set
+# CONFIG_USBD_CDC_ACM_CLASS is not set
 ```
 
-Why:
+### `boards/native_sim.conf`
 
-- `CONFIG_CONSOLE=n` and `CONFIG_UART_CONSOLE=n` stop Zephyr shell/console from stealing bytes and echoing prompts.
-- `CONFIG_BUILD_OUTPUT_UF2=n` and `CONFIG_USE_DT_CODE_PARTITION=n` stop XIAO UF2 layout from pushing app away from `0x0`.
+```ini
+# PTY UART is auto-enabled by DT_HAS_ZEPHYR_NATIVE_PTY_UART_ENABLED.
+# This fragment tunes the PTY mode for tests:
+CONFIG_UART_NATIVE_PTY_0_ON_OWN_PTY=y
+```
 
-### `pm_static.yml`
+### `boards/xiao_ble.conf`
 
-This file is critical:
+```ini
+CONFIG_BUILD_OUTPUT_UF2=y
+CONFIG_USE_DT_CODE_PARTITION=y
+CONFIG_BOOTLOADER_MCUBOOT=n
+CONFIG_GPIO=y
+```
+
+### `boards/<board>_usb.conf` (opt-in)
+
+```ini
+CONFIG_USB_DEVICE_STACK_NEXT=y
+CONFIG_USBD_CDC_ACM_CLASS=y
+CONFIG_CDC_ACM_SERIAL_INITIALIZE_AT_BOOT=n
+# Quiet logs:
+CONFIG_USBD_LOG_LEVEL_ERR=y
+CONFIG_UDC_DRIVER_LOG_LEVEL_ERR=y
+CONFIG_USBD_CDC_ACM_LOG_LEVEL_OFF=y
+```
+
+### `pm_static.yml` (xiao_ble only)
 
 ```yml
 app:
-  address: 0x0
-  size: 0x100000
+  address: 0x27000
+  size: 0xC5000
 ```
-
-Reason:
-
-- XIAO board ships `zephyr/boards/seeed/xiao_ble/pm_static.yml` with app at `0x27000`.
-- App-local `firmware/pm_static.yml` overrides board one.
-- Without this override, build may look fine but image lands at wrong flash offset.
 
 ## Architecture
 
 ```text
 src/
-  main.c          super loop, command dispatch
-  uart_drv.c/h    physical uart0 IRQ RX + ringbuf TX
+  main.c          super loop, command dispatch, calls usb_cdc_init()
+  uart_drv.c/h    DT_CHOSEN(zephyr_console), IRQ RX + ringbuf TX
   command.c/h     all commands, spam timer, app state
+  usb_cdc.c/h     USB CDC-ACM init + 1200-baud touch handler
+                  (guarded by CONFIG_USB_DEVICE_STACK_NEXT)
 ```
 
-Runtime path:
+Runtime paths:
 
-1. `main.c` initializes `uart0`
-2. IRQ callback accumulates bytes into partial line buffer
-3. Completed line becomes command for super loop
-4. `command_process()` executes command
-5. TX uses ring buffer so spam and traces do not block command loop
+- **Physical/PTY uart0** — test commands, spam, trace, framing
+- **Native USB CDC-ACM** (xiao_ble_usb / native_sim_usb) — 1200-baud
+  touch → UF2 entry. xiao_ble: writes `NRF_POWER->GPREGRET = 0x57`
+  then `NVIC_SystemReset()`. native_sim: writes `sim_gpregret = 0x57`
+  then `exit(42)`.
 
-## Actual Device Path
+## Actual Device Paths
 
-- Driver binds `DEVICE_DT_GET(DT_NODELABEL(uart0))`
-- Not `DEVICE_DT_GET_ONE(zephyr_cdc_acm_uart)`
-- UART callback uses `uart_irq_*`
+- Command UART: `DEVICE_DT_GET(DT_CHOSEN(zephyr_console))`, IRQ
+  callback via `uart_irq_*`
+- USB CDC: `usbd_msg_register_cb()` watches
+  `USBD_MSG_CDC_ACM_CONTROL_LINE_STATE` and
+  `USBD_MSG_CDC_ACM_LINE_CODING`. Reads DTR/baud via
+  `uart_line_ctrl_get()`.
 - Commands terminate on `\r` or `\n`
 
-If serial smoke test on `/dev/ttyACM0` returns nothing, first suspect wrong transport path, not flashing.
+## 1200-Baud Touch → UF2 Flow
+
+1. Host opens native USB CDC port at **1200 baud**
+2. Host asserts DTR (high)
+3. Host de-asserts DTR (low) — the "touch"
+4. Firmware's `usb_msg_cb` detects DTR-falling at 1200 baud
+5. Firmware writes `0x57` to GPREGRET (or `sim_gpregret`) and resets
+   (or exits with code 42 on native_sim)
+6. Bootloader sees GPREGRET, enters UF2 mode
+7. USB mass storage drive `XIAO-SENSE` / `XIAO BLE` appears
+8. Drag-drop `.uf2` to flash, or `pyocd flash` to recover
 
 ## Command Reference
 
@@ -172,45 +275,82 @@ SERIAL_MCP_TEST_PORT=/dev/ttyACM0 cargo test --test xiao_ble_validation -- --ign
 
 `--test-threads=1` matters. Parallel tests fight over same serial port.
 
-Known good result after latest fix:
+Native_sim test command (TBD — needs `tests/native_sim_validation.rs`):
 
-- `11 passed; 0 failed`
+```bash
+cargo test --test native_sim_validation -- --ignored --test-threads=N
+```
+
+Bootloader-entry emulated test (TBD — needs
+`tests/bootloader_touch_emulated.rs`):
+
+```bash
+cargo test --test bootloader_touch_emulated -- --ignored --test-threads=1
+```
 
 ## Important Implementation Notes
 
 - `spam` uses `k_timer`
 - PRNG is deterministic `xorshift32`
-- TX ring buffer sized large enough to carry spam completion message after payload flood
-- `spam stop` clears pending TX ring contents before printing stop line; this prevents stale flood bytes from leaking into next test
+- TX ring buffer sized large enough to carry spam completion message
+  after payload flood
+- `spam stop` clears pending TX ring contents before printing stop
+  line; this prevents stale flood bytes from leaking into next test
 - `rxbuf` snapshots `cmd_buf` under `irq_lock()`
 - `trace on` intentionally noisy; response interleaving is normal there
+- USB CDC `dtr_changed` callback uses `irq_lock` to read the last-seen
+  baud rate atomically
+- 1200-baud touch writes `0x57` to GPREGRET then resets
+- native_sim bootloader entry uses `exit(42)` so tests can verify
+  the magic code via process status
 
 ## Known Pitfalls
 
-### Symptom: build succeeds but firmware silent on `/dev/ttyACM0`
+### Symptom: build succeeds but firmware silent on `/dev/ttyACM0` (xiao_ble)
 
-Likely cause: code still using USB CDC path instead of `uart0`.
+Likely cause: code still using USB CDC path for commands instead of
+`uart0`. USB CDC is for 1200-baud touch only.
 
-### Symptom: linker shows `ORIGIN = 0x27000`
+### Symptom: linker shows `ORIGIN = 0x0` (xiao_ble)
 
-Likely cause: board `pm_static.yml` won. App-local `firmware/pm_static.yml` missing or ignored.
+Likely cause: `pm_static.yml` missing or `CONFIG_USE_DT_CODE_PARTITION=n`.
+The app would overwrite the bootloader.
 
 ### Symptom: serial output shows `>` prompt or echoed commands
 
-Likely cause: Zephyr console/shell got re-enabled.
+Likely cause: Zephyr console/shell got re-enabled. Check
+`CONFIG_CONSOLE=n` in `prj.conf`.
 
-### Symptom: ping test reads random hex instead of `pong`
+### Symptom: 1200-baud touch does nothing (xiao_ble)
 
-Likely cause: prior spam flood still draining. Clearing TX on `spam stop` fixed this.
+Likely cause: USB CDC not enumerated (check `dmesg` for the native
+USB device), or the `dtr_changed` callback wasn't wired in.
+
+### Symptom: native_sim PTY does not appear on stdout
+
+Likely cause: `CONFIG_UART_NATIVE_PTY_0_ON_OWN_PTY=n` (the message
+goes to stdio instead). Set it in `boards/native_sim.conf`.
+
+### Symptom: native_sim USB/IP attach fails
+
+Likely cause: `vhci_hcd` kernel module not loaded, or `zephyr.exe`
+not running with `CAP_NET_ADMIN`. Run `sudo modprobe vhci_hcd
+usbip-core usbip-host` and use `sudo ./zephyr.exe`.
 
 ## Minimal Recovery Checklist
 
 When agents get lost, do this exact sequence:
 
-1. Confirm `prj.conf` still has `CONFIG_BUILD_OUTPUT_UF2=n` and `CONFIG_USE_DT_CODE_PARTITION=n`
-2. Confirm `firmware/pm_static.yml` still sets app address `0x0`
-3. Build with `nrfutil sdk-manager toolchain launch --ncs-version v3.3.0`
-4. Check linker origin is `0x0`
-5. Flash with `pyocd flash -t nrf52840 .../zephyr.hex`
-6. Test `ping` over `/dev/ttyACM0`
-7. Run `cargo test --test xiao_ble_validation -- --ignored --test-threads=1`
+1. Confirm `prj.conf` has `CONFIG_CONSOLE=n` and `CONFIG_UART_CONSOLE=n`
+2. Confirm `boards/xiao_ble.conf` has `CONFIG_BUILD_OUTPUT_UF2=y` and
+   `CONFIG_USE_DT_CODE_PARTITION=y`
+3. Confirm `firmware/pm_static.yml` sets app address `0x27000`
+4. Bootloader still intact? Double-tap reset → mass storage appears
+5. Build: `west build -b native_sim firmware/` for native_sim,
+   or use `nrfutil sdk-manager toolchain launch` for xiao_ble
+6. Check linker origin is `0x27000` (xiao_ble)
+7. Flash app with `pyocd flash -t nrf52840 --base-address 0x27000 ...`
+8. Test `ping` over `/dev/ttyACM0` (xiao_ble) or the printed PTY
+   (native_sim)
+9. Test 1200-baud touch over native USB CDC
+10. Run `cargo test --test xiao_ble_validation -- --ignored --test-threads=1`
