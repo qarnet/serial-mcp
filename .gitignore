@@ -1,6 +1,7 @@
 /result
 /.direnv/
 /target/
+/build/
 tests/proptest.proptest-regressions
 fuzz/target/
 fuzz/Cargo.lock
