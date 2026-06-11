@@ -321,16 +321,21 @@ Each test spawns its own `zephyr.exe` with a fresh PTY. No shared state.
 11 tests — same coverage as Tier 3 xiao_ble_validation. All pass in ~1.2s
 with `--test-threads=4`.
 
-### Tier 2: native_sim USB CDC-ACM via USB/IP (software, needs kernel modules + sudo)
+### Tier 2: native_sim USB CDC-ACM via USB/IP (software, needs privileged access)
 
 ```bash
 cargo test --test bootloader_touch_emulated -- --ignored --test-threads=1
 ```
 
-Tests the 1200-baud touch → exit(42) flow. Requires `sudo modprobe vhci_hcd`
-and either root or `CAP_NET_ADMIN` on zephyr.exe.
+Tests the 1200-baud touch → exit(42) flow. Passes in ~8.6s.
 
-Written but untested — needs sudo access.
+**Privilege setup** — one of:
+- **Path A (NixOS):** NOPASSWD sudoers for `usbip-native-sim-attach`/`usbip-native-sim-detach`. Test auto-detects.
+- **Path B (any distro):** Udev rule for rootless vhci_hcd: `SUBSYSTEM=="platform", DRIVER=="vhci_hcd", GROUP="usbip", MODE="0660"`.
+
+**Env overrides:**
+- `SERIAL_MCP_NATIVE_SIM_USB_BIN` — path to USB-enabled zephyr.exe
+- `USBIP_NATIVE_SIM_ATTACH_CMD` / `USBIP_NATIVE_SIM_DETACH_CMD` — wrapper paths
 
 ### Tier 3: XIAO BLE hardware + PicoProbe
 

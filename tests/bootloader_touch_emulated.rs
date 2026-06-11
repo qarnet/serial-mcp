@@ -4,20 +4,34 @@
 //! **Architecture:**
 //! - zephyr.exe opens a TCP socket on port 3241 — no privileges needed
 //! - `usbip --tcp-port 3241 attach` writes to vhci_hcd sysfs — needs root
-//! - Kernel modules loaded once at boot; WSL2 bridge already does this
+//! - This test supports two privilege paths:
+//!
+//!   **Path A — usbip-native-sim wrappers (NixOS, preferred):**
+//!   Uses `sudo -n usbip-native-sim-attach <busid>` with a NOPASSWD
+//!   sudoers entry for the resolved nix-store path. The wrapper handles
+//!   `--tcp-port 3241`.
+//!
+//!   **Path B — udev rule (rootless, one-time setup):**
+//!   ```nix
+//!   users.groups.usbip = {};
+//!   users.users.<you>.extraGroups = ["usbip"];
+//!   services.udev.extraRules = ''
+//!     SUBSYSTEM=="platform", DRIVER=="vhci_hcd", GROUP="usbip", MODE="0660"
+//!   '';
+//!   ```
+//!   Then `sudo nixos-rebuild switch`, log out/in.
+//!
+//! - Kernel modules loaded once at boot; `vhci_hcd` must be available.
 //!
 //! **Port:** Our CMakeLists.txt overrides Zephyr's hardcoded 3240 → 3241.
 //!
-//! **NixOS rootless setup (one-time):** Add a udev rule to make vhci_hcd
-//! sysfs files writable by the `usbip` group. Add to configuration.nix:
-//! ```nix
-//! users.groups.usbip = {};
-//! users.users.thomas-workstation.extraGroups = ["usbip"];
-//! services.udev.extraRules = ''
-//!   SUBSYSTEM=="platform", DRIVER=="vhci_hcd", GROUP="usbip", MODE="0660"
-//! '';
-//! ```
-//! Then `sudo nixos-rebuild switch`, log out/in. No sudo needed after.
+//! **Environment:**
+//! - `SERIAL_MCP_NATIVE_SIM_USB_BIN` — path to USB-enabled zephyr.exe
+//!   (default: `build/firmware/zephyr/zephyr.exe`)
+//! - `USBIP_NATIVE_SIM_ATTACH_CMD` — override path to attach wrapper
+//!   (default: resolved path of `usbip-native-sim-attach`)
+//! - `USBIP_NATIVE_SIM_DETACH_CMD` — override path to detach wrapper
+//!   (default: resolved path of `usbip-native-sim-detach`)
 //!
 //! **Running:**
 //! ```sh
@@ -143,9 +157,58 @@ impl Drop for UsbFirmware {
 
 // ── USB/IP helpers ──────────────────────────────────────────────────────────
 
-/// Run `usbip --tcp-port 3241 attach -r 127.0.0.1 -b <bus>`.
-/// No sudo needed when udev rule makes vhci_hcd sysfs group-writable.
+/// Resolve the real path of a command (follows symlinks).
+/// Needed because `sudo` matches against the resolved path in sudoers.
+fn resolve_cmd(name: &str) -> Option<String> {
+    // Env var override takes priority.
+    let env_key = format!(
+        "USBIP_NATIVE_SIM_{}_CMD",
+        name.replace("usbip-native-sim-", "")
+            .replace('-', "_")
+            .to_uppercase()
+    );
+    if let Ok(val) = std::env::var(&env_key) {
+        if !val.is_empty() {
+            return Some(val);
+        }
+    }
+
+    let which = std::process::Command::new("which")
+        .arg(name)
+        .output()
+        .ok()?;
+    if !which.status.success() {
+        return None;
+    }
+    let symlink = String::from_utf8_lossy(&which.stdout).trim().to_string();
+    if symlink.is_empty() {
+        return None;
+    }
+
+    // Resolve symlinks so sudo can match the nix-store path.
+    let resolved = std::process::Command::new("readlink")
+        .arg("-f")
+        .arg(&symlink)
+        .output()
+        .ok()?;
+    if resolved.status.success() {
+        let real = String::from_utf8_lossy(&resolved.stdout).trim().to_string();
+        if !real.is_empty() {
+            return Some(real);
+        }
+    }
+
+    Some(symlink)
+}
+
+/// Attach the native_sim USB device via USB/IP.
+///
+/// Strategy:
+/// 1. If `usbip-native-sim-attach` wrapper exists → `sudo -n <wrapper> <busid>`
+/// 2. Fall back to raw `usbip --tcp-port 3241 attach -r 127.0.0.1 -b <busid>`
+///    (requires udev rule for rootless, or a separate sudoers entry).
 async fn usbip_attach() -> anyhow::Result<String> {
+    // List remote devices (no privileges needed).
     let list_output = Command::new("usbip")
         .args(["--tcp-port", "3241", "list", "-r", "127.0.0.1"])
         .output()
@@ -165,20 +228,46 @@ async fn usbip_attach() -> anyhow::Result<String> {
         .map(|s| s.trim_end_matches(':'))
         .unwrap_or("1-1");
 
+    // Try native-sim attach wrapper first (NixOS sudoers path).
+    if let Some(attach_cmd) = resolve_cmd("usbip-native-sim-attach") {
+        let output = Command::new("sudo")
+            .args(["-n", &attach_cmd, bus_id])
+            .output()
+            .await
+            .context("sudo usbip-native-sim-attach failed — check sudoers NOPASSWD entry")?;
+
+        if output.status.success() {
+            return Ok(bus_id.to_string());
+        }
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        // If sudo failed with "password required", fall through to raw usbip.
+        if !stderr.contains("password is required") {
+            anyhow::bail!("usbip-native-sim-attach failed: {stderr}");
+        }
+        // Else: fall through to raw usbip below.
+    }
+
+    // Fallback: raw usbip (needs udev rule or regular sudo).
     let output = Command::new("usbip")
         .args([
-            "--tcp-port", "3241",
-            "attach", "-r", "127.0.0.1", "-b", bus_id,
+            "--tcp-port",
+            "3241",
+            "attach",
+            "-r",
+            "127.0.0.1",
+            "-b",
+            bus_id,
         ])
         .output()
         .await
         .with_context(|| {
-            format!(
-                "usbip attach failed.\n\
-                 On NixOS, add a udev rule to make vhci_hcd writable:\n  \
-                 services.udev.extraRules = ''\n    \
-                 SUBSYSTEM==\"platform\", DRIVER==\"vhci_hcd\", GROUP=\"usbip\", MODE=\"0660\"\n  '';"
-            )
+            "usbip attach failed.\n\
+             On NixOS, either:\n  \
+             - Add NOPASSWD sudoers for usbip-native-sim-attach, or\n  \
+             - Add a udev rule to make vhci_hcd writable:\n    \
+             SUBSYSTEM==\"platform\", DRIVER==\"vhci_hcd\", GROUP=\"usbip\", MODE=\"0660\""
+                .to_string()
         })?;
 
     if !output.status.success() {
@@ -189,31 +278,47 @@ async fn usbip_attach() -> anyhow::Result<String> {
     Ok(bus_id.to_string())
 }
 
-/// Detach USB/IP device. No sudo when udev rule is in place.
+/// Detach USB/IP device.
 async fn usbip_detach(port: &str) {
+    // Try native-sim detach wrapper first.
+    if let Some(detach_cmd) = resolve_cmd("usbip-native-sim-detach") {
+        let _ = Command::new("sudo")
+            .args(["-n", &detach_cmd, port])
+            .output()
+            .await;
+        return;
+    }
+
+    // Fallback: raw usbip.
     let _ = Command::new("usbip")
         .args(["--tcp-port", "3241", "detach", "-p", port])
         .output()
         .await;
 }
 
-/// Find the newly created /dev/ttyACM device.
-async fn find_tty_acm() -> anyhow::Result<String> {
-    let output = Command::new("sh")
-        .arg("-c")
-        .arg("ls /dev/ttyACM* 2>/dev/null | tail -1")
-        .output()
-        .await
-        .context("ls /dev/ttyACM*")?;
+/// Find the newly created /dev/ttyACM device by recording what existed
+/// before attach and diffing after.
+async fn find_tty_acm(before: &str) -> anyhow::Result<String> {
+    // Poll for a new /dev/ttyACM device that wasn't present before.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let output = Command::new("sh")
+            .arg("-c")
+            .arg("ls /dev/ttyACM* 2>/dev/null")
+            .output()
+            .await
+            .context("ls /dev/ttyACM*")?;
 
-    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-
-    if path.is_empty() {
-        anyhow::bail!("No /dev/ttyACM device found after usbip attach");
+        let after = String::from_utf8_lossy(&output.stdout).to_string();
+        for dev in after.lines() {
+            if !before.contains(dev) {
+                return Ok(dev.to_string());
+            }
+        }
     }
 
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    Ok(path)
+    anyhow::bail!("No new /dev/ttyACM device appeared after usbip attach");
 }
 
 // ── MCP helpers ─────────────────────────────────────────────────────────────
@@ -294,32 +399,37 @@ async fn close_connection(
 
 /// Full 1200-baud touch flow via USB/IP:
 /// 1. Spawn USB firmware (zephyr.exe — no sudo, standard TCP socket)
-/// 2. usbip attach → /dev/ttyACMx appears (needs root for vhci_hcd)
+/// 2. usbip attach → /dev/ttyACMx appears (uses sudo or udev rule)
 /// 3. Open port at 1200 baud
 /// 4. Set DTR true, then false (the "touch")
 /// 5. Verify zephyr.exe exits with code 42
 /// 6. usbip detach, cleanup
 #[tokio::test]
-#[ignore = "needs one-time udev rule for rootless usbip: SUBSYSTEM==\"platform\", DRIVER==\"vhci_hcd\", GROUP=\"usbip\", MODE=\"0660\""]
+#[ignore = "needs privileged USB/IP access: either NOPASSWD sudoers for usbip-native-sim-attach, or vhci_hcd udev rule"]
 async fn bootloader_touch_via_usbip_exits_with_42() {
-    // Kernel modules should already be loaded (WSL2 bridge loads them).
-    // If not, load them once: sudo modprobe vhci_hcd usbip-core usbip-host
+    // Snapshot existing /dev/ttyACM devices before attach.
+    let before_acm = std::process::Command::new("sh")
+        .arg("-c")
+        .arg("ls /dev/ttyACM* 2>/dev/null || true")
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default();
 
-    // Spawn firmware. Port 3240 must be free (no other USB/IP server).
+    // Spawn firmware. Port 3241 must be free (no other USB/IP server).
     let fw = UsbFirmware::spawn()
         .await
-        .expect("spawn zephyr.exe — is port 3240 free? Stop usbip-wsl2-attach if running.");
+        .expect("spawn zephyr.exe — is port 3241 free? Stop usbip-wsl2-attach if running.");
 
     // Give USB/IP server time to start.
     tokio::time::sleep(Duration::from_millis(500)).await;
 
-    // Attach via USB/IP (needs root).
+    // Attach via USB/IP (uses sudo or udev rule).
     let bus_id = usbip_attach()
         .await
-        .expect("usbip attach — needs root (sudo -n usbip ...)");
+        .expect("usbip attach failed — check sudoers or udev rule for vhci_hcd");
 
-    // Find the emulated CDC-ACM device.
-    let tty_path = find_tty_acm()
+    // Find the newly-appeared CDC-ACM device.
+    let tty_path = find_tty_acm(&before_acm)
         .await
         .expect("find /dev/ttyACM device after attach");
 

@@ -572,35 +572,44 @@ cargo test --test native_sim_validation -- --ignored --test-threads=4
 **Binary path:** Defaults to `build/firmware/zephyr/zephyr.exe` (repo-relative).
 Override with `SERIAL_MCP_NATIVE_SIM_BIN` env var.
 
-### Step 5: Write `tests/bootloader_touch_emulated.rs` (Tier 2) ✅ Written
+### Step 5: Write `tests/bootloader_touch_emulated.rs` (Tier 2) ✅ Tested
 
 Tests the full 1200-baud touch → bootloader entry flow via USB/IP on native_sim.
+Test passed on NixOS using `usbip-native-sim-attach` wrappers with NOPASSWD sudoers.
 
 **Prerequisites (must be met before running):**
-- USB firmware built: `west build -b native_sim firmware/ -- -DEXTRA_CONF_FILE=boards/native_sim_usb.conf -DEXTRA_DTC_OVERLAY_FILE=boards/native_sim_usb.overlay`
-- Kernel modules: `modprobe vhci_hcd usbip-core usbip-host`
-- Sudo or CAP_NET_ADMIN on zephyr.exe: `sudo setcap cap_net_admin=ep build/firmware/zephyr/zephyr.exe`
+- USB firmware built: `fw-build-native-usb` (or manual `west build -b native_sim firmware/ -- -DEXTRA_CONF_FILE=boards/native_sim_usb.conf -DEXTRA_DTC_OVERLAY_FILE=boards/native_sim_usb.overlay`)
+- Kernel modules: `vhci_hcd` loaded (`sudo -n usbip-native-sim-load-vhci`)
+- Privileged USB/IP access — one of:
+  - **Path A (NixOS, preferred):** NOPASSWD sudoers entry for `usbip-native-sim-attach` and `usbip-native-sim-detach`. The test auto-detects these wrappers and runs via `sudo -n`.
+  - **Path B (any distro, one-time):** Udev rule to make vhci_hcd sysfs group-writable: `SUBSYSTEM=="platform", DRIVER=="vhci_hcd", GROUP="usbip", MODE="0660"`. Then the test falls back to raw `usbip` commands.
 
 **Test: `bootloader_touch_via_usbip_exits_with_42`:**
-1. Load kernel modules (best-effort via sudo modprobe)
-2. Spawn zephyr.exe with sudo/CAP_NET_ADMIN, parse PTY path
-3. `usbip attach -r 127.0.0.1 -b <bus>`
-4. Find /dev/ttyACMx device
-5. serial-mcp open at 1200 baud
-6. `set_dtr_rts(dtr=true)`, then `set_dtr_rts(dtr=false)`
-7. Verify zephyr.exe exits with code 42
-8. `usbip detach`, cleanup
+1. Record existing `/dev/ttyACM*` devices
+2. Spawn zephyr.exe (no special privileges needed — TCP socket)
+3. Wait for USB/IP export on port 3241
+4. `sudo -n usbip-native-sim-attach <busid>` (or raw `usbip attach` with udev rule)
+5. Find the newly-appeared `/dev/ttyACMx` device
+6. serial-mcp open at 1200 baud
+7. `set_dtr_rts(dtr=true)`, then `set_dtr_rts(dtr=false)`
+8. Verify zephyr.exe exits with code 42
+9. `sudo -n usbip-native-sim-detach <port>` (or raw `usbip detach`), cleanup
 
-**Status:** Test compiles and links. Cannot execute without sudo access for USB/IP.
+**Status:** Test compiles and passes (8.6s on NixOS with NOPASSWD sudoers).
 
 **Running:**
 ```bash
-# Option 1: run test as root
-sudo -E cargo test --test bootloader_touch_emulated -- --ignored --test-threads=1
-
-# Option 2: setcap + run as normal user
-sudo setcap cap_net_admin=ep build/firmware/zephyr/zephyr.exe
+# NixOS with usbip-native-sim wrappers (NOPASSWD sudoers):
 cargo test --test bootloader_touch_emulated -- --ignored --test-threads=1
+
+# Override wrapper paths:
+USBIP_NATIVE_SIM_ATTACH_CMD=/path/to/usbip-native-sim-attach \
+USBIP_NATIVE_SIM_DETACH_CMD=/path/to/usbip-native-sim-detach \
+  cargo test --test bootloader_touch_emulated -- --ignored --test-threads=1
+
+# Override firmware binary:
+SERIAL_MCP_NATIVE_SIM_USB_BIN=/path/to/zephyr.exe \
+  cargo test --test bootloader_touch_emulated -- --ignored --test-threads=1
 ```
 
 ### Step 9: CI integration
@@ -614,9 +623,10 @@ Add native_sim builds and tests to `.github/workflows/ci.yml`.
 
 **Tier 2 (with USB/IP):**
 - Requires `vhci_hcd` kernel module on runner
-- Build USB firmware variant
-- Run `cargo test --test bootloader_touch_emulated -- --ignored`
-- May need self-hosted runner or privileged container
+- Requires NOPASSWD sudoers for `usbip-native-sim-attach`/`usbip-native-sim-detach`, or udev rule for rootless vhci_hcd
+- Build USB firmware variant (`fw-build-native-usb`)
+- Run `cargo test --test bootloader_touch_emulated -- --ignored --test-threads=1`
+- Passes locally (8.6s on NixOS). CI needs privileged runner or container.
 
 **Tier 3-4 (hardware):**
 - Requires XIAO BLE + PicoProbe connected to runner
