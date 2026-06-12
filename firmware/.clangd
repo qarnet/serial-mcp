@@ -1,0 +1,13 @@
+If:
+  PathMatch: .*/src/usb_.*\.[ch]
+CompileFlags:
+  CompilationDatabase: ../build/native_sim_usb/firmware
+  Remove:
+    - -fno-reorder-functions
+    - -fno-freestanding
+---
+CompileFlags:
+  CompilationDatabase: ../build/native_sim/firmware
+  Remove:
+    - -fno-reorder-functions
+    - -fno-freestanding

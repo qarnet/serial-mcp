@@ -45,9 +45,10 @@ firmware/
 ### native_sim (no USB — Tier 1 test)
 
 ```bash
-west build -b native_sim firmware/
-# Run: ./build/zephyr/zephyr.exe
-# Or:  west build -t run
+# Plain variant uses a dedicated build tree.
+west build -b native_sim firmware/ -d build/native_sim --pristine
+# Run: ./build/native_sim/firmware/zephyr/zephyr.exe
+# Or:  west build -d build/native_sim -t run
 # Connect to the PTY printed on stdout, e.g. /dev/pts/5
 ```
 
@@ -58,10 +59,18 @@ fw-build-native
 fw-run-native
 ```
 
+`fw-build-native` also emits LSP metadata at:
+
+```text
+build/native_sim/firmware/compile_commands.json
+```
+
 ### native_sim (with USB — Tier 2 test, emulated 1200-baud touch)
 
 ```bash
-west build -b native_sim firmware/ --pristine -- \
+# USB variant uses its own dedicated build tree so it cannot
+# contaminate the plain variant's Kconfig/devicetree state.
+west build -b native_sim firmware/ -d build/native_sim_usb --pristine -- \
   -DEXTRA_CONF_FILE=boards/native_sim_usb.conf \
   -DEXTRA_DTC_OVERLAY_FILE=boards/native_sim_usb.overlay
 
@@ -72,7 +81,7 @@ sudo -n usbip-native-sim-load-vhci
 fw-run-native-usb-attached
 
 # Manual fallback:
-./build/firmware/zephyr/zephyr.exe
+./build/native_sim_usb/firmware/zephyr/zephyr.exe
 usbip --tcp-port 3241 list -r 127.0.0.1
 usbip --tcp-port 3241 attach -r 127.0.0.1 -b 1-1
 # /dev/ttyACM1 now appears
@@ -85,8 +94,29 @@ fw-build-native-usb
 fw-run-native-usb-attached
 ```
 
+`fw-build-native-usb` also emits LSP metadata at:
+
+```text
+build/native_sim_usb/firmware/compile_commands.json
+```
+
 `fw-run-native-usb-attached` starts `zephyr.exe`, waits for local USB/IP export on
 `127.0.0.1:3241`, attaches it, prints `/dev/ttyACMx`, then detaches on exit.
+
+## LSP / clangd
+
+- Project LSP routing lives in `firmware/.clangd`.
+- Default route: plain firmware files use `../build/native_sim/firmware/compile_commands.json`.
+- USB route: `src/usb_*.c` and `src/usb_*.h` use `../build/native_sim_usb/firmware/compile_commands.json`.
+- `.clangd` also strips clangd-hostile GCC flags: `-fno-reorder-functions` and `-fno-freestanding`.
+- Build both variants at least once after clone or clean:
+
+```bash
+fw-build-native
+fw-build-native-usb
+```
+
+- opencode launches `clangd` through `direnv exec .` so Nix toolchain paths resolve. If Zephyr headers go missing in LSP, first check that both compile DB files exist and are fresh.
 
 ## Do Not Drift
 
