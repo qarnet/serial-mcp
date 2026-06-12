@@ -353,6 +353,18 @@ impl SerialHandler {
     ) -> Result<Json<GetStatusResult>, String> {
         port_ops::get_status(&self.connections, args).await
     }
+
+    #[tool(
+        description = "Reconfigure serial parameters (baud rate, data bits, stop bits, parity, flow control) on a live connection without closing and reopening it. Omitted parameters are left unchanged.",
+        title = "Reconfigure Serial Port",
+        annotations(destructive_hint = true, open_world_hint = false)
+    )]
+    async fn reconfigure(
+        &self,
+        Parameters(args): Parameters<ReconfigureArgs>,
+    ) -> Result<Json<ReconfigureResult>, String> {
+        port_ops::reconfigure(&self.connections, args).await
+    }
 }
 
 // ---- Tool helpers (extracted to src/tools/helpers.rs) -----------------------

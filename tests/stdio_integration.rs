@@ -30,6 +30,7 @@ const EXPECTED_TOOLS: &[&str] = &[
     "subscribe",
     "unsubscribe",
     "get_status",
+    "reconfigure",
 ];
 
 fn build_stdio_server() {

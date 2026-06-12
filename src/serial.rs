@@ -316,6 +316,27 @@ pub trait SerialIo: AsyncRead + AsyncWrite + Send + Unpin {
     fn set_dtr_rts(&mut self, dtr: bool, rts: bool) -> std::io::Result<()>;
     fn set_flow_control(&mut self, flow_control: FlowControl) -> std::io::Result<()>;
     fn set_break_state(&self, asserted: bool) -> std::io::Result<()>;
+
+    /// Reconfigure baud rate on an already-open port. Default is no-op
+    /// for backends that don't support hardware reconfiguration.
+    fn reconfigure_baud_rate(&mut self, _baud_rate: u32) -> std::io::Result<()> {
+        Ok(())
+    }
+
+    /// Reconfigure data bits on an already-open port.
+    fn reconfigure_data_bits(&mut self, _data_bits: serialport::DataBits) -> std::io::Result<()> {
+        Ok(())
+    }
+
+    /// Reconfigure stop bits on an already-open port.
+    fn reconfigure_stop_bits(&mut self, _stop_bits: serialport::StopBits) -> std::io::Result<()> {
+        Ok(())
+    }
+
+    /// Reconfigure parity on an already-open port.
+    fn reconfigure_parity(&mut self, _parity: serialport::Parity) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 impl SerialIo for SerialStream {
@@ -341,6 +362,22 @@ impl SerialIo for SerialStream {
             self.clear_break().map_err(io_error_from_serialport)
         }
     }
+
+    fn reconfigure_baud_rate(&mut self, baud_rate: u32) -> std::io::Result<()> {
+        SerialPort::set_baud_rate(self, baud_rate).map_err(io_error_from_serialport)
+    }
+
+    fn reconfigure_data_bits(&mut self, data_bits: serialport::DataBits) -> std::io::Result<()> {
+        SerialPort::set_data_bits(self, data_bits).map_err(io_error_from_serialport)
+    }
+
+    fn reconfigure_stop_bits(&mut self, stop_bits: serialport::StopBits) -> std::io::Result<()> {
+        SerialPort::set_stop_bits(self, stop_bits).map_err(io_error_from_serialport)
+    }
+
+    fn reconfigure_parity(&mut self, parity: serialport::Parity) -> std::io::Result<()> {
+        SerialPort::set_parity(self, parity).map_err(io_error_from_serialport)
+    }
 }
 
 fn io_error_from_serialport(err: serialport::Error) -> std::io::Error {
@@ -355,10 +392,10 @@ pub struct SerialConnection {
     id: String,
     port: String,
     name: Option<String>,
-    baud_rate: u32,
-    data_bits: DataBits,
-    stop_bits: StopBits,
-    parity: Parity,
+    baud_rate: StdMutex<u32>,
+    data_bits: StdMutex<DataBits>,
+    stop_bits: StdMutex<StopBits>,
+    parity: StdMutex<Parity>,
     flow_control: StdMutex<FlowControl>,
     io: Mutex<Option<Box<dyn SerialIo>>>,
     close_token: CancellationToken,
@@ -411,10 +448,10 @@ impl SerialConnection {
             id: Uuid::new_v4().to_string(),
             port: config.port,
             name: config.name,
-            baud_rate: config.baud_rate,
-            data_bits: config.data_bits,
-            stop_bits: config.stop_bits,
-            parity: config.parity,
+            baud_rate: StdMutex::new(config.baud_rate),
+            data_bits: StdMutex::new(config.data_bits),
+            stop_bits: StdMutex::new(config.stop_bits),
+            parity: StdMutex::new(config.parity),
             flow_control: StdMutex::new(config.flow_control),
             io: Mutex::new(Some(io)),
             close_token: CancellationToken::new(),
@@ -438,7 +475,7 @@ impl SerialConnection {
     }
 
     pub fn baud_rate(&self) -> u32 {
-        self.baud_rate
+        *self.baud_rate.lock().expect("baud_rate mutex poisoned")
     }
 
     pub fn flow_control(&self) -> FlowControl {
@@ -449,15 +486,15 @@ impl SerialConnection {
     }
 
     pub fn data_bits(&self) -> DataBits {
-        self.data_bits
+        *self.data_bits.lock().expect("data_bits mutex poisoned")
     }
 
     pub fn stop_bits(&self) -> StopBits {
-        self.stop_bits
+        *self.stop_bits.lock().expect("stop_bits mutex poisoned")
     }
 
     pub fn parity(&self) -> Parity {
-        self.parity
+        *self.parity.lock().expect("parity mutex poisoned")
     }
 
     /// Record `n` bytes written to the device.
@@ -663,6 +700,70 @@ impl SerialConnection {
         self.set_break_state(true).await?;
         tokio::time::sleep(Duration::from_millis(duration_ms)).await;
         self.set_break_state(false).await
+    }
+
+    /// Reconfigure serial parameters on a live connection. Parameters passed
+    /// as `None` are left unchanged. Returns the effective config after the
+    /// operation completes.
+    pub async fn reconfigure(
+        &self,
+        baud_rate: Option<u32>,
+        data_bits: Option<DataBits>,
+        stop_bits: Option<StopBits>,
+        parity: Option<Parity>,
+        flow_control: Option<FlowControl>,
+    ) -> Result<ConnectionStatus> {
+        self.ensure_open()?;
+
+        if let Some(rate) = baud_rate {
+            ensure_valid_baud_rate(rate)?;
+        }
+
+        // Apply requested changes to the underlying serial port hardware.
+        {
+            let mut io = self.io.lock().await;
+            let io = io
+                .as_mut()
+                .ok_or_else(|| SerialError::ConnectionClosed(self.display_name()))?;
+
+            if let Some(rate) = baud_rate {
+                io.reconfigure_baud_rate(rate).map_err(SerialError::from)?;
+            }
+            if let Some(db) = data_bits {
+                io.reconfigure_data_bits(db.into())
+                    .map_err(SerialError::from)?;
+            }
+            if let Some(sb) = stop_bits {
+                io.reconfigure_stop_bits(sb.into())
+                    .map_err(SerialError::from)?;
+            }
+            if let Some(p) = parity {
+                io.reconfigure_parity(p.into())
+                    .map_err(SerialError::from)?;
+            }
+            if let Some(fc) = flow_control {
+                io.set_flow_control(fc).map_err(SerialError::from)?;
+            }
+        }
+
+        // Update stored configuration.
+        if let Some(rate) = baud_rate {
+            *self.baud_rate.lock().expect("poisoned") = rate;
+        }
+        if let Some(db) = data_bits {
+            *self.data_bits.lock().expect("poisoned") = db;
+        }
+        if let Some(sb) = stop_bits {
+            *self.stop_bits.lock().expect("poisoned") = sb;
+        }
+        if let Some(p) = parity {
+            *self.parity.lock().expect("poisoned") = p;
+        }
+        if let Some(fc) = flow_control {
+            *self.flow_control.lock().expect("poisoned") = fc;
+        }
+
+        Ok(self.status_snapshot())
     }
 
     pub async fn close(&self) -> Result<()> {

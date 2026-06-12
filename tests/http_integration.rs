@@ -38,6 +38,7 @@ const EXPECTED_TOOLS: &[&str] = &[
     "subscribe",
     "unsubscribe",
     "get_status",
+    "reconfigure",
 ];
 
 #[tokio::test]
@@ -1223,6 +1224,111 @@ async fn get_status_unknown_connection_returns_error() {
         result.is_error, Some(true),
         "unknown connection should return error: {result:?}"
     );
+
+    client.cancel().await.ok();
+}
+
+#[tokio::test]
+async fn reconfigure_changes_baud_rate_on_loopback() {
+    let manager = Arc::new(ConnectionManager::new());
+    let (conn, _peer) = loopback_connection("loop-recfg");
+    let connection_id = manager.insert(conn).await.unwrap();
+
+    let server = TestServer::start_with(manager).await;
+    let (client, _rx) = connect_client(&server).await.unwrap();
+
+    // Verify initial config
+    let status = client
+        .peer()
+        .call_tool(tool_request(
+            "get_status",
+            json!({ "connection_id": connection_id }),
+        ))
+        .await
+        .unwrap();
+    let s = status.structured_content.unwrap();
+    assert_eq!(s["baud_rate"], json!(115200));
+
+    // Reconfigure baud_rate to 9600
+    let result = client
+        .peer()
+        .call_tool(tool_request(
+            "reconfigure",
+            json!({ "connection_id": connection_id, "baud_rate": 9600 }),
+        ))
+        .await
+        .unwrap();
+    assert_ne!(result.is_error, Some(true), "{result:?}");
+    let s = result.structured_content.expect("structured");
+    assert_eq!(s["baud_rate"], json!(9600), "{s:?}");
+
+    // Verify through get_status that change persisted
+    let status = client
+        .peer()
+        .call_tool(tool_request(
+            "get_status",
+            json!({ "connection_id": connection_id }),
+        ))
+        .await
+        .unwrap();
+    let s = status.structured_content.unwrap();
+    assert_eq!(s["baud_rate"], json!(9600), "baud_rate should persist: {s:?}");
+
+    client.cancel().await.ok();
+}
+
+#[tokio::test]
+async fn reconfigure_invalid_args_return_error() {
+    let manager = Arc::new(ConnectionManager::new());
+    let (conn, _peer) = loopback_connection("loop-recfg-err");
+    let connection_id = manager.insert(conn).await.unwrap();
+
+    let server = TestServer::start_with(manager).await;
+    let (client, _rx) = connect_client(&server).await.unwrap();
+
+    // Bogus baud_rate (0)
+    let result = client
+        .peer()
+        .call_tool(tool_request(
+            "reconfigure",
+            json!({ "connection_id": connection_id, "baud_rate": 0 }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(result.is_error, Some(true), "{result:?}");
+
+    // Bogus data_bits
+    let result = client
+        .peer()
+        .call_tool(tool_request(
+            "reconfigure",
+            json!({ "connection_id": connection_id, "data_bits": "9" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(result.is_error, Some(true), "{result:?}");
+
+    // Bogus flow_control
+    let result = client
+        .peer()
+        .call_tool(tool_request(
+            "reconfigure",
+            json!({ "connection_id": connection_id, "flow_control": "bogus" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(result.is_error, Some(true), "{result:?}");
+
+    // Unknown connection
+    let result = client
+        .peer()
+        .call_tool(tool_request(
+            "reconfigure",
+            json!({ "connection_id": "nonexistent", "baud_rate": 9600 }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(result.is_error, Some(true), "{result:?}");
 
     client.cancel().await.ok();
 }

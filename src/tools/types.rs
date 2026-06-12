@@ -132,6 +132,22 @@ pub struct GetStatusArgs {
     pub connection_id: String,
 }
 
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct ReconfigureArgs {
+    pub connection_id: String,
+    #[serde(default)]
+    #[schemars(schema_with = "crate::schema_helpers::option_uint_schema")]
+    pub baud_rate: Option<u32>,
+    #[serde(default)]
+    pub data_bits: Option<String>,
+    #[serde(default)]
+    pub stop_bits: Option<String>,
+    #[serde(default)]
+    pub parity: Option<String>,
+    #[serde(default)]
+    pub flow_control: Option<String>,
+}
+
 // ---- Response structs ------------------------------------------------------
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -284,6 +300,19 @@ pub struct GetStatusResult {
     /// Last I/O activity as milliseconds since Unix epoch, or null.
     #[schemars(schema_with = "crate::schema_helpers::option_uint_schema")]
     pub last_activity_ms: Option<u64>,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct ReconfigureResult {
+    pub connection_id: String,
+    pub name: Option<String>,
+    pub port: String,
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub baud_rate: u32,
+    pub data_bits: String,
+    pub stop_bits: String,
+    pub parity: String,
+    pub flow_control: String,
 }
 
 // ---- Default helpers -------------------------------------------------------

@@ -35,6 +35,7 @@ mod tests {
             ("subscribe", SerialHandler::subscribe_tool_attr()),
             ("unsubscribe", SerialHandler::unsubscribe_tool_attr()),
             ("get_status", SerialHandler::get_status_tool_attr()),
+            ("reconfigure", SerialHandler::reconfigure_tool_attr()),
         ];
 
         for (name, tool) in tools {
@@ -62,6 +63,7 @@ mod tests {
             SerialHandler::subscribe_tool_attr(),
             SerialHandler::unsubscribe_tool_attr(),
             SerialHandler::get_status_tool_attr(),
+            SerialHandler::reconfigure_tool_attr(),
         ];
 
         for tool in tools {

@@ -19,7 +19,7 @@ Exposes serial ports as MCP tools so agents like Claude can interact with
 embedded devices, Arduino boards, STM32 microcontrollers, and any UART/USB-serial
 hardware — all through natural language.
 
-**13 tools** — list_ports, list_connections, open, close, read, write, flush, set_dtr_rts, set_flow_control, send_break, subscribe, unsubscribe, get_status  
+**14 tools** — list_ports, list_connections, open, close, read, write, flush, set_dtr_rts, set_flow_control, send_break, subscribe, unsubscribe, get_status, reconfigure  
 **3 resources** — `serial://ports`, `serial://connections`, `serial://connections/{id}`  
 **2 prompt templates** — `diagnose_port`, `interactive_terminal`  
 
