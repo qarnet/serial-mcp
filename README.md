@@ -39,7 +39,7 @@ Add user to `dialout` group for port access: `sudo usermod -aG dialout $USER`
 
 ```bash
 VERSION=$(curl -s https://api.github.com/repos/qarnet/serial-mcp/releases/latest | grep -oP '"tag_name": "\K[^"]+')
-ARCH=aarch64-macos   # Intel: x86_64-macos
+ARCH=aarch64-macos
 curl -L "https://github.com/qarnet/serial-mcp/releases/download/${VERSION}/serial-mcp-${VERSION#v}-${ARCH}" \
   -o serial-mcp && chmod +x serial-mcp && sudo mv serial-mcp /usr/local/bin/
 ```
@@ -121,11 +121,9 @@ cargo test
 cargo clippy --all-targets -- -D warnings
 cargo fmt --all -- --check
 
-# Hardware tests (requires TX-RX loopback device)
-SERIAL_MCP_TEST_PORT=/dev/ttyACM0 cargo test --test hardware_loopback -- --ignored
-
-# XIAO BLE firmware validation (requires dedicated serial-mcp test firmware)
-SERIAL_MCP_XIAO_PORT=/dev/ttyACM0 cargo test --test xiao_ble_validation -- --ignored --test-threads=1
+# Firmware-based tests (require native_sim firmware, see firmware/AGENTS.md)
+cargo test --test native_sim_validation -- --ignored
+cargo test --test native_sim_connection_lifecycle -- --ignored --test-threads=1
 ```
 
 > Be sure to ask your agent to give honest feedback on the tool after they finish using it. Always looking for ways to improve serial-mcp :)

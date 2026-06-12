@@ -22,13 +22,9 @@ use common::{args_object, connect_client, next_notification, tool_request, TestS
 
 // ── Firmware process management ──────────────────────────────────────────────
 
-const DEFAULT_BIN: &str = "build/firmware/zephyr/zephyr.exe";
-
-fn zephyr_bin() -> String {
-    std::env::var("SERIAL_MCP_NATIVE_SIM_BIN")
-        .ok()
-        .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| DEFAULT_BIN.to_string())
+fn zephyr_bin() -> std::path::PathBuf {
+    common::firmware::ensure_plain_firmware_built()
+        .expect("plain native_sim firmware available for validation tests")
 }
 
 /// A running native_sim firmware instance with a known PTY path.
@@ -50,7 +46,7 @@ impl NativeSimFirmware {
             .stderr(std::process::Stdio::null())
             .kill_on_drop(true)
             .spawn()
-            .with_context(|| format!("Failed to spawn {bin}"))?;
+            .with_context(|| format!("Failed to spawn {}", bin.display()))?;
 
         let stdout = child.stdout.take().context("stdout not piped")?;
         let mut reader = BufReader::new(stdout).lines();
@@ -97,6 +93,11 @@ impl NativeSimFirmware {
 
     fn pty_path(&self) -> &str {
         &self.pty_path
+    }
+
+    /// Check whether the firmware process has exited, and return its exit code.
+    fn try_exit_code(&mut self) -> Option<i32> {
+        self.child.try_wait().ok().flatten().and_then(|s| s.code())
     }
 }
 
@@ -884,5 +885,194 @@ async fn native_close_while_subscribe_active() {
     );
 
     client.cancel().await.ok();
+    drop(fw);
+}
+
+// ── Test 12: bootloader touch command → exit(42) ──────────────────────────────
+
+/// Send the "touch" command over the PTY command channel. Firmware
+/// should respond with "touch exit(42)" and then call exit(42).
+/// This validates the end-to-end path that a bootloader-entry
+/// trigger (sent via serial-mcp `write`) causes the expected
+/// firmware-side behaviour.
+#[tokio::test]
+#[ignore = "requires native_sim firmware binary"]
+async fn native_bootloader_touch_exits_42() {
+    let mut fw = NativeSimFirmware::spawn().await.expect("spawn zephyr.exe");
+    let pty_path = fw.pty_path().to_string();
+
+    let server = TestServer::start().await;
+    let (client, _rx) = connect_client(&server).await.unwrap();
+
+    let id = open_pty(&client, &pty_path).await;
+    sync_boot(&client, &id).await;
+
+    // Send the "touch" command
+    client
+        .peer()
+        .call_tool(tool_request(
+            "write",
+            json!({
+                "connection_id": id,
+                "data": "touch\r\n",
+                "encoding": "utf8",
+            }),
+        ))
+        .await
+        .expect("write touch command");
+
+    // Give firmware time to process and call exit(42)
+    for _ in 0..20 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        if let Some(code) = fw.try_exit_code() {
+            assert_eq!(
+                code, 42,
+                "expected exit(42) from touch command, got code {code}"
+            );
+            client.cancel().await.ok();
+            return;
+        }
+    }
+
+    client.cancel().await.ok();
+    panic!("firmware did not exit within 2s after touch command");
+}
+
+// ── Test 13: list_ports returns valid JSON with an opened PTY ──────────────────
+
+#[tokio::test]
+#[ignore = "requires native_sim firmware binary"]
+async fn native_list_ports_after_open() {
+    let fw = NativeSimFirmware::spawn().await.expect("spawn zephyr.exe");
+    let pty_path = fw.pty_path().to_string();
+
+    let server = TestServer::start().await;
+    let (client, _rx) = connect_client(&server).await.unwrap();
+
+    let id = open_pty(&client, &pty_path).await;
+    sync_boot(&client, &id).await;
+
+    let result = client
+        .peer()
+        .call_tool(tool_request("list_ports", json!({})))
+        .await
+        .expect("list_ports");
+    assert_ne!(result.is_error, Some(true), "{result:?}");
+
+    let s = result.structured_content.expect("structured");
+    let ports = s["ports"].as_array().expect("ports is array");
+    assert!(
+        !ports.is_empty(),
+        "expected at least one port in list: {s:?}"
+    );
+
+    // The PTY might not be enumerated by serialport::available_ports()
+    // on all platforms, but list_ports must return valid JSON.
+    close_connection(&client, &id).await;
+    client.cancel().await.ok();
+    drop(fw);
+}
+
+// ── Test 14: flush preserves data integrity ────────────────────────────────────
+
+#[tokio::test]
+#[ignore = "requires native_sim firmware binary"]
+async fn native_flush_after_write() {
+    let fw = NativeSimFirmware::spawn().await.expect("spawn zephyr.exe");
+    let pty_path = fw.pty_path().to_string();
+
+    let server = TestServer::start().await;
+    let (client, _rx) = connect_client(&server).await.unwrap();
+
+    let id = open_pty(&client, &pty_path).await;
+    sync_boot(&client, &id).await;
+
+    // Write a command, flush, then read — the pong should arrive.
+    write_cmd(&client, &id, "ping").await;
+
+    client
+        .peer()
+        .call_tool(tool_request("flush", json!({ "connection_id": id })))
+        .await
+        .expect("flush");
+
+    let result = client
+        .peer()
+        .call_tool(tool_request(
+            "read",
+            json!({
+                "connection_id": id,
+                "timeout_ms": 1000,
+            }),
+        ))
+        .await
+        .expect("read");
+    assert_ne!(result.is_error, Some(true), "{result:?}");
+
+    let s = result.structured_content.expect("structured");
+    let data = s["data"].as_str().unwrap_or("");
+    assert!(
+        data.contains("pong"),
+        "expected pong after flush+read, got: {data}"
+    );
+
+    close_connection(&client, &id).await;
+    client.cancel().await.ok();
+    drop(fw);
+}
+
+// ── Test 15: unsubscribe followed by re-subscribe ──────────────────────────────
+
+#[tokio::test]
+#[ignore = "requires native_sim firmware binary"]
+async fn native_unsubscribe_then_resubscribe() {
+    let fw = NativeSimFirmware::spawn().await.expect("spawn zephyr.exe");
+    let pty_path = fw.pty_path().to_string();
+
+    let server = TestServer::start().await;
+    let (client, rx) = connect_client(&server).await.unwrap();
+
+    let id = open_pty(&client, &pty_path).await;
+    sync_boot(&client, &id).await;
+
+    // Subscribe
+    client
+        .peer()
+        .call_tool(tool_request(
+            "subscribe",
+            json!({
+                "connection_id": id,
+                "poll_interval_ms": 50,
+                "max_buffered_bytes": 1024,
+            }),
+        ))
+        .await
+        .expect("subscribe");
+
+    // Unsubscribe
+    let result = client
+        .peer()
+        .call_tool(tool_request("unsubscribe", json!({ "connection_id": id })))
+        .await
+        .expect("unsubscribe");
+    assert_ne!(result.is_error, Some(true), "{result:?}");
+
+    // Re-subscribe — should succeed
+    let resub = client
+        .peer()
+        .call_tool(tool_request(
+            "subscribe",
+            json!({
+                "connection_id": id,
+                "poll_interval_ms": 50,
+                "max_buffered_bytes": 1024,
+            }),
+        ))
+        .await
+        .expect("re-subscribe");
+    assert_ne!(resub.is_error, Some(true), "{resub:?}");
+
+    client.cancel().await.ok();
+    drop(rx);
     drop(fw);
 }

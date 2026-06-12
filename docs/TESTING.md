@@ -5,26 +5,20 @@
 ## Quick Reference
 
 ```bash
-# Everything that runs without hardware (CI baseline)
-cargo test --all-targets
+# Orchestrator (preferred — runs all CI-critical suites in order)
+cargo run --manifest-path xtask/Cargo.toml -- test
+cargo run --manifest-path xtask/Cargo.toml -- test-all   # + HTTP integration
+cargo run --manifest-path xtask/Cargo.toml -- build-test-assets
 
-# Formatting check (CI enforces zero diff)
-cargo fmt --all -- --check
+# Individual suites
+cargo test --lib                    # 149 unit tests
+cargo test --test http_integration  # 23 HTTP tests (13 via spawned binary)
+cargo test --test stdio_integration # 3 + 1 hw-skipped stdio tests
+cargo test --test blob_resources    # 2 blob resource tests
 
-# Clippy (CI enforces zero warnings)
-cargo clippy --all-targets -- -D warnings
-
-# Hardware loopback tests (requires real serial device)
-SERIAL_MCP_TEST_PORT=/dev/ttyUSB0 cargo test --test hardware_loopback -- --ignored
-
-# Live E83 board test
-cargo test --test e83_live_validation -- --ignored
-
-# XIAO BLE board tests (must be single-threaded: one port, one owner)
-cargo test --test xiao_ble_validation -- --ignored --test-threads=1
-
-# Schema network check (fetches upstream schemas)
-cargo test --test config_schema_validation -- --ignored
+# Firmware tests (require native_sim firmware, see firmware/AGENTS.md)
+cargo test --test native_sim_validation -- --ignored
+cargo test --test native_sim_connection_lifecycle -- --ignored --test-threads=1
 ```
 
 ---
@@ -86,7 +80,7 @@ Run via `cargo test --test proptest`. Uses `proptest` to generate random inputs.
 
 ### Layer 3 — HTTP Integration (`tests/http_integration.rs`)
 
-Run via `cargo test --test http_integration`. Spins up a real streamable-HTTP MCP server in-process; uses a real MCP client over localhost.
+Run via `cargo test --test http_integration`. 13 tests spawn a real `serial-mcp --transport=http` child process; 10 tests that inject a custom `ConnectionManager` still run in-process. Uses a real MCP client over localhost.
 
 | Test | What it covers |
 |------|---------------|
@@ -209,73 +203,22 @@ Run via `cargo test --test config_schema_validation`.
 
 ---
 
-### Layer 11 — Hardware Tests (ignored by default)
+### Layer 11 — native_sim Firmware Lifecycle (`tests/native_sim_connection_lifecycle.rs`)
 
-These tests are skipped by `cargo test`. Run explicitly when hardware is available.
-
-#### Hardware loopback (`tests/hardware_loopback.rs`)
-
-Requires a serial loopback device (TX wired to RX, or two ports connected). Set `SERIAL_MCP_TEST_PORT` before running.
-
-```bash
-SERIAL_MCP_TEST_PORT=/dev/ttyUSB0 cargo test --test hardware_loopback -- --ignored
-```
+Run via `cargo test --test native_sim_connection_lifecycle -- --ignored --test-threads=1`.
+Requires the native_sim firmware binary (see `firmware/AGENTS.md`).
 
 | Test | What it covers |
 |------|---------------|
-| `hw_loopback_write_then_read_roundtrip` | Write bytes, read them back via hardware loopback |
-| `hw_loopback_read_match_echo` | `read(match=...)` finds a pattern echoed through real hardware |
+| `native_named_connection_appears_in_list_connections` | A named connection is correctly reported in `list_connections` |
+| `native_set_flow_control_updates_summary_and_result` | `set_flow_control` tool returns the requested mode and `list_connections` reflects the update |
+| `native_close_while_read_active_returns_close_error` | Closing while a `read` is pending surfaces a close-related error to the MCP caller |
+| `native_reopen_same_port_after_close_works` | Reopening the same PTY after a clean close works and serves new commands |
+| `native_reopen_then_match_finds_fresh_output` | After reopen, a fresh `read(match=...)` returns the response to a new command |
+| `native_open_with_flow_control_persists_in_summary` | `flow_control` provided at `open` time is reflected in the connection summary |
 
-#### E83 live board (`tests/e83_live_validation.rs`)
-
-Requires an E83 board on `/dev/ttyUSB0`.
-
-```bash
-cargo test --test e83_live_validation -- --ignored
-```
-
-| Test | What it covers |
-|------|---------------|
-| *(1 test, name varies)* | Live device validation: open, write command, read response, match pattern |
-
-#### XIAO BLE board (`tests/xiao_ble_validation.rs`)
-
-Requires an nRF52840 XIAO BLE running the dedicated serial-mcp UART test firmware, reached through the PicoProbe UART bridge on `/dev/ttyACM0`. Must be run single-threaded (one port, one owner).
-
-```bash
-cargo test --test xiao_ble_validation -- --ignored --test-threads=1
-# or with a custom port:
-SERIAL_MCP_XIAO_PORT=/dev/ttyACM1 cargo test --test xiao_ble_validation -- --ignored --test-threads=1
-```
-
-| Test | What it covers |
-|------|---------------|
-| `xiao_close_while_subscribe_active` | Close during active subscribe stream; connection count drops to 0 |
-| `xiao_framing_reports_single_split_command` | Firmware framing mode proves split writes commit as one `ping` line |
-| `xiao_pending_read_then_write_ping_roundtrip` | TX still works promptly while a `read` is already pending on the same connection |
-| `xiao_ping_roundtrip` | `read(match="pong")` finds firmware's response to `ping` |
-| `xiao_read_buffer_budget_stops_under_flood` | `read` stops at `max_buffered_bytes` under hex spam flood |
-| `xiao_read_match_on_spam_complete` | `read(match="Spam complete")` stops when spam finishes |
-| `xiao_split_writes_preserve_command_order` | Split `write` calls still form a valid `ping` command on real hardware |
-| `xiao_subscribe_match_stops_on_spam_complete` | `subscribe(match=...)` self-stops on match (exercises subscribe stop-bug fix) |
-| `xiao_subscribe_silence_timeout_after_spam` | `no_new_rx_timeout_ms` fires when spam finishes and line goes silent |
-| `xiao_subscribe_timeout_stops_under_flood` | Wall-clock `timeout_ms` stops a live subscribe stream even while data keeps flowing |
-| `xiao_trace_reports_exact_split_byte_sequence` | Firmware trace mode proves exact byte order, including `\r\n`, for split writes |
-
-#### native_sim USB/IP bootloader touch (`tests/bootloader_touch_emulated.rs`)
-
-Requires native_sim USB firmware build plus local USB/IP attach on port `3241`.
-
-```bash
-fw-build-native-usb
-sudo -n usbip-native-sim-load-vhci
-fw-run-native-usb-attached
-
-# in another terminal:
-cargo test --test bootloader_touch_emulated -- --ignored --test-threads=1
-```
-
-If attaching manually, use `usbip --tcp-port 3241 ...`. Default port `3240` is wrong for this repo.
+The bootloader touch flow is exercised via the `touch` command in this
+same suite — no separate test binary or USB/IP setup required.
 
 ---
 

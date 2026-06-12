@@ -9,6 +9,10 @@
 
 #![allow(dead_code)]
 
+pub mod binaries;
+pub mod firmware;
+pub mod spawned;
+
 use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
@@ -136,9 +140,21 @@ pub async fn connect_client(
     RunningService<RoleClient, NotificationCollector>,
     mpsc::UnboundedReceiver<LoggingMessageNotificationParam>,
 )> {
+    connect_to_url(server.url.as_str()).await
+}
+
+/// Connect an `rmcp` HTTP client to a server URL (in-process or
+/// spawned-binary). Returns the running client service plus the
+/// receiving end of the notification collector.
+pub async fn connect_to_url(
+    url: &str,
+) -> Result<(
+    RunningService<RoleClient, NotificationCollector>,
+    mpsc::UnboundedReceiver<LoggingMessageNotificationParam>,
+)> {
     let (tx, rx) = mpsc::unbounded_channel();
     let handler = NotificationCollector { tx };
-    let transport = StreamableHttpClientTransport::from_uri(server.url.as_str());
+    let transport = StreamableHttpClientTransport::from_uri(url);
     let client = handler.serve(transport).await?;
     Ok((client, rx))
 }

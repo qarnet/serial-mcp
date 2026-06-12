@@ -13,6 +13,9 @@ use rmcp::{
 };
 use tokio::process::Command;
 
+mod common;
+use common::binaries::ensure_serial_mcp_built;
+
 const EXPECTED_TOOLS: &[&str] = &[
     "list_ports",
     "list_connections",
@@ -29,30 +32,13 @@ const EXPECTED_TOOLS: &[&str] = &[
 ];
 
 fn build_stdio_server() {
-    static ONCE: std::sync::Once = std::sync::Once::new();
-    ONCE.call_once(|| {
-        let output = std::process::Command::new("cargo")
-            .args(["build", "--bin", "serial-mcp"])
-            .output()
-            .expect("cargo build");
-        if !output.status.success() {
-            panic!(
-                "cargo build --bin serial-mcp failed:\nstderr: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
-    });
+    ensure_serial_mcp_built().expect("serial-mcp binary available for stdio tests");
 }
 
 async fn start_stdio_client() -> rmcp::service::RunningService<rmcp::service::RoleClient, ()> {
     build_stdio_server();
 
-    let cmd = Command::new(
-        std::env::current_dir()
-            .unwrap()
-            .join("target/debug/serial-mcp"),
-    )
-    .configure(|cmd| {
+    let cmd = Command::new(common::binaries::serial_mcp_bin()).configure(|cmd| {
         cmd.env("RUST_LOG", "off");
     });
 
@@ -120,12 +106,7 @@ async fn stdio_full_connection_lifecycle_with_hardware() {
 
     build_stdio_server();
 
-    let cmd = Command::new(
-        std::env::current_dir()
-            .unwrap()
-            .join("target/debug/serial-mcp"),
-    )
-    .configure(|cmd| {
+    let cmd = Command::new(common::binaries::serial_mcp_bin()).configure(|cmd| {
         cmd.env("RUST_LOG", "off");
     });
 

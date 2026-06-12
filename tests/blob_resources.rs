@@ -4,32 +4,18 @@ use rmcp::transport::{child_process::TokioChildProcess, ConfigureCommandExt};
 use rmcp::ServiceExt;
 use tokio::process::Command;
 
+mod common;
+use common::binaries::ensure_serial_mcp_built;
+
 fn build_stdio_server() {
-    static ONCE: std::sync::Once = std::sync::Once::new();
-    ONCE.call_once(|| {
-        let output = std::process::Command::new("cargo")
-            .args(["build", "--bin", "serial-mcp"])
-            .output()
-            .expect("cargo build");
-        if !output.status.success() {
-            panic!(
-                "cargo build --bin serial-mcp failed:\nstderr: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
-    });
+    ensure_serial_mcp_built().expect("serial-mcp binary available for blob resource tests");
 }
 
 #[tokio::test]
 async fn blob_resource_template_is_advertised() {
     build_stdio_server();
 
-    let cmd = Command::new(
-        std::env::current_dir()
-            .unwrap()
-            .join("target/debug/serial-mcp"),
-    )
-    .configure(|cmd| {
+    let cmd = Command::new(common::binaries::serial_mcp_bin()).configure(|cmd| {
         cmd.env("RUST_LOG", "off");
     });
 
@@ -59,12 +45,7 @@ async fn blob_resource_template_is_advertised() {
 async fn resource_uri_parsing_includes_raw_suffix() {
     build_stdio_server();
 
-    let cmd = Command::new(
-        std::env::current_dir()
-            .unwrap()
-            .join("target/debug/serial-mcp"),
-    )
-    .configure(|cmd| {
+    let cmd = Command::new(common::binaries::serial_mcp_bin()).configure(|cmd| {
         cmd.env("RUST_LOG", "off");
     });
 

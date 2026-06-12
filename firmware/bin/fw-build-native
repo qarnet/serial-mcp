@@ -1,4 +1,14 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: MIT
+#
+# Build the `native_sim` test firmware.
+#
+# Build dir:  build/native_sim
+# Result:     build/native_sim/firmware/zephyr/zephyr.exe
+# Also emits: build/native_sim/firmware/compile_commands.json
+#
+# Override the build dir by exporting SERIAL_MCP_FW_BUILD_DIR.
+
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -6,4 +16,9 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/fw-common.sh"
 
 cd "$(_fw_repo_dir)"
-exec west build -b native_sim firmware/ "$@"
+
+BUILD_DIR="${SERIAL_MCP_FW_BUILD_DIR:-$(_fw_repo_dir)/build/native_sim}"
+
+exec west build -b native_sim firmware/ -d "$BUILD_DIR" --pristine -- \
+  -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+  "$@"

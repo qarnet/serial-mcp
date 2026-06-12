@@ -17,6 +17,7 @@
  *   slow on [<us>]                        → slow consumer mode (delay reads)
  *   slow off                             → normal consumer mode
  *   write cmd <id> <rest...>             → execute <rest> tagged with <id>
+ *   touch                                 → exit(42) — bootloader entry trigger
  */
 
 #include "command.h"
@@ -93,7 +94,7 @@ static void cmd_ping(struct app_state *state)
 static void cmd_info(struct app_state *state)
 {
 	uart_drv_printf(state->uart,
-		"board=XIAO_BLE_nRF52840 build=0.1.0 " __DATE__ " " __TIME__ "\r\n");
+		"board=native_sim build=0.1.0 " __DATE__ " " __TIME__ "\r\n");
 }
 
 static void cmd_spam_start(struct app_state *state, char *count_str, char *rest)
@@ -375,6 +376,9 @@ void command_process(struct app_state *state, char *line)
 		cmd_write(state, saveptr ? saveptr : "");
 	} else if (strcmp(cmd, "binary") == 0) {
 		cmd_binary(state, saveptr ? saveptr : "");
+	} else if (strcmp(cmd, "touch") == 0) {
+		uart_drv_send_str(state->uart, "touch exit(42)\r\n");
+		exit(42);
 	} else {
 		uart_drv_printf(state->uart, "ERR unknown command: %s\r\n", cmd);
 	}

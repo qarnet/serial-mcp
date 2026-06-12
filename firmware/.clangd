@@ -1,0 +1,5 @@
+CompileFlags:
+  CompilationDatabase: ../build/native_sim/firmware
+  Remove:
+    - -fno-reorder-functions
+    - -fno-freestanding

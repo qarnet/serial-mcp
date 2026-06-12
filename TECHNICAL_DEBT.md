@@ -65,13 +65,13 @@ Likely follow-up:
 ### 5. Add better live coverage for TX output flush semantics
 
 Current issue:
-- PTY and loopback tests cover TX ordering and output flush behavior well.
-- Current XIAO BLE firmware does not expose command-processing states that make `flush(target="output")` easy to prove on real hardware.
+- PTY and unit tests cover TX ordering and basic output flush behavior.
+- The current `native_sim` firmware does not expose command-processing states (e.g. partial-line buffering or delayed command commit) that make `flush(target="output")` semantics fully testable in software.
 
 Why it matters:
 - New `TxSession` architecture now owns serialized writes and output-side flush behavior.
-- Real hardware tests still do not directly prove what happens to queued partial TX data on a CDC-ACM device.
+- Tests still do not directly prove what happens to queued partial TX data on a serial device.
 
 Likely follow-up:
 - extend test firmware with commands that expose partial-line buffering or delayed command commit,
-- add live tests that can distinguish fully delivered TX, partially queued TX, and flushed-before-delivery TX.
+- add tests that can distinguish fully delivered TX, partially queued TX, and flushed-before-delivery TX.
