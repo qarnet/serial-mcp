@@ -26,6 +26,7 @@ cargo test --test native_sim_connection_lifecycle -- --ignored --test-threads=1
 ## Related Docs
 
 - [Simulation Matrix](SIMULATION_MATRIX.md) — compares `native_sim`, QEMU, Renode, PTY pairs, custom simulators, and hardware HIL for `serial-mcp` test suitability.
+- [Testing Gaps](TESTING_GAPS.md) — known acceptable gaps in test coverage with reasons and revisit criteria.
 
 ---
 
