@@ -8,7 +8,8 @@ use crate::serial::{ConnectionManager, PortInfo};
 use crate::tools::helpers::log_tool_err;
 use crate::tools::helpers::parse_open_args;
 use crate::tools::types::{
-    CloseArgs, CloseResult, ListConnectionsResult, ListPortsResult, OpenArgs, OpenResult,
+    CloseArgs, CloseResult, GetStatusArgs, GetStatusResult, ListConnectionsResult,
+    ListPortsResult, OpenArgs, OpenResult,
 };
 
 pub async fn list_ports() -> Result<Json<ListPortsResult>, String> {
@@ -87,5 +88,37 @@ pub async fn close(
     Ok(Json(CloseResult {
         connection_id: args.connection_id,
         name,
+    }))
+}
+
+pub async fn get_status(
+    connections: &Arc<ConnectionManager>,
+    args: GetStatusArgs,
+) -> Result<Json<GetStatusResult>, String> {
+    debug!("Getting status for {}", args.connection_id);
+    let conn = connections
+        .get(&args.connection_id)
+        .await
+        .map_err(|_| format!("Connection ID {} not found", args.connection_id))?;
+
+    let status = conn.status_snapshot();
+    info!(
+        "Status {}: open={} tx={} rx={}",
+        args.connection_id, !status.is_closed, status.tx_bytes, status.rx_bytes
+    );
+
+    Ok(Json(GetStatusResult {
+        connection_id: status.connection_id,
+        name: status.name,
+        port: status.port,
+        baud_rate: status.baud_rate,
+        data_bits: status.data_bits,
+        stop_bits: status.stop_bits,
+        parity: status.parity,
+        flow_control: status.flow_control,
+        is_open: !status.is_closed,
+        tx_bytes: status.tx_bytes,
+        rx_bytes: status.rx_bytes,
+        last_activity_ms: status.last_activity_ms,
     }))
 }

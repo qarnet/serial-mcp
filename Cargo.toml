@@ -5,7 +5,7 @@ edition = "2021"
 authors = [
     "Thomas Kirschner <thomaskirschner85@yahoo.de>",
 ]
-description = "MCP server for serial port communication. 12 tools (list/open/read/write/subscribe/...), resources, prompts, task cancellation, stdio + streamable-HTTP transports."
+description = "MCP server for serial port communication. 13 tools (list/open/read/write/subscribe/get_status/...), resources, prompts, task cancellation, stdio + streamable-HTTP transports."
 license = "MIT"
 readme = "README.md"
 repository = "https://github.com/qarnet/serial-mcp"

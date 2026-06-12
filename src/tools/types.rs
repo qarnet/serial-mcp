@@ -127,6 +127,11 @@ pub struct UnsubscribeArgs {
     pub connection_id: String,
 }
 
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct GetStatusArgs {
+    pub connection_id: String,
+}
+
 // ---- Response structs ------------------------------------------------------
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -258,6 +263,27 @@ pub struct UnsubscribeResult {
     pub connection_id: String,
     pub name: Option<String>,
     pub was_active: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct GetStatusResult {
+    pub connection_id: String,
+    pub name: Option<String>,
+    pub port: String,
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub baud_rate: u32,
+    pub data_bits: String,
+    pub stop_bits: String,
+    pub parity: String,
+    pub flow_control: String,
+    pub is_open: bool,
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub tx_bytes: u64,
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub rx_bytes: u64,
+    /// Last I/O activity as milliseconds since Unix epoch, or null.
+    #[schemars(schema_with = "crate::schema_helpers::option_uint_schema")]
+    pub last_activity_ms: Option<u64>,
 }
 
 // ---- Default helpers -------------------------------------------------------

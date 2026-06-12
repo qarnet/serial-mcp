@@ -8,7 +8,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use std::time::{Duration, Instant};
@@ -104,6 +104,38 @@ impl From<FlowControl> for serialport::FlowControl {
             FlowControl::Software => Self::Software,
             FlowControl::Hardware => Self::Hardware,
         }
+    }
+}
+
+fn data_bits_to_str(d: DataBits) -> String {
+    match d {
+        DataBits::Five => "5".into(),
+        DataBits::Six => "6".into(),
+        DataBits::Seven => "7".into(),
+        DataBits::Eight => "8".into(),
+    }
+}
+
+fn stop_bits_to_str(s: StopBits) -> String {
+    match s {
+        StopBits::One => "1".into(),
+        StopBits::Two => "2".into(),
+    }
+}
+
+fn parity_to_str(p: Parity) -> String {
+    match p {
+        Parity::None => "none".into(),
+        Parity::Odd => "odd".into(),
+        Parity::Even => "even".into(),
+    }
+}
+
+fn flow_control_to_str(f: FlowControl) -> String {
+    match f {
+        FlowControl::None => "none".into(),
+        FlowControl::Software => "software".into(),
+        FlowControl::Hardware => "hardware".into(),
     }
 }
 
@@ -324,10 +356,19 @@ pub struct SerialConnection {
     port: String,
     name: Option<String>,
     baud_rate: u32,
+    data_bits: DataBits,
+    stop_bits: StopBits,
+    parity: Parity,
     flow_control: StdMutex<FlowControl>,
     io: Mutex<Option<Box<dyn SerialIo>>>,
     close_token: CancellationToken,
     closed: AtomicBool,
+    /// Total bytes written to the device via the `write` tool.
+    tx_bytes: AtomicU64,
+    /// Total bytes read from the device and delivered through any RX path.
+    rx_bytes: AtomicU64,
+    /// Wall-clock time of the last rx or tx byte operation.
+    last_activity: StdMutex<Option<std::time::SystemTime>>,
 }
 
 impl fmt::Debug for SerialConnection {
@@ -371,10 +412,16 @@ impl SerialConnection {
             port: config.port,
             name: config.name,
             baud_rate: config.baud_rate,
+            data_bits: config.data_bits,
+            stop_bits: config.stop_bits,
+            parity: config.parity,
             flow_control: StdMutex::new(config.flow_control),
             io: Mutex::new(Some(io)),
             close_token: CancellationToken::new(),
             closed: AtomicBool::new(false),
+            tx_bytes: AtomicU64::new(0),
+            rx_bytes: AtomicU64::new(0),
+            last_activity: StdMutex::new(None),
         }
     }
 
@@ -399,6 +446,60 @@ impl SerialConnection {
             .flow_control
             .lock()
             .expect("flow_control mutex poisoned")
+    }
+
+    pub fn data_bits(&self) -> DataBits {
+        self.data_bits
+    }
+
+    pub fn stop_bits(&self) -> StopBits {
+        self.stop_bits
+    }
+
+    pub fn parity(&self) -> Parity {
+        self.parity
+    }
+
+    /// Record `n` bytes written to the device.
+    pub fn record_tx_bytes(&self, n: usize) {
+        self.tx_bytes.fetch_add(n as u64, Ordering::SeqCst);
+        *self.last_activity.lock().expect("poisoned") = Some(std::time::SystemTime::now());
+    }
+
+    /// Record `n` bytes read from the device.
+    pub fn record_rx_bytes(&self, n: usize) {
+        self.rx_bytes.fetch_add(n as u64, Ordering::SeqCst);
+        *self.last_activity.lock().expect("poisoned") = Some(std::time::SystemTime::now());
+    }
+
+    /// Return the last I/O activity as milliseconds since Unix epoch.
+    pub fn last_activity_ms(&self) -> Option<u64> {
+        self.last_activity
+            .lock()
+            .expect("poisoned")
+            .and_then(|t| {
+                t.duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as u64)
+                    .ok()
+            })
+    }
+
+    /// Build a snapshot of the current status of this connection.
+    pub fn status_snapshot(&self) -> ConnectionStatus {
+        ConnectionStatus {
+            connection_id: self.id().to_string(),
+            name: self.name().map(str::to_string),
+            port: self.port().to_string(),
+            baud_rate: self.baud_rate(),
+            data_bits: data_bits_to_str(self.data_bits()),
+            stop_bits: stop_bits_to_str(self.stop_bits()),
+            parity: parity_to_str(self.parity()),
+            flow_control: flow_control_to_str(self.flow_control()),
+            is_closed: self.closed.load(Ordering::SeqCst),
+            tx_bytes: self.tx_bytes.load(Ordering::SeqCst),
+            rx_bytes: self.rx_bytes.load(Ordering::SeqCst),
+            last_activity_ms: self.last_activity_ms(),
+        }
     }
 
     pub fn cancel_token(&self) -> CancellationToken {
@@ -435,6 +536,7 @@ impl SerialConnection {
             .ok_or_else(|| SerialError::ConnectionClosed(self.display_name()))?;
         io.write_all(data).await?;
         io.flush().await?;
+        self.record_tx_bytes(data.len());
         Ok(data.len())
     }
 
@@ -455,10 +557,12 @@ impl SerialConnection {
                 let io = io
                     .as_mut()
                     .ok_or_else(|| SerialError::ConnectionClosed(self.display_name()))?;
-                tokio::select! {
+                let n = tokio::select! {
                     _ = self.close_token.cancelled() => Err(SerialError::ConnectionClosed(self.display_name())),
                     res = io.read(dst) => Ok(res?),
-                }
+                }?;
+                self.record_rx_bytes(n);
+                Ok(n)
             }
             Some(ms) => {
                 let deadline = Instant::now() + Duration::from_millis(ms);
@@ -480,7 +584,10 @@ impl SerialConnection {
                             _ = self.close_token.cancelled() => return Err(SerialError::ConnectionClosed(self.display_name())),
                             res = timeout(poll_dur, io.read(dst)) => res,
                         } {
-                            Ok(Ok(n)) if n > 0 => return Ok(n),
+                            Ok(Ok(n)) if n > 0 => {
+                                self.record_rx_bytes(n);
+                                return Ok(n);
+                            }
                             Ok(Ok(_)) => {}
                             Ok(Err(e)) => return Err(SerialError::from(e)),
                             Err(_elapsed) => {}
@@ -747,6 +854,28 @@ pub struct ConnectionSummary {
     #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
     pub baud_rate: u32,
     pub flow_control: FlowControl,
+}
+
+/// Full status snapshot of a connection used by the `get_status` tool.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ConnectionStatus {
+    pub connection_id: String,
+    pub name: Option<String>,
+    pub port: String,
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub baud_rate: u32,
+    pub data_bits: String,
+    pub stop_bits: String,
+    pub parity: String,
+    pub flow_control: String,
+    pub is_closed: bool,
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub tx_bytes: u64,
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub rx_bytes: u64,
+    /// Last I/O activity as milliseconds since Unix epoch, or null.
+    #[schemars(schema_with = "crate::schema_helpers::option_uint_schema")]
+    pub last_activity_ms: Option<u64>,
 }
 
 fn find_connection_by_port<'a>(

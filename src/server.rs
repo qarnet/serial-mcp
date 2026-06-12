@@ -341,6 +341,18 @@ impl SerialHandler {
     ) -> Result<Json<UnsubscribeResult>, String> {
         stream_ops::unsubscribe(&self.connections, &self.rx_sessions, &self.streams, args).await
     }
+
+    #[tool(
+        description = "Get the current status and configuration of an open serial connection",
+        title = "Get Connection Status",
+        annotations(read_only_hint = true, open_world_hint = false)
+    )]
+    async fn get_status(
+        &self,
+        Parameters(args): Parameters<GetStatusArgs>,
+    ) -> Result<Json<GetStatusResult>, String> {
+        port_ops::get_status(&self.connections, args).await
+    }
 }
 
 // ---- Tool helpers (extracted to src/tools/helpers.rs) -----------------------

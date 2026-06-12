@@ -37,6 +37,7 @@ const EXPECTED_TOOLS: &[&str] = &[
     "send_break",
     "subscribe",
     "unsubscribe",
+    "get_status",
 ];
 
 #[tokio::test]
@@ -49,7 +50,7 @@ async fn initialize_handshake_succeeds() {
 }
 
 #[tokio::test]
-async fn list_tools_returns_all_twelve_tools() {
+async fn list_tools_returns_all_thirteen_tools() {
     let server = common::spawned::SpawnedServer::start().await;
     let (client, _rx) = common::spawned::spawn_client(&server).await.unwrap();
 
@@ -1121,6 +1122,106 @@ async fn bogus_connection_id_returns_tool_error_for_all_id_tools() {
     assert_ne!(
         result.is_error, Some(true),
         "list_connections should succeed without connection_id: {result:?}"
+    );
+
+    client.cancel().await.ok();
+}
+
+// ── get_status integration ───────────────────────────────────────────────────
+
+#[tokio::test]
+async fn get_status_returns_config_and_counters() {
+    let manager = Arc::new(ConnectionManager::new());
+    let (conn, mut peer) = loopback_connection("loop-get-status");
+    let connection_id = manager.insert(conn).await.unwrap();
+
+    let server = TestServer::start_with(manager).await;
+    let (client, _rx) = connect_client(&server).await.unwrap();
+
+    // Before any I/O, counters should be zero
+    let result = client
+        .peer()
+        .call_tool(tool_request(
+            "get_status",
+            json!({ "connection_id": connection_id }),
+        ))
+        .await
+        .unwrap();
+    assert_ne!(result.is_error, Some(true), "{result:?}");
+    let s = result.structured_content.expect("structured");
+    assert_eq!(s["connection_id"], json!(connection_id));
+    assert_eq!(s["baud_rate"], json!(115200));
+    assert_eq!(s["data_bits"], json!("8"));
+    assert_eq!(s["stop_bits"], json!("1"));
+    assert_eq!(s["parity"], json!("none"));
+    assert_eq!(s["flow_control"], json!("none"));
+    assert_eq!(s["is_open"], json!(true));
+    assert_eq!(s["tx_bytes"], json!(0));
+    assert_eq!(s["rx_bytes"], json!(0));
+    assert!(s["last_activity_ms"].is_null());
+
+    // Write some data — tx counter should increase
+    client
+        .peer()
+        .call_tool(tool_request(
+            "write",
+            json!({ "connection_id": connection_id, "data": "hello" }),
+        ))
+        .await
+        .unwrap();
+
+    peer.write_all(b"world").await.unwrap();
+
+    // Read to increment rx counter
+    client
+        .peer()
+        .call_tool(tool_request(
+            "read",
+            json!({
+                "connection_id": connection_id,
+                "timeout_ms": 100,
+                "max_buffered_bytes": 64,
+            }),
+        ))
+        .await
+        .unwrap();
+
+    // Check updated status
+    let result = client
+        .peer()
+        .call_tool(tool_request(
+            "get_status",
+            json!({ "connection_id": connection_id }),
+        ))
+        .await
+        .unwrap();
+    let s = result.structured_content.expect("structured");
+    assert_eq!(s["tx_bytes"], json!(5), "tx should be 5: {s:?}");
+    assert_eq!(s["rx_bytes"], json!(5), "rx should be 5: {s:?}");
+    assert!(
+        !s["last_activity_ms"].is_null(),
+        "last_activity_ms should be set after I/O: {s:?}"
+    );
+
+    client.cancel().await.ok();
+}
+
+#[tokio::test]
+async fn get_status_unknown_connection_returns_error() {
+    let server = TestServer::start().await;
+    let (client, _rx) = connect_client(&server).await.unwrap();
+
+    let result = client
+        .peer()
+        .call_tool(tool_request(
+            "get_status",
+            json!({ "connection_id": "nonexistent-deadbeef" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        result.is_error, Some(true),
+        "unknown connection should return error: {result:?}"
     );
 
     client.cancel().await.ok();
