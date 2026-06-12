@@ -41,8 +41,8 @@ const EXPECTED_TOOLS: &[&str] = &[
 
 #[tokio::test]
 async fn initialize_handshake_succeeds() {
-    let server = TestServer::start().await;
-    let (client, _rx) = connect_client(&server).await.unwrap();
+    let server = common::spawned::SpawnedServer::start().await;
+    let (client, _rx) = common::spawned::spawn_client(&server).await.unwrap();
     let info = client.peer().peer_info().expect("peer_info");
     assert_eq!(info.server_info.name, "serial-mcp");
     client.cancel().await.ok();
@@ -50,8 +50,8 @@ async fn initialize_handshake_succeeds() {
 
 #[tokio::test]
 async fn list_tools_returns_all_twelve_tools() {
-    let server = TestServer::start().await;
-    let (client, _rx) = connect_client(&server).await.unwrap();
+    let server = common::spawned::SpawnedServer::start().await;
+    let (client, _rx) = common::spawned::spawn_client(&server).await.unwrap();
 
     let result = client
         .peer()
@@ -72,8 +72,8 @@ async fn list_tools_returns_all_twelve_tools() {
 
 #[tokio::test]
 async fn list_resources_returns_two_statics() {
-    let server = TestServer::start().await;
-    let (client, _rx) = connect_client(&server).await.unwrap();
+    let server = common::spawned::SpawnedServer::start().await;
+    let (client, _rx) = common::spawned::spawn_client(&server).await.unwrap();
 
     let result = client
         .peer()
@@ -113,8 +113,8 @@ async fn list_connections_returns_open_connection_summaries() {
 
 #[tokio::test]
 async fn list_resources_pagination_with_cursor_returns_next_page() {
-    let server = TestServer::start().await;
-    let (client, _rx) = connect_client(&server).await.unwrap();
+    let server = common::spawned::SpawnedServer::start().await;
+    let (client, _rx) = common::spawned::spawn_client(&server).await.unwrap();
 
     // Request first page with size 1
     let page1 = client
@@ -137,8 +137,8 @@ async fn list_resources_pagination_with_cursor_returns_next_page() {
 
 #[tokio::test]
 async fn list_resource_templates_returns_connection_template() {
-    let server = TestServer::start().await;
-    let (client, _rx) = connect_client(&server).await.unwrap();
+    let server = common::spawned::SpawnedServer::start().await;
+    let (client, _rx) = common::spawned::spawn_client(&server).await.unwrap();
 
     let result = client
         .peer()
@@ -159,8 +159,8 @@ async fn list_resource_templates_returns_connection_template() {
 
 #[tokio::test]
 async fn list_resource_templates_pagination_with_cursor_returns_next_page() {
-    let server = TestServer::start().await;
-    let (client, _rx) = connect_client(&server).await.unwrap();
+    let server = common::spawned::SpawnedServer::start().await;
+    let (client, _rx) = common::spawned::spawn_client(&server).await.unwrap();
 
     // Request first page with size 1
     let page1 = client
@@ -183,8 +183,8 @@ async fn list_resource_templates_pagination_with_cursor_returns_next_page() {
 
 #[tokio::test]
 async fn list_prompts_returns_diagnose_and_interactive() {
-    let server = TestServer::start().await;
-    let (client, _rx) = connect_client(&server).await.unwrap();
+    let server = common::spawned::SpawnedServer::start().await;
+    let (client, _rx) = common::spawned::spawn_client(&server).await.unwrap();
 
     let result = client
         .peer()
@@ -199,8 +199,8 @@ async fn list_prompts_returns_diagnose_and_interactive() {
 
 #[tokio::test]
 async fn read_serial_ports_resource_returns_json_payload() {
-    let server = TestServer::start().await;
-    let (client, _rx) = connect_client(&server).await.unwrap();
+    let server = common::spawned::SpawnedServer::start().await;
+    let (client, _rx) = common::spawned::spawn_client(&server).await.unwrap();
 
     let result = client
         .peer()
@@ -220,8 +220,8 @@ async fn read_serial_ports_resource_returns_json_payload() {
 
 #[tokio::test]
 async fn read_unknown_resource_yields_not_found() {
-    let server = TestServer::start().await;
-    let (client, _rx) = connect_client(&server).await.unwrap();
+    let server = common::spawned::SpawnedServer::start().await;
+    let (client, _rx) = common::spawned::spawn_client(&server).await.unwrap();
 
     let result = client
         .peer()
@@ -233,8 +233,8 @@ async fn read_unknown_resource_yields_not_found() {
 
 #[tokio::test]
 async fn read_unknown_connection_yields_not_found() {
-    let server = TestServer::start().await;
-    let (client, _rx) = connect_client(&server).await.unwrap();
+    let server = common::spawned::SpawnedServer::start().await;
+    let (client, _rx) = common::spawned::spawn_client(&server).await.unwrap();
 
     let result = client
         .peer()
@@ -248,8 +248,8 @@ async fn read_unknown_connection_yields_not_found() {
 
 #[tokio::test]
 async fn call_tool_open_with_bad_data_bits_returns_is_error() {
-    let server = TestServer::start().await;
-    let (client, _rx) = connect_client(&server).await.unwrap();
+    let server = common::spawned::SpawnedServer::start().await;
+    let (client, _rx) = common::spawned::spawn_client(&server).await.unwrap();
 
     let result = client
         .peer()
@@ -269,8 +269,8 @@ async fn call_tool_open_with_bad_data_bits_returns_is_error() {
 
 #[tokio::test]
 async fn call_tool_list_ports_returns_structured_result() {
-    let server = TestServer::start().await;
-    let (client, _rx) = connect_client(&server).await.unwrap();
+    let server = common::spawned::SpawnedServer::start().await;
+    let (client, _rx) = common::spawned::spawn_client(&server).await.unwrap();
 
     let result = client
         .peer()
@@ -288,8 +288,8 @@ async fn call_tool_list_ports_returns_structured_result() {
 
 #[tokio::test]
 async fn get_prompt_diagnose_port_returns_user_message() {
-    let server = TestServer::start().await;
-    let (client, _rx) = connect_client(&server).await.unwrap();
+    let server = common::spawned::SpawnedServer::start().await;
+    let (client, _rx) = common::spawned::spawn_client(&server).await.unwrap();
 
     let result = client
         .peer()
