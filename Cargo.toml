@@ -14,7 +14,7 @@ categories = ["development-tools", "embedded"]
 
 [dependencies]
 rmcp = { version = "1.7", features = ["server", "macros", "transport-io", "transport-streamable-http-server", "schemars"] }
-serialport = "4.5"
+serialport = { version = "4.5", features = ["usbportinfo-interface"] }
 tokio = { version = "1.41", features = ["macros", "rt-multi-thread", "sync", "time", "io-util", "signal", "net"] }
 tokio-serial = "5.4"
 tokio-util = "0.7"

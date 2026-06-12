@@ -973,7 +973,70 @@ async fn native_list_ports_after_open() {
     drop(fw);
 }
 
-// ── Test 14: flush preserves data integrity ────────────────────────────────────
+// ── Test 14: list_ports returns rich device identity ──────────────────────────
+
+#[tokio::test]
+#[ignore = "requires native_sim firmware binary"]
+async fn native_list_ports_includes_identity_fields() {
+    let fw = NativeSimFirmware::spawn().await.expect("spawn zephyr.exe");
+    let pty_path = fw.pty_path().to_string();
+
+    let server = TestServer::start().await;
+    let (client, _rx) = connect_client(&server).await.unwrap();
+
+    let id = open_pty(&client, &pty_path).await;
+    sync_boot(&client, &id).await;
+
+    let result = client
+        .peer()
+        .call_tool(tool_request("list_ports", json!({})))
+        .await
+        .expect("list_ports");
+    assert_ne!(result.is_error, Some(true), "{result:?}");
+
+    let s = result.structured_content.expect("structured");
+    let ports = s["ports"].as_array().expect("ports is array");
+
+    for port in ports {
+        // Every port must have at least these fields.
+        assert!(port["name"].is_string(), "port missing name: {port:?}");
+        assert!(
+            port["display_name"].is_string(),
+            "port missing display_name: {port:?}"
+        );
+        assert!(
+            port["transport"].is_string(),
+            "port missing transport: {port:?}"
+        );
+        let transport = port["transport"].as_str().unwrap();
+        assert!(
+            matches!(transport, "usb" | "pci" | "bluetooth" | "unknown"),
+            "unexpected transport '{transport}' in {port:?}"
+        );
+
+        // USB-specific fields should be null for non-USB transports.
+        if transport != "usb" {
+            assert!(
+                port["vid"].is_null(),
+                "non-USB port should have null vid: {port:?}"
+            );
+            assert!(
+                port["pid"].is_null(),
+                "non-USB port should have null pid: {port:?}"
+            );
+            assert!(
+                port["serial_number"].is_null(),
+                "non-USB port should have null serial_number: {port:?}"
+            );
+        }
+    }
+
+    close_connection(&client, &id).await;
+    client.cancel().await.ok();
+    drop(fw);
+}
+
+// ── Test 15: flush preserves data integrity ────────────────────────────────────
 
 #[tokio::test]
 #[ignore = "requires native_sim firmware binary"]
@@ -1021,7 +1084,7 @@ async fn native_flush_after_write() {
     drop(fw);
 }
 
-// ── Test 15: unsubscribe followed by re-subscribe ──────────────────────────────
+// ── Test 16: unsubscribe followed by re-subscribe ──────────────────────────────
 
 #[tokio::test]
 #[ignore = "requires native_sim firmware binary"]

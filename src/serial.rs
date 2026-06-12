@@ -121,12 +121,50 @@ pub struct ConnectionConfig {
 
 // ---- Port enumeration --------------------------------------------------------
 
-/// Information about a serial port reported by the OS.
-#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+/// Transport type observed on the host OS for a serial port.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum PortTransport {
+    Usb,
+    Pci,
+    Bluetooth,
+    Unknown,
+}
+
+/// Information about a single serial port on the system.
+///
+/// Fields are populated from OS-level enumeration. USB ports carry
+/// the richest identity; other transports provide more limited metadata.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct PortInfo {
+    /// OS-level path, e.g. `/dev/ttyUSB0` or `COM3`.
     pub name: String,
+    /// Short platform-local name, e.g. `ttyUSB0`.
+    pub display_name: String,
+    /// Human-readable description (manufacturer + product when available).
     pub description: String,
+    /// Formatted hardware identifier string.
     pub hardware_id: Option<String>,
+    /// Transport type — `usb`, `pci`, `bluetooth`, or `unknown`.
+    pub transport: PortTransport,
+    /// USB Vendor ID. `None` for non-USB ports.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vid: Option<u16>,
+    /// USB Product ID. `None` for non-USB ports.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pid: Option<u16>,
+    /// USB serial number string from the device descriptor.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub serial_number: Option<String>,
+    /// USB manufacturer string.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub manufacturer: Option<String>,
+    /// USB product string.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub product: Option<String>,
+    /// USB interface index. `None` when not available or not a USB port.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub interface: Option<u8>,
 }
 
 impl PortInfo {
@@ -137,11 +175,69 @@ impl PortInfo {
     }
 
     fn from_os(port: SerialPortInfo) -> Self {
+        let transport = transport_from_os(&port.port_type);
+        let (vid, pid, serial_number, manufacturer, product, interface) =
+            usb_fields(&port.port_type);
+        let description = describe_port(&port);
+        let hardware_id = format_hardware_id(&port);
+        let display_name = short_display_name(&port.port_name);
+
         PortInfo {
-            hardware_id: format_hardware_id(&port),
-            description: describe_port(&port),
+            display_name,
             name: port.port_name,
+            description,
+            hardware_id,
+            transport,
+            vid,
+            pid,
+            serial_number,
+            manufacturer,
+            product,
+            interface,
         }
+    }
+}
+
+/// Extract the last path component or the full name when no separator exists.
+fn short_display_name(port_name: &str) -> String {
+    port_name
+        .rsplit(&['/', '\\'][..])
+        .next()
+        .unwrap_or(port_name)
+        .to_string()
+}
+
+fn transport_from_os(port_type: &SerialPortType) -> PortTransport {
+    match port_type {
+        SerialPortType::UsbPort(_) => PortTransport::Usb,
+        SerialPortType::PciPort => PortTransport::Pci,
+        SerialPortType::BluetoothPort => PortTransport::Bluetooth,
+        SerialPortType::Unknown => PortTransport::Unknown,
+    }
+}
+
+#[allow(clippy::type_complexity)]
+fn usb_fields(
+    port_type: &SerialPortType,
+) -> (
+    Option<u16>,
+    Option<u16>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<u8>,
+) {
+    if let SerialPortType::UsbPort(info) = port_type {
+        (
+            Some(info.vid),
+            Some(info.pid),
+            info.serial_number.clone(),
+            info.manufacturer.clone(),
+            info.product.clone(),
+            info.interface,
+        )
+    } else {
+        (None, None, None, None, None, None)
     }
 }
 
