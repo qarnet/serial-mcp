@@ -325,4 +325,101 @@ baud_rate = 9600
         assert_eq!(profiles[0].defaults.name.as_deref(), Some("nrf"));
         assert_eq!(profiles[1].name, "arduino");
     }
+
+    #[test]
+    fn manufacturer_match() {
+        let p = Profile {
+            name: "by-mfg".into(),
+            selector: ProfileSelector {
+                manufacturer: Some("STMicro".into()),
+                ..Default::default()
+            },
+            defaults: ProfileDefaults::default(),
+        };
+        let mut port = make_port("/dev/ttyACM0", None, None, None);
+        port.manufacturer = Some("STMicro".into());
+        assert!(p.matches(&port));
+        port.manufacturer = Some("Other".into());
+        assert!(!p.matches(&port));
+    }
+
+    #[test]
+    fn product_match() {
+        let p = Profile {
+            name: "by-prod".into(),
+            selector: ProfileSelector {
+                product: Some("VirtualCom".into()),
+                ..Default::default()
+            },
+            defaults: ProfileDefaults::default(),
+        };
+        let mut port = make_port("/dev/ttyACM0", None, None, None);
+        port.product = Some("VirtualCom".into());
+        assert!(p.matches(&port));
+        port.product = Some("Other".into());
+        assert!(!p.matches(&port));
+    }
+
+    #[test]
+    fn interface_match() {
+        let p = Profile {
+            name: "by-iface".into(),
+            selector: ProfileSelector {
+                interface: Some(2),
+                ..Default::default()
+            },
+            defaults: ProfileDefaults::default(),
+        };
+        let mut port = make_port("/dev/ttyACM0", None, None, None);
+        port.interface = Some(2);
+        assert!(p.matches(&port));
+        port.interface = Some(0);
+        assert!(!p.matches(&port));
+    }
+
+    #[test]
+    fn description_pattern_match() {
+        let p = Profile {
+            name: "by-desc".into(),
+            selector: ProfileSelector {
+                description_pattern: Some("*CP210*".into()),
+                ..Default::default()
+            },
+            defaults: ProfileDefaults::default(),
+        };
+        let port = PortInfo {
+            description: "Silicon Labs CP2102 USB to UART Bridge Controller".into(),
+            ..make_port("/dev/ttyUSB0", None, None, None)
+        };
+        assert!(p.matches(&port));
+        assert!(!p.matches(&make_port("/dev/ttyUSB0", None, None, None)));
+    }
+
+    #[test]
+    fn invalid_glob_pattern_returns_false() {
+        let p = Profile {
+            name: "bad-glob".into(),
+            selector: ProfileSelector {
+                port_pattern: Some("[unclosed".into()),
+                ..Default::default()
+            },
+            defaults: ProfileDefaults::default(),
+        };
+        assert!(!p.matches(&make_port("/dev/ttyUSB0", None, None, None)));
+    }
+
+    #[test]
+    fn load_profiles_missing_file_returns_empty() {
+        let profiles = load_profiles(&PathBuf::from("/nonexistent/path/profiles.toml"));
+        assert!(profiles.is_empty());
+    }
+
+    #[test]
+    fn load_profiles_invalid_toml_returns_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bad.toml");
+        std::fs::write(&path, "not valid toml {{{").unwrap();
+        let profiles = load_profiles(&path);
+        assert!(profiles.is_empty());
+    }
 }

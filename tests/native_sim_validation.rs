@@ -1139,3 +1139,151 @@ async fn native_unsubscribe_then_resubscribe() {
     drop(rx);
     drop(fw);
 }
+
+// ── Phase 1 gap-fill: get_status on PTY ─────────────────────────────────────
+
+#[tokio::test]
+#[ignore = "requires native_sim firmware binary"]
+async fn native_get_status_after_write_increments_tx_counter() {
+    let fw = NativeSimFirmware::spawn().await.expect("spawn zephyr.exe");
+    let pty_path = fw.pty_path().to_string();
+
+    let server = TestServer::start().await;
+    let (client, _rx) = connect_client(&server).await.unwrap();
+
+    let id = open_pty(&client, &pty_path).await;
+    sync_boot(&client, &id).await;
+
+    // sync_boot only reads boot output — tx may be 0, rx > 0
+    let result = client
+        .peer()
+        .call_tool(tool_request(
+            "get_status",
+            json!({ "connection_id": id }),
+        ))
+        .await
+        .unwrap();
+    assert_ne!(result.is_error, Some(true), "{result:?}");
+    let s = result.structured_content.unwrap();
+    assert_eq!(s["is_open"], json!(true));
+    let rx0 = s["rx_bytes"].as_u64().unwrap();
+    assert!(rx0 > 0, "rx after boot: {s:?}");
+
+    // Write + read should increase both counters
+    write_cmd(&client, &id, "ping").await;
+    let result = client
+        .peer()
+        .call_tool(tool_request(
+            "read",
+            json!({
+                "connection_id": id,
+                "timeout_ms": 2000,
+                "max_buffered_bytes": 64,
+                "encoding": "utf8",
+                "match": {
+                    "pattern": "pong",
+                    "config": { "mode": "literal_substring", "pattern_encoding": "utf8" }
+                }
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_ne!(result.is_error, Some(true), "{result:?}");
+
+    let result = client
+        .peer()
+        .call_tool(tool_request(
+            "get_status",
+            json!({ "connection_id": id }),
+        ))
+        .await
+        .unwrap();
+    let s = result.structured_content.unwrap();
+    let tx1 = s["tx_bytes"].as_u64().unwrap();
+    let rx1 = s["rx_bytes"].as_u64().unwrap();
+    assert!(tx1 > 0, "tx after ping: {s:?}");
+    assert!(rx1 > 0, "rx after ping: {s:?}");
+    assert!(
+        !s["last_activity_ms"].is_null(),
+        "last_activity after I/O: {s:?}"
+    );
+
+    close_connection(&client, &id).await;
+    client.cancel().await.ok();
+    drop(fw);
+}
+
+// ── Phase 1 gap-fill: reconfigure on PTY ─────────────────────────────────────
+
+#[tokio::test]
+#[ignore = "requires native_sim firmware binary"]
+async fn native_reconfigure_baud_rate_persists() {
+    let fw = NativeSimFirmware::spawn().await.expect("spawn zephyr.exe");
+    let pty_path = fw.pty_path().to_string();
+
+    let server = TestServer::start().await;
+    let (client, _rx) = connect_client(&server).await.unwrap();
+
+    let id = open_pty(&client, &pty_path).await;
+    sync_boot(&client, &id).await;
+
+    // Change baud to 38400
+    let result = client
+        .peer()
+        .call_tool(tool_request(
+            "reconfigure",
+            json!({ "connection_id": id, "baud_rate": 38400 }),
+        ))
+        .await
+        .unwrap();
+    assert_ne!(result.is_error, Some(true), "{result:?}");
+    let s = result.structured_content.unwrap();
+    assert_eq!(s["baud_rate"], json!(38400), "{s:?}");
+
+    // Verify via get_status
+    let result = client
+        .peer()
+        .call_tool(tool_request(
+            "get_status",
+            json!({ "connection_id": id }),
+        ))
+        .await
+        .unwrap();
+    let s = result.structured_content.unwrap();
+    assert_eq!(s["baud_rate"], json!(38400), "baud should persist: {s:?}");
+
+    // Connection still works — ping roundtrip
+    write_cmd(&client, &id, "ping").await;
+    let result = client
+        .peer()
+        .call_tool(tool_request(
+            "read",
+            json!({
+                "connection_id": id,
+                "timeout_ms": 2000,
+                "max_buffered_bytes": 64,
+                "encoding": "utf8",
+                "match": {
+                    "pattern": "pong",
+                    "config": { "mode": "literal_substring", "pattern_encoding": "utf8" }
+                }
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_ne!(result.is_error, Some(true), "{result:?}");
+
+    // Reconfigure back to 115200
+    client
+        .peer()
+        .call_tool(tool_request(
+            "reconfigure",
+            json!({ "connection_id": id, "baud_rate": 115200 }),
+        ))
+        .await
+        .unwrap();
+
+    close_connection(&client, &id).await;
+    client.cancel().await.ok();
+    drop(fw);
+}

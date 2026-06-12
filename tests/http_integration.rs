@@ -1373,3 +1373,97 @@ async fn open_profile_not_found_returns_error() {
 
     client.cancel().await.ok();
 }
+
+// ── reconfigure gap-fill tests ───────────────────────────────────────────────
+
+#[tokio::test]
+async fn reconfigure_multiple_params_at_once() {
+    let manager = Arc::new(ConnectionManager::new());
+    let (conn, _peer) = loopback_connection("loop-recfg-multi");
+    let connection_id = manager.insert(conn).await.unwrap();
+
+    let server = TestServer::start_with(manager).await;
+    let (client, _rx) = connect_client(&server).await.unwrap();
+
+    let result = client
+        .peer()
+        .call_tool(tool_request(
+            "reconfigure",
+            json!({
+                "connection_id": connection_id,
+                "baud_rate": 9600,
+                "data_bits": "7",
+                "stop_bits": "2",
+                "parity": "odd",
+                "flow_control": "software",
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_ne!(result.is_error, Some(true), "{result:?}");
+    let s = result.structured_content.unwrap();
+    assert_eq!(s["baud_rate"], json!(9600));
+    assert_eq!(s["data_bits"], json!("7"));
+    assert_eq!(s["stop_bits"], json!("2"));
+    assert_eq!(s["parity"], json!("odd"));
+    assert_eq!(s["flow_control"], json!("software"));
+
+    client.cancel().await.ok();
+}
+
+#[tokio::test]
+async fn reconfigure_no_params_returns_current_config() {
+    let manager = Arc::new(ConnectionManager::new());
+    let (conn, _peer) = loopback_connection("loop-recfg-noop");
+    let connection_id = manager.insert(conn).await.unwrap();
+
+    let server = TestServer::start_with(manager).await;
+    let (client, _rx) = connect_client(&server).await.unwrap();
+
+    let result = client
+        .peer()
+        .call_tool(tool_request(
+            "reconfigure",
+            json!({ "connection_id": connection_id }),
+        ))
+        .await
+        .unwrap();
+    assert_ne!(result.is_error, Some(true), "{result:?}");
+    let s = result.structured_content.unwrap();
+    assert_eq!(s["baud_rate"], json!(115200));
+    assert_eq!(s["data_bits"], json!("8"));
+
+    client.cancel().await.ok();
+}
+
+#[tokio::test]
+async fn reconfigure_invalid_stop_bits_returns_error() {
+    let manager = Arc::new(ConnectionManager::new());
+    let (conn, _peer) = loopback_connection("loop-recfg-stop");
+    let connection_id = manager.insert(conn).await.unwrap();
+
+    let server = TestServer::start_with(manager).await;
+    let (client, _rx) = connect_client(&server).await.unwrap();
+
+    let result = client
+        .peer()
+        .call_tool(tool_request(
+            "reconfigure",
+            json!({ "connection_id": connection_id, "stop_bits": "3" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(result.is_error, Some(true), "{result:?}");
+
+    let result = client
+        .peer()
+        .call_tool(tool_request(
+            "reconfigure",
+            json!({ "connection_id": connection_id, "parity": "mark" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(result.is_error, Some(true), "{result:?}");
+
+    client.cancel().await.ok();
+}
