@@ -987,12 +987,15 @@ async fn native_flush_after_write() {
     let id = open_pty(&client, &pty_path).await;
     sync_boot(&client, &id).await;
 
-    // Write a command, flush, then read — the pong should arrive.
+    // Write a command, flush output, then read — the pong should arrive.
     write_cmd(&client, &id, "ping").await;
 
     client
         .peer()
-        .call_tool(tool_request("flush", json!({ "connection_id": id })))
+        .call_tool(tool_request(
+            "flush",
+            json!({ "connection_id": id, "target": "output" }),
+        ))
         .await
         .expect("flush");
 
