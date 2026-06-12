@@ -9,8 +9,8 @@
  * PTY path is printed to stdout at boot so the host can `open` it via
  * serial-mcp's `open` tool.
  *
- * USB CDC-ACM is OPTIONAL. When `boards/native_sim_usb.conf` is
- * applied, `CONFIG_USB_DEVICE_STACK=y` and `usb_cdc_init()` brings up
+ * USB CDC-ACM is OPTIONAL. When the "usb" snippet is applied
+ * (`-S usb`), `CONFIG_USB_DEVICE_STACK=y` and `usb_cdc_init()` brings up
  * a CDC-ACM UART exposed via the native_posix USB/IP controller
  * (default port 3240, overridden to 3241 via the `USBIP_PORT` macro).
  * The CDC-ACM port is used to validate the 1200-baud touch →
@@ -24,6 +24,11 @@
 #include <errno.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/sys/util.h>
+
+#if !IS_ENABLED(CONFIG_SERIAL)
+#error "No build variant selected. Rebuild with '-S plain' or '-S usb'."
+#endif
 
 LOG_MODULE_REGISTER(main, LOG_LEVEL_INF);
 

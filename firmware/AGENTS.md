@@ -8,10 +8,12 @@ and `tests/bootloader_touch_emulated.rs`.
 
 - **Single build target:** `native_sim` — runs as a Linux process,
   PTY-backed UART. No real hardware required.
-- **Two transports, opt-in via Zephyr snippet:**
-  - **Always-on:** command channel on the PTY-backed `uart0`
-  - **Opt-in (`-S usb`):** native USB CDC-ACM over USB/IP for
-    1200-baud touch testing — see `snippets/usb/snippet.yml`
+- **Two build variants selected via Zephyr snippets:**
+  - **`-S plain`:** command channel only (no USB).
+  - **`-S usb`:** command channel + USB CDC-ACM over USB/IP for
+    1200-baud touch testing.
+- **Without a snippet the build fails** — `main.c` contains a
+  `#error` guard that fires when `CONFIG_SERIAL` is not set.
 - The command channel uses `DT_CHOSEN(zephyr_console)`, which
   resolves to `&uart0` on `native_sim`. Device-agnostic.
 - The CDC-ACM port (when enabled) is the entry point for the
@@ -23,10 +25,14 @@ and `tests/bootloader_touch_emulated.rs`.
 ```
 firmware/
 ├── CMakeLists.txt              # Zephyr build entry
-├── prj.conf                    # SHARED Kconfig
+├── prj.conf                    # deliberately minimal (snippets provide real config)
+│
+├── config/
+│   ├── plain.conf              # Kconfig for "plain" snippet (no USB)
+│   └── usb.conf                # Kconfig for "usb" snippet (+ USB stack)
 │
 ├── src/                        # firmware source
-│   ├── main.c                  # super loop, command dispatch
+│   ├── main.c                  # super loop, command dispatch, snippet guard
 │   ├── uart_drv.c              # Zephyr UART API
 │   ├── uart_drv.h
 │   ├── command.c               # ping, spam, trace, framing, etc.
@@ -35,22 +41,26 @@ firmware/
 │   └── usb_cdc.h
 │
 ├── boards/
-│   ├── native_sim.conf         # PTY UART Kconfig (always applied)
-│   ├── native_sim_usb.conf     # OPT-IN: USB legacy stack + CDC-ACM
-│   └── native_sim_usb.overlay  # OPT-IN: CDC-ACM node
+│   ├── native_sim.conf         # PTY UART tuning (always auto-loaded)
+│   └── native_sim_usb.overlay  # CDC-ACM DT node (applied by usb snippet)
 │
 └── snippets/
+    ├── plain/
+    │   └── snippet.yml         # Snippet: plain Kconfig (no USB)
     └── usb/
-        └── snippet.yml         # Snippet binding USB conf + overlay
+        └── snippet.yml         # Snippet: USB Kconfig + CDC-ACM overlay
 ```
 
 ## Build
 
+**Without a snippet the build fails** with a clear `#error` in `main.c`.
+Always pass `-S plain` or `-S usb`.
+
 ### native_sim (no USB — Tier 1 test)
 
 ```bash
-# Plain variant uses a dedicated build tree.
-west build -b native_sim firmware/ -d build/native_sim --pristine
+# -S plain is required. The "plain" snippet pulls in config/plain.conf.
+west build -b native_sim firmware/ -d build/native_sim --pristine -S plain
 # Run: ./build/native_sim/firmware/zephyr/zephyr.exe
 # Or:  west build -d build/native_sim -t run
 # Connect to the PTY printed on stdout, e.g. /dev/pts/5
@@ -127,8 +137,9 @@ fw-build-native-usb
 
 - Do **not** use `DT_NODELABEL(uart0)` directly. Use
   `DT_CHOSEN(zephyr_console)`. The driver is `zephyr,native-pty-uart`.
-- Do **not** re-enable `CONFIG_CONSOLE` or `CONFIG_UART_CONSOLE`.
-  They steal bytes from the command channel.
+- Do **not** set `CONFIG_UART_CONSOLE=y` — it steals bytes from the
+  command channel. `CONFIG_CONSOLE=y` is required on native_sim
+  (for `POSIX_ARCH_CONSOLE`) and is set in `boards/native_sim.conf`.
 - Do **not** add a second `USBD_DEVICE_DEFINE()` instance. The single
   one in `usb_cdc.c` registers all CDC-ACM classes from devicetree.
 - Do **not** put `#include "usb_cdc.h"` calls behind Kconfig in app
@@ -138,7 +149,23 @@ fw-build-native-usb
 
 ## Config Files That Matter
 
-### `prj.conf` (shared)
+### `prj.conf` (stub)
+
+```ini
+# Build variants are selected via Zephyr snippets:
+#
+#   west build ... -S plain   # command-channel-only firmware
+#   west build ... -S usb     # command channel + USB CDC-ACM
+#
+# Without a snippet, critical Kconfig symbols (CONFIG_SERIAL etc.)
+# are missing and the build fails with a clear #error message.
+```
+
+This file deliberately contains no `CONFIG_` settings. All real
+configuration lives in `config/plain.conf` and `config/usb.conf`,
+each loaded by its snippet's `EXTRA_CONF_FILE`.
+
+### `config/plain.conf` (applied by `-S plain` snippet)
 
 ```ini
 CONFIG_SERIAL=y
@@ -147,43 +174,49 @@ CONFIG_UART_LINE_CTRL=y
 CONFIG_RING_BUFFER=y
 CONFIG_HWINFO=y
 CONFIG_LOG=y
-CONFIG_CONSOLE=n
 CONFIG_UART_CONSOLE=n
-# USB disabled by default — enable via the "usb" snippet (-S usb)
-# CONFIG_USB_DEVICE_STACK is not set
-# CONFIG_USB_CDC_ACM is not set
+# CONSOLE is set by boards/native_sim.conf to y
+# (needed for POSIX_ARCH_CONSOLE on native_sim).
+```
+
+### `config/usb.conf` (applied by `-S usb` snippet)
+
+```ini
+# Common settings (same as config/plain.conf) plus:
+CONFIG_USB_DEVICE_STACK=y
+CONFIG_USB_CDC_ACM=y
+CONFIG_CDC_ACM_DTE_RATE_CALLBACK_SUPPORT=y
+CONFIG_USB_DEVICE_INITIALIZE_AT_BOOT=n
+CONFIG_USB_DRIVER_LOG_LEVEL_ERR=y
+CONFIG_USB_DEVICE_LOG_LEVEL_ERR=y
 ```
 
 ### `boards/native_sim.conf`
 
 ```ini
-# PTY UART is auto-enabled by DT_HAS_ZEPHYR_NATIVE_PTY_UART_ENABLED.
-# This fragment tunes the PTY mode for tests:
 CONFIG_UART_NATIVE_PTY_0_ON_OWN_PTY=y
+CONFIG_CONSOLE=y
+CONFIG_UART_CONSOLE=n
 ```
 
-### `boards/native_sim_usb.conf` (applied by `-S usb` snippet)
+Always auto-loaded for `native_sim` board. Sets `CONSOLE=y` to satisfy
+`POSIX_ARCH_CONSOLE` select; `UART_CONSOLE=n` prevents Zephyr shell
+from stealing command-channel bytes.
 
-```ini
-CONFIG_USB_DEVICE_STACK=y
-CONFIG_USB_CDC_ACM=y
-CONFIG_CDC_ACM_SERIAL_INITIALIZE_AT_BOOT=n
-# Quiet logs:
-CONFIG_USB_DRIVER_LOG_LEVEL_ERR=y
-CONFIG_USB_DEVICE_LOG_LEVEL_ERR=y
-CONFIG_USB_CDC_ACM_LOG_LEVEL_DEFAULT=y
-CONFIG_USB_CDC_ACM_LOG_LEVEL=3
+### `snippets/plain/snippet.yml`
+
+```yaml
+name: plain
+append:
+  EXTRA_CONF_FILE: ../../config/plain.conf
 ```
 
 ### `snippets/usb/snippet.yml`
 
 ```yaml
-# Binds the USB Kconfig fragment and CDC-ACM devicetree overlay
-# together as a single named snippet. Applied with:
-#   west build … -S usb
 name: usb
 append:
-  EXTRA_CONF_FILE: ../../boards/native_sim_usb.conf
+  EXTRA_CONF_FILE: ../../config/usb.conf
   EXTRA_DTC_OVERLAY_FILE: ../../boards/native_sim_usb.overlay
 ```
 

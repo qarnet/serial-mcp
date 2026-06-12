@@ -130,7 +130,7 @@ jobs:
         run: |
           eval "$(nrfutil sdk-manager toolchain env --ncs-version "$NCS_VERSION" --as-script sh)"
           export ZEPHYR_BASE="$NCS_INSTALL_DIR/$NCS_VERSION/zephyr"
-          west build -b native_sim firmware/ -d build/native_sim --pristine -- \
+          west build -b native_sim firmware/ -d build/native_sim --pristine -S plain -- \
             -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
 
       - name: Build USB native_sim firmware
