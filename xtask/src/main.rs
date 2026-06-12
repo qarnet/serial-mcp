@@ -3,17 +3,17 @@
 //! Centralizes the small set of commands an operator or CI run needs
 //! in order to take the repo from a clean checkout to a fully tested
 //! state, with no surprises. Each subcommand is intentionally thin:
-//! it shells out to existing helpers (`cargo`, `fw-build-native`,
-//! `fw-build-native-usb`) and the `tests/common/binaries.rs` /
+//! it shells out to existing helpers (`cargo`, `fw-build-native`)
+//! and the `tests/common/binaries.rs` /
 //! `firmware.rs` test helpers via the `cargo test` build. We do not
 //! reimplement cargo, west, or our own build pipeline in here.
 //!
 //! Subcommands:
 //!
 //! - `xtask build-test-assets`
-//!   Build the `serial-mcp` binary plus both `native_sim` firmware
-//!   variants (plain + USB). Pristine firmware builds. Safe to run
-//!   after a clean checkout or before the first test run.
+//!   Build the `serial-mcp` binary plus the `native_sim` firmware.
+//!   Pristine firmware build. Safe to run after a clean checkout or
+//!   before the first test run.
 //!
 //! - `xtask test`
 //!   Run the same test set CI runs: unit tests + the four
@@ -29,7 +29,7 @@
 //!
 //! - `xtask print-paths`
 //!   Print the on-disk paths the test orchestrator resolves for the
-//!   serial-mcp binary, the plain firmware, and the USB firmware.
+//!   serial-mcp binary and the firmware binary.
 //!   Useful for debugging test wiring and for AGENTS.md cross-checks.
 
 use std::path::PathBuf;
@@ -39,7 +39,6 @@ use anyhow::{Context, Result};
 
 const SERIAL_MCP_BIN: &str = "serial-mcp";
 const PLAIN_VARIANT: &str = "native_sim";
-const USB_VARIANT: &str = "native_sim_usb";
 
 fn main() {
     if let Err(e) = real_main() {
@@ -77,7 +76,7 @@ USAGE:
     xtask <SUBCOMMAND>
 
 SUBCOMMANDS:
-    build-test-assets   Build serial-mcp + both native_sim firmware variants
+    build-test-assets   Build serial-mcp + native_sim firmware
     test                Run unit + process-level integration tests
     test-all            Like 'test', plus the spawned-binary HTTP suite
     print-paths         Print the resolved test-asset paths
@@ -122,10 +121,6 @@ fn build_test_assets(rest: &[String]) -> Result<()> {
     run(
         Command::new("fw-build-native").current_dir(&root),
         "fw-build-native",
-    )?;
-    run(
-        Command::new("fw-build-native-usb").current_dir(&root),
-        "fw-build-native-usb",
     )?;
     eprintln!("xtask: build-test-assets complete");
     Ok(())
@@ -206,15 +201,8 @@ fn print_paths() -> Result<()> {
         .join("firmware")
         .join("zephyr")
         .join("zephyr.exe");
-    let usb = root
-        .join("build")
-        .join(USB_VARIANT)
-        .join("firmware")
-        .join("zephyr")
-        .join("zephyr.exe");
     println!("serial-mcp binary: {}", bin.display());
-    println!("plain firmware:    {}", plain.display());
-    println!("usb firmware:      {}", usb.display());
+    println!("firmware:          {}", plain.display());
     println!("\nThese paths mirror tests/common/binaries.rs and tests/common/firmware.rs.");
     Ok(())
 }

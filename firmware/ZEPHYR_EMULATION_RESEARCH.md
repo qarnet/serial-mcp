@@ -2,16 +2,16 @@
 
 > **Status: Historical research.** This document captured the exploration
 > that led to the current `native_sim`-based test setup. For current
-> build commands, see `firmware/AGENTS.md`. The build commands below use
-> the old single-build-dir pattern; production helpers now use dedicated
-> `build/native_sim/` and `build/native_sim_usb/` trees.
+> build commands, see `firmware/AGENTS.md`. The USB/IP CDC-ACM approach
+> was evaluated and replaced with a PTY-only `touch` command — no
+> USB/IP, `vhci_hcd`, or `fw-build-native-usb` needed.
 
 ## Landscape
 
 | Approach | Serial exposes | Works for serial-mcp? | 1200-baud touch? | Notes |
 |---|---|---|---|---|
 | **native_sim + PTY UART** | `/dev/pts/N` PTY | ✅ Yes — opens like a real serial port | ❌ No DTR/RTS on PTY | `CONFIG_UART_NATIVE_PTY_0_ON_STDINOUT=y` for pipe-based testing |
-| **native_sim + USB CDC-ACM over USB/IP** | `/dev/ttyACMx` via `usbip attach` | ✅ Yes — full USB CDC device | ✅ **Yes!** DTR/RTS over USB CDC control transfers | Killer feature: test 1200-baud touch with zero hardware |
+| **native_sim + USB CDC-ACM over USB/IP** | `/dev/ttyACMx` via `usbip attach` | ✅ Yes — full USB CDC device | ✅ **Yes!** DTR/RTS over USB CDC control transfers | **Evaluated and replaced.** The `touch` command on PTY eliminates the need for USB/IP entirely. |
 | **native_sim + TTY UART** | Real `/dev/ttyUSB0` | ✅ Yes — opens real serial port | Hardware-dependent | Opens actual host serial devices |
 | **QEMU + chardev pty** | `/dev/pts/N` PTY | ✅ Yes | ❌ No DTR/RTS | No nRF52840 QEMU target |
 | **QEMU + chardev socket** | `localhost:4321` TCP | ✅ Yes (via socat) | ❌ | Needs serial-mcp to support TCP or use socat bridge |
@@ -97,8 +97,8 @@ Zephyr supports building the same application for multiple boards:
 | In-code guards | `#ifdef CONFIG_BOARD_NATIVE_SIM` | Target-specific C code paths |
 | DT checks | `DT_HAS_COMPAT_STATUS_OKAY(zephyr_native_pty_uart)` | Compile-time DT queries |
 
-This means one `firmware/` directory can produce:
-- `native_sim` → Linux executable with PTY UART + optional USB CDC-ACM
+This means one `firmware/` directory produces:
+- `native_sim` → Linux executable with PTY UART, including the `touch` command for bootloader entry testing
 
 The `xiao_ble` target was removed in the software-only migration; the
 remaining native_sim-only build no longer needs a multi-target CMakeLists
@@ -109,12 +109,16 @@ or `pm_static.yml`.
 ```bash
 # Build for native_sim
 west build -b native_sim firmware/
-
-# Build with USB CDC-ACM enabled
-west build -b native_sim firmware/ -- -DEXTRA_CONF_FILE=overlay-usb-cdc.conf
 ```
 
-## 1200-Baud Touch via USB/IP — Full Flow
+## Bootloader Entry via `touch` Command
+
+The USB/IP CDC-ACM approach (depicted below) was evaluated and **replaced**
+with a PTY-only `touch` command. The firmware receives `touch` over the
+command channel, writes GPREGRET=0x57, and calls `exit(42)`. No USB/IP,
+`vhci_hcd`, or separate CDC-ACM port needed.
+
+Original USB/IP flow (historical):
 
 ```text
 ┌──────────────────────────────────────────────────────┐

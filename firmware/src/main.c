@@ -9,26 +9,16 @@
  * PTY path is printed to stdout at boot so the host can `open` it via
  * serial-mcp's `open` tool.
  *
- * USB CDC-ACM is OPTIONAL. When the "usb" snippet is applied
- * (`-S usb`), `CONFIG_USB_DEVICE_STACK=y` and `usb_cdc_init()` brings up
- * a CDC-ACM UART exposed via the native_posix USB/IP controller
- * (default port 3240, overridden to 3241 via the `USBIP_PORT` macro).
- * The CDC-ACM port is used to validate the 1200-baud touch →
- * `exit(42)` flow in software.
+ * The `touch` command triggers exit(42) — used by the bootloader
+ * touch test to validate the end-to-end firmware trigger path.
  */
 
 #include "command.h"
 #include "uart_drv.h"
-#include "usb_cdc.h"
 
 #include <errno.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
-#include <zephyr/sys/util.h>
-
-#if !IS_ENABLED(CONFIG_SERIAL)
-#error "No build variant selected. Rebuild with '-S plain' or '-S usb'."
-#endif
 
 LOG_MODULE_REGISTER(main, LOG_LEVEL_INF);
 
@@ -43,17 +33,6 @@ int main(void)
 	if (ret != 0) {
 		LOG_ERR("UART driver init failed: %d", ret);
 		return 0;
-	}
-
-	/* Try to bring up USB CDC-ACM. Returns -ENODEV if not configured
-	 * (no `boards/native_sim_usb.conf` applied). That's expected on
-	 * the no-USB build; log at debug level only.
-	 */
-	ret = usb_cdc_init();
-	if (ret == 0) {
-		LOG_INF("USB CDC-ACM initialized");
-	} else if (ret != -ENODEV) {
-		LOG_WRN("USB CDC-ACM init failed: %d", ret);
 	}
 
 	command_init(&app, &uart0);

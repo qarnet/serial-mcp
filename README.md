@@ -124,7 +124,6 @@ cargo fmt --all -- --check
 # Firmware-based tests (require native_sim firmware, see firmware/AGENTS.md)
 cargo test --test native_sim_validation -- --ignored
 cargo test --test native_sim_connection_lifecycle -- --ignored --test-threads=1
-cargo test --test bootloader_touch_emulated -- --ignored --test-threads=1
 ```
 
 > Be sure to ask your agent to give honest feedback on the tool after they finish using it. Always looking for ways to improve serial-mcp :)

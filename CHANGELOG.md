@@ -48,14 +48,15 @@ for the staged plan.
 - `pyocd` and `segger-jlink` from `flake.nix`
 
 **Changed:**
-- `firmware/src/usb_cdc.c` simplified to native_sim legacy USB stack
-  only. Device-next / GPREGRET / NVIC reset code paths removed.
-- `firmware/src/main.c` and `firmware/src/usb_cdc.h` comments updated
-  to reflect native_sim-only target.
-- `firmware/AGENTS.md` rewritten to drop xiao_ble / UF2 / PicoProbe
-  workflows.
-- `firmware/prj.conf` comments updated to reference only native_sim
-  conf fragments.
+- `firmware/src/usb_cdc.c` and `firmware/src/usb_cdc.h` removed.
+  Bootloader entry flow replaced with `touch` command on the PTY
+  command channel — no USB CDC-ACM, USB/IP, or `vhci_hcd` required.
+- `firmware/src/main.c` and `firmware/src/command.h` updated to
+  implement the `touch` command and remove USB CDC references.
+- `firmware/AGENTS.md` rewritten to drop USB variant, snippets,
+  `fw-build-native-usb`, and USB/IP sections.
+- `firmware/prj.conf` consolidated to full unified config (no
+  snippets or `config/` directory needed).
 
 ---
 

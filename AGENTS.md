@@ -29,7 +29,6 @@ cargo test --locked --test config_schema_validation -- --ignored
 # native_sim tests (needs firmware built first — see Firmware section)
 cargo test --test native_sim_validation -- --ignored
 cargo test --test native_sim_connection_lifecycle -- --ignored --test-threads=1
-cargo test --test bootloader_touch_emulated -- --ignored --test-threads=1
 ```
 
 - CI runs exactly: fmt -> build -> test -> clippy, plus `cargo test --locked --test config_schema_validation` on Ubuntu.
@@ -53,9 +52,8 @@ cargo test --test bootloader_touch_emulated -- --ignored --test-threads=1
 - `tests/stdio_integration.rs` spawns binary over stdin/stdout.
 - `tests/protocol_emulator*.rs` are protocol hardening tests.
 - `tests/config_schema_validation.rs` validates generated schemas against vendored examples; ignored case fetches upstream schemas.
-- `tests/native_sim_validation.rs` — Tier 1: native_sim firmware over PTY. 11 tests, < 2s, pure software. Env: `SERIAL_MCP_NATIVE_SIM_BIN` (default `build/native_sim/firmware/zephyr/zephyr.exe`).
-- `tests/native_sim_connection_lifecycle.rs` — software-only lifecycle: named connection, `set_flow_control`, close-while-read, reopen. Run with `--test-threads=1`.
-- `tests/bootloader_touch_emulated.rs` — Tier 2: 1200-baud USB/IP touch → exit(42). Needs `vhci_hcd` + NOPASSWD sudoers (or udev rule). Env: `SERIAL_MCP_NATIVE_SIM_USB_BIN`, `USBIP_NATIVE_SIM_ATTACH_CMD` / `USBIP_NATIVE_SIM_DETACH_CMD`. Must use `--test-threads=1`.
+- `tests/native_sim_validation.rs` — native_sim firmware over PTY. 11 tests, < 2s, pure software. Env: `SERIAL_MCP_NATIVE_SIM_BIN` (default `build/native_sim/firmware/zephyr/zephyr.exe`).
+- `tests/native_sim_connection_lifecycle.rs` — software-only lifecycle: named connection, `set_flow_control`, close-while-read, reopen, touch-command bootloader entry. Run with `--test-threads=1`.
 - There are no hardware-required tests in this repo. All test coverage is runnable on a normal Linux host.
 
 ## Firmware / NCS
@@ -66,19 +64,16 @@ cargo test --test bootloader_touch_emulated -- --ignored --test-threads=1
 
 ```bash
 fw-build-native
-fw-build-native-usb
 fw-run-native
-fw-run-native-usb-attached
 ```
 
 - `native_sim` is a 32-bit host build (`-m32`). Repo flake now supplies multilib GCC; do not reintroduce "NixOS unsupported" guidance.
 - The XIAO BLE nRF52840 target was removed. The test firmware now targets `native_sim` only.
 - Do not switch firmware command channel away from `DT_CHOSEN(zephyr_console)`.
-- native_sim tests need firmware built first: `fw-build-native` for Tier 1, `fw-build-native-usb` for Tier 2. Tier 2 also needs `vhci_hcd` kernel module + NOPASSWD sudoers for `usbip-native-sim-attach` (or a vhci_hcd udev rule).
-- Plain and USB firmware live in **dedicated** build trees (`build/native_sim`, `build/native_sim_usb`) so they can never pollute each other. Helpers always pass `--pristine`. Do not reintroduce shared `build/firmware/...` paths.
-- Firmware helpers also export `compile_commands.json` by default for LSP: plain variant writes `build/native_sim/firmware/compile_commands.json`, USB variant writes `build/native_sim_usb/firmware/compile_commands.json`.
-- Firmware LSP routing lives in `firmware/.clangd`: `usb_*` files use USB compile DB, all other firmware C/H files use plain compile DB. Keep this split aligned with build dirs.
-- `opencode.json` runs `clangd` through `direnv exec .` with `--query-driver=/nix/store/*/bin/*` so Nix toolchain headers resolve. If opencode LSP regresses, check `opencode.json`, `firmware/.clangd`, then rebuild both variants.
+- native_sim tests need firmware built first: `fw-build-native`. Plain firmware in dedicated build tree `build/native_sim`.
+- Firmware helpers also export `compile_commands.json` by default for LSP: writes `build/native_sim/firmware/compile_commands.json`.
+- Firmware LSP routing lives in `firmware/.clangd`: all firmware C/H files use the single compile DB. Keep this aligned with the build dir.
+- `opencode.json` runs `clangd` through `direnv exec .` with `--query-driver=/nix/store/*/bin/*` so Nix toolchain headers resolve. If opencode LSP regresses, check `opencode.json`, `firmware/.clangd`, then rebuild.
 
 ## Release workflow
 
@@ -101,7 +96,8 @@ cargo run --manifest-path xtask/Cargo.toml -- test-all
 cargo run --manifest-path xtask/Cargo.toml -- print-paths
 ```
 
-- `build-test-assets` — builds `serial-mcp` binary + both `native_sim` firmware variants.
+- `build-test-assets` — builds `serial-mcp` binary + native_sim firmware.
+- `test` — runs unit tests + stdio, blob, native_sim validation, and native_sim lifecycle suites.
 - `test` — runs unit tests + stdio, blob, native_sim validation, and native_sim lifecycle suites.
 - `test-all` — same as `test` plus HTTP integration suite (spawned binary).
 - `print-paths` — emits resolved test-asset paths for debugging.

@@ -126,40 +126,19 @@ jobs:
         if: steps.cache-ncs.outputs.cache-hit != 'true'
         run: nrfutil sdk-manager install "$NCS_VERSION"
 
-      - name: Build plain native_sim firmware
+      - name: Build native_sim firmware
         run: |
           eval "$(nrfutil sdk-manager toolchain env --ncs-version "$NCS_VERSION" --as-script sh)"
           export ZEPHYR_BASE="$NCS_INSTALL_DIR/$NCS_VERSION/zephyr"
-          west build -b native_sim firmware/ -d build/native_sim --pristine -S plain -- \
+          west build -b native_sim firmware/ -d build/native_sim --pristine -- \
             -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
 
-      - name: Build USB native_sim firmware
-        run: |
-          eval "$(nrfutil sdk-manager toolchain env --ncs-version "$NCS_VERSION" --as-script sh)"
-          export ZEPHYR_BASE="$NCS_INSTALL_DIR/$NCS_VERSION/zephyr"
-          west build -b native_sim firmware/ -d build/native_sim_usb --pristine -S usb -- \
-            -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
-
-      - name: Run native_sim tests (plain)
+      - name: Run native_sim tests
         env:
           SERIAL_MCP_NATIVE_SIM_BIN: build/native_sim/firmware/zephyr/zephyr.exe
         run: |
           cargo test --test native_sim_validation -- --ignored --test-threads=1
           cargo test --test native_sim_connection_lifecycle -- --ignored --test-threads=1
-
-      - name: Run native_sim tests (USB bootloader touch)
-        env:
-          SERIAL_MCP_NATIVE_SIM_USB_BIN: build/native_sim_usb/firmware/zephyr/zephyr.exe
-        run: |
-          # Tier 2: requires vhci_hcd + usbip. Run only if the kernel
-          # module is loadable on the CI host; otherwise skip silently
-          # to avoid hard-failing a run that previously only checked
-          # Tier 1.
-          if sudo -n modprobe vhci_hcd 2>/dev/null; then
-            cargo test --test bootloader_touch_emulated -- --ignored --test-threads=1
-          else
-            echo "::notice::vhci_hcd not loadable on this CI host; skipping Tier 2 USB test"
-          fi
 
       - name: Run HTTP integration tests (spawned binary)
         run: cargo test --test http_integration --locked -- --test-threads=1

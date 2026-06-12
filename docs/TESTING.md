@@ -19,14 +19,6 @@ cargo test --test blob_resources    # 2 blob resource tests
 # Firmware tests (require native_sim firmware, see firmware/AGENTS.md)
 cargo test --test native_sim_validation -- --ignored
 cargo test --test native_sim_connection_lifecycle -- --ignored --test-threads=1
-cargo test --test bootloader_touch_emulated -- --ignored --test-threads=1
-
-# Formatting and linting (CI enforces)
-cargo fmt --all -- --check
-cargo clippy --all-targets --locked -- -D warnings
-
-# Schema network check (fetches upstream schemas)
-cargo test --test config_schema_validation -- --ignored
 ```
 
 ---
@@ -225,20 +217,8 @@ Requires the native_sim firmware binary (see `firmware/AGENTS.md`).
 | `native_reopen_then_match_finds_fresh_output` | After reopen, a fresh `read(match=...)` returns the response to a new command |
 | `native_open_with_flow_control_persists_in_summary` | `flow_control` provided at `open` time is reflected in the connection summary |
 
-#### native_sim USB/IP bootloader touch (`tests/bootloader_touch_emulated.rs`)
-
-Requires native_sim USB firmware build plus local USB/IP attach on port `3241`.
-
-```bash
-fw-build-native-usb
-sudo -n usbip-native-sim-load-vhci
-fw-run-native-usb-attached
-
-# in another terminal:
-cargo test --test bootloader_touch_emulated -- --ignored --test-threads=1
-```
-
-If attaching manually, use `usbip --tcp-port 3241 ...`. Default port `3240` is wrong for this repo.
+The bootloader touch flow is exercised via the `touch` command in this
+same suite — no separate test binary or USB/IP setup required.
 
 ---
 

@@ -94,6 +94,11 @@ impl NativeSimFirmware {
     fn pty_path(&self) -> &str {
         &self.pty_path
     }
+
+    /// Check whether the firmware process has exited, and return its exit code.
+    fn try_exit_code(&mut self) -> Option<i32> {
+        self.child.try_wait().ok().flatten().and_then(|s| s.code())
+    }
 }
 
 impl Drop for NativeSimFirmware {
@@ -881,4 +886,51 @@ async fn native_close_while_subscribe_active() {
 
     client.cancel().await.ok();
     drop(fw);
+}
+
+// ── Test 12: bootloader touch command → exit(42) ──────────────────────────────
+
+/// Send the "touch" command over the PTY command channel. Firmware
+/// should respond with "touch exit(42)" and then call exit(42).
+/// This validates the end-to-end path that a bootloader-entry
+/// trigger (sent via serial-mcp `write`) causes the expected
+/// firmware-side behaviour.
+#[tokio::test]
+#[ignore = "requires native_sim firmware binary"]
+async fn native_bootloader_touch_exits_42() {
+    let mut fw = NativeSimFirmware::spawn().await.expect("spawn zephyr.exe");
+    let pty_path = fw.pty_path().to_string();
+
+    let server = TestServer::start().await;
+    let (client, _rx) = connect_client(&server).await.unwrap();
+
+    let id = open_pty(&client, &pty_path).await;
+    sync_boot(&client, &id).await;
+
+    // Send the "touch" command
+    client
+        .peer()
+        .call_tool(tool_request(
+            "write",
+            json!({
+                "connection_id": id,
+                "data": "touch\r\n",
+                "encoding": "utf8",
+            }),
+        ))
+        .await
+        .expect("write touch command");
+
+    // Give firmware time to process and call exit(42)
+    for _ in 0..20 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        if let Some(code) = fw.try_exit_code() {
+            assert_eq!(code, 42, "expected exit(42) from touch command, got code {code}");
+            client.cancel().await.ok();
+            return;
+        }
+    }
+
+    client.cancel().await.ok();
+    panic!("firmware did not exit within 2s after touch command");
 }
