@@ -934,3 +934,142 @@ async fn native_bootloader_touch_exits_42() {
     client.cancel().await.ok();
     panic!("firmware did not exit within 2s after touch command");
 }
+
+// ── Test 13: list_ports returns valid JSON with an opened PTY ──────────────────
+
+#[tokio::test]
+#[ignore = "requires native_sim firmware binary"]
+async fn native_list_ports_after_open() {
+    let fw = NativeSimFirmware::spawn().await.expect("spawn zephyr.exe");
+    let pty_path = fw.pty_path().to_string();
+
+    let server = TestServer::start().await;
+    let (client, _rx) = connect_client(&server).await.unwrap();
+
+    let id = open_pty(&client, &pty_path).await;
+    sync_boot(&client, &id).await;
+
+    let result = client
+        .peer()
+        .call_tool(tool_request("list_ports", json!({})))
+        .await
+        .expect("list_ports");
+    assert_ne!(result.is_error, Some(true), "{result:?}");
+
+    let s = result.structured_content.expect("structured");
+    let ports = s["ports"].as_array().expect("ports is array");
+    assert!(!ports.is_empty(), "expected at least one port in list: {s:?}");
+
+    // The PTY might not be enumerated by serialport::available_ports()
+    // on all platforms, but list_ports must return valid JSON.
+    close_connection(&client, &id).await;
+    client.cancel().await.ok();
+    drop(fw);
+}
+
+// ── Test 14: flush preserves data integrity ────────────────────────────────────
+
+#[tokio::test]
+#[ignore = "requires native_sim firmware binary"]
+async fn native_flush_after_write() {
+    let fw = NativeSimFirmware::spawn().await.expect("spawn zephyr.exe");
+    let pty_path = fw.pty_path().to_string();
+
+    let server = TestServer::start().await;
+    let (client, _rx) = connect_client(&server).await.unwrap();
+
+    let id = open_pty(&client, &pty_path).await;
+    sync_boot(&client, &id).await;
+
+    // Write a command, flush, then read — the pong should arrive.
+    write_cmd(&client, &id, "ping").await;
+
+    client
+        .peer()
+        .call_tool(tool_request("flush", json!({ "connection_id": id })))
+        .await
+        .expect("flush");
+
+    let result = client
+        .peer()
+        .call_tool(tool_request(
+            "read",
+            json!({
+                "connection_id": id,
+                "timeout_ms": 1000,
+            }),
+        ))
+        .await
+        .expect("read");
+    assert_ne!(result.is_error, Some(true), "{result:?}");
+
+    let s = result.structured_content.expect("structured");
+    let data = s["data"].as_str().unwrap_or("");
+    assert!(
+        data.contains("pong"),
+        "expected pong after flush+read, got: {data}"
+    );
+
+    close_connection(&client, &id).await;
+    client.cancel().await.ok();
+    drop(fw);
+}
+
+// ── Test 15: unsubscribe followed by re-subscribe ──────────────────────────────
+
+#[tokio::test]
+#[ignore = "requires native_sim firmware binary"]
+async fn native_unsubscribe_then_resubscribe() {
+    let fw = NativeSimFirmware::spawn().await.expect("spawn zephyr.exe");
+    let pty_path = fw.pty_path().to_string();
+
+    let server = TestServer::start().await;
+    let (client, rx) = connect_client(&server).await.unwrap();
+
+    let id = open_pty(&client, &pty_path).await;
+    sync_boot(&client, &id).await;
+
+    // Subscribe
+    client
+        .peer()
+        .call_tool(tool_request(
+            "subscribe",
+            json!({
+                "connection_id": id,
+                "poll_interval_ms": 50,
+                "max_buffered_bytes": 1024,
+            }),
+        ))
+        .await
+        .expect("subscribe");
+
+    // Unsubscribe
+    let result = client
+        .peer()
+        .call_tool(tool_request(
+            "unsubscribe",
+            json!({ "connection_id": id }),
+        ))
+        .await
+        .expect("unsubscribe");
+    assert_ne!(result.is_error, Some(true), "{result:?}");
+
+    // Re-subscribe — should succeed
+    let resub = client
+        .peer()
+        .call_tool(tool_request(
+            "subscribe",
+            json!({
+                "connection_id": id,
+                "poll_interval_ms": 50,
+                "max_buffered_bytes": 1024,
+            }),
+        ))
+        .await
+        .expect("re-subscribe");
+    assert_ne!(resub.is_error, Some(true), "{resub:?}");
+
+    client.cancel().await.ok();
+    drop(rx);
+    drop(fw);
+}

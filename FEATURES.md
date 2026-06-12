@@ -39,12 +39,12 @@
 
 ## Stronger live TX flush testing support
 
-- Add firmware support for true RX holdoff or throttle so host-side queued TX can remain undelivered long enough to test `flush(target="output")` on real hardware.
+- Add firmware support for true RX holdoff or throttle so host-side queued TX can remain undelivered long enough to test `flush(target="output")` in software against the PTY.
 - Candidate firmware capabilities:
   - `rx_throttle on|off`
   - explicit UART FIFO drain pause/resume
   - host-visible counters for delivered RX bytes vs buffered-but-uncommitted bytes
-- Goal: enable hardware tests that distinguish:
+- Goal: enable tests that distinguish:
   - fully delivered TX
   - partially delivered TX
   - flushed-before-delivery TX

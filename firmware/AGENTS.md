@@ -154,7 +154,7 @@ Runtime paths:
 - `Spam complete: N bytes sent\r\n`
 - `Spam stopped: N bytes sent\r\n`
 
-Hardware tests match on exact phrase `Spam complete`.
+Tests match on exact phrase `Spam complete`.
 
 ### Diagnostic commands
 
