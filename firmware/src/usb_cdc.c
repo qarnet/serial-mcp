@@ -16,9 +16,9 @@
 
 #include "usb_cdc.h"
 
-#include <zephyr/logging/log.h>
-#include <stdlib.h>
 #include <errno.h>
+#include <stdlib.h>
+#include <zephyr/logging/log.h>
 
 LOG_MODULE_REGISTER(usb_cdc, LOG_LEVEL_INF);
 
@@ -27,8 +27,18 @@ LOG_MODULE_REGISTER(usb_cdc, LOG_LEVEL_INF);
 
 /* Visible to tests: a global that the native_sim bootloader-entry
  * handler writes to. Tests can verify the magic value.
+ *
+ * Always defined so `usb_cdc_init()` callers (and any test code that
+ * peeks at it) can link cleanly against the plain `native_sim` build.
  */
 volatile uint8_t sim_gpregret;
+
+#if defined(CONFIG_USB_DEVICE_STACK) && defined(CONFIG_USB_CDC_ACM)
+
+#include <zephyr/device.h>
+#include <zephyr/drivers/uart.h>
+#include <zephyr/drivers/uart/cdc_acm.h>
+#include <zephyr/usb/usb_device.h>
 
 static inline void do_bootloader_entry(void)
 {
@@ -36,11 +46,6 @@ static inline void do_bootloader_entry(void)
 	LOG_INF("Bootloader entry: sim_gpregret=0x57, exit(42)");
 	exit(42);
 }
-
-#include <zephyr/device.h>
-#include <zephyr/drivers/uart.h>
-#include <zephyr/drivers/uart/cdc_acm.h>
-#include <zephyr/usb/usb_device.h>
 
 /* CDC-ACM UART node from our overlay (cdc_acm_0 on zephyr_udc0). */
 #define CDC_DEV DEVICE_DT_GET(DT_NODELABEL(cdc_acm_0))
@@ -105,3 +110,16 @@ int usb_cdc_init(void)
 	LOG_INF("USB CDC-ACM ready");
 	return 0;
 }
+
+#else /* !(CONFIG_USB_DEVICE_STACK && CONFIG_USB_CDC_ACM) */
+
+/* Plain `native_sim` build: no USB CDC support compiled in.
+ * `usb_cdc_init()` returns -ENODEV so callers (see `main.c`) can
+ * treat "USB not built" as a non-fatal condition.
+ */
+int usb_cdc_init(void)
+{
+	return -ENODEV;
+}
+
+#endif /* CONFIG_USB_DEVICE_STACK && CONFIG_USB_CDC_ACM */

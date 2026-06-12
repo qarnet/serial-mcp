@@ -5,8 +5,9 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=firmware/bin/fw-common.sh
 source "$SCRIPT_DIR/fw-common.sh"
 
-EXE_PATH="$(_fw_build_dir)/firmware/zephyr/zephyr.exe"
-CONFIG_PATH="$(_fw_build_dir)/firmware/zephyr/.config"
+DEFAULT_BUILD_DIR="${SERIAL_MCP_FW_BUILD_DIR:-$(_fw_repo_dir)/build/native_sim_usb}"
+EXE_PATH="${SERIAL_MCP_NATIVE_SIM_USB_BIN:-$DEFAULT_BUILD_DIR/firmware/zephyr/zephyr.exe}"
+CONFIG_PATH="$DEFAULT_BUILD_DIR/firmware/zephyr/.config"
 USBIP_PORT="${SERIAL_MCP_USBIP_PORT:-3241}"
 USBIP_HOST="${SERIAL_MCP_USBIP_HOST:-127.0.0.1}"
 ATTACHED_BUSID=""

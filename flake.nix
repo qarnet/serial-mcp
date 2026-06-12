@@ -110,6 +110,59 @@
           '';
         };
 
+        # Minimal upstream nrfutil packaging for sdk-manager usage in the dev
+        # shell. Avoid nixpkgs nrfutil because it depends on SEGGER J-Link.
+        nrfutilCoreSrc =
+          {
+            x86_64-linux = {
+              triplet = "x86_64-unknown-linux-gnu";
+              version = "8.1.1";
+              hash = "sha256-SAD4tx/uwMqvPBQ9KbC3/W8zxqJY2hDmYHQ/DbGJCgs=";
+            };
+            aarch64-linux = {
+              triplet = "aarch64-unknown-linux-gnu";
+              version = "8.1.1";
+              hash = "sha256-y7ywCr9Ze3Uz1JQh0hNg2BOPKW2yEftYDaD8WzHWSxY=";
+            };
+          }
+          .${system} or null;
+
+        nrfutil-core =
+          if nrfutilCoreSrc == null then
+            null
+          else
+            pkgs.stdenvNoCC.mkDerivation {
+              pname = "nrfutil-core";
+              inherit (nrfutilCoreSrc) version;
+              src = pkgs.fetchurl {
+                url = "https://files.nordicsemi.com/artifactory/swtools/external/nrfutil/executables/${nrfutilCoreSrc.triplet}/nrfutil";
+                hash = nrfutilCoreSrc.hash;
+              };
+              dontUnpack = true;
+              nativeBuildInputs = pkgs.lib.optionals pkgs.stdenv.isLinux [ pkgs.autoPatchelfHook ];
+              buildInputs = pkgs.lib.optionals pkgs.stdenv.isLinux [
+                pkgs.glibc
+                pkgs.stdenv.cc.cc.lib
+                pkgs.zlib
+                pkgs.xz
+                pkgs.libusb1
+                pkgs.udev
+              ];
+              installPhase = ''
+                runHook preInstall
+                mkdir -p $out/bin
+                install -Dm755 $src $out/bin/nrfutil
+                runHook postInstall
+              '';
+              meta = with pkgs.lib; {
+                description = "Nordic nrfutil core CLI";
+                homepage = "https://www.nordicsemi.com/Products/Development-tools/nRF-Util";
+                license = licenses.unfree;
+                platforms = [ system ];
+                sourceProvenance = with sourceTypes; [ binaryNativeCode ];
+              };
+            };
+
         serial-mcp = craneLib.buildPackage (
           commonArgs
           // {
@@ -185,8 +238,8 @@
               cargo-nextest
               jsonschema-cli
               mcp-publisher
-              nrfutil
             ])
+            ++ pkgs.lib.optionals (nrfutil-core != null) [ nrfutil-core ]
             ++ pkgs.lib.optionals pkgs.stdenv.isLinux [
               # native_sim builds pass -m32 on x86_64-linux. Use multilib GCC in
               # shell so Zephyr host builds work on NixOS too.

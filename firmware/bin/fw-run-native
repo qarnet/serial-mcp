@@ -1,11 +1,22 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: MIT
+#
+# Run the plain `native_sim` test firmware.
+#
+# Variant build dir: build/native_sim
+# Resulting binary:  build/native_sim/zephyr/zephyr.exe
+#
+# Override the build dir by exporting SERIAL_MCP_FW_BUILD_DIR.
+# Override the binary path by exporting SERIAL_MCP_NATIVE_SIM_BIN.
+
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=firmware/bin/fw-common.sh
 source "$SCRIPT_DIR/fw-common.sh"
 
-EXE_PATH="$(_fw_build_dir)/firmware/zephyr/zephyr.exe"
+DEFAULT_BUILD_DIR="${SERIAL_MCP_FW_BUILD_DIR:-$(_fw_repo_dir)/build/native_sim}"
+EXE_PATH="${SERIAL_MCP_NATIVE_SIM_BIN:-$DEFAULT_BUILD_DIR/firmware/zephyr/zephyr.exe}"
 
 if [ ! -x "$EXE_PATH" ]; then
   printf 'Missing native_sim binary: %s\n' "$EXE_PATH" >&2
