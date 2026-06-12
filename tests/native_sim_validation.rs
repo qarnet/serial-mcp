@@ -925,7 +925,10 @@ async fn native_bootloader_touch_exits_42() {
     for _ in 0..20 {
         tokio::time::sleep(Duration::from_millis(100)).await;
         if let Some(code) = fw.try_exit_code() {
-            assert_eq!(code, 42, "expected exit(42) from touch command, got code {code}");
+            assert_eq!(
+                code, 42,
+                "expected exit(42) from touch command, got code {code}"
+            );
             client.cancel().await.ok();
             return;
         }
@@ -958,7 +961,10 @@ async fn native_list_ports_after_open() {
 
     let s = result.structured_content.expect("structured");
     let ports = s["ports"].as_array().expect("ports is array");
-    assert!(!ports.is_empty(), "expected at least one port in list: {s:?}");
+    assert!(
+        !ports.is_empty(),
+        "expected at least one port in list: {s:?}"
+    );
 
     // The PTY might not be enumerated by serialport::available_ports()
     // on all platforms, but list_ports must return valid JSON.
@@ -1046,10 +1052,7 @@ async fn native_unsubscribe_then_resubscribe() {
     // Unsubscribe
     let result = client
         .peer()
-        .call_tool(tool_request(
-            "unsubscribe",
-            json!({ "connection_id": id }),
-        ))
+        .call_tool(tool_request("unsubscribe", json!({ "connection_id": id })))
         .await
         .expect("unsubscribe");
     assert_ne!(result.is_error, Some(true), "{result:?}");
