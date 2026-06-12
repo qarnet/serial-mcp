@@ -8,10 +8,10 @@ and `tests/bootloader_touch_emulated.rs`.
 
 - **Single build target:** `native_sim` — runs as a Linux process,
   PTY-backed UART. No real hardware required.
-- **Two transports, opt-in via separate conf fragments:**
+- **Two transports, opt-in via Zephyr snippet:**
   - **Always-on:** command channel on the PTY-backed `uart0`
-  - **Opt-in (USB conf):** native USB CDC-ACM over USB/IP for
-    1200-baud touch testing
+  - **Opt-in (`-S usb`):** native USB CDC-ACM over USB/IP for
+    1200-baud touch testing — see `snippets/usb/snippet.yml`
 - The command channel uses `DT_CHOSEN(zephyr_console)`, which
   resolves to `&uart0` on `native_sim`. Device-agnostic.
 - The CDC-ACM port (when enabled) is the entry point for the
@@ -34,10 +34,14 @@ firmware/
 │   ├── usb_cdc.c               # USB CDC init + 1200-baud touch
 │   └── usb_cdc.h
 │
-└── boards/
-    ├── native_sim.conf         # PTY UART Kconfig (always applied)
-    ├── native_sim_usb.conf     # OPT-IN: USB legacy stack + CDC-ACM
-    └── native_sim_usb.overlay  # OPT-IN: CDC-ACM node
+├── boards/
+│   ├── native_sim.conf         # PTY UART Kconfig (always applied)
+│   ├── native_sim_usb.conf     # OPT-IN: USB legacy stack + CDC-ACM
+│   └── native_sim_usb.overlay  # OPT-IN: CDC-ACM node
+│
+└── snippets/
+    └── usb/
+        └── snippet.yml         # Snippet binding USB conf + overlay
 ```
 
 ## Build
@@ -70,9 +74,10 @@ build/native_sim/firmware/compile_commands.json
 ```bash
 # USB variant uses its own dedicated build tree so it cannot
 # contaminate the plain variant's Kconfig/devicetree state.
-west build -b native_sim firmware/ -d build/native_sim_usb --pristine -- \
-  -DEXTRA_CONF_FILE=boards/native_sim_usb.conf \
-  -DEXTRA_DTC_OVERLAY_FILE=boards/native_sim_usb.overlay
+# The "usb" snippet bundles both the USB Kconfig fragment and
+# the CDC-ACM devicetree overlay. List available snippets with
+# `west build -S help`.
+west build -b native_sim firmware/ -d build/native_sim_usb --pristine -S usb
 
 # One-time host prep:
 sudo -n usbip-native-sim-load-vhci
@@ -144,7 +149,7 @@ CONFIG_HWINFO=y
 CONFIG_LOG=y
 CONFIG_CONSOLE=n
 CONFIG_UART_CONSOLE=n
-# USB disabled by default — enable via boards/native_sim_usb.conf
+# USB disabled by default — enable via the "usb" snippet (-S usb)
 # CONFIG_USB_DEVICE_STACK is not set
 # CONFIG_USB_CDC_ACM is not set
 ```
@@ -157,7 +162,7 @@ CONFIG_UART_CONSOLE=n
 CONFIG_UART_NATIVE_PTY_0_ON_OWN_PTY=y
 ```
 
-### `boards/native_sim_usb.conf` (opt-in)
+### `boards/native_sim_usb.conf` (applied by `-S usb` snippet)
 
 ```ini
 CONFIG_USB_DEVICE_STACK=y
@@ -168,6 +173,18 @@ CONFIG_USB_DRIVER_LOG_LEVEL_ERR=y
 CONFIG_USB_DEVICE_LOG_LEVEL_ERR=y
 CONFIG_USB_CDC_ACM_LOG_LEVEL_DEFAULT=y
 CONFIG_USB_CDC_ACM_LOG_LEVEL=3
+```
+
+### `snippets/usb/snippet.yml`
+
+```yaml
+# Binds the USB Kconfig fragment and CDC-ACM devicetree overlay
+# together as a single named snippet. Applied with:
+#   west build … -S usb
+name: usb
+append:
+  EXTRA_CONF_FILE: ../../boards/native_sim_usb.conf
+  EXTRA_DTC_OVERLAY_FILE: ../../boards/native_sim_usb.overlay
 ```
 
 ## Architecture
@@ -183,7 +200,7 @@ src/
 Runtime paths:
 
 - **PTY uart0** — test commands, spam, trace, framing
-- **USB CDC-ACM** (when `boards/native_sim_usb.conf` is applied) —
+- **USB CDC-ACM** (when `-S usb` snippet is applied) —
   1200-baud touch → `exit(42)` so the test process can verify the
   magic exit code.
 
