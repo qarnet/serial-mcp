@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: MIT
 #
-# Run the plain `native_sim` test firmware.
+# Run the `native_sim` test firmware.
 #
-# Variant build dir: build/native_sim
-# Resulting binary:  build/native_sim/firmware/zephyr/zephyr.exe
+# Build dir:  build/native_sim
+# Result:     build/native_sim/firmware/zephyr/zephyr.exe
 #
 # Override the build dir by exporting SERIAL_MCP_FW_BUILD_DIR.
 # Override the binary path by exporting SERIAL_MCP_NATIVE_SIM_BIN.

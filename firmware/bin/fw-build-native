@@ -1,14 +1,11 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: MIT
 #
-# Build plain `native_sim` test firmware (no USB).
+# Build the `native_sim` test firmware.
 #
-# Variant build dir: build/native_sim
-# Resulting binary:  build/native_sim/firmware/zephyr/zephyr.exe
-# Also emits:       build/native_sim/firmware/compile_commands.json
-#
-# Each variant owns its own build tree, so plain and USB builds can
-# never pollute each other.
+# Build dir:  build/native_sim
+# Result:     build/native_sim/firmware/zephyr/zephyr.exe
+# Also emits: build/native_sim/firmware/compile_commands.json
 #
 # Override the build dir by exporting SERIAL_MCP_FW_BUILD_DIR.
 
@@ -22,6 +19,6 @@ cd "$(_fw_repo_dir)"
 
 BUILD_DIR="${SERIAL_MCP_FW_BUILD_DIR:-$(_fw_repo_dir)/build/native_sim}"
 
-exec west build -b native_sim firmware/ -d "$BUILD_DIR" --pristine -S plain -- \
+exec west build -b native_sim firmware/ -d "$BUILD_DIR" --pristine -- \
   -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
   "$@"

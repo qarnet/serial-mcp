@@ -178,16 +178,6 @@ fn test(rest: &[String], include_http: bool) -> Result<()> {
         run(&mut c, "cargo test --test http_integration")?;
     }
 
-    if include_http {
-        // HTTP suite does not need `--ignored` and uses the spawned
-        // binary which is the default.
-        let mut c = Command::new("cargo");
-        c.current_dir(&root)
-            .args(["test", "--test", "http_integration", "--locked", "--"])
-            .args(&args);
-        run(&mut c, "cargo test --test http_integration")?;
-    }
-
     eprintln!("xtask: test complete");
     Ok(())
 }

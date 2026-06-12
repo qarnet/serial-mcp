@@ -70,7 +70,7 @@ fw-run-native
 - `native_sim` is a 32-bit host build (`-m32`). Repo flake now supplies multilib GCC; do not reintroduce "NixOS unsupported" guidance.
 - The XIAO BLE nRF52840 target was removed. The test firmware now targets `native_sim` only.
 - Do not switch firmware command channel away from `DT_CHOSEN(zephyr_console)`.
-- native_sim tests need firmware built first: `fw-build-native`. Plain firmware in dedicated build tree `build/native_sim`.
+- native_sim tests need firmware built first: `fw-build-native`. Firmware lives in dedicated build tree `build/native_sim`.
 - Firmware helpers also export `compile_commands.json` by default for LSP: writes `build/native_sim/firmware/compile_commands.json`.
 - Firmware LSP routing lives in `firmware/.clangd`: all firmware C/H files use the single compile DB. Keep this aligned with the build dir.
 - `opencode.json` runs `clangd` through `direnv exec .` with `--query-driver=/nix/store/*/bin/*` so Nix toolchain headers resolve. If opencode LSP regresses, check `opencode.json`, `firmware/.clangd`, then rebuild.
@@ -97,7 +97,6 @@ cargo run --manifest-path xtask/Cargo.toml -- print-paths
 ```
 
 - `build-test-assets` — builds `serial-mcp` binary + native_sim firmware.
-- `test` — runs unit tests + stdio, blob, native_sim validation, and native_sim lifecycle suites.
 - `test` — runs unit tests + stdio, blob, native_sim validation, and native_sim lifecycle suites.
 - `test-all` — same as `test` plus HTTP integration suite (spawned binary).
 - `print-paths` — emits resolved test-asset paths for debugging.

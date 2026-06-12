@@ -2,7 +2,7 @@
 
 | Version | Date | Highlights |
 |---|---|---|
-| [Unreleased](#unreleased) | — | Software-only test migration: XIAO/E83/hardware-loopback tests replaced by native_sim + USB/IP; CI now runs without any hardware |
+| [Unreleased](#unreleased) | — | Software-only test migration: XIAO/E83/hardware-loopback tests replaced by native_sim PTY; CI runs without any hardware |
 | [0.5.0](#050) | 2026-06-06 | RX redesign (Plans 1-7): session pump, unified stop controller, match options, buffer budgets, silence timeout, context shaping |
 | [0.4.1](#041) | 2026-06-04 | CI/release hardening, schema-validated config examples, docs cleanup |
 | [0.4.0](#040) | 2026-06-04 | Crate rename to `serial-mcp`, `read_line` + `get_version` tools, text encoding, RX guard, flexible args |
@@ -22,19 +22,20 @@
 
 Migration to software-only validation. No physical hardware, board
 bring-up, USB-serial adapters, or `pyocd`/`PicoProbe` workflows
-required to validate the server. See `docs/SOFTWARE_ONLY_TEST_MIGRATION_PLAN.md`
-for the staged plan.
+required to validate the server. All testing runs on the `native_sim`
+POSIX emulator over PTY.
 
 **Added:**
 - `tests/native_sim_connection_lifecycle.rs` — 6 new software-only
   tests covering named-connection bookkeeping in `list_connections`,
   `set_flow_control` round-trip, close-while-read behavior, and
   PTY reopen. Run with `--test-threads=1`.
-- `docs/SOFTWARE_ONLY_TEST_MIGRATION_PLAN.md` capturing the staged
-  removal of hardware-only tests, board files, and helpers.
-- CI job `native_sim firmware + test` (already present) now validated
-  end-to-end on ubuntu-latest without NOPASSWD sudoers for production
-  runs; the USB/IP path remains opt-in.
+- `tests/native_sim_validation.rs` test 12: `native_bootloader_touch_exits_42` —
+  sends `touch` command over PTY, verifies firmware exit(42).
+- `firmware/src/command.c`: `touch` command triggers `exit(42)` for
+  bootloader-entry validation.
+- CI job `native_sim firmware + test` runs end-to-end on ubuntu-latest
+  without NOPASSWD sudoers or kernel modules.
 
 **Removed:**
 - `tests/xiao_ble_validation.rs` — XIAO BLE hardware test suite

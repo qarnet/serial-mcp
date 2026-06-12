@@ -27,7 +27,7 @@
 ## native_sim test firmware diagnostics
 
 - Keep and evolve the test firmware features that make TX/RX behavior
-  observable from a software-only test harness (native_sim + USB/IP).
+  observable from a software-only test harness (native_sim over PTY).
 - Existing useful diagnostics now include:
   - `framing on|off` for committed line visibility
   - `trace on|off` for per-byte RX ordering visibility
