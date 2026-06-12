@@ -2,6 +2,8 @@
 /.direnv/
 /target/
 /build/
+/xtask/target/
+/xtask/Cargo.lock
 tests/proptest.proptest-regressions
 fuzz/target/
 fuzz/Cargo.lock
