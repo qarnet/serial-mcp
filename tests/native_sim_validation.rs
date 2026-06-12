@@ -22,13 +22,9 @@ use common::{args_object, connect_client, next_notification, tool_request, TestS
 
 // ── Firmware process management ──────────────────────────────────────────────
 
-const DEFAULT_BIN: &str = "build/firmware/zephyr/zephyr.exe";
-
-fn zephyr_bin() -> String {
-    std::env::var("SERIAL_MCP_NATIVE_SIM_BIN")
-        .ok()
-        .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| DEFAULT_BIN.to_string())
+fn zephyr_bin() -> std::path::PathBuf {
+    common::firmware::ensure_plain_firmware_built()
+        .expect("plain native_sim firmware available for validation tests")
 }
 
 /// A running native_sim firmware instance with a known PTY path.
@@ -50,7 +46,7 @@ impl NativeSimFirmware {
             .stderr(std::process::Stdio::null())
             .kill_on_drop(true)
             .spawn()
-            .with_context(|| format!("Failed to spawn {bin}"))?;
+            .with_context(|| format!("Failed to spawn {}", bin.display()))?;
 
         let stdout = child.stdout.take().context("stdout not piped")?;
         let mut reader = BufReader::new(stdout).lines();

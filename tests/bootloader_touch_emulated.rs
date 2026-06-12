@@ -51,15 +51,12 @@ use common::{args_object, connect_client, tool_request, TestServer};
 
 // ── Constants ───────────────────────────────────────────────────────────────
 
-const USB_FW_BIN: &str = "build/firmware/zephyr/zephyr.exe";
 const TOUCH_BAUD: u32 = 1200;
 const BOOTLOADER_EXIT_CODE: i32 = 42;
 
-fn zephyr_bin() -> String {
-    std::env::var("SERIAL_MCP_NATIVE_SIM_USB_BIN")
-        .ok()
-        .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| USB_FW_BIN.to_string())
+fn zephyr_bin() -> std::path::PathBuf {
+    common::firmware::ensure_usb_firmware_built()
+        .expect("USB native_sim firmware available for bootloader tests")
 }
 
 // ── Firmware process management ─────────────────────────────────────────────
@@ -79,7 +76,7 @@ impl UsbFirmware {
             .stderr(Stdio::piped())
             .kill_on_drop(true)
             .spawn()
-            .with_context(|| format!("Failed to spawn {bin}"))?;
+            .with_context(|| format!("Failed to spawn {}", bin.display()))?;
 
         let stdout = child.stdout.take().context("stdout not piped")?;
         let stderr = child.stderr.take().context("stderr not piped")?;
