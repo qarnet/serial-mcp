@@ -89,3 +89,23 @@ fw-run-native-usb-attached
 
 - Conventional commits used here: `feat:`, `fix:`, `docs:`, `test:`, `refactor:`.
 - Never add attribution footers or co-author lines.
+
+## Orchestrator (xtask)
+
+Single entry-point for building test assets + running all tests in order:
+
+```bash
+cargo run --manifest-path xtask/Cargo.toml -- build-test-assets
+cargo run --manifest-path xtask/Cargo.toml -- test
+cargo run --manifest-path xtask/Cargo.toml -- test-all
+cargo run --manifest-path xtask/Cargo.toml -- print-paths
+```
+
+- `build-test-assets` — builds `serial-mcp` binary + both `native_sim` firmware variants.
+- `test` — runs unit tests + stdio, blob, native_sim validation, and native_sim lifecycle suites.
+- `test-all` — same as `test` plus HTTP integration suite (spawned binary).
+- `print-paths` — emits resolved test-asset paths for debugging.
+- Both `test` and `test-all` pass `--test-threads=1` unless overridden.
+- The native_sim firmware suites are run with `--ignored` because their tests carry `#[ignore = "requires native_sim firmware binary"]`.
+- Non-firmware suites (stdio, blob, http) run without `--ignored` — their hardware-required tests remain skipped automatically.
+- All test helpers (`tests/common/binaries.rs`, `tests/common/firmware.rs`, `tests/common/spawned.rs`) auto-build missing test assets on first use.
