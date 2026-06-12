@@ -5,19 +5,25 @@
 ## Quick Reference
 
 ```bash
-# Everything that runs without hardware (CI baseline)
-cargo test --all-targets
+# Orchestrator (preferred — runs all CI-critical suites in order)
+cargo run --manifest-path xtask/Cargo.toml -- test
+cargo run --manifest-path xtask/Cargo.toml -- test-all   # + HTTP integration
+cargo run --manifest-path xtask/Cargo.toml -- build-test-assets
 
-# Formatting check (CI enforces zero diff)
-cargo fmt --all -- --check
-
-# Clippy (CI enforces zero warnings)
-cargo clippy --all-targets -- -D warnings
+# Individual suites
+cargo test --lib                    # 149 unit tests
+cargo test --test http_integration  # 23 HTTP tests (13 via spawned binary)
+cargo test --test stdio_integration # 3 + 1 hw-skipped stdio tests
+cargo test --test blob_resources    # 2 blob resource tests
 
 # Firmware tests (require native_sim firmware, see firmware/AGENTS.md)
 cargo test --test native_sim_validation -- --ignored
 cargo test --test native_sim_connection_lifecycle -- --ignored --test-threads=1
 cargo test --test bootloader_touch_emulated -- --ignored --test-threads=1
+
+# Formatting and linting (CI enforces)
+cargo fmt --all -- --check
+cargo clippy --all-targets --locked -- -D warnings
 
 # Schema network check (fetches upstream schemas)
 cargo test --test config_schema_validation -- --ignored
@@ -82,7 +88,7 @@ Run via `cargo test --test proptest`. Uses `proptest` to generate random inputs.
 
 ### Layer 3 — HTTP Integration (`tests/http_integration.rs`)
 
-Run via `cargo test --test http_integration`. Spins up a real streamable-HTTP MCP server in-process; uses a real MCP client over localhost.
+Run via `cargo test --test http_integration`. 13 tests spawn a real `serial-mcp --transport=http` child process; 10 tests that inject a custom `ConnectionManager` still run in-process. Uses a real MCP client over localhost.
 
 | Test | What it covers |
 |------|---------------|

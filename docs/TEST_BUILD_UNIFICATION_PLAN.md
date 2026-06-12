@@ -1,5 +1,9 @@
 # Test/Build Unification Plan — `serial-mcp`
 
+> **Status: Implemented.** All phases 1–5 complete.
+> See commits `2362d90` through `36e1bdd` on `fix/reset-firmware-state`.
+> This document remains as design rationale.
+
 ## Goal
 
 Make repo test and firmware workflows deterministic.

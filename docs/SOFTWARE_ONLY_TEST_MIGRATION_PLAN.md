@@ -1,5 +1,9 @@
 # Software-Only Test Migration Plan
 
+> **Status: Implemented.**
+> See `docs/TEST_BUILD_UNIFICATION_PLAN.md` for the successor plan (also implemented).
+> This document remains as design rationale and historical reference.
+
 ## Goal
 
 Move repo to **software-only validation of serial-mcp server quality**.

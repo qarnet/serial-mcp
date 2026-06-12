@@ -1,5 +1,11 @@
 # Zephyr Emulation Research — serial-mcp Testing
 
+> **Status: Historical research.** This document captured the exploration
+> that led to the current `native_sim`-based test setup. For current
+> build commands, see `firmware/AGENTS.md`. The build commands below use
+> the old single-build-dir pattern; production helpers now use dedicated
+> `build/native_sim/` and `build/native_sim_usb/` trees.
+
 ## Landscape
 
 | Approach | Serial exposes | Works for serial-mcp? | 1200-baud touch? | Notes |
