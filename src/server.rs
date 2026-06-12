@@ -71,15 +71,24 @@ pub struct SerialHandler {
     rx_sessions: Arc<RxSessionManager>,
     tx_sessions: Arc<TxSessionManager>,
     budget: Arc<dyn BufferBudget>,
+    profiles: Vec<crate::profiles::Profile>,
 }
 
 #[tool_router]
 impl SerialHandler {
     pub fn new() -> Self {
+        let profiles = crate::profiles::load_profiles(&crate::profiles::default_profiles_path());
         Self::with_manager_and_security(
             Arc::new(ConnectionManager::new()),
             SecurityManager::from_patterns::<[&str; 0]>([]),
         )
+        .with_profiles(profiles)
+    }
+
+    /// Replace the loaded profiles with the given vector.
+    pub fn with_profiles(mut self, profiles: Vec<crate::profiles::Profile>) -> Self {
+        self.profiles = profiles;
+        self
     }
 
     /// Construct a handler with a caller-supplied [`ConnectionManager`].
@@ -138,6 +147,7 @@ impl SerialHandler {
             rx_sessions: Arc::new(RxSessionManager::new()),
             tx_sessions: Arc::new(TxSessionManager::new()),
             budget,
+            profiles: Vec::new(),
         }
     }
 
@@ -364,6 +374,37 @@ impl SerialHandler {
         Parameters(args): Parameters<ReconfigureArgs>,
     ) -> Result<Json<ReconfigureResult>, String> {
         port_ops::reconfigure(&self.connections, args).await
+    }
+
+    #[tool(
+        description = "List all configured serial device profiles. Profiles define selector rules and default settings so agents can open devices by name instead of fragile port paths.",
+        title = "List Profiles",
+        annotations(read_only_hint = true, open_world_hint = false)
+    )]
+    async fn list_profiles(&self) -> Result<Json<ListProfilesResult>, String> {
+        port_ops::list_profiles(&self.profiles)
+    }
+
+    #[tool(
+        description = "Open a serial port by profile name rather than raw port path. The server matches the profile's selector against live ports and applies the profile's default configuration.",
+        title = "Open by Profile",
+        annotations(destructive_hint = false, open_world_hint = false)
+    )]
+    async fn open_profile(
+        &self,
+        Parameters(args): Parameters<OpenProfileArgs>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<Json<OpenResult>, String> {
+        let result = port_ops::open_profile(
+            &self.connections,
+            &self.security,
+            &self.profiles,
+            args,
+        )
+        .await?;
+        let connection_id = result.0.connection_id.clone();
+        self.notify_resource_changed(&connection_id, &ctx).await;
+        Ok(result)
     }
 }
 

@@ -107,7 +107,7 @@ impl From<FlowControl> for serialport::FlowControl {
     }
 }
 
-fn data_bits_to_str(d: DataBits) -> String {
+pub(crate) fn data_bits_to_str(d: DataBits) -> String {
     match d {
         DataBits::Five => "5".into(),
         DataBits::Six => "6".into(),
@@ -116,14 +116,14 @@ fn data_bits_to_str(d: DataBits) -> String {
     }
 }
 
-fn stop_bits_to_str(s: StopBits) -> String {
+pub(crate) fn stop_bits_to_str(s: StopBits) -> String {
     match s {
         StopBits::One => "1".into(),
         StopBits::Two => "2".into(),
     }
 }
 
-fn parity_to_str(p: Parity) -> String {
+pub(crate) fn parity_to_str(p: Parity) -> String {
     match p {
         Parity::None => "none".into(),
         Parity::Odd => "odd".into(),

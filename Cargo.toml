@@ -5,7 +5,7 @@ edition = "2021"
 authors = [
     "Thomas Kirschner <thomaskirschner85@yahoo.de>",
 ]
-description = "MCP server for serial port communication. 14 tools (list/open/read/write/subscribe/get_status/reconfigure/...), resources, prompts, task cancellation, stdio + streamable-HTTP transports."
+description = "MCP server for serial port communication. 16 tools (list/open/read/write/subscribe/get_status/reconfigure/list_profiles/open_profile/...), resources, prompts, task cancellation, stdio + streamable-HTTP transports."
 license = "MIT"
 readme = "README.md"
 repository = "https://github.com/qarnet/serial-mcp"
@@ -30,6 +30,8 @@ base64 = "0.22"
 axum = "0.8"
 glob = "0.3"
 pico-args = { version = "0.5.0", features = ["eq-separator"] }
+toml = "0.8"
+dirs = "6"
 
 [[bin]]
 name = "serial-mcp"
@@ -47,6 +49,7 @@ proptest = "1.6"
 proptest-derive = "0.5"
 libfuzzer-sys = "0.4"
 arbitrary = { version = "1", features = ["derive"] }
+tempfile = "3"
 jsonschema = "0.26"
 reqwest = { version = "0.12", features = ["blocking", "json", "rustls-tls"], default-features = false }
 mutants = "0.0.4"

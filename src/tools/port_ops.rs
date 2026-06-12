@@ -9,7 +9,8 @@ use crate::tools::helpers::log_tool_err;
 use crate::tools::helpers::parse_open_args;
 use crate::tools::types::{
     CloseArgs, CloseResult, GetStatusArgs, GetStatusResult, ListConnectionsResult,
-    ListPortsResult, OpenArgs, OpenResult, ReconfigureArgs, ReconfigureResult,
+    ListPortsResult, ListProfilesResult, OpenArgs, OpenProfileArgs, OpenResult,
+    ProfileSummary, ReconfigureArgs, ReconfigureResult,
 };
 
 pub async fn list_ports() -> Result<Json<ListPortsResult>, String> {
@@ -201,4 +202,68 @@ fn parse_string_parity(s: &str) -> Result<crate::serial::Parity, String> {
         "even" => Ok(crate::serial::Parity::Even),
         other => Err(format!("Invalid parity: {other}")),
     }
+}
+
+pub fn list_profiles(
+    profiles: &[crate::profiles::Profile],
+) -> Result<Json<ListProfilesResult>, String> {
+    let summaries: Vec<ProfileSummary> = profiles
+        .iter()
+        .map(|p| ProfileSummary {
+            name: p.name.clone(),
+            selector: p.selector.clone(),
+            defaults: p.defaults.clone(),
+        })
+        .collect();
+    let count = summaries.len();
+    info!("Listed {count} profiles");
+    Ok(Json(ListProfilesResult {
+        count,
+        profiles: summaries,
+    }))
+}
+
+pub async fn open_profile(
+    connections: &Arc<ConnectionManager>,
+    security: &SecurityManager,
+    profiles: &[crate::profiles::Profile],
+    args: OpenProfileArgs,
+) -> Result<Json<OpenResult>, String> {
+    let profile = profiles
+        .iter()
+        .find(|p| p.name == args.profile)
+        .ok_or_else(|| format!("Profile '{}' not found", args.profile))?;
+
+    let ports = PortInfo::list_available()
+        .map_err(|e| log_tool_err("open_profile", "Failed to list ports", e))?;
+
+    let matched = ports.iter().find(|p| profile.matches(p)).ok_or_else(|| {
+        format!(
+            "No port matches profile '{}' selector: {:?}",
+            args.profile, profile.selector
+        )
+    })?;
+
+    open(
+        connections,
+        security,
+        OpenArgs {
+            port: matched.name.clone(),
+            name: args.name.or_else(|| {
+                profile.defaults.name.as_ref().map(|prefix| {
+                    format!(
+                        "{}-{}",
+                        prefix,
+                        matched.name.rsplit('/').next().unwrap_or(&matched.name)
+                    )
+                })
+            }),
+            baud_rate: profile.defaults.baud_rate,
+            data_bits: profile.defaults.data_bits.clone(),
+            stop_bits: profile.defaults.stop_bits.clone(),
+            parity: profile.defaults.parity.clone(),
+            flow_control: profile.defaults.flow_control.clone(),
+        },
+    )
+    .await
 }

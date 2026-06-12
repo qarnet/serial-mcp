@@ -31,6 +31,8 @@ const EXPECTED_TOOLS: &[&str] = &[
     "unsubscribe",
     "get_status",
     "reconfigure",
+    "list_profiles",
+    "open_profile",
 ];
 
 fn build_stdio_server() {

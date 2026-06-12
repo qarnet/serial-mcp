@@ -3,6 +3,7 @@ pub mod codec;
 pub mod error;
 pub mod limits;
 pub mod match_config;
+pub mod profiles;
 pub mod prompts;
 pub mod resources;
 pub mod rx_metadata;

@@ -39,6 +39,8 @@ const EXPECTED_TOOLS: &[&str] = &[
     "unsubscribe",
     "get_status",
     "reconfigure",
+    "list_profiles",
+    "open_profile",
 ];
 
 #[tokio::test]
@@ -1329,6 +1331,45 @@ async fn reconfigure_invalid_args_return_error() {
         .await
         .unwrap();
     assert_eq!(result.is_error, Some(true), "{result:?}");
+
+    client.cancel().await.ok();
+}
+
+#[tokio::test]
+async fn list_profiles_returns_empty_when_no_config() {
+    let server = TestServer::start().await;
+    let (client, _rx) = connect_client(&server).await.unwrap();
+
+    let result = client
+        .peer()
+        .call_tool(tool_request("list_profiles", json!({})))
+        .await
+        .unwrap();
+    assert_ne!(result.is_error, Some(true), "{result:?}");
+    let s = result.structured_content.expect("structured");
+    assert_eq!(s["count"], json!(0));
+    assert!(s["profiles"].as_array().unwrap().is_empty());
+
+    client.cancel().await.ok();
+}
+
+#[tokio::test]
+async fn open_profile_not_found_returns_error() {
+    let server = TestServer::start().await;
+    let (client, _rx) = connect_client(&server).await.unwrap();
+
+    let result = client
+        .peer()
+        .call_tool(tool_request(
+            "open_profile",
+            json!({ "profile": "nonexistent" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        result.is_error, Some(true),
+        "unknown profile should return error: {result:?}"
+    );
 
     client.cancel().await.ok();
 }

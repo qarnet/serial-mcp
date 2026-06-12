@@ -148,6 +148,16 @@ pub struct ReconfigureArgs {
     pub flow_control: Option<String>,
 }
 
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct ListProfilesArgs {}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct OpenProfileArgs {
+    pub profile: String,
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
 // ---- Response structs ------------------------------------------------------
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -313,6 +323,21 @@ pub struct ReconfigureResult {
     pub stop_bits: String,
     pub parity: String,
     pub flow_control: String,
+}
+
+/// Summary of a single profile returned by `list_profiles`.
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct ProfileSummary {
+    pub name: String,
+    pub selector: crate::profiles::ProfileSelector,
+    pub defaults: crate::profiles::ProfileDefaults,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct ListProfilesResult {
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub count: usize,
+    pub profiles: Vec<ProfileSummary>,
 }
 
 // ---- Default helpers -------------------------------------------------------
