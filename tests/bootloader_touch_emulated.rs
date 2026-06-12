@@ -27,7 +27,7 @@
 //!
 //! **Environment:**
 //! - `SERIAL_MCP_NATIVE_SIM_USB_BIN` — path to USB-enabled zephyr.exe
-//!   (default: `build/firmware/zephyr/zephyr.exe`)
+//!   (default: `build/native_sim_usb/firmware/zephyr/zephyr.exe`)
 //! - `USBIP_NATIVE_SIM_ATTACH_CMD` — override path to attach wrapper
 //!   (default: resolved path of `usbip-native-sim-attach`)
 //! - `USBIP_NATIVE_SIM_DETACH_CMD` — override path to detach wrapper
