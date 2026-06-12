@@ -39,7 +39,7 @@ Add user to `dialout` group for port access: `sudo usermod -aG dialout $USER`
 
 ```bash
 VERSION=$(curl -s https://api.github.com/repos/qarnet/serial-mcp/releases/latest | grep -oP '"tag_name": "\K[^"]+')
-ARCH=aarch64-macos   # Intel: x86_64-macos
+ARCH=aarch64-macos
 curl -L "https://github.com/qarnet/serial-mcp/releases/download/${VERSION}/serial-mcp-${VERSION#v}-${ARCH}" \
   -o serial-mcp && chmod +x serial-mcp && sudo mv serial-mcp /usr/local/bin/
 ```

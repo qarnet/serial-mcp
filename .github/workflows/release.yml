@@ -114,6 +114,7 @@ jobs:
             pkg_config_allow_cross: ""
             pkg_config_path: ""
 
+          # GitHub Actions uses macOS version labels here; macos-14 is Apple Silicon.
           - os: macos-14
             target: aarch64-apple-darwin
             artifact: serial-mcp

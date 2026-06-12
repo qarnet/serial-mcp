@@ -50,10 +50,11 @@ pub fn workspace_root() -> &'static PathBuf {
 
 /// Default path to the debug `serial-mcp` binary inside the workspace.
 pub fn default_serial_mcp_bin() -> PathBuf {
-    workspace_root()
-        .join("target")
-        .join("debug")
-        .join(SERIAL_MCP_BIN_NAME)
+    workspace_root().join("target").join("debug").join(format!(
+        "{}{}",
+        SERIAL_MCP_BIN_NAME,
+        std::env::consts::EXE_SUFFIX
+    ))
 }
 
 /// Resolve the path to the `serial-mcp` binary the tests should spawn.

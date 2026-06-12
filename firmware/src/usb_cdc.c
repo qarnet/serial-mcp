@@ -19,6 +19,7 @@
 #include <errno.h>
 #include <stdlib.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/devicetree.h>
 
 LOG_MODULE_REGISTER(usb_cdc, LOG_LEVEL_INF);
 
@@ -33,7 +34,7 @@ LOG_MODULE_REGISTER(usb_cdc, LOG_LEVEL_INF);
  */
 volatile uint8_t sim_gpregret;
 
-#if defined(CONFIG_USB_DEVICE_STACK) && defined(CONFIG_USB_CDC_ACM)
+#if defined(CONFIG_USB_DEVICE_STACK) && defined(CONFIG_USB_CDC_ACM) && DT_NODE_EXISTS(DT_NODELABEL(cdc_acm_0))
 
 #include <zephyr/device.h>
 #include <zephyr/drivers/uart.h>
@@ -111,7 +112,7 @@ int usb_cdc_init(void)
 	return 0;
 }
 
-#else /* !(CONFIG_USB_DEVICE_STACK && CONFIG_USB_CDC_ACM) */
+#else /* !(CONFIG_USB_DEVICE_STACK && CONFIG_USB_CDC_ACM && cdc_acm_0 DT node) */
 
 /* Plain `native_sim` build: no USB CDC support compiled in.
  * `usb_cdc_init()` returns -ENODEV so callers (see `main.c`) can
@@ -122,4 +123,4 @@ int usb_cdc_init(void)
 	return -ENODEV;
 }
 
-#endif /* CONFIG_USB_DEVICE_STACK && CONFIG_USB_CDC_ACM */
+#endif /* CONFIG_USB_DEVICE_STACK && CONFIG_USB_CDC_ACM && DT_NODE_EXISTS(cdc_acm_0) */

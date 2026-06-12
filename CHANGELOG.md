@@ -86,7 +86,7 @@ Release workflow and docs cleanup.
 
 **Added:** vendored schema validation for config examples via Rust integration tests and a daily upstream schema drift workflow.
 
-**Changed:** release automation now runs after successful `main` CI and builds Linux x86_64, Linux ARM64, macOS x86_64, macOS ARM64, and Windows artifacts.
+**Changed:** release automation now runs after successful `main` CI and builds Linux x86_64, Linux ARM64, macOS ARM64, and Windows artifacts.
 
 **Changed:** agent configuration docs now point to schema-backed examples and official docs, with stale examples removed.
 
