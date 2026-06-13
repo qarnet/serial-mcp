@@ -27,28 +27,48 @@ jobs:
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@v16
 
-      - name: Cache Nix store
-        uses: DeterminateSystems/magic-nix-cache-action@v8
-
       - name: Extract version from Cargo.toml
         id: version
         run: |
           VER=$(python3 -c "import tomllib; print(tomllib.load(open('Cargo.toml','rb'))['package']['version'])")
           echo "value=$VER" >> "$GITHUB_OUTPUT"
 
-      - name: Verify release tag exists (skip dry-run releases)
-        id: tag_check
+      - name: Decide whether to publish
+        id: gate
         run: |
-          TAG="v${{ steps.version.outputs.value }}"
-          if git ls-remote --tags origin "refs/tags/$TAG" | grep -q .; then
-            echo "exists=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "exists=false" >> "$GITHUB_OUTPUT"
-            echo "Tag $TAG not found — this was a dry-run release, skipping."
+          VERSION="${{ steps.version.outputs.value }}"
+          TAG="v${VERSION}"
+          NAME=$(jq -r '.name' server.json)
+
+          # 1. The release tag must exist. Without it this was a dry-run build
+          #    (workflow_dispatch on Release) and the referenced release binaries
+          #    do not exist yet.
+          if ! git ls-remote --tags origin "refs/tags/$TAG" | grep -q .; then
+            echo "Tag $TAG not found — dry-run release, nothing to publish."
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
 
+          # 2. The version must not already be in the registry. Publishing a
+          #    duplicate version returns HTTP 400 and fails the job, so re-runs
+          #    and un-bumped merges (tag exists from a prior release) must no-op.
+          COUNT=$(curl -fsS --get \
+            --data-urlencode "search=$NAME" \
+            --data-urlencode "version=$VERSION" \
+            https://registry.modelcontextprotocol.io/v0/servers \
+            | jq -r '.metadata.count // 0')
+
+          if [ "$COUNT" != "0" ]; then
+            echo "$NAME@$VERSION already published to the MCP registry — skipping."
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "$NAME@$VERSION not yet published — proceeding."
+          echo "publish=true" >> "$GITHUB_OUTPUT"
+
       - name: Build server.json from release binaries
-        if: steps.tag_check.outputs.exists == 'true'
+        if: steps.gate.outputs.publish == 'true'
         run: |
           VERSION="${{ steps.version.outputs.value }}"
           BASE="https://github.com/qarnet/serial-mcp/releases/download/v${VERSION}"
@@ -84,7 +104,7 @@ jobs:
           mv server.json.tmp server.json
 
       - name: Validate server.json against schema
-        if: steps.tag_check.outputs.exists == 'true'
+        if: steps.gate.outputs.publish == 'true'
         run: |
           curl -sL https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json \
             -o /tmp/mcp-server.schema.json
@@ -92,9 +112,9 @@ jobs:
             jsonschema-cli validate /tmp/mcp-server.schema.json -i server.json
 
       - name: Login to MCP Registry (GitHub OIDC)
-        if: steps.tag_check.outputs.exists == 'true'
+        if: steps.gate.outputs.publish == 'true'
         run: nix run .#mcp-publisher -- login github-oidc
 
       - name: Publish to MCP Registry
-        if: steps.tag_check.outputs.exists == 'true'
+        if: steps.gate.outputs.publish == 'true'
         run: nix run .#mcp-publisher -- publish

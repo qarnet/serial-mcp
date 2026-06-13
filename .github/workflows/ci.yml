@@ -23,7 +23,11 @@ jobs:
         uses: DeterminateSystems/nix-installer-action@v16
 
       - name: Cache Nix store
-        uses: DeterminateSystems/magic-nix-cache-action@v8
+        uses: nix-community/cache-nix-action@v7
+        with:
+          primary-key: nix-${{ runner.os }}-${{ hashFiles('**/flake.lock', '**/Cargo.lock') }}
+          restore-prefixes-first-match: nix-${{ runner.os }}-
+          gc-max-store-size-linux: 2G
 
       - name: nix flake check
         run: nix flake check --accept-flake-config
