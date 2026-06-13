@@ -250,8 +250,9 @@ async fn protocol_emulator_workflow() {
     assert!(collected.contains("P=980.9"), "data must contain pressure");
     assert!(collected.contains("C=409"), "data must contain co2");
 
-    // Unsubscribe to stop the background stream before read
-    // competes with the pump for serial RX data.
+    // Unsubscribe to stop the background stream before read competes with the
+    // pump for serial RX data. unsubscribe now awaits the stream task and pump
+    // exit, so the port is quiescent on return — no sleep band-aid needed.
     client
         .peer()
         .call_tool(tool_request(
@@ -260,10 +261,6 @@ async fn protocol_emulator_workflow() {
         ))
         .await
         .unwrap();
-    // Yield briefly so the subscribe pump task fully stops before Stage 3
-    // issues a write. Without this, slow schedulers (e.g. ARM) can leave
-    // the pump running long enough to consume the CSV response.
-    tokio::time::sleep(Duration::from_millis(50)).await;
 
     // ---- Stage 3: write + read (CSV) ----
     client

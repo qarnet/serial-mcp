@@ -224,11 +224,16 @@ impl RxSession {
     /// Prune consumers whose receivers have been dropped, and if no
     /// consumers remain, cancel the pump token so it exits promptly.
     ///
+    /// Returns `true` if the pump was cancelled because no consumers remain.
+    /// In that case the caller should [`Self::join_pump`] to await the pump's
+    /// exit before touching the serial port, otherwise a still-running pump
+    /// can read (and discard) bytes that later read/wait_for tools need.
+    ///
     /// Call this after removing a stream handle (e.g., unsubscribe) so
     /// the pump does not keep reading serial data that other direct-read
     /// tools (read, wait_for) need. Until PLAN 1c/1d migrate those tools
     /// onto RxSession, this avoids RX data starvation.
-    pub fn prune_consumers(&self) {
+    pub fn prune_consumers(&self) -> bool {
         let mut reg = self.consumers.lock().expect("consumers mutex poisoned");
         reg.prune_closed();
         if reg.is_empty() {
@@ -240,6 +245,9 @@ impl RxSession {
                 "rx_session: pump cancelled for {} (no consumers after prune)",
                 self.connection_id
             );
+            true
+        } else {
+            false
         }
     }
 
