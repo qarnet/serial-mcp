@@ -490,6 +490,7 @@ mod tests {
             flow_control: "none".into(),
             log_capacity: 1024,
             log_enabled: true,
+            reconnect_policy: Default::default(),
         };
         let config = parse_open_args(args).unwrap();
         assert_eq!(config.port, "/dev/ttyUSB0");
@@ -509,6 +510,7 @@ mod tests {
             flow_control: "none".into(),
             log_capacity: 1024,
             log_enabled: true,
+            reconnect_policy: Default::default(),
         };
         let err = parse_open_args(args).unwrap_err();
         assert!(err.contains("data_bits"));

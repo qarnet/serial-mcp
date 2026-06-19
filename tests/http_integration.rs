@@ -46,6 +46,7 @@ const EXPECTED_TOOLS: &[&str] = &[
     "get_log",
     "clear_log",
     "export_log",
+    "reconnect",
 ];
 
 #[tokio::test]

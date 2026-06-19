@@ -468,6 +468,18 @@ impl SerialHandler {
     ) -> Result<Json<ExportLogResult>, String> {
         port_ops::export_log(&self.connections, args).await
     }
+
+    #[tool(
+        description = "Attempt to reconnect a disconnected serial connection. Rebuilds the port stream from the original configuration, preserving connection_id, counters, and log buffer. Succeeds immediately if already connected.",
+        title = "Reconnect",
+        annotations(destructive_hint = false, open_world_hint = false)
+    )]
+    async fn reconnect(
+        &self,
+        Parameters(args): Parameters<ReconnectArgs>,
+    ) -> Result<Json<ReconnectResult>, String> {
+        port_ops::reconnect(&self.connections, args).await
+    }
 }
 
 // ---- Tool helpers (extracted to src/tools/helpers.rs) -----------------------

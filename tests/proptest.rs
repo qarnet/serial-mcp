@@ -174,6 +174,7 @@ proptest! {
             flow_control: fc.clone(),
             log_capacity: 1024,
             log_enabled: true,
+            reconnect_policy: Default::default(),
         };
         assert_roundtrip!(args);
 
@@ -507,6 +508,7 @@ proptest! {
             flow_control: "none".into(),
             log_capacity: 1024,
             log_enabled: true,
+            reconnect_policy: Default::default(),
         };
         assert_roundtrip!(args);
     }

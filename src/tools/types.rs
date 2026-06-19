@@ -31,6 +31,9 @@ pub struct OpenArgs {
     /// Whether logging is enabled. Default: true (ignored when capacity is 0).
     #[serde(default = "default_true")]
     pub log_enabled: bool,
+    /// Reconnect policy for this connection. Default: disabled.
+    #[serde(default)]
+    pub reconnect_policy: crate::serial::ReconnectPolicy,
 }
 
 fn default_log_capacity() -> usize {
@@ -344,6 +347,13 @@ pub struct GetStatusResult {
     /// OS-level port identity captured at open time. `null` for connections
     /// without identity data (e.g. loopback tests).
     pub port_info: Option<crate::serial::PortInfo>,
+    /// Current connection health state.
+    pub state: crate::serial::ConnectionState,
+    /// Number of reconnect attempts since last disconnect.
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub reconnect_attempts: u64,
+    /// Last fatal error message, or null.
+    pub last_error: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -493,4 +503,19 @@ pub struct ExportLogResult {
     pub path: String,
     #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
     pub events_written: usize,
+}
+
+// ---- Reconnect tool --------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ReconnectArgs {
+    pub connection_id: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct ReconnectResult {
+    pub connection_id: String,
+    pub name: Option<String>,
+    pub port: String,
+    pub state: crate::serial::ConnectionState,
 }

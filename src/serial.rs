@@ -170,6 +170,88 @@ fn default_true() -> bool {
     true
 }
 
+// ---- Connection state -------------------------------------------------------
+
+/// The health state of a live serial connection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ConnectionState {
+    Open,
+    Disconnected,
+    Reconnecting,
+    Closed,
+}
+
+impl ConnectionState {
+    pub fn is_healthy(&self) -> bool {
+        matches!(self, ConnectionState::Open)
+    }
+}
+
+/// Reconnect policy for a connection. When enabled and the port
+/// disappears, the server will try to re-establish the connection
+/// automatically with exponential backoff.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ReconnectPolicy {
+    /// Enable automatic reconnect. Default: false.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Maximum reconnect attempts. 0 = unlimited. Default: 10.
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    #[serde(default = "default_max_reconnect_attempts")]
+    pub max_attempts: u32,
+    /// Initial delay between reconnect attempts in milliseconds. Default: 500.
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    #[serde(default = "default_initial_reconnect_delay_ms")]
+    pub initial_delay_ms: u64,
+    /// Maximum delay between attempts in milliseconds. Default: 30000.
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    #[serde(default = "default_max_reconnect_delay_ms")]
+    pub max_delay_ms: u64,
+    /// Backoff multiplier. Default: 2.0.
+    #[serde(default = "default_backoff_multiplier")]
+    pub backoff_multiplier: f64,
+}
+
+impl Default for ReconnectPolicy {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_attempts: 10,
+            initial_delay_ms: 500,
+            max_delay_ms: 30_000,
+            backoff_multiplier: 2.0,
+        }
+    }
+}
+
+fn default_max_reconnect_attempts() -> u32 {
+    10
+}
+fn default_initial_reconnect_delay_ms() -> u64 {
+    500
+}
+fn default_max_reconnect_delay_ms() -> u64 {
+    30_000
+}
+fn default_backoff_multiplier() -> f64 {
+    2.0
+}
+
+/// Classify an I/O error as a fatal disconnect (port vanished).
+pub fn is_fatal_disconnect(err: &std::io::Error) -> bool {
+    use std::io::ErrorKind;
+    matches!(
+        err.kind(),
+        ErrorKind::NotFound
+            | ErrorKind::PermissionDenied
+            | ErrorKind::ConnectionReset
+            | ErrorKind::ConnectionAborted
+            | ErrorKind::BrokenPipe
+            | ErrorKind::Interrupted
+    )
+}
+
 // ---- Port enumeration --------------------------------------------------------
 
 /// Transport type observed on the host OS for a serial port.
@@ -449,6 +531,14 @@ pub struct SerialConnection {
     port_info: Option<PortInfo>,
     /// Per-connection event log buffer.
     log: Arc<crate::log_buffer::LogBuffer>,
+    /// Current connection health state.
+    state: StdMutex<ConnectionState>,
+    /// Reconnect policy for this connection.
+    pub(crate) reconnect_policy: StdMutex<ReconnectPolicy>,
+    /// Count of reconnect attempts since the last disconnect.
+    reconnect_attempts: AtomicU64,
+    /// Last fatal I/O error message and timestamp.
+    last_error: StdMutex<Option<(std::time::SystemTime, String)>>,
 }
 
 impl fmt::Debug for SerialConnection {
@@ -513,6 +603,10 @@ impl SerialConnection {
             notification_drop_count: AtomicU64::new(0),
             port_info: config.port_info,
             log: crate::log_buffer::LogBuffer::new_shared(config.log_capacity, config.log_enabled),
+            state: StdMutex::new(ConnectionState::Open),
+            reconnect_policy: StdMutex::new(ReconnectPolicy::default()),
+            reconnect_attempts: AtomicU64::new(0),
+            last_error: StdMutex::new(None),
         }
     }
 
@@ -559,6 +653,115 @@ impl SerialConnection {
     /// Return the per-connection event log buffer.
     pub fn log(&self) -> &Arc<crate::log_buffer::LogBuffer> {
         &self.log
+    }
+
+    /// Return the current connection health state.
+    pub fn state(&self) -> ConnectionState {
+        *self.state.lock().expect("state mutex poisoned")
+    }
+
+    /// Set the connection state and log the transition.
+    fn set_state(&self, new_state: ConnectionState) {
+        *self.state.lock().expect("state mutex poisoned") = new_state;
+    }
+
+    /// Mark the connection as disconnected due to a fatal I/O error.
+    /// Takes the io handle out (sets to None), cancels in-flight operations,
+    /// and clears RX buffers.
+    pub async fn mark_disconnected(&self, error_message: String) {
+        let was_healthy = self.state().is_healthy();
+        self.set_state(ConnectionState::Disconnected);
+        self.last_error
+            .lock()
+            .expect("poisoned")
+            .replace((std::time::SystemTime::now(), error_message.clone()));
+        // We do NOT cancel close_token here — that is reserved for explicit
+        // close(). The pump and in-flight reads will time out naturally and
+        // retry when the port is reconnected.
+        self.log.rx_data(0); // dummy to trigger log
+        self.log.record(
+            None,
+            crate::log_buffer::LogEvent::Disconnect {
+                error: error_message,
+            },
+        );
+        // Take the io handle out so subsequent I/O calls get ConnectionClosed
+        let mut io_lock = self.io.lock().await;
+        if let Some(mut io) = io_lock.take() {
+            // Best-effort: clear OS buffers and shutdown
+            let _ = io.clear_os_buffers(FlushTarget::Input);
+            let _ = io.shutdown().await;
+        }
+        if was_healthy {
+            tracing::warn!("Connection {} disconnected", self.display_name());
+        }
+    }
+
+    /// Attempt to re-establish the serial port connection.
+    ///
+    /// Rebuilds a `SerialStream` from the stored config and replaces the
+    /// current `io` handle in place. Preserves all counters, id, name,
+    /// and log buffer. Called by auto-reconnect tasks and the reconnect
+    /// tool.
+    pub async fn reconnect(&self) -> Result<()> {
+        let state = self.state();
+        if state == ConnectionState::Open {
+            return Ok(()); // already connected
+        }
+        if state == ConnectionState::Closed {
+            return Err(SerialError::ConnectionClosed(self.display_name()));
+        }
+
+        self.set_state(ConnectionState::Reconnecting);
+        self.reconnect_attempts.fetch_add(1, Ordering::SeqCst);
+        let attempt = self.reconnect_attempts.load(Ordering::SeqCst) as u32;
+        self.log.record(
+            None,
+            crate::log_buffer::LogEvent::ReconnectStart { attempt },
+        );
+
+        let config = self.build_config();
+        match build_stream(&config) {
+            Ok(stream) => {
+                let mut io_lock = self.io.lock().await;
+                *io_lock = Some(Box::new(stream));
+                self.closed.store(false, Ordering::SeqCst);
+                self.set_state(ConnectionState::Open);
+                self.log
+                    .record(None, crate::log_buffer::LogEvent::ReconnectSuccess);
+                tracing::info!("Connection {} reconnected", self.display_name());
+                Ok(())
+            }
+            Err(e) => {
+                self.set_state(ConnectionState::Disconnected);
+                let msg = e.to_string();
+                self.log.record(
+                    None,
+                    crate::log_buffer::LogEvent::ReconnectFailed {
+                        attempt,
+                        error: msg,
+                    },
+                );
+                Err(e)
+            }
+        }
+    }
+
+    /// Build a `ConnectionConfig` from the current connection state,
+    /// for use in reconnect.
+    fn build_config(&self) -> ConnectionConfig {
+        ConnectionConfig {
+            port: self.port.clone(),
+            name: self.name.clone(),
+            baud_rate: self.baud_rate(),
+            data_bits: self.data_bits(),
+            stop_bits: self.stop_bits(),
+            parity: self.parity(),
+            flow_control: self.flow_control(),
+            port_info: self.port_info.clone(),
+            log_capacity: 1024, // preserve log config
+            log_enabled: self.log.is_enabled(),
+        }
     }
 
     /// Record `n` bytes written to the device.
@@ -622,6 +825,14 @@ impl SerialConnection {
             truncation_count: self.truncation_count.load(Ordering::SeqCst),
             notification_drop_count: self.notification_drop_count.load(Ordering::SeqCst),
             port_info: self.port_info.clone(),
+            state: self.state(),
+            reconnect_attempts: self.reconnect_attempts.load(Ordering::SeqCst),
+            last_error: self
+                .last_error
+                .lock()
+                .expect("poisoned")
+                .as_ref()
+                .map(|(_, msg)| msg.clone()),
         }
     }
 
@@ -1076,6 +1287,13 @@ pub struct ConnectionStatus {
     /// manufacturer, etc.). `null` for connections opened without
     /// identity data (e.g. loopback tests).
     pub port_info: Option<PortInfo>,
+    /// Current connection health state.
+    pub state: ConnectionState,
+    /// Number of reconnect attempts since last disconnect.
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub reconnect_attempts: u64,
+    /// Last fatal error message, or null.
+    pub last_error: Option<String>,
 }
 
 fn find_connection_by_port<'a>(

@@ -329,6 +329,14 @@ async fn pump_loop(
             }
             Err(e) => {
                 error!("rx_session: read error on {conn_id}: {e}");
+                // Detect fatal disconnects and update connection state.
+                if let crate::error::SerialError::IoError(ref io_err) = e {
+                    if crate::serial::is_fatal_disconnect(io_err) {
+                        connection
+                            .mark_disconnected(format!("Read error: {e}"))
+                            .await;
+                    }
+                }
                 consumers
                     .lock()
                     .expect("consumers mutex poisoned")

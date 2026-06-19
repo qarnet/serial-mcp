@@ -11,8 +11,8 @@ use crate::tools::types::{
     ClearLogArgs, ClearLogResult, CloseArgs, CloseResult, DeleteProfileArgs, DeleteProfileResult,
     ExportLogArgs, ExportLogResult, GetLogArgs, GetLogResult, GetStatusArgs, GetStatusResult,
     ListConnectionsResult, ListPortsResult, ListProfilesResult, OpenArgs, OpenProfileArgs,
-    OpenResult, ProfileSummary, ReconfigureArgs, ReconfigureResult, SaveProfileArgs,
-    SaveProfileResult,
+    OpenResult, ProfileSummary, ReconfigureArgs, ReconfigureResult, ReconnectArgs, ReconnectResult,
+    SaveProfileArgs, SaveProfileResult,
 };
 
 pub async fn list_ports() -> Result<Json<ListPortsResult>, String> {
@@ -59,6 +59,7 @@ pub async fn open(
         .ok()
         .and_then(|ports| ports.into_iter().find(|p| p.name == port));
 
+    let reconnect_policy = args.reconnect_policy.clone();
     let mut config = parse_open_args(args)?;
     config.port_info = port_info;
 
@@ -66,6 +67,12 @@ pub async fn open(
         .open(config)
         .await
         .map_err(|e| log_tool_err("open", &format!("Failed to open port {port}"), e))?;
+
+    // Set reconnect policy on the newly opened connection.
+    if let Ok(conn) = connections.get(&connection_id).await {
+        *conn.reconnect_policy.lock().expect("poisoned") = reconnect_policy;
+    }
+
     info!("Opened connection {} -> {}", connection_id, port);
 
     Ok(Json(OpenResult {
@@ -136,6 +143,9 @@ pub async fn get_status(
         truncation_count: status.truncation_count,
         notification_drop_count: status.notification_drop_count,
         port_info: status.port_info,
+        state: status.state,
+        reconnect_attempts: status.reconnect_attempts,
+        last_error: status.last_error,
     }))
 }
 
@@ -286,6 +296,7 @@ pub async fn open_profile(
             flow_control: profile.defaults.flow_control.clone(),
             log_capacity: args.log_capacity,
             log_enabled: args.log_enabled,
+            reconnect_policy: crate::serial::ReconnectPolicy::default(),
         },
     )
     .await
@@ -373,6 +384,29 @@ pub async fn delete_profile(
 
     Ok(Json(DeleteProfileResult {
         profile_name: args.profile_name,
+    }))
+}
+
+// ── Reconnect tool ─────────────────────────────────────────────────────
+
+pub async fn reconnect(
+    connections: &Arc<ConnectionManager>,
+    args: ReconnectArgs,
+) -> Result<Json<ReconnectResult>, String> {
+    let conn = connections
+        .get(&args.connection_id)
+        .await
+        .map_err(|_| format!("Connection ID {} not found", args.connection_id))?;
+
+    conn.reconnect()
+        .await
+        .map_err(|e| format!("Reconnect failed: {e}"))?;
+
+    Ok(Json(ReconnectResult {
+        connection_id: args.connection_id,
+        name: conn.name().map(str::to_string),
+        port: conn.port().to_string(),
+        state: conn.state(),
     }))
 }
 

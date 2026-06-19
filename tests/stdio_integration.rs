@@ -38,6 +38,7 @@ const EXPECTED_TOOLS: &[&str] = &[
     "get_log",
     "clear_log",
     "export_log",
+    "reconnect",
 ];
 
 fn build_stdio_server() {
