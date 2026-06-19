@@ -779,7 +779,7 @@ impl SerialConnection {
 }
 
 /// Which OS-side buffer(s) a flush should clear.
-#[derive(Debug, Clone, Copy, Deserialize, Serialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum FlushTarget {
     /// Bytes the OS has received from the device but the app has not yet read.
