@@ -413,6 +413,7 @@ pub fn build_read_result(
         bytes_returned: outcome.meta.bytes_returned,
         matched: outcome.matched,
         match_index: outcome.match_index,
+        frames: None,
     }))
 }
 

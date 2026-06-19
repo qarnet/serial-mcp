@@ -83,6 +83,11 @@ pub struct ReadArgs {
     /// result includes `matched` and `match_index` fields.
     #[serde(default)]
     pub r#match: Option<crate::match_config::MatchRequest>,
+    /// Optional frame decoder configuration. When present, the byte stream is
+    /// split into structured frames. The result includes `frames` in addition
+    /// to the raw `data` field. Can be combined with `match`.
+    #[serde(default)]
+    pub framing: Option<crate::framing::FramingConfig>,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -139,6 +144,11 @@ pub struct SubscribeArgs {
     /// and `match_index`, then terminates.
     #[serde(default)]
     pub r#match: Option<crate::match_config::MatchRequest>,
+    /// Optional frame decoder configuration. When present, the stream emits
+    /// one notification per decoded frame (instead of per raw chunk). Can
+    /// be combined with `match`.
+    #[serde(default)]
+    pub framing: Option<crate::framing::FramingConfig>,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -224,6 +234,38 @@ pub struct WriteResult {
     pub encoding: String,
 }
 
+/// A single decoded frame returned in a read result.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct FrameResult {
+    pub data: String,
+    pub encoding: String,
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub frame_index: usize,
+    pub frame_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parsed: Option<ParsedFrameResult>,
+}
+
+/// Structured field interpretation of a decoded frame.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "parser", rename_all = "snake_case")]
+pub enum ParsedFrameResult {
+    AtCommand {
+        response_type: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        command: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        status: Option<String>,
+        fields: Vec<String>,
+    },
+    Json(serde_json::Value),
+    ShellPrompt {
+        prompt: String,
+        prompt_type: String,
+    },
+    Raw,
+}
+
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct ReadResult {
     pub connection_id: String,
@@ -264,6 +306,9 @@ pub struct ReadResult {
     #[serde(default)]
     #[schemars(schema_with = "crate::schema_helpers::option_uint_schema")]
     pub match_index: Option<usize>,
+    /// Decoded frames, present when the `framing` option was used.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub frames: Option<Vec<FrameResult>>,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]

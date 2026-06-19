@@ -211,7 +211,7 @@ proptest! {
         max_buffered_bytes in any_usize(),
         enc in valid_encoding(),
     ) {
-        let args = ReadArgs { connection_id: id, timeout_ms: timeout, max_buffered_bytes, encoding: enc, r#match: None, no_new_rx_timeout_ms: None };
+        let args = ReadArgs { connection_id: id, timeout_ms: timeout, max_buffered_bytes, encoding: enc, r#match: None, no_new_rx_timeout_ms: None, framing: None };
         assert_roundtrip!(args);
     }
 
@@ -249,6 +249,7 @@ proptest! {
             max_buffered_bytes,
             poll_interval_ms: poll,
             r#match: None,
+            framing: None,
         };
         assert_roundtrip!(args);
     }
@@ -293,7 +294,7 @@ proptest! {
         stop_reason in valid_stop_reason(), truncated: bool,
         bytes_obs in any_usize(), bytes_ret in any_usize(),
     ) {
-        let r = ReadResult { connection_id: id, name: None, bytes_read: br, encoding: enc, data, timeout_ms: timeout, no_new_rx_timeout_ms: None, elapsed_ms: elapsed, stop_reason, truncated, bytes_observed: bytes_obs, bytes_returned: bytes_ret, matched: false, match_index: None };
+        let r = ReadResult { connection_id: id, name: None, bytes_read: br, encoding: enc, data, timeout_ms: timeout, no_new_rx_timeout_ms: None, elapsed_ms: elapsed, stop_reason, truncated, bytes_observed: bytes_obs, bytes_returned: bytes_ret, matched: false, match_index: None, frames: None };
         let v = serde_json::to_value(&r).unwrap();
         assert_schema_valid!(ReadResult, v);
     }

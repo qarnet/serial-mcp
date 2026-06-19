@@ -1,6 +1,7 @@
 pub mod buffer_budget;
 pub mod codec;
 pub mod error;
+pub mod framing;
 pub mod limits;
 pub mod log_buffer;
 pub mod match_config;
