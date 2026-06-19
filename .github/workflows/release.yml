@@ -212,7 +212,25 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Skip if version already on crates.io
+        id: crate_check
+        run: |
+          NAME=$(cargo metadata --format-version 1 --no-deps | jq -r '.packages[0].name')
+          VERSION="${{ needs.prepare.outputs.version }}"
+          # crates.io rejects republishing an existing version; treat an already
+          # published version as a no-op so re-runs don't fail the release.
+          CODE=$(curl -sS -o /dev/null -w '%{http_code}' \
+            -H "User-Agent: ${NAME}-release-ci (github.com/qarnet/serial-mcp)" \
+            "https://crates.io/api/v1/crates/${NAME}/${VERSION}")
+          if [ "$CODE" = "200" ]; then
+            echo "${NAME} ${VERSION} already on crates.io — skipping publish."
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Publish
+        if: steps.crate_check.outputs.exists != 'true'
         run: cargo publish --locked
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}

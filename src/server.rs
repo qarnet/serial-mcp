@@ -395,13 +395,8 @@ impl SerialHandler {
         Parameters(args): Parameters<OpenProfileArgs>,
         ctx: RequestContext<RoleServer>,
     ) -> Result<Json<OpenResult>, String> {
-        let result = port_ops::open_profile(
-            &self.connections,
-            &self.security,
-            &self.profiles,
-            args,
-        )
-        .await?;
+        let result =
+            port_ops::open_profile(&self.connections, &self.security, &self.profiles, args).await?;
         let connection_id = result.0.connection_id.clone();
         self.notify_resource_changed(&connection_id, &ctx).await;
         Ok(result)

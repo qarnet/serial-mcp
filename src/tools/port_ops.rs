@@ -8,9 +8,9 @@ use crate::serial::{ConnectionManager, PortInfo};
 use crate::tools::helpers::log_tool_err;
 use crate::tools::helpers::parse_open_args;
 use crate::tools::types::{
-    CloseArgs, CloseResult, GetStatusArgs, GetStatusResult, ListConnectionsResult,
-    ListPortsResult, ListProfilesResult, OpenArgs, OpenProfileArgs, OpenResult,
-    ProfileSummary, ReconfigureArgs, ReconfigureResult,
+    CloseArgs, CloseResult, GetStatusArgs, GetStatusResult, ListConnectionsResult, ListPortsResult,
+    ListProfilesResult, OpenArgs, OpenProfileArgs, OpenResult, ProfileSummary, ReconfigureArgs,
+    ReconfigureResult,
 };
 
 pub async fn list_ports() -> Result<Json<ListPortsResult>, String> {
@@ -161,7 +161,13 @@ pub async fn reconfigure(
     let status = conn
         .reconfigure(baud_rate, data_bits, stop_bits, parity, flow_control)
         .await
-        .map_err(|e| log_tool_err("reconfigure", &format!("Failed to reconfigure connection {conn_id}"), e))?;
+        .map_err(|e| {
+            log_tool_err(
+                "reconfigure",
+                &format!("Failed to reconfigure connection {conn_id}"),
+                e,
+            )
+        })?;
 
     info!("Reconfigured {}: baud={}", conn_id, status.baud_rate);
 

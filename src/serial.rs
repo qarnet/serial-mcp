@@ -511,14 +511,11 @@ impl SerialConnection {
 
     /// Return the last I/O activity as milliseconds since Unix epoch.
     pub fn last_activity_ms(&self) -> Option<u64> {
-        self.last_activity
-            .lock()
-            .expect("poisoned")
-            .and_then(|t| {
-                t.duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_millis() as u64)
-                    .ok()
-            })
+        self.last_activity.lock().expect("poisoned").and_then(|t| {
+            t.duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .ok()
+        })
     }
 
     /// Build a snapshot of the current status of this connection.
@@ -738,8 +735,7 @@ impl SerialConnection {
                     .map_err(SerialError::from)?;
             }
             if let Some(p) = parity {
-                io.reconfigure_parity(p.into())
-                    .map_err(SerialError::from)?;
+                io.reconfigure_parity(p.into()).map_err(SerialError::from)?;
             }
             if let Some(fc) = flow_control {
                 io.set_flow_control(fc).map_err(SerialError::from)?;

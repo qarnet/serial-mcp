@@ -770,7 +770,11 @@ async fn flush_each_target_returns_valid_response() {
             "flush target={target} returned error: {result:?}"
         );
         let s = result.structured_content.expect("structured content");
-        assert_eq!(s["target"], json!(target), "target mismatch for {target} in {s:?}");
+        assert_eq!(
+            s["target"],
+            json!(target),
+            "target mismatch for {target} in {s:?}"
+        );
         assert_eq!(s["connection_id"], json!(connection_id));
     }
 
@@ -837,7 +841,11 @@ async fn write_with_invalid_encoding_returns_tool_error() {
             ))
             .await
             .unwrap();
-        assert_ne!(result.is_error, Some(true), "valid utf8 should succeed: {result:?}");
+        assert_ne!(
+            result.is_error,
+            Some(true),
+            "valid utf8 should succeed: {result:?}"
+        );
     }
 
     // Bogus encoding name
@@ -875,7 +883,8 @@ async fn unsubscribe_on_unknown_connection_returns_was_active_false() {
     assert_ne!(result.is_error, Some(true), "{result:?}");
     let s = result.structured_content.expect("structured content");
     assert_eq!(
-        s["was_active"], json!(false),
+        s["was_active"],
+        json!(false),
         "expected was_active=false for unknown connection: {s:?}"
     );
 
@@ -914,7 +923,8 @@ async fn read_silence_timeout_stops_with_no_new_rx_timeout() {
     );
     let s = result.structured_content.expect("structured content");
     assert_eq!(
-        s["stop_reason"], json!("no_new_rx_timeout"),
+        s["stop_reason"],
+        json!("no_new_rx_timeout"),
         "expected no_new_rx_timeout stop_reason: {s:?}"
     );
     assert_eq!(s["bytes_read"], json!(0));
@@ -951,7 +961,8 @@ async fn subscribe_replaced_previous_field_is_correct() {
         .structured_content
         .expect("first subscribe structured");
     assert_eq!(
-        s["replaced_previous"], json!(false),
+        s["replaced_previous"],
+        json!(false),
         "first subscribe should have replaced_previous=false: {s:?}"
     );
 
@@ -973,7 +984,8 @@ async fn subscribe_replaced_previous_field_is_correct() {
         .structured_content
         .expect("second subscribe structured");
     assert_eq!(
-        s["replaced_previous"], json!(true),
+        s["replaced_previous"],
+        json!(true),
         "second subscribe should have replaced_previous=true: {s:?}"
     );
 
@@ -1000,7 +1012,8 @@ async fn set_flow_control_invalid_mode_returns_tool_error() {
         .await
         .unwrap();
     assert_eq!(
-        result.is_error, Some(true),
+        result.is_error,
+        Some(true),
         "bogus flow_control should return tool error: {result:?}"
     );
 
@@ -1014,7 +1027,8 @@ async fn set_flow_control_invalid_mode_returns_tool_error() {
         .await
         .unwrap();
     assert_ne!(
-        result.is_error, Some(true),
+        result.is_error,
+        Some(true),
         "valid flow_control=none should succeed: {result:?}"
     );
 
@@ -1077,11 +1091,20 @@ async fn bogus_connection_id_returns_tool_error_for_all_id_tools() {
 
     let cases = [
         ("close", json!({ "connection_id": bogus_id })),
-        ("write", json!({ "connection_id": bogus_id, "data": "test" })),
+        (
+            "write",
+            json!({ "connection_id": bogus_id, "data": "test" }),
+        ),
         ("read", json!({ "connection_id": bogus_id })),
         ("flush", json!({ "connection_id": bogus_id })),
-        ("set_dtr_rts", json!({ "connection_id": bogus_id, "dtr": true, "rts": false })),
-        ("set_flow_control", json!({ "connection_id": bogus_id, "flow_control": "none" })),
+        (
+            "set_dtr_rts",
+            json!({ "connection_id": bogus_id, "dtr": true, "rts": false }),
+        ),
+        (
+            "set_flow_control",
+            json!({ "connection_id": bogus_id, "flow_control": "none" }),
+        ),
         ("send_break", json!({ "connection_id": bogus_id })),
         ("subscribe", json!({ "connection_id": bogus_id })),
     ];
@@ -1093,7 +1116,8 @@ async fn bogus_connection_id_returns_tool_error_for_all_id_tools() {
             .await
             .unwrap();
         assert_eq!(
-            result.is_error, Some(true),
+            result.is_error,
+            Some(true),
             "{tool_name} with bogus id should return tool error: {result:?}"
         );
     }
@@ -1109,7 +1133,8 @@ async fn bogus_connection_id_returns_tool_error_for_all_id_tools() {
             .await
             .unwrap();
         assert_ne!(
-            result.is_error, Some(true),
+            result.is_error,
+            Some(true),
             "unsubscribe with bogus id should succeed with was_active=false: {result:?}"
         );
         let s = result.structured_content.unwrap();
@@ -1123,7 +1148,8 @@ async fn bogus_connection_id_returns_tool_error_for_all_id_tools() {
         .await
         .unwrap();
     assert_ne!(
-        result.is_error, Some(true),
+        result.is_error,
+        Some(true),
         "list_connections should succeed without connection_id: {result:?}"
     );
 
@@ -1223,7 +1249,8 @@ async fn get_status_unknown_connection_returns_error() {
         .await
         .unwrap();
     assert_eq!(
-        result.is_error, Some(true),
+        result.is_error,
+        Some(true),
         "unknown connection should return error: {result:?}"
     );
 
@@ -1274,7 +1301,11 @@ async fn reconfigure_changes_baud_rate_on_loopback() {
         .await
         .unwrap();
     let s = status.structured_content.unwrap();
-    assert_eq!(s["baud_rate"], json!(9600), "baud_rate should persist: {s:?}");
+    assert_eq!(
+        s["baud_rate"],
+        json!(9600),
+        "baud_rate should persist: {s:?}"
+    );
 
     client.cancel().await.ok();
 }
@@ -1367,7 +1398,8 @@ async fn open_profile_not_found_returns_error() {
         .await
         .unwrap();
     assert_eq!(
-        result.is_error, Some(true),
+        result.is_error,
+        Some(true),
         "unknown profile should return error: {result:?}"
     );
 

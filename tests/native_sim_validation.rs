@@ -1160,10 +1160,7 @@ async fn native_get_status_after_write_increments_tx_counter() {
     // sync_boot only reads boot output — tx may be 0, rx > 0
     let result = client
         .peer()
-        .call_tool(tool_request(
-            "get_status",
-            json!({ "connection_id": id }),
-        ))
+        .call_tool(tool_request("get_status", json!({ "connection_id": id })))
         .await
         .unwrap();
     assert_ne!(result.is_error, Some(true), "{result:?}");
@@ -1195,10 +1192,7 @@ async fn native_get_status_after_write_increments_tx_counter() {
 
     let result = client
         .peer()
-        .call_tool(tool_request(
-            "get_status",
-            json!({ "connection_id": id }),
-        ))
+        .call_tool(tool_request("get_status", json!({ "connection_id": id })))
         .await
         .unwrap();
     let s = result.structured_content.unwrap();
@@ -1246,10 +1240,7 @@ async fn native_reconfigure_baud_rate_persists() {
     // Verify via get_status
     let result = client
         .peer()
-        .call_tool(tool_request(
-            "get_status",
-            json!({ "connection_id": id }),
-        ))
+        .call_tool(tool_request("get_status", json!({ "connection_id": id })))
         .await
         .unwrap();
     let s = result.structured_content.unwrap();

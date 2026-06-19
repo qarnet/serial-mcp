@@ -28,6 +28,19 @@ pub struct StreamHandle {
     join: tokio::task::JoinHandle<()>,
 }
 
+impl StreamHandle {
+    /// Abort the streaming task and wait for it to fully terminate.
+    ///
+    /// Awaiting matters: it guarantees the task has dropped its RxSession
+    /// consumer receiver before the caller prunes consumers. A bare `abort()`
+    /// (as in `Drop`) only schedules cancellation, leaving the consumer briefly
+    /// open so the pump keeps stealing RX data.
+    async fn abort_and_join(mut self) {
+        self.join.abort();
+        let _ = (&mut self.join).await;
+    }
+}
+
 impl Drop for StreamHandle {
     fn drop(&mut self) {
         self.join.abort();
@@ -194,19 +207,32 @@ pub async fn unsubscribe(
         .ok()
         .and_then(|connection| connection.name().map(str::to_string));
 
-    let mut streams = streams.lock().await;
-    let was_active = streams.remove(&args.connection_id).is_some();
-    drop(streams);
+    let handle = {
+        let mut streams = streams.lock().await;
+        streams.remove(&args.connection_id)
+    };
+    let was_active = handle.is_some();
+
+    // Wait for the streaming task to fully stop before pruning. Aborting alone
+    // leaves its consumer receiver open, so prune_consumers below would not see
+    // it as closed and the pump would keep stealing RX data that subsequent
+    // read/wait_for tools need.
+    if let Some(handle) = handle {
+        handle.abort_and_join().await;
+    }
     info!(
         "unsubscribed {} (was_active={})",
         args.connection_id, was_active
     );
 
-    // Prune closed consumers from the RX session so the pump can
-    // exit if no consumers remain. This prevents the pump from
-    // stealing RX data that read/wait_for tools need.
+    // Prune closed consumers from the RX session so the pump can exit if no
+    // consumers remain. When prune cancels the pump, await its exit so the
+    // serial port is quiescent before we return — otherwise a pump mid-read
+    // can grab and discard bytes a following read/wait_for is waiting for.
     if let Some(session) = rx_sessions.get(&args.connection_id).await {
-        session.prune_consumers();
+        if session.prune_consumers() {
+            session.join_pump().await;
+        }
     }
 
     Ok(Json(UnsubscribeResult {
