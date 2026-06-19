@@ -24,6 +24,7 @@ struct uart_drv {
 	uint8_t rx_seq;
 	bool trace_on;
 	bool framing_on;
+	bool tx_hold;
 };
 
 int uart_drv_init(struct uart_drv *drv);

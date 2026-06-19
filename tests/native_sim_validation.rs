@@ -179,6 +179,50 @@ async fn write_raw(
     assert_ne!(result.is_error, Some(true), "write failed: {result:?}");
 }
 
+/// Read unstructured data string via the `read` tool.
+async fn read_str(
+    client: &rmcp::service::RunningService<
+        rmcp::service::RoleClient,
+        common::NotificationCollector,
+    >,
+    connection_id: &str,
+    timeout_ms: u64,
+) -> String {
+    let result = client
+        .peer()
+        .call_tool(tool_request(
+            "read",
+            json!({
+                "connection_id": connection_id,
+                "timeout_ms": timeout_ms,
+                "encoding": "utf8",
+            }),
+        ))
+        .await
+        .expect("read call");
+    if result.is_error == Some(true) {
+        return String::new();
+    }
+    result
+        .structured_content
+        .and_then(|s| s["data"].as_str().map(str::to_string))
+        .unwrap_or_default()
+}
+
+/// Read until `expected` substring is found.
+async fn read_until(
+    client: &rmcp::service::RunningService<
+        rmcp::service::RoleClient,
+        common::NotificationCollector,
+    >,
+    connection_id: &str,
+    expected: &str,
+    timeout_ms: u64,
+) -> bool {
+    let data = read_str(client, connection_id, timeout_ms).await;
+    data.contains(expected)
+}
+
 async fn flush_both(
     client: &rmcp::service::RunningService<
         rmcp::service::RoleClient,
@@ -1276,6 +1320,193 @@ async fn native_reconfigure_baud_rate_persists() {
         ))
         .await
         .unwrap();
+
+    close_connection(&client, &id).await;
+    client.cancel().await.ok();
+    drop(fw);
+}
+
+// ── Test 19: ack command provides pre-execution acknowledgment ───────────────
+
+#[tokio::test]
+#[ignore = "requires native_sim firmware binary"]
+async fn native_ack_command_provides_pre_execution_ack() {
+    let fw = NativeSimFirmware::spawn().await.expect("spawn zephyr.exe");
+    let pty_path = fw.pty_path().to_string();
+
+    let server = TestServer::start().await;
+    let (client, _rx) = connect_client(&server).await.unwrap();
+
+    let id = open_pty(&client, &pty_path).await;
+    sync_boot(&client, &id).await;
+
+    // Enable acks.
+    write_cmd(&client, &id, "ack on").await;
+    read_until(&client, &id, "ack on", 2000).await;
+
+    // Write ping, read everything (ack + pong arrive together).
+    write_cmd(&client, &id, "ping").await;
+    let data = read_str(&client, &id, 2000).await;
+    assert!(
+        data.contains("ack 0"),
+        "ack should appear before pong, got: {data}"
+    );
+    assert!(data.contains("pong"), "pong should follow ack, got: {data}");
+
+    // Second ping — ack increments.
+    write_cmd(&client, &id, "ping").await;
+    let data2 = read_str(&client, &id, 2000).await;
+    assert!(data2.contains("ack 1"), "ack seq should increment: {data2}");
+    assert!(data2.contains("pong"), "second pong: {data2}");
+
+    // Disable acks, verify no more ack prefix.
+    write_cmd(&client, &id, "ack off").await;
+    read_until(&client, &id, "ack off", 2000).await;
+    write_cmd(&client, &id, "ping").await;
+    let data3 = read_str(&client, &id, 2000).await;
+    assert!(!data3.contains("ack 2"), "ack should be off: {data3}");
+    assert!(data3.contains("pong"), "pong without ack: {data3}");
+
+    close_connection(&client, &id).await;
+    client.cancel().await.ok();
+    drop(fw);
+}
+
+// ── Test 20: txbuf status reports pending TX ──────────────────────────────────
+
+#[tokio::test]
+#[ignore = "requires native_sim firmware binary"]
+async fn native_txbuf_status_reports_pending() {
+    let fw = NativeSimFirmware::spawn().await.expect("spawn zephyr.exe");
+    let pty_path = fw.pty_path().to_string();
+
+    let server = TestServer::start().await;
+    let (client, _rx) = connect_client(&server).await.unwrap();
+
+    let id = open_pty(&client, &pty_path).await;
+    sync_boot(&client, &id).await;
+
+    // Idle: txbuf should show 0.
+    write_cmd(&client, &id, "txbuf status").await;
+    let idle = read_until(&client, &id, "txbuf len=0 busy=0", 2000).await;
+    assert!(idle, "txbuf should be empty when idle");
+
+    // Enable TX hold, then release. Verify pong still works roundtrip.
+    write_cmd(&client, &id, "hold on").await;
+    read_until(&client, &id, "hold on", 2000).await;
+    write_cmd(&client, &id, "hold off").await;
+    read_until(&client, &id, "hold off", 2000).await;
+
+    write_cmd(&client, &id, "ping").await;
+    let pong = read_until(&client, &id, "pong", 2000).await;
+    assert!(pong, "ping should work after hold on/off cycle");
+
+    // Verify idle again.
+    flush_both(&client, &id).await;
+    write_cmd(&client, &id, "txbuf status").await;
+    let post = read_until(&client, &id, "txbuf len=0", 2000).await;
+    assert!(post, "txbuf should be empty after drain");
+
+    close_connection(&client, &id).await;
+    client.cancel().await.ok();
+    drop(fw);
+}
+
+// ── Test 21: flush(input) clears host RX ─────────────────────────────────────
+
+#[tokio::test]
+#[ignore = "requires native_sim firmware binary"]
+async fn native_flush_input_clears_host_rx() {
+    let fw = NativeSimFirmware::spawn().await.expect("spawn zephyr.exe");
+    let pty_path = fw.pty_path().to_string();
+
+    let server = TestServer::start().await;
+    let (client, _rx) = connect_client(&server).await.unwrap();
+
+    let id = open_pty(&client, &pty_path).await;
+    sync_boot(&client, &id).await;
+
+    // Spam a modest amount, then flush input.
+    write_cmd(&client, &id, "spam 2000 hex").await;
+    read_until(&client, &id, "spam start", 2000).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let flush = client
+        .peer()
+        .call_tool(tool_request(
+            "flush",
+            json!({ "connection_id": id, "target": "input" }),
+        ))
+        .await
+        .unwrap();
+    assert_ne!(flush.is_error, Some(true), "flush input failed: {flush:?}");
+
+    write_cmd(&client, &id, "spam stop").await;
+    read_until(&client, &id, "Spam stopped", 2000).await;
+
+    // Read after flush input — should be minimal.
+    let result = client
+        .peer()
+        .call_tool(tool_request(
+            "read",
+            json!({
+                "connection_id": id,
+                "timeout_ms": 500,
+                "encoding": "utf8",
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_ne!(
+        result.is_error,
+        Some(true),
+        "read after flush input: {result:?}"
+    );
+    let s = result.structured_content.expect("structured");
+    let data = s["data"].as_str().unwrap_or("");
+    assert!(
+        data.len() < 500,
+        "expected few bytes after flush input, got len={}",
+        data.len()
+    );
+
+    close_connection(&client, &id).await;
+    client.cancel().await.ok();
+    drop(fw);
+}
+
+// ── Test 22: flush during arm_cmd delay ──────────────────────────────────────
+
+#[tokio::test]
+#[ignore = "requires native_sim firmware binary"]
+async fn native_flush_during_arm_cmd_delay() {
+    let fw = NativeSimFirmware::spawn().await.expect("spawn zephyr.exe");
+    let pty_path = fw.pty_path().to_string();
+
+    let server = TestServer::start().await;
+    let (client, _rx) = connect_client(&server).await.unwrap();
+
+    let id = open_pty(&client, &pty_path).await;
+    sync_boot(&client, &id).await;
+
+    // Arm a 500ms delay for the next command.
+    write_cmd(&client, &id, "arm_cmd 500").await;
+    let armed = read_until(&client, &id, "arm_cmd delay=500", 2000).await;
+    assert!(armed, "arm_cmd should confirm");
+
+    // Write ping — it will sleep 500ms before executing.
+    write_cmd(&client, &id, "ping").await;
+
+    // Flush during the sleep window.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    flush_both(&client, &id).await;
+
+    // Pong should arrive after the delay, despite the flush.
+    let pong = read_until(&client, &id, "pong", 5000).await;
+    assert!(
+        pong,
+        "pong should arrive despite flush during arm_cmd delay"
+    );
 
     close_connection(&client, &id).await;
     client.cancel().await.ok();

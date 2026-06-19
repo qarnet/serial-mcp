@@ -51,6 +51,11 @@ static void uart_isr(const struct device *dev, void *user_data)
 		}
 
 		if (uart_irq_tx_ready(dev)) {
+			if (drv->tx_hold) {
+				uart_irq_tx_disable(dev);
+				drv->tx_busy = false;
+				continue;
+			}
 			uint8_t tmp[64];
 			int rb_len = (int)ring_buf_get(&drv->tx_ringbuf, tmp, sizeof(tmp));
 
