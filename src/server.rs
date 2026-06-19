@@ -5,6 +5,7 @@
 //! instead of parsing free-form text.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use base64::Engine as _;
@@ -71,23 +72,26 @@ pub struct SerialHandler {
     rx_sessions: Arc<RxSessionManager>,
     tx_sessions: Arc<TxSessionManager>,
     budget: Arc<dyn BufferBudget>,
-    profiles: Vec<crate::profiles::Profile>,
+    profiles: Arc<tokio::sync::RwLock<Vec<crate::profiles::Profile>>>,
+    profiles_path: PathBuf,
 }
 
 #[tool_router]
 impl SerialHandler {
     pub fn new() -> Self {
-        let profiles = crate::profiles::load_profiles(&crate::profiles::default_profiles_path());
+        let path = crate::profiles::default_profiles_path();
+        let profiles = crate::profiles::load_profiles(&path);
         Self::with_manager_and_security(
             Arc::new(ConnectionManager::new()),
             SecurityManager::from_patterns::<[&str; 0]>([]),
         )
-        .with_profiles(profiles)
+        .with_profiles(path, profiles)
     }
 
-    /// Replace the loaded profiles with the given vector.
-    pub fn with_profiles(mut self, profiles: Vec<crate::profiles::Profile>) -> Self {
-        self.profiles = profiles;
+    /// Replace the loaded profiles with the given vector and path.
+    pub fn with_profiles(mut self, path: PathBuf, profiles: Vec<crate::profiles::Profile>) -> Self {
+        self.profiles = Arc::new(tokio::sync::RwLock::new(profiles));
+        self.profiles_path = path;
         self
     }
 
@@ -147,7 +151,8 @@ impl SerialHandler {
             rx_sessions: Arc::new(RxSessionManager::new()),
             tx_sessions: Arc::new(TxSessionManager::new()),
             budget,
-            profiles: Vec::new(),
+            profiles: Arc::new(tokio::sync::RwLock::new(Vec::new())),
+            profiles_path: crate::profiles::default_profiles_path(),
         }
     }
 
@@ -382,7 +387,8 @@ impl SerialHandler {
         annotations(read_only_hint = true, open_world_hint = false)
     )]
     async fn list_profiles(&self) -> Result<Json<ListProfilesResult>, String> {
-        port_ops::list_profiles(&self.profiles)
+        let profiles = self.profiles.read().await;
+        port_ops::list_profiles(&profiles)
     }
 
     #[tool(
@@ -395,11 +401,36 @@ impl SerialHandler {
         Parameters(args): Parameters<OpenProfileArgs>,
         ctx: RequestContext<RoleServer>,
     ) -> Result<Json<OpenResult>, String> {
+        let profiles = self.profiles.read().await;
         let result =
-            port_ops::open_profile(&self.connections, &self.security, &self.profiles, args).await?;
+            port_ops::open_profile(&self.connections, &self.security, &profiles, args).await?;
         let connection_id = result.0.connection_id.clone();
         self.notify_resource_changed(&connection_id, &ctx).await;
         Ok(result)
+    }
+
+    #[tool(
+        description = "Save a new profile by snapshotting an open connection's port identity and current serial configuration. Use this after opening a device to create a reusable profile that can be selected by name in later sessions.",
+        title = "Save Profile",
+        annotations(destructive_hint = true, open_world_hint = false)
+    )]
+    async fn save_profile(
+        &self,
+        Parameters(args): Parameters<SaveProfileArgs>,
+    ) -> Result<Json<SaveProfileResult>, String> {
+        port_ops::save_profile(&self.connections, &self.profiles, &self.profiles_path, args).await
+    }
+
+    #[tool(
+        description = "Delete a profile by name, removing it from the profiles configuration file.",
+        title = "Delete Profile",
+        annotations(destructive_hint = true, open_world_hint = false)
+    )]
+    async fn delete_profile(
+        &self,
+        Parameters(args): Parameters<DeleteProfileArgs>,
+    ) -> Result<Json<DeleteProfileResult>, String> {
+        port_ops::delete_profile(&self.profiles, &self.profiles_path, args).await
     }
 }
 

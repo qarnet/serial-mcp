@@ -8,9 +8,10 @@ use crate::serial::{ConnectionManager, PortInfo};
 use crate::tools::helpers::log_tool_err;
 use crate::tools::helpers::parse_open_args;
 use crate::tools::types::{
-    CloseArgs, CloseResult, GetStatusArgs, GetStatusResult, ListConnectionsResult, ListPortsResult,
-    ListProfilesResult, OpenArgs, OpenProfileArgs, OpenResult, ProfileSummary, ReconfigureArgs,
-    ReconfigureResult,
+    CloseArgs, CloseResult, DeleteProfileArgs, DeleteProfileResult, GetStatusArgs, GetStatusResult,
+    ListConnectionsResult, ListPortsResult, ListProfilesResult, OpenArgs, OpenProfileArgs,
+    OpenResult, ProfileSummary, ReconfigureArgs, ReconfigureResult, SaveProfileArgs,
+    SaveProfileResult,
 };
 
 pub async fn list_ports() -> Result<Json<ListPortsResult>, String> {
@@ -39,10 +40,9 @@ pub async fn open(
     security: &SecurityManager,
     args: OpenArgs,
 ) -> Result<Json<OpenResult>, String> {
-    let config = parse_open_args(args)?;
-    let port = config.port.clone();
-    let name = config.name.clone();
-    let baud_rate = config.baud_rate;
+    let port = args.port.clone();
+    let name = args.name.clone();
+    let baud_rate = args.baud_rate;
     debug!("Opening {} @ {}", port, baud_rate);
 
     if !security.is_port_allowed(&port) {
@@ -51,6 +51,15 @@ pub async fn open(
             security.allowlist_summary()
         ));
     }
+
+    // Capture OS-level port identity before opening so it is available
+    // for status snapshots and profile save operations.
+    let port_info = PortInfo::list_available()
+        .ok()
+        .and_then(|ports| ports.into_iter().find(|p| p.name == port));
+
+    let mut config = parse_open_args(args)?;
+    config.port_info = port_info;
 
     let connection_id = connections
         .open(config)
@@ -276,4 +285,100 @@ pub async fn open_profile(
         },
     )
     .await
+}
+
+/// Save a new profile by snapshotting an open connection's identity
+/// and current configuration.
+pub async fn save_profile(
+    connections: &Arc<ConnectionManager>,
+    profiles: &Arc<tokio::sync::RwLock<Vec<crate::profiles::Profile>>>,
+    profiles_path: &std::path::PathBuf,
+    args: SaveProfileArgs,
+) -> Result<Json<SaveProfileResult>, String> {
+    let conn = connections
+        .get(&args.connection_id)
+        .await
+        .map_err(|_| format!("Connection ID {} not found", args.connection_id))?;
+
+    let info = conn
+        .port_info()
+        .ok_or_else(|| format!("No port identity available for {}", args.connection_id))?;
+
+    let defaults = crate::profiles::ProfileDefaults {
+        baud_rate: conn.baud_rate(),
+        data_bits: crate::serial::data_bits_to_str(conn.data_bits()),
+        stop_bits: crate::serial::stop_bits_to_str(conn.stop_bits()),
+        parity: crate::serial::parity_to_str(conn.parity()),
+        flow_control: crate::serial::flow_control_to_str(conn.flow_control()),
+        name: conn.name().map(str::to_string),
+        reconnect_policy: None,
+        decoder: None,
+        safety_policy: None,
+    };
+
+    let selector = crate::profiles::ProfileSelector {
+        vid: info.vid,
+        pid: info.pid,
+        serial_number: info.serial_number.clone(),
+        manufacturer: info.manufacturer.clone(),
+        product: info.product.clone(),
+        interface: info.interface,
+        port_pattern: None,
+        description_pattern: None,
+        transport: Some(info.transport.to_string()),
+        hardware_id: info.hardware_id.clone(),
+    };
+
+    let profile = crate::profiles::Profile {
+        name: args.profile_name.clone(),
+        selector,
+        defaults,
+    };
+
+    // Check overwrite policy against in-memory profiles first.
+    if !args.overwrite {
+        let lock = profiles.read().await;
+        if lock.iter().any(|p| p.name == args.profile_name) {
+            return Err(format!(
+                "Profile '{}' already exists. Set overwrite=true to replace.",
+                args.profile_name
+            ));
+        }
+    }
+
+    let created = crate::profiles::save_profile(profiles_path, &profile)?;
+
+    // Reload profiles into memory.
+    let reloaded = crate::profiles::load_profiles(profiles_path);
+    {
+        let mut lock = profiles.write().await;
+        *lock = reloaded;
+    }
+
+    Ok(Json(SaveProfileResult {
+        name: profile.name,
+        selector: profile.selector,
+        defaults: profile.defaults,
+        created,
+    }))
+}
+
+/// Delete a profile by name.
+pub async fn delete_profile(
+    profiles: &Arc<tokio::sync::RwLock<Vec<crate::profiles::Profile>>>,
+    profiles_path: &std::path::PathBuf,
+    args: DeleteProfileArgs,
+) -> Result<Json<DeleteProfileResult>, String> {
+    crate::profiles::delete_profile(profiles_path, &args.profile_name)?;
+
+    // Reload profiles into memory.
+    let reloaded = crate::profiles::load_profiles(profiles_path);
+    {
+        let mut lock = profiles.write().await;
+        *lock = reloaded;
+    }
+
+    Ok(Json(DeleteProfileResult {
+        profile_name: args.profile_name,
+    }))
 }

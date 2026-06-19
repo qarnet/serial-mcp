@@ -131,7 +131,7 @@ pub(crate) fn parity_to_str(p: Parity) -> String {
     }
 }
 
-fn flow_control_to_str(f: FlowControl) -> String {
+pub(crate) fn flow_control_to_str(f: FlowControl) -> String {
     match f {
         FlowControl::None => "none".into(),
         FlowControl::Software => "software".into(),
@@ -149,6 +149,9 @@ pub struct ConnectionConfig {
     pub stop_bits: StopBits,
     pub parity: Parity,
     pub flow_control: FlowControl,
+    /// OS-level port identity (VID, PID, serial, transport, etc.)
+    /// Captured at open time for status and profile save operations.
+    pub port_info: Option<PortInfo>,
 }
 
 // ---- Port enumeration --------------------------------------------------------
@@ -161,6 +164,17 @@ pub enum PortTransport {
     Pci,
     Bluetooth,
     Unknown,
+}
+
+impl std::fmt::Display for PortTransport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PortTransport::Usb => f.write_str("usb"),
+            PortTransport::Pci => f.write_str("pci"),
+            PortTransport::Bluetooth => f.write_str("bluetooth"),
+            PortTransport::Unknown => f.write_str("unknown"),
+        }
+    }
 }
 
 /// Information about a single serial port on the system.
@@ -415,6 +429,8 @@ pub struct SerialConnection {
     truncation_count: AtomicU64,
     /// Number of notification drops (encoding errors or disconnected peers).
     notification_drop_count: AtomicU64,
+    /// OS-level port identity captured at open time.
+    port_info: Option<PortInfo>,
 }
 
 impl fmt::Debug for SerialConnection {
@@ -447,6 +463,7 @@ impl SerialConnection {
                 stop_bits: StopBits::One,
                 parity: Parity::None,
                 flow_control: FlowControl::None,
+                port_info: None,
             },
             io,
         )
@@ -472,6 +489,7 @@ impl SerialConnection {
             write_ops: AtomicU64::new(0),
             truncation_count: AtomicU64::new(0),
             notification_drop_count: AtomicU64::new(0),
+            port_info: config.port_info,
         }
     }
 
@@ -508,6 +526,11 @@ impl SerialConnection {
 
     pub fn parity(&self) -> Parity {
         *self.parity.lock().expect("parity mutex poisoned")
+    }
+
+    /// Return the OS-level port identity captured at open time.
+    pub fn port_info(&self) -> Option<&PortInfo> {
+        self.port_info.as_ref()
     }
 
     /// Record `n` bytes written to the device.
@@ -1196,6 +1219,7 @@ mod tests {
             stop_bits: StopBits::One,
             parity: Parity::None,
             flow_control: FlowControl::None,
+            port_info: None,
         });
         let owner_id = mgr.insert(c1).await.unwrap();
 

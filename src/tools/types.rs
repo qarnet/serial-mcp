@@ -382,3 +382,37 @@ pub fn default_subscribe_buffered_bytes() -> usize {
 pub fn default_subscribe_poll_ms() -> u64 {
     200
 }
+
+// ---- Profile management tools ----------------------------------------------
+
+/// Save a profile by snapshotting an open connection's identity and config.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct SaveProfileArgs {
+    pub connection_id: String,
+    /// Desired profile name. Must be unique (or overwrite if overwrite=true).
+    pub profile_name: String,
+    /// If true, replace an existing profile with the same name.
+    /// If false (default), return an error when the name already exists.
+    #[serde(default)]
+    pub overwrite: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct SaveProfileResult {
+    pub name: String,
+    pub selector: crate::profiles::ProfileSelector,
+    pub defaults: crate::profiles::ProfileDefaults,
+    /// `true` when a new profile was created; `false` when existing was overwritten.
+    pub created: bool,
+}
+
+/// Delete a profile by name.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct DeleteProfileArgs {
+    pub profile_name: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct DeleteProfileResult {
+    pub profile_name: String,
+}

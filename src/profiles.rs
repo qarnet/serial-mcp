@@ -41,6 +41,11 @@ pub struct ProfileSelector {
     pub port_pattern: Option<String>,
     /// Glob pattern matched against the port's `description` field.
     pub description_pattern: Option<String>,
+    /// Transport type filter (matches `port.transport` Display string).
+    /// Examples: "usb", "pci", "bluetooth", "unknown".
+    pub transport: Option<String>,
+    /// Exact match on the port's hardware_id field.
+    pub hardware_id: Option<String>,
 }
 
 /// Default serial configuration applied when opening via this profile.
@@ -60,6 +65,15 @@ pub struct ProfileDefaults {
     /// Connection name prefix. The actual connection name will be
     /// `{name_prefix}-{short_port_name}` when a name is provided.
     pub name: Option<String>,
+    /// Reserved for future reconnect policy. Not yet enforced.
+    #[serde(default)]
+    pub reconnect_policy: Option<String>,
+    /// Reserved for future decoder selection. Not yet enforced.
+    #[serde(default)]
+    pub decoder: Option<String>,
+    /// Reserved for future safety policy hints. Not yet enforced.
+    #[serde(default)]
+    pub safety_policy: Option<String>,
 }
 
 fn default_baud() -> u32 {
@@ -87,6 +101,9 @@ impl Default for ProfileDefaults {
             parity: default_parity(),
             flow_control: default_flow_control(),
             name: None,
+            reconnect_policy: None,
+            decoder: None,
+            safety_policy: None,
         }
     }
 }
@@ -144,6 +161,16 @@ impl Profile {
                 return false;
             }
         }
+        if let Some(ref want) = s.transport {
+            if port.transport.to_string().as_str() != want.as_str() {
+                return false;
+            }
+        }
+        if let Some(ref want) = s.hardware_id {
+            if port.hardware_id.as_deref() != Some(want.as_str()) {
+                return false;
+            }
+        }
 
         true
     }
@@ -177,8 +204,79 @@ pub fn default_profiles_path() -> PathBuf {
     p
 }
 
+/// Write a profile to the TOML file atomically.
+///
+/// Returns `true` if the profile was newly created, `false` if it
+/// replaced an existing profile with the same name.
+///
+/// Writes to a temporary file first, then renames for atomicity.
+pub fn save_profile(path: &PathBuf, profile: &Profile) -> Result<bool, String> {
+    let mut profiles = load_profiles(path);
+    let existing_idx = profiles.iter().position(|p| p.name == profile.name);
+
+    match existing_idx {
+        Some(idx) => {
+            profiles[idx] = profile.clone();
+        }
+        None => {
+            profiles.push(profile.clone());
+        }
+    }
+    let created = existing_idx.is_none();
+
+    let toml = toml::to_string_pretty(&ProfilesFile { profile: profiles })
+        .map_err(|e| format!("Failed to serialize profiles: {e}"))?;
+
+    // Atomic write: temp file + rename.
+    let dir = path
+        .parent()
+        .ok_or_else(|| "Profiles path has no parent directory".to_string())?;
+    std::fs::create_dir_all(dir).map_err(|e| format!("Cannot create profile dir: {e}"))?;
+
+    let mut tmp = path.clone();
+    tmp.set_extension("tmp");
+    std::fs::write(&tmp, toml).map_err(|e| format!("Failed to write profiles: {e}"))?;
+    std::fs::rename(&tmp, path).map_err(|e| format!("Failed to commit profiles: {e}"))?;
+
+    tracing::info!(
+        "Profile '{}' {} (path: {})",
+        profile.name,
+        if created { "created" } else { "updated" },
+        path.display()
+    );
+    Ok(created)
+}
+
+/// Delete a profile by name from the TOML file. Returns an error if
+/// the profile does not exist.
+pub fn delete_profile(path: &PathBuf, name: &str) -> Result<(), String> {
+    let mut profiles = load_profiles(path);
+    let len_before = profiles.len();
+    profiles.retain(|p| p.name != name);
+
+    if profiles.len() == len_before {
+        return Err(format!("Profile '{name}' not found"));
+    }
+
+    let toml = toml::to_string_pretty(&ProfilesFile { profile: profiles })
+        .map_err(|e| format!("Failed to serialize profiles: {e}"))?;
+
+    let dir = path
+        .parent()
+        .ok_or_else(|| "Profiles path has no parent directory".to_string())?;
+    std::fs::create_dir_all(dir).map_err(|e| format!("Cannot create profile dir: {e}"))?;
+
+    let mut tmp = path.clone();
+    tmp.set_extension("tmp");
+    std::fs::write(&tmp, toml).map_err(|e| format!("Failed to write profiles: {e}"))?;
+    std::fs::rename(&tmp, path).map_err(|e| format!("Failed to commit profiles: {e}"))?;
+
+    tracing::info!("Profile '{}' deleted (path: {})", name, path.display());
+    Ok(())
+}
+
 /// TOML root structure for the profiles file.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 struct ProfilesFile {
     profile: Vec<Profile>,
 }

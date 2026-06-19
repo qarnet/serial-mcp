@@ -421,6 +421,7 @@ pub fn parse_open_args(args: OpenArgs) -> Result<ConnectionConfig, String> {
         stop_bits: parse_stop_bits(&args.stop_bits)?,
         parity: parse_parity(&args.parity)?,
         flow_control: parse_flow_control(&args.flow_control)?,
+        port_info: None,
     })
 }
 

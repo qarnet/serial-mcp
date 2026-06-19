@@ -41,6 +41,8 @@ const EXPECTED_TOOLS: &[&str] = &[
     "reconfigure",
     "list_profiles",
     "open_profile",
+    "save_profile",
+    "delete_profile",
 ];
 
 #[tokio::test]
