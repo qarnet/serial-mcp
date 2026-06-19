@@ -422,6 +422,8 @@ pub fn parse_open_args(args: OpenArgs) -> Result<ConnectionConfig, String> {
         parity: parse_parity(&args.parity)?,
         flow_control: parse_flow_control(&args.flow_control)?,
         port_info: None,
+        log_capacity: args.log_capacity,
+        log_enabled: args.log_enabled,
     })
 }
 
@@ -486,6 +488,8 @@ mod tests {
             stop_bits: "1".into(),
             parity: "none".into(),
             flow_control: "none".into(),
+            log_capacity: 1024,
+            log_enabled: true,
         };
         let config = parse_open_args(args).unwrap();
         assert_eq!(config.port, "/dev/ttyUSB0");
@@ -503,6 +507,8 @@ mod tests {
             stop_bits: "1".into(),
             parity: "none".into(),
             flow_control: "none".into(),
+            log_capacity: 1024,
+            log_enabled: true,
         };
         let err = parse_open_args(args).unwrap_err();
         assert!(err.contains("data_bits"));

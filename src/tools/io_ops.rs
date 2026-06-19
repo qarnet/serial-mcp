@@ -138,8 +138,17 @@ pub async fn read(
         args.no_new_rx_timeout_ms,
     )?;
     connection.record_read_op();
+    let log = connection.log();
+    log.rx_data(result.0.bytes_read);
     if result.0.truncated {
         connection.record_truncation();
+        log.truncated(result.0.bytes_observed, result.0.bytes_returned);
+    }
+    if result.0.matched {
+        // Extract pattern info from the result
+        if let Some(ref m) = args.r#match {
+            log.match_found(&m.pattern, &m.config.mode.to_string());
+        }
     }
     Ok(result)
 }

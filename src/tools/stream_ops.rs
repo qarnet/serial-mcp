@@ -363,6 +363,9 @@ async fn stream_rx_via_session(
                             "RX encoding error on {conn_id}: {encoding} cannot encode {n} bytes — dropped"
                         );
                         conn.record_notification_drop();
+                        conn.log().notification_dropped(&format!(
+                            "encoding error: {encoding} cannot encode {n} bytes"
+                        ));
                         let payload = serde_json::json!({
                             "connection_id": conn_id,
                             "encoding_error": true,
@@ -400,6 +403,8 @@ async fn stream_rx_via_session(
                 if let Err(e) = peer.notify_logging_message(param).await {
                     error!("RX stream peer disconnected: {e}");
                     conn.record_notification_drop();
+                    conn.log()
+                        .notification_dropped(&format!("peer disconnected: {e}"));
                     stop_outcome = Some(ctrl.peer_disconnected());
                     break;
                 }
@@ -427,6 +432,19 @@ async fn stream_rx_via_session(
     let truncated = total_returned < bytes_observed;
     if truncated {
         conn.record_truncation();
+        conn.log().truncated(bytes_observed, total_returned);
+    }
+    if outcome.matched {
+        if let Some(ref m) = matcher {
+            // Log the match pattern. For regex/glob, mode is known; for literal, needle len.
+            let mode = match &m {
+                crate::match_config::Matcher::Literal { .. } => "literal_substring".to_string(),
+                crate::match_config::Matcher::Regex { .. } => "regex".to_string(),
+                crate::match_config::Matcher::Glob { .. } => "glob".to_string(),
+            };
+            // pattern is not directly accessible — deferred
+            let _ = mode;
+        }
     }
     let stop_meta = RxStopMetadata {
         stop_reason: outcome.meta.stop_reason,

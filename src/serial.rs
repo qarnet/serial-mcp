@@ -152,6 +152,22 @@ pub struct ConnectionConfig {
     /// OS-level port identity (VID, PID, serial, transport, etc.)
     /// Captured at open time for status and profile save operations.
     pub port_info: Option<PortInfo>,
+    /// Log buffer capacity in events. 0 or None disables logging.
+    /// Default: 1024.
+    #[serde(default = "default_log_capacity")]
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub log_capacity: usize,
+    /// Whether logging is enabled. Default: true when capacity > 0.
+    #[serde(default = "default_true")]
+    pub log_enabled: bool,
+}
+
+fn default_log_capacity() -> usize {
+    1024
+}
+
+fn default_true() -> bool {
+    true
 }
 
 // ---- Port enumeration --------------------------------------------------------
@@ -431,6 +447,8 @@ pub struct SerialConnection {
     notification_drop_count: AtomicU64,
     /// OS-level port identity captured at open time.
     port_info: Option<PortInfo>,
+    /// Per-connection event log buffer.
+    log: Arc<crate::log_buffer::LogBuffer>,
 }
 
 impl fmt::Debug for SerialConnection {
@@ -464,12 +482,16 @@ impl SerialConnection {
                 parity: Parity::None,
                 flow_control: FlowControl::None,
                 port_info: None,
+                log_capacity: 1024,
+                log_enabled: true,
             },
             io,
         )
     }
 
     pub fn from_io_with_config(config: ConnectionConfig, io: Box<dyn SerialIo>) -> Self {
+        let log = crate::log_buffer::LogBuffer::new_shared(config.log_capacity, config.log_enabled);
+        log.opened();
         Self {
             id: Uuid::new_v4().to_string(),
             port: config.port,
@@ -490,6 +512,7 @@ impl SerialConnection {
             truncation_count: AtomicU64::new(0),
             notification_drop_count: AtomicU64::new(0),
             port_info: config.port_info,
+            log: crate::log_buffer::LogBuffer::new_shared(config.log_capacity, config.log_enabled),
         }
     }
 
@@ -531,6 +554,11 @@ impl SerialConnection {
     /// Return the OS-level port identity captured at open time.
     pub fn port_info(&self) -> Option<&PortInfo> {
         self.port_info.as_ref()
+    }
+
+    /// Return the per-connection event log buffer.
+    pub fn log(&self) -> &Arc<crate::log_buffer::LogBuffer> {
+        &self.log
     }
 
     /// Record `n` bytes written to the device.
@@ -625,6 +653,7 @@ impl SerialConnection {
     /// Write a byte slice, flushing before returning.
     pub async fn write(&self, data: &[u8]) -> Result<usize> {
         self.ensure_open()?;
+        self.log.tx_data(data.len());
         let mut io = self.io.lock().await;
         let io = io
             .as_mut()
@@ -968,6 +997,7 @@ impl ConnectionManager {
         };
 
         let port = connection.port().to_string();
+        connection.log().closed();
         let result = connection.close().await;
 
         self.state.lock().await.closing_ports.remove(&port);
@@ -1225,6 +1255,8 @@ mod tests {
             parity: Parity::None,
             flow_control: FlowControl::None,
             port_info: None,
+            log_capacity: 1024,
+            log_enabled: true,
         });
         let owner_id = mgr.insert(c1).await.unwrap();
 

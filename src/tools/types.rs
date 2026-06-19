@@ -24,6 +24,20 @@ pub struct OpenArgs {
     pub parity: String,
     #[serde(default = "default_flow_control")]
     pub flow_control: String,
+    /// Log buffer capacity in events. 0 disables logging. Default: 1024.
+    #[serde(default = "default_log_capacity")]
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub log_capacity: usize,
+    /// Whether logging is enabled. Default: true (ignored when capacity is 0).
+    #[serde(default = "default_true")]
+    pub log_enabled: bool,
+}
+
+fn default_log_capacity() -> usize {
+    1024
+}
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -158,6 +172,13 @@ pub struct OpenProfileArgs {
     pub profile: String,
     #[serde(default)]
     pub name: Option<String>,
+    /// Log buffer capacity in events. 0 disables logging. Default: 1024.
+    #[serde(default = "default_log_capacity")]
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub log_capacity: usize,
+    /// Whether logging is enabled. Default: true (ignored when capacity is 0).
+    #[serde(default = "default_true")]
+    pub log_enabled: bool,
 }
 
 // ---- Response structs ------------------------------------------------------
@@ -418,4 +439,58 @@ pub struct DeleteProfileArgs {
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct DeleteProfileResult {
     pub profile_name: String,
+}
+
+// ---- Log tools -------------------------------------------------------------
+
+/// Arguments for the `get_log` tool.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct GetLogArgs {
+    pub connection_id: String,
+    /// Return only events after this timestamp (ms since Unix epoch).
+    #[serde(default)]
+    #[schemars(schema_with = "crate::schema_helpers::option_uint_schema")]
+    pub since_ms: Option<u64>,
+    /// Maximum number of events to return. Default: no limit.
+    #[serde(default)]
+    #[schemars(schema_with = "crate::schema_helpers::option_uint_schema")]
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct GetLogResult {
+    /// Whether logging is enabled for this connection.
+    pub log_enabled: bool,
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub capacity: usize,
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub total_events: usize,
+    pub events: Vec<crate::log_buffer::LogEntry>,
+}
+
+/// Arguments for the `clear_log` tool.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ClearLogArgs {
+    pub connection_id: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct ClearLogResult {
+    pub connection_id: String,
+}
+
+/// Arguments for the `export_log` tool.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ExportLogArgs {
+    pub connection_id: String,
+    /// File path to write the JSONL log to.
+    pub path: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct ExportLogResult {
+    pub connection_id: String,
+    pub path: String,
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub events_written: usize,
 }

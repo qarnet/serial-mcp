@@ -79,6 +79,16 @@ fn default_match_mode() -> MatchMode {
     MatchMode::LiteralSubstring
 }
 
+impl std::fmt::Display for MatchMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            MatchMode::LiteralSubstring => f.write_str("literal_substring"),
+            MatchMode::Regex => f.write_str("regex"),
+            MatchMode::Glob => f.write_str("glob"),
+        }
+    }
+}
+
 /// Pattern encoding — just an alias for the codec `Encoding` type with a
 /// different JSON schema name so the MCP tool description is clear.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

@@ -8,7 +8,8 @@ use crate::serial::{ConnectionManager, PortInfo};
 use crate::tools::helpers::log_tool_err;
 use crate::tools::helpers::parse_open_args;
 use crate::tools::types::{
-    CloseArgs, CloseResult, DeleteProfileArgs, DeleteProfileResult, GetStatusArgs, GetStatusResult,
+    ClearLogArgs, ClearLogResult, CloseArgs, CloseResult, DeleteProfileArgs, DeleteProfileResult,
+    ExportLogArgs, ExportLogResult, GetLogArgs, GetLogResult, GetStatusArgs, GetStatusResult,
     ListConnectionsResult, ListPortsResult, ListProfilesResult, OpenArgs, OpenProfileArgs,
     OpenResult, ProfileSummary, ReconfigureArgs, ReconfigureResult, SaveProfileArgs,
     SaveProfileResult,
@@ -283,6 +284,8 @@ pub async fn open_profile(
             stop_bits: profile.defaults.stop_bits.clone(),
             parity: profile.defaults.parity.clone(),
             flow_control: profile.defaults.flow_control.clone(),
+            log_capacity: args.log_capacity,
+            log_enabled: args.log_enabled,
         },
     )
     .await
@@ -370,5 +373,82 @@ pub async fn delete_profile(
 
     Ok(Json(DeleteProfileResult {
         profile_name: args.profile_name,
+    }))
+}
+
+// ── Log tools ──────────────────────────────────────────────────────────
+
+pub async fn get_log(
+    connections: &Arc<ConnectionManager>,
+    args: GetLogArgs,
+) -> Result<Json<GetLogResult>, String> {
+    let conn = connections
+        .get(&args.connection_id)
+        .await
+        .map_err(|_| format!("Connection ID {} not found", args.connection_id))?;
+
+    let log = conn.log();
+    let all = log.snapshot();
+    let total = all.len();
+
+    let filtered: Vec<crate::log_buffer::LogEntry> = all
+        .into_iter()
+        .filter(|e| args.since_ms.is_none_or(|since| e.timestamp_ms >= since))
+        .collect();
+
+    let events = match args.limit {
+        Some(limit) if limit < filtered.len() => {
+            let start = filtered.len() - limit;
+            filtered[start..].to_vec()
+        }
+        _ => filtered,
+    };
+
+    Ok(Json(GetLogResult {
+        log_enabled: log.is_enabled(),
+        capacity: 1024, // TODO: expose from LogBuffer
+        total_events: total,
+        events,
+    }))
+}
+
+pub async fn clear_log(
+    connections: &Arc<ConnectionManager>,
+    args: ClearLogArgs,
+) -> Result<Json<ClearLogResult>, String> {
+    let conn = connections
+        .get(&args.connection_id)
+        .await
+        .map_err(|_| format!("Connection ID {} not found", args.connection_id))?;
+    conn.log().clear();
+    Ok(Json(ClearLogResult {
+        connection_id: args.connection_id,
+    }))
+}
+
+pub async fn export_log(
+    connections: &Arc<ConnectionManager>,
+    args: ExportLogArgs,
+) -> Result<Json<ExportLogResult>, String> {
+    let conn = connections
+        .get(&args.connection_id)
+        .await
+        .map_err(|_| format!("Connection ID {} not found", args.connection_id))?;
+
+    let events = conn.log().snapshot();
+    let count = events.len();
+    let mut out = String::new();
+    for event in &events {
+        let line = serde_json::to_string(event)
+            .map_err(|e| format!("Failed to serialize log entry: {e}"))?;
+        out.push_str(&line);
+        out.push('\n');
+    }
+    std::fs::write(&args.path, out).map_err(|e| format!("Failed to write log export: {e}"))?;
+
+    Ok(Json(ExportLogResult {
+        connection_id: args.connection_id,
+        path: args.path,
+        events_written: count,
     }))
 }

@@ -35,6 +35,9 @@ const EXPECTED_TOOLS: &[&str] = &[
     "open_profile",
     "save_profile",
     "delete_profile",
+    "get_log",
+    "clear_log",
+    "export_log",
 ];
 
 fn build_stdio_server() {
@@ -98,8 +101,8 @@ async fn stdio_list_resources_returns_statics_and_templates() {
         .unwrap();
     assert_eq!(
         templates.resource_templates.len(),
-        2,
-        "expected 2 resource templates (connection + raw)"
+        3,
+        "expected 3 resource templates (connection + raw + log)"
     );
 
     client.cancel().await.ok();

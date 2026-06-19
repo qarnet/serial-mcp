@@ -172,6 +172,8 @@ proptest! {
             stop_bits: sb.clone(),
             parity: p.clone(),
             flow_control: fc.clone(),
+            log_capacity: 1024,
+            log_enabled: true,
         };
         assert_roundtrip!(args);
 
@@ -503,6 +505,8 @@ proptest! {
             stop_bits: "1".into(),
             parity: "none".into(),
             flow_control: "none".into(),
+            log_capacity: 1024,
+            log_enabled: true,
         };
         assert_roundtrip!(args);
     }

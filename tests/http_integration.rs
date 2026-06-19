@@ -43,6 +43,9 @@ const EXPECTED_TOOLS: &[&str] = &[
     "open_profile",
     "save_profile",
     "delete_profile",
+    "get_log",
+    "clear_log",
+    "export_log",
 ];
 
 #[tokio::test]
@@ -158,7 +161,11 @@ async fn list_resource_templates_returns_connection_template() {
         .collect();
     assert_eq!(
         uris,
-        vec!["serial://connections/{id}", "serial://connections/{id}/raw"]
+        vec![
+            "serial://connections/{id}",
+            "serial://connections/{id}/raw",
+            "serial://connections/{id}/log"
+        ]
     );
     client.cancel().await.ok();
 }
@@ -176,8 +183,8 @@ async fn list_resource_templates_pagination_with_cursor_returns_next_page() {
         .unwrap();
     assert_eq!(
         page1.resource_templates.len(),
-        2,
-        "both templates fit on single page"
+        3,
+        "all three templates fit on single page"
     );
     assert!(
         page1.next_cursor.is_none(),

@@ -432,6 +432,42 @@ impl SerialHandler {
     ) -> Result<Json<DeleteProfileResult>, String> {
         port_ops::delete_profile(&self.profiles, &self.profiles_path, args).await
     }
+
+    #[tool(
+        description = "Retrieve the event log for an open serial connection. Returns timestamped JSONL entries for RX data, TX data, matches, errors, and lifecycle events. Use since_ms to filter by time and limit to cap the number of entries returned.",
+        title = "Get Log",
+        annotations(read_only_hint = true, open_world_hint = false)
+    )]
+    async fn get_log(
+        &self,
+        Parameters(args): Parameters<GetLogArgs>,
+    ) -> Result<Json<GetLogResult>, String> {
+        port_ops::get_log(&self.connections, args).await
+    }
+
+    #[tool(
+        description = "Clear the event log buffer for a connection. Resets the log to empty.",
+        title = "Clear Log",
+        annotations(destructive_hint = true, open_world_hint = false)
+    )]
+    async fn clear_log(
+        &self,
+        Parameters(args): Parameters<ClearLogArgs>,
+    ) -> Result<Json<ClearLogResult>, String> {
+        port_ops::clear_log(&self.connections, args).await
+    }
+
+    #[tool(
+        description = "Export the event log for a connection to a JSONL file on disk. Each line is a JSON object representing one log entry.",
+        title = "Export Log",
+        annotations(destructive_hint = true, open_world_hint = false)
+    )]
+    async fn export_log(
+        &self,
+        Parameters(args): Parameters<ExportLogArgs>,
+    ) -> Result<Json<ExportLogResult>, String> {
+        port_ops::export_log(&self.connections, args).await
+    }
 }
 
 // ---- Tool helpers (extracted to src/tools/helpers.rs) -----------------------
@@ -631,6 +667,17 @@ impl ServerHandler for SerialHandler {
             .with_mime_type("application/octet-stream".to_string())
             .with_priority(0.6)
             .with_audience(vec![Role::User, Role::Assistant]),
+            RawResourceTemplate::new(
+                URI_CONNECTION_LOG_TEMPLATE,
+                "Event log for a serial connection",
+            )
+            .with_description(
+                "JSONL event log for the connection. Substitute {id} with a connection_id. Each line is a JSON object with timestamp, direction, and event fields."
+                    .to_string(),
+            )
+            .with_mime_type("application/x-ndjson".to_string())
+            .with_priority(0.5)
+            .with_audience(vec![Role::User, Role::Assistant]),
         ];
         let (resource_templates, next_cursor) =
             paginate(&all, request.and_then(|r| r.cursor), PAGE_SIZE);
@@ -706,6 +753,26 @@ impl ServerHandler for SerialHandler {
                 )
                 .with_mime_type("application/octet-stream")]))
             }
+            ResourceUriKind::ConnectionLog(id) => {
+                let conn = self.connections.get(&id).await.map_err(|_| {
+                    McpError::resource_not_found(
+                        "connection_not_found",
+                        Some(serde_json::json!({ "uri": uri, "connection_id": id })),
+                    )
+                })?;
+                let events = conn.log().snapshot();
+                let mut body = String::new();
+                for event in &events {
+                    let line = serde_json::to_string(event)
+                        .map_err(|e| McpError::internal_error(format!("serialize: {e}"), None))?;
+                    body.push_str(&line);
+                    body.push('\n');
+                }
+                Ok(ReadResourceResult::new(vec![ResourceContents::text(
+                    body, uri,
+                )
+                .with_mime_type("application/x-ndjson")]))
+            }
             ResourceUriKind::Unknown => Err(McpError::resource_not_found(
                 "resource_not_found",
                 Some(serde_json::json!({ "uri": uri })),
@@ -760,7 +827,8 @@ impl ServerHandler for SerialHandler {
 
 use crate::resources::{
     parse_resource_uri, ConnectionsResource, ResourceUriKind, URI_CONNECTIONS,
-    URI_CONNECTION_PREFIX, URI_CONNECTION_RAW_TEMPLATE, URI_CONNECTION_TEMPLATE, URI_PORTS,
+    URI_CONNECTION_LOG_TEMPLATE, URI_CONNECTION_PREFIX, URI_CONNECTION_RAW_TEMPLATE,
+    URI_CONNECTION_TEMPLATE, URI_PORTS,
 };
 
 #[cfg(test)]

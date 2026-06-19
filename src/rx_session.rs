@@ -318,6 +318,7 @@ async fn pump_loop(
                 continue;
             }
             Ok(n) => {
+                connection.log().rx_data(n);
                 let chunk = buf[..n].to_vec();
                 let mut reg = consumers.lock().expect("consumers mutex poisoned");
                 reg.fanout(RxEvent::Data(chunk));
