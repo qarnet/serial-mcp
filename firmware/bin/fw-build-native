@@ -15,6 +15,8 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=firmware/bin/fw-common.sh
 source "$SCRIPT_DIR/fw-common.sh"
 
+_fw_require_env
+
 cd "$(_fw_repo_dir)"
 
 BUILD_DIR="${SERIAL_MCP_FW_BUILD_DIR:-$(_fw_repo_dir)/build/native_sim}"
