@@ -312,6 +312,14 @@ pub struct GetStatusResult {
     /// Last I/O activity as milliseconds since Unix epoch, or null.
     #[schemars(schema_with = "crate::schema_helpers::option_uint_schema")]
     pub last_activity_ms: Option<u64>,
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub read_ops: u64,
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub write_ops: u64,
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub truncation_count: u64,
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub notification_drop_count: u64,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]

@@ -406,6 +406,15 @@ pub struct SerialConnection {
     rx_bytes: AtomicU64,
     /// Wall-clock time of the last rx or tx byte operation.
     last_activity: StdMutex<Option<std::time::SystemTime>>,
+    /// Number of successful `read` or `subscribe` operations.
+    read_ops: AtomicU64,
+    /// Number of successful `write` operations.
+    write_ops: AtomicU64,
+    /// Number of RX operations where data was truncated
+    /// (bytes_returned < bytes_observed).
+    truncation_count: AtomicU64,
+    /// Number of notification drops (encoding errors or disconnected peers).
+    notification_drop_count: AtomicU64,
 }
 
 impl fmt::Debug for SerialConnection {
@@ -459,6 +468,10 @@ impl SerialConnection {
             tx_bytes: AtomicU64::new(0),
             rx_bytes: AtomicU64::new(0),
             last_activity: StdMutex::new(None),
+            read_ops: AtomicU64::new(0),
+            write_ops: AtomicU64::new(0),
+            truncation_count: AtomicU64::new(0),
+            notification_drop_count: AtomicU64::new(0),
         }
     }
 
@@ -518,6 +531,26 @@ impl SerialConnection {
         })
     }
 
+    /// Record one successful read or subscribe operation.
+    pub fn record_read_op(&self) {
+        self.read_ops.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// Record one successful write operation.
+    pub fn record_write_op(&self) {
+        self.write_ops.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// Record one RX truncation (bytes_returned < bytes_observed).
+    pub fn record_truncation(&self) {
+        self.truncation_count.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// Record one notification drop (encoding error or disconnected peer).
+    pub fn record_notification_drop(&self) {
+        self.notification_drop_count.fetch_add(1, Ordering::SeqCst);
+    }
+
     /// Build a snapshot of the current status of this connection.
     pub fn status_snapshot(&self) -> ConnectionStatus {
         ConnectionStatus {
@@ -533,6 +566,10 @@ impl SerialConnection {
             tx_bytes: self.tx_bytes.load(Ordering::SeqCst),
             rx_bytes: self.rx_bytes.load(Ordering::SeqCst),
             last_activity_ms: self.last_activity_ms(),
+            read_ops: self.read_ops.load(Ordering::SeqCst),
+            write_ops: self.write_ops.load(Ordering::SeqCst),
+            truncation_count: self.truncation_count.load(Ordering::SeqCst),
+            notification_drop_count: self.notification_drop_count.load(Ordering::SeqCst),
         }
     }
 
@@ -973,6 +1010,14 @@ pub struct ConnectionStatus {
     /// Last I/O activity as milliseconds since Unix epoch, or null.
     #[schemars(schema_with = "crate::schema_helpers::option_uint_schema")]
     pub last_activity_ms: Option<u64>,
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub read_ops: u64,
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub write_ops: u64,
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub truncation_count: u64,
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub notification_drop_count: u64,
 }
 
 fn find_connection_by_port<'a>(

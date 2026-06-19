@@ -150,6 +150,7 @@ pub async fn subscribe(
     // streaming consumer. The pump in the session is the *only* code that
     // reads from the serial port. This subscribe worker consumes from the
     // mpsc channel fed by the pump.
+    let conn = Arc::clone(&connection);
     let session = rx_sessions.get_or_create(connection).await;
     let event_rx = session.register_streaming();
 
@@ -159,6 +160,7 @@ pub async fn subscribe(
 
     let join = tokio::spawn(stream_rx_via_session(
         peer,
+        conn,
         session,
         event_rx,
         encoding,
@@ -257,6 +259,7 @@ pub async fn unsubscribe(
 #[allow(clippy::too_many_arguments)]
 async fn stream_rx_via_session(
     peer: Peer<RoleServer>,
+    conn: Arc<crate::serial::SerialConnection>,
     session: Arc<crate::rx_session::RxSession>,
     mut event_rx: tokio::sync::mpsc::Receiver<RxEvent>,
     encoding: crate::codec::Encoding,
@@ -271,6 +274,7 @@ async fn stream_rx_via_session(
     let conn_id = session.connection_id().to_string();
     let logger = format!("serial:{conn_id}");
     let start = Instant::now();
+    conn.record_read_op();
     // Subscribe does not use max_buffered_bytes as a stop condition (it
     // streams each chunk immediately). We pass 0 so the controller never
     // stops on MaxBufferedBytes; instead we rely on timeout, match_found,
@@ -355,6 +359,7 @@ async fn stream_rx_via_session(
                         warn!(
                             "RX encoding error on {conn_id}: {encoding} cannot encode {n} bytes — dropped"
                         );
+                        conn.record_notification_drop();
                         let payload = serde_json::json!({
                             "connection_id": conn_id,
                             "encoding_error": true,
@@ -391,6 +396,7 @@ async fn stream_rx_via_session(
                 };
                 if let Err(e) = peer.notify_logging_message(param).await {
                     error!("RX stream peer disconnected: {e}");
+                    conn.record_notification_drop();
                     stop_outcome = Some(ctrl.peer_disconnected());
                     break;
                 }
@@ -416,6 +422,9 @@ async fn stream_rx_via_session(
     let outcome = stop_outcome.unwrap_or_else(|| ctrl.channel_closed());
     let bytes_observed = ctrl.bytes_observed();
     let truncated = total_returned < bytes_observed;
+    if truncated {
+        conn.record_truncation();
+    }
     let stop_meta = RxStopMetadata {
         stop_reason: outcome.meta.stop_reason,
         truncated,

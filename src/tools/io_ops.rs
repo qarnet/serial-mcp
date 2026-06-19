@@ -41,6 +41,7 @@ pub async fn write(
     })?;
 
     debug!("Wrote {} bytes to {}", bytes_written, args.connection_id);
+    connection.record_write_op();
     Ok(Json(WriteResult {
         connection_id: args.connection_id,
         name: connection.name().map(str::to_string),
@@ -128,14 +129,19 @@ pub async fn read(
 
     session.prune_consumers();
 
-    build_read_result(
+    let result = build_read_result(
         outcome,
         args.connection_id,
         connection.name().map(str::to_string),
         encoding,
         args.timeout_ms,
         args.no_new_rx_timeout_ms,
-    )
+    )?;
+    connection.record_read_op();
+    if result.0.truncated {
+        connection.record_truncation();
+    }
+    Ok(result)
 }
 
 pub async fn flush(

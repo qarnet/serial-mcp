@@ -121,6 +121,10 @@ pub async fn get_status(
         tx_bytes: status.tx_bytes,
         rx_bytes: status.rx_bytes,
         last_activity_ms: status.last_activity_ms,
+        read_ops: status.read_ops,
+        write_ops: status.write_ops,
+        truncation_count: status.truncation_count,
+        notification_drop_count: status.notification_drop_count,
     }))
 }
 
