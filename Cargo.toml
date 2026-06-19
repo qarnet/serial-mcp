@@ -29,6 +29,7 @@ hex = "0.4"
 base64 = "0.22"
 axum = "0.8"
 glob = "0.3"
+regex = "1"
 pico-args = { version = "0.5.0", features = ["eq-separator"] }
 toml = "0.8"
 dirs = "6"

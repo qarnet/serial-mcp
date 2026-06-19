@@ -5,7 +5,7 @@ use tracing::{debug, info};
 
 use crate::buffer_budget::BufferBudget;
 use crate::codec;
-use crate::match_config::{validate_match_request, ByteMatcher};
+use crate::match_config::{validate_match_request, Matcher};
 use crate::rx_session::RxSessionManager;
 use crate::serial::ConnectionManager;
 use crate::serial::FlushTarget;
@@ -87,7 +87,7 @@ pub async fn read(
     }
 
     // Resolve matcher if provided.
-    let matcher: Option<ByteMatcher> = match &args.r#match {
+    let matcher: Option<Matcher> = match &args.r#match {
         Some(m) => Some(validate_match_request(m)?),
         None => None,
     };

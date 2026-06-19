@@ -1512,3 +1512,107 @@ async fn native_flush_during_arm_cmd_delay() {
     client.cancel().await.ok();
     drop(fw);
 }
+
+// ── Test 23: regex match finds pong ────────────────────────────────────────
+
+#[tokio::test]
+#[ignore = "requires native_sim firmware binary"]
+async fn native_read_regex_matches_pong() {
+    let fw = NativeSimFirmware::spawn().await.expect("spawn zephyr.exe");
+    let pty_path = fw.pty_path().to_string();
+
+    let server = TestServer::start().await;
+    let (client, _rx) = connect_client(&server).await.unwrap();
+    let id = open_pty(&client, &pty_path).await;
+    sync_boot(&client, &id).await;
+
+    let read_handle = {
+        let peer = client.peer().clone();
+        let id2 = id.clone();
+        tokio::spawn(async move {
+            peer.call_tool(tool_request(
+                "read",
+                json!({
+                    "connection_id": id2,
+                    "timeout_ms": 3000,
+                    "max_buffered_bytes": 128,
+                    "encoding": "utf8",
+                    "match": {
+                        "pattern": "po.g",
+                        "config": { "mode": "regex", "pattern_encoding": "utf8" }
+                    }
+                }),
+            ))
+            .await
+        })
+    };
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    write_cmd(&client, &id, "ping").await;
+
+    let result = read_handle.await.unwrap().expect("read task");
+    assert_ne!(result.is_error, Some(true), "{result:?}");
+    let s = result.structured_content.expect("structured");
+    assert_eq!(
+        s["matched"],
+        json!(true),
+        "regex po.g should match pong: {s:?}"
+    );
+    assert_eq!(s["stop_reason"], json!("match_found"));
+
+    close_connection(&client, &id).await;
+    client.cancel().await.ok();
+    drop(fw);
+}
+
+// ── Test 24: glob match per-line finds pong line ───────────────────────────
+
+#[tokio::test]
+#[ignore = "requires native_sim firmware binary"]
+async fn native_read_glob_matches_pong_line() {
+    let fw = NativeSimFirmware::spawn().await.expect("spawn zephyr.exe");
+    let pty_path = fw.pty_path().to_string();
+
+    let server = TestServer::start().await;
+    let (client, _rx) = connect_client(&server).await.unwrap();
+    let id = open_pty(&client, &pty_path).await;
+    sync_boot(&client, &id).await;
+
+    let read_handle = {
+        let peer = client.peer().clone();
+        let id2 = id.clone();
+        tokio::spawn(async move {
+            peer.call_tool(tool_request(
+                "read",
+                json!({
+                    "connection_id": id2,
+                    "timeout_ms": 3000,
+                    "max_buffered_bytes": 128,
+                    "encoding": "utf8",
+                    "match": {
+                        "pattern": "po*",
+                        "config": { "mode": "glob", "pattern_encoding": "utf8" }
+                    }
+                }),
+            ))
+            .await
+        })
+    };
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    write_cmd(&client, &id, "ping").await;
+
+    let result = read_handle.await.unwrap().expect("read task");
+    assert_ne!(result.is_error, Some(true), "{result:?}");
+    let s = result.structured_content.expect("structured");
+    assert_eq!(
+        s["matched"],
+        json!(true),
+        "glob po* should match pong line: {s:?}"
+    );
+    assert_eq!(s["stop_reason"], json!("match_found"));
+
+    close_connection(&client, &id).await;
+    client.cancel().await.ok();
+    drop(fw);
+}

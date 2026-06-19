@@ -11,7 +11,7 @@ use tracing::error;
 use tokio::sync::mpsc;
 
 use crate::codec::{self, Encoding};
-use crate::match_config::{shape_match_context, ByteMatcher};
+use crate::match_config::{shape_match_context, Matcher};
 use crate::rx_metadata::RxStopMetadata;
 use crate::rx_session::RxEvent;
 use crate::serial::{
@@ -97,7 +97,7 @@ pub async fn read_bytes_via_session(
     ct: &tokio_util::sync::CancellationToken,
     progress_token: Option<ProgressToken>,
     peer: Option<&Peer<RoleServer>>,
-    mut matcher: Option<ByteMatcher>,
+    mut matcher: Option<Matcher>,
     no_new_rx_timeout_ms: Option<u64>,
 ) -> Result<ReadOutcome, String> {
     const SETTLE_MS: u64 = 50;
@@ -113,7 +113,7 @@ pub async fn read_bytes_via_session(
     let mut accumulated: Vec<u8> = Vec::with_capacity(max_bytes);
 
     let context_amount = matcher.as_ref().and_then(|m| m.context_amount());
-    let needle_len = matcher.as_ref().map(|m| m.needle().len());
+    let needle_len = matcher.as_ref().and_then(|m| m.needle_len());
 
     let make_outcome = |bytes: Vec<u8>,
                         elapsed_ms: u64,
@@ -233,6 +233,17 @@ pub async fn read_bytes_via_session(
                 }
                 // With a matcher, push_data already checked max_buffered_bytes.
                 // Loop continues to accumulate until match/timeout/close.
+                // Prune the matcher's internal window to prevent unbounded growth.
+                if let Some(m) = matcher.as_mut() {
+                    let keep = m
+                        .needle_len()
+                        .map(|n| n.max(1).saturating_add(1))
+                        .unwrap_or(256);
+                    let cap = max_bytes.max(keep);
+                    if m.len() > cap {
+                        m.truncate_front(cap);
+                    }
+                }
             }
             RxEvent::Closed => {
                 let outcome = ctrl.connection_closed();

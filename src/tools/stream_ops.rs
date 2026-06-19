@@ -11,7 +11,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::buffer_budget::BufferBudget;
 use crate::codec;
-use crate::match_config::{shape_match_context, validate_match_request, ByteMatcher};
+use crate::match_config::{shape_match_context, validate_match_request, Matcher};
 use crate::rx_metadata::RxStopMetadata;
 use crate::rx_session::{RxEvent, RxSessionManager};
 use crate::serial::ConnectionManager;
@@ -99,7 +99,7 @@ pub async fn subscribe(
     }
 
     // Resolve matcher if provided.
-    let matcher: Option<ByteMatcher> = match &args.r#match {
+    let matcher: Option<Matcher> = match &args.r#match {
         Some(m) => Some(validate_match_request(m)?),
         None => None,
     };
@@ -269,7 +269,7 @@ async fn stream_rx_via_session(
     no_new_rx_timeout_ms: Option<u64>,
     // Held for RAII: dropping releases the budget reservation.
     _reservation: Box<dyn crate::buffer_budget::BufferReservation>,
-    mut matcher: Option<ByteMatcher>,
+    mut matcher: Option<Matcher>,
 ) {
     let conn_id = session.connection_id().to_string();
     let logger = format!("serial:{conn_id}");
@@ -291,7 +291,7 @@ async fn stream_rx_via_session(
     // Accumulated buffer for context shaping on match. Capped by
     // _max_buffered_bytes so memory stays bounded.
     let context_amount = matcher.as_ref().and_then(|m| m.context_amount());
-    let needle_len = matcher.as_ref().map(|m| m.needle().len());
+    let needle_len = matcher.as_ref().and_then(|m| m.needle_len());
     let mut accumulated: Vec<u8> = Vec::new();
 
     loop {
@@ -340,7 +340,10 @@ async fn stream_rx_via_session(
                 // reservation budget). For subscribe, this prevents the
                 // matcher from growing beyond the reserved budget.
                 if let Some(m) = matcher.as_mut() {
-                    let keep = m.needle().len().max(1).saturating_add(1);
+                    let keep = m
+                        .needle_len()
+                        .map(|n| n.max(1).saturating_add(1))
+                        .unwrap_or(256);
                     let cap = _max_buffered_bytes.max(keep);
                     if m.len() > cap {
                         m.truncate_front(cap);
