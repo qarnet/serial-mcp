@@ -11,8 +11,8 @@ cargo run --manifest-path xtask/Cargo.toml -- test-all   # + HTTP integration
 cargo run --manifest-path xtask/Cargo.toml -- build-test-assets
 
 # Individual suites
-cargo test --lib                    # 149 unit tests
-cargo test --test http_integration  # 23 HTTP tests (13 via spawned binary)
+cargo test --lib                    # 162 unit tests
+cargo test --test http_integration  # 41 HTTP tests (via spawned binary)
 cargo test --test stdio_integration # 3 + 1 hw-skipped stdio tests
 cargo test --test blob_resources    # 2 blob resource tests
 
@@ -245,7 +245,7 @@ Currently fuzzes: `OpenArgs`, `CloseArgs`, `WriteArgs`, `ReadArgs`, `FlushArgs`,
 
 ---
 
-## Coverage Gaps (from CLEANUP.md)
+## Coverage Gaps (from TECHNICAL_DEBT.md)
 
 Known gaps that should be addressed in follow-up work:
 

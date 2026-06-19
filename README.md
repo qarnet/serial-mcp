@@ -101,6 +101,53 @@ serial-mcp [OPTIONS]
 | stdio | default | Desktop agents |
 | HTTP | `--transport=http` | Remote / headless |
 
+## How RX Works
+
+All receive-side operations (`read`, `subscribe`) share a single **per-connection
+RX pump** (`RxSession`). The pump is the only code that reads from the serial
+port — it fans bytes out to registered consumers, so `read` and `subscribe`
+never race each other.
+
+**Future-only semantics:** `read` returns **only bytes received after the call
+starts**, not previously buffered data. This means `read` sees a fresh stream
+every time.
+
+**Stop reasons:** Every `read` and `subscribe` stop payload includes a
+`stop_reason` field with one of these values:
+
+| Reason | Meaning |
+|---|---|
+| `data_complete` | Operation finished its data collection normally |
+| `timeout` | Wall-clock timeout (`timeout_ms`) elapsed |
+| `match_found` | A literal byte pattern was matched |
+| `max_buffered_bytes` | Buffer budget limit reached |
+| `no_new_rx_timeout` | Silence timeout elapsed (no new bytes within window) |
+| `connection_closed` | The underlying serial port was closed |
+| `cancelled` | The MCP client cancelled the request |
+| `read_error` | An I/O error occurred on the serial port |
+| `channel_closed` | The internal RX pump channel closed |
+| `peer_disconnected` | The MCP client disconnected during streaming |
+| `budget_exhausted` | Program buffer budget was insufficient |
+
+**Result metadata:** `read` and subscribe stop notifications carry:
+
+| Field | Meaning |
+|---|---|
+| `bytes_observed` | Total bytes the operation saw from the RX stream |
+| `bytes_returned` | Bytes actually returned in the result `data` |
+| `truncated` | `true` when `bytes_returned < bytes_observed` (data was capped) |
+| `matched` | `true` when a configured pattern was found |
+| `match_index` | Byte offset of the match within the returned `data` |
+
+**Matching:** Set `match.pattern` + optional `match.pattern_encoding` on
+`read` or `subscribe`. The operation stops when the literal byte substring is
+found. Add `match.context_amount_of_matched_bytes` to return up to N bytes
+*before* the match plus the matched bytes (shaped context).
+
+**Silence timeout:** Set `no_new_rx_timeout_ms` to stop when no new bytes
+arrive within the specified window. Distinct from wall-clock `timeout_ms` —
+the silence timer resets on every received chunk.
+
 ## Example Agent Flow
 
 ```
@@ -109,7 +156,10 @@ serial-mcp [OPTIONS]
 3. list_connections() → [{ connection_id: "9f...", name: "board-uart", port: "/dev/ttyACM0" }]
 4. set_dtr_rts(id, dtr=false, rts=false)  # Arduino reset
    set_dtr_rts(id, dtr=true,  rts=true)
-5. read(id, match={ pattern: "OK>" }, timeout_ms=3000)  # pattern match in RX data
+5. read(id, match={ pattern: "OK>" }, timeout_ms=3000)
+   → { stop_reason: "match_found", matched: true, match_index: 0,
+       bytes_observed: 37, bytes_returned: 37, truncated: false,
+       data: "...OK>" }
 6. write(id, data="status\r\n")
 7. close(id)
 ```

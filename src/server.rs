@@ -220,7 +220,7 @@ impl SerialHandler {
     }
 
     #[tool(
-        description = "Read data from a serial port connection. With no match option, reads available bytes with timeout and burst-settle. With match, accumulates future bytes until the pattern is found, timeout, max_buffered_bytes, connection close, or cancellation. The match option specifies a literal byte-substring pattern to detect; match_encoding controls how the pattern string is decoded to raw bytes.",
+        description = "Read data from a serial port connection. Returns only future bytes — data received after the call starts, not previously buffered data. With no match option, reads available bytes with timeout and burst-settle. With match, accumulates future bytes until the pattern is found, timeout, max_buffered_bytes, connection close, or cancellation. The result includes stop_reason, truncated, bytes_observed, bytes_returned, matched, match_index, and elapsed_ms metadata. Set no_new_rx_timeout_ms to stop when no new bytes arrive within the specified silence window (distinct from wall-clock timeout_ms). The match option specifies a literal byte-substring pattern to detect; match_encoding controls how the pattern string is decoded to raw bytes.",
         title = "Read Serial Data",
         annotations(read_only_hint = true, open_world_hint = false),
         execution(task_support = "optional")
@@ -305,7 +305,7 @@ impl SerialHandler {
     }
 
     #[tool(
-        description = "Subscribe to a connection: starts a background stream that forwards received bytes as MCP `notifications/message` events with logger=\"serial:<connection_id>\". When timeout_ms is set, the stream auto-stops after that duration. When omitted, the stream runs until unsubscribe, connection close, or error. With the match option, the stream also detects the first byte-substring match, emits a final notification with matched=true and match_index, then stops. Replaces any prior subscription on the same connection. A final notification with stop_reason is emitted when the stream ends.",
+        description = "Subscribe to a connection: starts a background stream that forwards received bytes as MCP `notifications/message` events with logger=\"serial:<connection_id>\". When timeout_ms is set, the stream auto-stops after that duration. When omitted, the stream runs until unsubscribe, connection close, or error. Set no_new_rx_timeout_ms to stop after a period of silence (no new bytes). With the match option, the stream also detects the first byte-substring match, emits a final notification with matched=true and match_index, then stops. Replaces any prior subscription on the same connection. A final notification with stop_reason, truncated, bytes_observed, bytes_returned, elapsed_ms, timeout_ms, and no_new_rx_timeout_ms is emitted when the stream ends.",
         title = "Subscribe to RX Stream",
         annotations(
             destructive_hint = false,

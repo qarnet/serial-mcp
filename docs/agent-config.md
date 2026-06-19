@@ -137,7 +137,7 @@ Agent config (any client that supports streamable HTTP):
 ## Troubleshooting
 
 - `Failed to open port` or `Unable to acquire exclusive lock on serial port`: another program already owns the device. Close tools like `picocom`, `screen`, `minicom`, serial monitors, or another `serial-mcp` instance.
-- `Connection busy: ... already owns RX`: one receive-side MCP operation is already active on that connection. Finish or unsubscribe the current `read` or `subscribe` operation before starting another.
+- `Connection busy: ... already owns RX`: a receive-side operation (`read` or `subscribe`) is already active on that connection. Each connection has a single shared RX pump; only one `read` or `subscribe` stream task can be active at a time. Finish or unsubscribe the current operation before starting another. See the [README](../README.md#how-rx-works) for RX model details.
 
 ## Schema validation
 

@@ -54,6 +54,8 @@ pub struct ReadArgs {
     #[serde(default)]
     #[schemars(schema_with = "crate::schema_helpers::option_positive_timeout_ms_schema")]
     pub no_new_rx_timeout_ms: Option<u64>,
+    /// Maximum bytes to buffer before the read stops. When exceeded, the operation
+    /// stops with `max_buffered_bytes` and `truncated` is `true` in the result.
     #[serde(default = "default_max_buffered_bytes")]
     #[schemars(schema_with = "crate::schema_helpers::read_max_buffered_bytes_schema")]
     pub max_buffered_bytes: usize,
@@ -213,10 +215,19 @@ pub struct ReadResult {
     pub no_new_rx_timeout_ms: Option<u64>,
     #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
     pub elapsed_ms: u64,
+    /// Why the operation stopped. One of: `data_complete`, `timeout`,
+    /// `match_found`, `max_buffered_bytes`, `no_new_rx_timeout`,
+    /// `connection_closed`, `cancelled`, `read_error`, `channel_closed`,
+    /// `peer_disconnected`, `budget_exhausted`.
     pub stop_reason: String,
+    /// `true` when `bytes_returned < bytes_observed` because the result
+    /// data was capped (e.g. `max_buffered_bytes` limit exceeded observed
+    /// data).
     pub truncated: bool,
+    /// Total bytes the operation observed from the RX stream before stopping.
     #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
     pub bytes_observed: usize,
+    /// Bytes actually returned in the result `data` field.
     #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
     pub bytes_returned: usize,
     /// Whether the match pattern was found. `false` when no `match` option was
