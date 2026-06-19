@@ -406,17 +406,7 @@ async fn subscribe_with_timeout_auto_stops_in_background() {
         .unwrap();
 
     assert_ne!(result.is_error, Some(true), "{result:?}");
-    let structured = result.structured_content.expect("structured content");
-    // Both subscribe modes now return immediate ack; data is always null.
-    assert!(structured["data"].is_null(), "data must be null in ack");
-    assert!(
-        structured["bytes_read"].is_null(),
-        "bytes_read must be null in ack"
-    );
-    assert!(
-        structured["elapsed_ms"].is_null(),
-        "elapsed_ms must be null in ack"
-    );
+    // Subscribe ack is always immediate after PLAN 1b.
 
     // Data arrives as a background notification.
     let event = next_notification(&mut rx, Duration::from_secs(2))
@@ -453,21 +443,7 @@ async fn subscribe_without_timeout_is_fire_and_forget() {
         .unwrap();
     assert_ne!(result.is_error, Some(true), "{result:?}");
 
-    // Fire-and-forget: data is null; bytes_read/elapsed_ms/timeout_ms also null
-    let structured = result.structured_content.expect("structured content");
-    assert!(structured["data"].is_null(), "data must be null in FF mode");
-    assert!(
-        structured["bytes_read"].is_null(),
-        "bytes_read must be null"
-    );
-    assert!(
-        structured["elapsed_ms"].is_null(),
-        "elapsed_ms must be null"
-    );
-    assert!(
-        structured["timeout_ms"].is_null(),
-        "timeout_ms must be null"
-    );
+    // Subscribe ack is always immediate after PLAN 1b.
 
     // Background stream still runs: write something and it arrives as notification
     peer.write_all(b"post-subscribe").await.unwrap();

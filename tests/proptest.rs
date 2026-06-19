@@ -322,25 +322,11 @@ proptest! {
         id in opaque_id(), enc in valid_encoding(),
         max_buffered_bytes in any_usize(), poll in any_u64(), replaced: bool,
     ) {
-        // Fire-and-forget: all Optional fields are null
+        // SubscribeResult — subscribe is always background (PLAN 1b).
         let r = SubscribeResult {
             connection_id: id.clone(), name: None, encoding: enc.clone(),
             max_buffered_bytes, poll_interval_ms: poll,
             replaced_previous: replaced,
-            data: None, bytes_read: None, elapsed_ms: None, timeout_ms: None,
-        };
-        let v = serde_json::to_value(&r).unwrap();
-        assert!(v["data"].is_null(), "data must be null in FF mode");
-        assert!(v["bytes_read"].is_null(), "bytes_read must be null in FF mode");
-        assert_schema_valid!(SubscribeResult, v);
-
-        // Blocking: all Optional fields are present
-        let r = SubscribeResult {
-            connection_id: id, name: None, encoding: enc,
-            max_buffered_bytes, poll_interval_ms: poll,
-            replaced_previous: replaced,
-            data: Some("sensor data".into()), bytes_read: Some(42),
-            elapsed_ms: Some(1500), timeout_ms: Some(3000),
         };
         let v = serde_json::to_value(&r).unwrap();
         assert_schema_valid!(SubscribeResult, v);
@@ -567,6 +553,7 @@ fn all_result_types_have_valid_schema() {
 
 #[test]
 fn subscribe_result_ff_null_fields_match_schema() {
+    // Subscribe is always background after PLAN 1b; no nullable vestigial fields remain.
     let r = SubscribeResult {
         connection_id: "abc".into(),
         name: None,
@@ -574,25 +561,8 @@ fn subscribe_result_ff_null_fields_match_schema() {
         max_buffered_bytes: 1024,
         poll_interval_ms: 200,
         replaced_previous: false,
-        data: None,
-        bytes_read: None,
-        elapsed_ms: None,
-        timeout_ms: None,
     };
     let v = serde_json::to_value(&r).unwrap();
-    assert!(v["data"].is_null(), "data must serialize as null");
-    assert!(
-        v["bytes_read"].is_null(),
-        "bytes_read must serialize as null"
-    );
-    assert!(
-        v["elapsed_ms"].is_null(),
-        "elapsed_ms must serialize as null"
-    );
-    assert!(
-        v["timeout_ms"].is_null(),
-        "timeout_ms must serialize as null"
-    );
     validate_schema::<SubscribeResult>(&v);
     roundtrip_stable(&r);
 }
@@ -606,25 +576,8 @@ fn subscribe_result_blocking_filled_fields_match_schema() {
         max_buffered_bytes: 2048,
         poll_interval_ms: 100,
         replaced_previous: true,
-        data: None,
-        bytes_read: None,
-        elapsed_ms: None,
-        timeout_ms: None,
     };
     let v = serde_json::to_value(&r).unwrap();
-    assert!(v["data"].is_null(), "data must be null after PLAN 1b");
-    assert!(
-        v["bytes_read"].is_null(),
-        "bytes_read must be null after PLAN 1b"
-    );
-    assert!(
-        v["elapsed_ms"].is_null(),
-        "elapsed_ms must be null after PLAN 1b"
-    );
-    assert!(
-        v["timeout_ms"].is_null(),
-        "timeout_ms must be null after PLAN 1b"
-    );
     validate_schema::<SubscribeResult>(&v);
     roundtrip_stable(&r);
 }

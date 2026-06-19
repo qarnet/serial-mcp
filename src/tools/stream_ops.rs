@@ -187,10 +187,6 @@ pub async fn subscribe(
         max_buffered_bytes,
         poll_interval_ms: poll_ms,
         replaced_previous: was_replaced,
-        data: None,
-        bytes_read: None,
-        elapsed_ms: None,
-        timeout_ms: None,
     }))
 }
 
