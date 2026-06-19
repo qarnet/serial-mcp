@@ -36,6 +36,9 @@ pub enum RxStopReason {
     PeerDisconnected,
     /// The program buffer budget was insufficient to reserve the requested bytes.
     BudgetExhausted,
+    /// The read collected the configured maximum number of frames
+    /// (`max_frames` in framing configuration).
+    MaxFrames,
 }
 
 impl fmt::Display for RxStopReason {
@@ -162,6 +165,15 @@ impl RxStopMetadata {
             truncated: false,
             bytes_observed,
             bytes_returned: bytes_observed,
+        }
+    }
+
+    pub fn max_frames(bytes_observed: usize, bytes_returned: usize) -> Self {
+        Self {
+            stop_reason: RxStopReason::MaxFrames,
+            truncated: false,
+            bytes_observed,
+            bytes_returned,
         }
     }
 

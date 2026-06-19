@@ -125,6 +125,7 @@ pub async fn read(
         matcher,
         args.no_new_rx_timeout_ms,
         Some(Arc::clone(&connection)),
+        args.framing,
     )
     .await?;
 

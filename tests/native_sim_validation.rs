@@ -1703,3 +1703,279 @@ async fn native_auto_reconnect_preserves_connection() {
     client.cancel().await.ok();
     drop(fw);
 }
+
+// ── Test 26: line framing splits multi-line output into frames ─────────────
+
+#[tokio::test]
+#[ignore = "requires native_sim firmware binary"]
+#[cfg(unix)]
+async fn native_read_line_framing_splits_lines() {
+    let fw = NativeSimFirmware::spawn().await.expect("spawn zephyr.exe");
+    let pty_path = fw.pty_path().to_string();
+
+    let server = TestServer::start().await;
+    let (client, _rx) = connect_client(&server).await.unwrap();
+    let id = open_pty(&client, &pty_path).await;
+    sync_boot(&client, &id).await;
+
+    // Drain boot output so read only sees our commands.
+    flush_both(&client, &id).await;
+
+    // Start a read with line framing before writing to capture all output.
+    let read_handle = {
+        let peer = client.peer().clone();
+        let id2 = id.clone();
+        tokio::spawn(async move {
+            peer.call_tool(tool_request(
+                "read",
+                json!({
+                    "connection_id": id2,
+                    "timeout_ms": 3000,
+                    "max_buffered_bytes": 512,
+                    "encoding": "utf8",
+                    "framing": { "mode": { "type": "line" } }
+                }),
+            ))
+            .await
+        })
+    };
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    write_cmd(&client, &id, "ping").await;
+    // Give firmware time to process first command before sending second.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    write_cmd(&client, &id, "info").await;
+
+    let result = read_handle.await.unwrap().expect("read task");
+    assert_ne!(result.is_error, Some(true), "{result:?}");
+    let s = result.structured_content.expect("structured");
+    let frames = s["frames"].as_array().expect("frames array should exist");
+    assert!(
+        frames.len() >= 2,
+        "expected at least 2 frames (pong, info), got {}: {frames:?}",
+        frames.len()
+    );
+    // First frame should be pong line.
+    let f0 = &frames[0];
+    assert_eq!(f0["frame_type"], json!("line"));
+    assert!(f0["data"].as_str().unwrap().contains("pong"), "f0: {f0:?}");
+
+    close_connection(&client, &id).await;
+    client.cancel().await.ok();
+    drop(fw);
+}
+
+// ── Test 27: JSON parser decodes jsonout command output ───────────────────
+
+#[tokio::test]
+#[ignore = "requires native_sim firmware binary"]
+#[cfg(unix)]
+async fn native_read_json_parser_decodes_jsonout() {
+    let fw = NativeSimFirmware::spawn().await.expect("spawn zephyr.exe");
+    let pty_path = fw.pty_path().to_string();
+
+    let server = TestServer::start().await;
+    let (client, _rx) = connect_client(&server).await.unwrap();
+    let id = open_pty(&client, &pty_path).await;
+    sync_boot(&client, &id).await;
+    flush_both(&client, &id).await;
+
+    let read_handle = {
+        let peer = client.peer().clone();
+        let id2 = id.clone();
+        tokio::spawn(async move {
+            peer.call_tool(tool_request(
+                "read",
+                json!({
+                    "connection_id": id2,
+                    "timeout_ms": 3000,
+                    "max_buffered_bytes": 1024,
+                    "encoding": "utf8",
+                    "framing": {
+                        "mode": { "type": "line" },
+                        "parser": { "type": "json_lines" }
+                    }
+                }),
+            ))
+            .await
+        })
+    };
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    write_cmd(&client, &id, "jsonout").await;
+
+    let result = read_handle.await.unwrap().expect("read task");
+    assert_ne!(result.is_error, Some(true), "{result:?}");
+    let s = result.structured_content.expect("structured");
+    let frames = s["frames"].as_array().expect("frames array");
+    assert_eq!(
+        frames.len(),
+        3,
+        "expected 3 JSON frames from jsonout, got {}: {frames:?}",
+        frames.len()
+    );
+
+    // Each frame should have parsed JSON with inline fields.
+    // The JSON parser inlines the object fields into the parsed result:
+    // { "parser": "json", "sensor": "temp", "value": 25.5, "unit": "C" }
+    for frame in frames {
+        let parsed = frame["parsed"].as_object().expect("parsed object");
+        assert_eq!(
+            parsed["parser"],
+            json!("json"),
+            "parser mismatch: {parsed:?}"
+        );
+        assert!(parsed["sensor"].is_string(), "missing sensor: {parsed:?}");
+    }
+
+    // Verify specific sensor values (inline, not nested under "value" key).
+    let f0 = &frames[0]["parsed"];
+    assert_eq!(f0["sensor"], json!("temp"));
+    assert!((f0["value"].as_f64().unwrap() - 25.5).abs() < 0.01);
+
+    close_connection(&client, &id).await;
+    client.cancel().await.ok();
+    drop(fw);
+}
+
+// ── Test 28: AT command parser treats pong as data line ────────────────────
+
+#[tokio::test]
+#[ignore = "requires native_sim firmware binary"]
+#[cfg(unix)]
+async fn native_read_at_parser_parses_pong() {
+    let fw = NativeSimFirmware::spawn().await.expect("spawn zephyr.exe");
+    let pty_path = fw.pty_path().to_string();
+
+    let server = TestServer::start().await;
+    let (client, _rx) = connect_client(&server).await.unwrap();
+    let id = open_pty(&client, &pty_path).await;
+    sync_boot(&client, &id).await;
+    flush_both(&client, &id).await;
+
+    let read_handle = {
+        let peer = client.peer().clone();
+        let id2 = id.clone();
+        tokio::spawn(async move {
+            peer.call_tool(tool_request(
+                "read",
+                json!({
+                    "connection_id": id2,
+                    "timeout_ms": 3000,
+                    "max_buffered_bytes": 512,
+                    "encoding": "utf8",
+                    "framing": {
+                        "mode": { "type": "line" },
+                        "parser": { "type": "at_command" }
+                    }
+                }),
+            ))
+            .await
+        })
+    };
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    write_cmd(&client, &id, "ping").await;
+
+    let result = read_handle.await.unwrap().expect("read task");
+    assert_ne!(result.is_error, Some(true), "{result:?}");
+    let s = result.structured_content.expect("structured");
+    let frames = s["frames"].as_array().expect("frames array");
+    assert!(!frames.is_empty(), "expected at least one frame");
+
+    // The pong line should be parsed as AT data.
+    let f0 = &frames[0];
+    let parsed = f0["parsed"].as_object().expect("parsed object");
+    assert_eq!(parsed["parser"], json!("at_command"), "parser: {parsed:?}");
+    assert_eq!(
+        parsed["response_type"],
+        json!("data"),
+        "pong should be AT data line: {parsed:?}"
+    );
+    let fields = parsed["fields"].as_array().expect("fields array");
+    assert!(
+        fields.iter().any(|f| f.as_str().unwrap().contains("pong")),
+        "fields should contain pong: {fields:?}"
+    );
+
+    close_connection(&client, &id).await;
+    client.cancel().await.ok();
+    drop(fw);
+}
+
+// ── Test 29: subscribe with line framing emits per-frame notifications ────
+
+#[tokio::test]
+#[ignore = "requires native_sim firmware binary"]
+#[cfg(unix)]
+async fn native_subscribe_line_framing_emits_per_frame() {
+    let fw = NativeSimFirmware::spawn().await.expect("spawn zephyr.exe");
+    let pty_path = fw.pty_path().to_string();
+
+    let server = TestServer::start().await;
+    let (client, mut rx) = connect_client(&server).await.unwrap();
+    let id = open_pty(&client, &pty_path).await;
+    sync_boot(&client, &id).await;
+
+    // Subscribe with line framing, auto-stop after 2 seconds.
+    client
+        .peer()
+        .call_tool(tool_request(
+            "subscribe",
+            json!({
+                "connection_id": id,
+                "poll_interval_ms": 50,
+                "max_buffered_bytes": 8192,
+                "timeout_ms": 2000,
+                "encoding": "utf8",
+                "framing": {
+                    "mode": { "type": "line" }
+                }
+            }),
+        ))
+        .await
+        .unwrap();
+
+    write_cmd(&client, &id, "ping").await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    write_cmd(&client, &id, "info").await;
+
+    let mut frame_count = 0;
+    let mut saw_stop = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while tokio::time::Instant::now() < deadline {
+        match next_notification(&mut rx, Duration::from_secs(2)).await {
+            Ok(event) => {
+                let data = event.data.as_object().unwrap();
+                // Stop notification has stop_reason; frame notifications have frame_index.
+                if data.contains_key("stop_reason") {
+                    saw_stop = true;
+                    assert!(data["frames_emitted"].as_u64().unwrap_or(0) > 0);
+                    break;
+                }
+                if data.contains_key("frame_index") {
+                    frame_count += 1;
+                    assert!(
+                        data.contains_key("frame_type"),
+                        "missing frame_type: {data:?}"
+                    );
+                    // Frames replace raw chunks, so no bytes_read field.
+                    assert!(
+                        !data.contains_key("bytes_read"),
+                        "frame notifications should not have bytes_read: {data:?}"
+                    );
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    assert!(saw_stop, "subscribe should emit stop notification");
+    assert!(
+        frame_count >= 2,
+        "expected at least 2 frame notifications (pong, info), got {frame_count}"
+    );
+
+    close_connection(&client, &id).await;
+    client.cancel().await.ok();
+    drop(fw);
+}

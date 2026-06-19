@@ -369,6 +369,18 @@ static void cmd_hold(struct app_state *state, char *arg)
 	}
 }
 
+static void cmd_jsonout(struct app_state *state)
+{
+	/* Emit JSON lines for parser testing.
+	   Each line is a complete JSON object terminated by \r\n. */
+	uart_drv_printf(state->uart,
+			"{\"sensor\":\"temp\",\"value\":25.5,\"unit\":\"C\"}\r\n");
+	uart_drv_printf(state->uart,
+			"{\"sensor\":\"humidity\",\"value\":60,\"unit\":\"%%\"}\r\n");
+	uart_drv_printf(state->uart,
+			"{\"sensor\":\"pressure\",\"value\":1013.25,\"unit\":\"hPa\"}\r\n");
+}
+
 void command_init(struct app_state *state, struct uart_drv *drv)
 {
 	memset(state, 0, sizeof(*state));
@@ -448,6 +460,8 @@ void command_process(struct app_state *state, char *line)
 	} else if (strcmp(cmd, "touch") == 0) {
 		uart_drv_send_str(state->uart, "touch exit(42)\r\n");
 		exit(42);
+	} else if (strcmp(cmd, "jsonout") == 0) {
+		cmd_jsonout(state);
 	} else {
 		uart_drv_printf(state->uart, "ERR unknown command: %s\r\n", cmd);
 	}

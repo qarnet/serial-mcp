@@ -177,6 +177,7 @@ Tests match on exact phrase `Spam complete`.
 | `ack off` | `ack off\r\n` | disable pre-execution ack |
 | `hold on` | `hold on\r\n` | halt firmware TX drain (ring buffer fills) |
 | `hold off` | `hold off\r\n` | resume firmware TX drain |
+| `jsonout` | 3 JSON lines: `{"sensor":"temp",...}` | emits JSON objects for parser testing |
 
 ## Test Expectations
 
