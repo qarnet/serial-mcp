@@ -279,6 +279,11 @@ async fn stream_rx_via_session(
     let deadline = ctrl.deadline();
     let mut stop_outcome: Option<crate::stop_controller::RxStopOutcome> = None;
 
+    // Track total bytes sent via per-chunk data notifications, so
+    // bytes_returned in the stop payload reflects cumulative delivered
+    // bytes rather than the last chunk size.
+    let mut total_returned: usize = 0;
+
     // Accumulated buffer for context shaping on match. Capped by
     // _max_buffered_bytes so memory stays bounded.
     let context_amount = matcher.as_ref().and_then(|m| m.context_amount());
@@ -337,7 +342,9 @@ async fn stream_rx_via_session(
                         m.truncate_front(cap);
                     }
                 }
-                if let RxStopDecision::Stop(outcome) = ctrl.push_data(n, n, match_result) {
+                if let RxStopDecision::Stop(outcome) =
+                    ctrl.push_data(n, total_returned, match_result)
+                {
                     stop_outcome = Some(outcome);
                 }
 
@@ -387,6 +394,7 @@ async fn stream_rx_via_session(
                     stop_outcome = Some(ctrl.peer_disconnected());
                     break;
                 }
+                total_returned += n;
 
                 if stop_outcome.is_some() {
                     break;
@@ -406,11 +414,13 @@ async fn stream_rx_via_session(
 
     let elapsed_ms = start.elapsed().as_millis() as u64;
     let outcome = stop_outcome.unwrap_or_else(|| ctrl.channel_closed());
+    let bytes_observed = ctrl.bytes_observed();
+    let truncated = total_returned < bytes_observed;
     let stop_meta = RxStopMetadata {
         stop_reason: outcome.meta.stop_reason,
-        truncated: outcome.meta.truncated,
-        bytes_observed: outcome.meta.bytes_observed,
-        bytes_returned: outcome.meta.bytes_returned,
+        truncated,
+        bytes_observed,
+        bytes_returned: total_returned,
     };
 
     let mut stop_payload = serde_json::json!({
@@ -440,7 +450,6 @@ async fn stream_rx_via_session(
             match codec::encode(encoding, data) {
                 Ok(encoded) => {
                     stop_payload["data"] = serde_json::json!(encoded);
-                    stop_payload["bytes_returned"] = serde_json::json!(data.len());
                 }
                 Err(e) => {
                     warn!("RX stream match context encoding error on {conn_id}: {e}");
