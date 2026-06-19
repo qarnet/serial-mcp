@@ -224,12 +224,17 @@ impl Matcher {
             Self::Glob { pat, window, .. } => {
                 let decoded = String::from_utf8_lossy(window);
                 let mut byte_offset: usize = 0;
-                for line in decoded.lines() {
-                    if pat.matches(line) {
+                for line in decoded.split('\n') {
+                    // Strip trailing \r for line content matching (handles
+                    // both \n and \r\n line endings from UART/serial).
+                    let line_content = line.strip_suffix('\r').unwrap_or(line);
+                    if pat.matches(line_content) {
                         return MatchResult::Found(byte_offset);
                     }
-                    // +1 for the `\n` separator
-                    byte_offset += line.len() + 1;
+                    // Advance past the raw bytes of this line plus the \n separator.
+                    // split('\n') preserves \r, so line.len() counts both \r and
+                    // the line content correctly.
+                    byte_offset += line.len() + 1; // +1 for \n
                 }
                 MatchResult::NoMatch
             }
@@ -537,5 +542,145 @@ mod tests {
         };
         let matcher = validate_match_request(&req).unwrap();
         assert_eq!(matcher.context_amount(), Some(128));
+    }
+
+    // ── Regex matching ─────────────────────────────────────────────────
+
+    #[test]
+    fn regex_matches_simple_pattern() {
+        let mut m = Matcher::Regex {
+            re: regex::bytes::Regex::new("world").unwrap(),
+            window: Vec::new(),
+            context_amount: None,
+        };
+        assert_eq!(m.push(b"hello "), MatchResult::NoMatch);
+        assert_eq!(m.push(b"world"), MatchResult::Found(6));
+    }
+
+    #[test]
+    fn regex_matches_wildcard_dot() {
+        let mut m = Matcher::Regex {
+            re: regex::bytes::Regex::new("po.g").unwrap(),
+            window: Vec::new(),
+            context_amount: None,
+        };
+        assert_eq!(m.push(b"test"), MatchResult::NoMatch);
+        assert_eq!(m.push(b"pong"), MatchResult::Found(4));
+    }
+
+    #[test]
+    fn regex_no_match_returns_no_match() {
+        let mut m = Matcher::Regex {
+            re: regex::bytes::Regex::new("world").unwrap(),
+            window: Vec::new(),
+            context_amount: None,
+        };
+        assert_eq!(m.push(b"hello moon"), MatchResult::NoMatch);
+    }
+
+    #[test]
+    fn validate_match_request_regex_utf8() {
+        let req = MatchRequest {
+            pattern: "po.g".into(),
+            config: MatchConfig {
+                mode: MatchMode::Regex,
+                pattern_encoding: PatternEncoding::Utf8,
+                context_amount_of_matched_bytes: None,
+            },
+        };
+        let matcher = validate_match_request(&req).unwrap();
+        assert!(matcher.needle_len().is_none()); // regex has no fixed needle
+    }
+
+    #[test]
+    fn validate_match_request_regex_invalid_rejected() {
+        let req = MatchRequest {
+            pattern: "[invalid".into(),
+            config: MatchConfig {
+                mode: MatchMode::Regex,
+                pattern_encoding: PatternEncoding::Utf8,
+                context_amount_of_matched_bytes: None,
+            },
+        };
+        assert!(validate_match_request(&req).is_err());
+    }
+
+    // ── Glob matching ──────────────────────────────────────────────────
+
+    #[test]
+    fn glob_matches_line() {
+        let mut m = Matcher::Glob {
+            pat: glob::Pattern::new("pong").unwrap(),
+            window: Vec::new(),
+            context_amount: None,
+        };
+        assert_eq!(m.push(b"boot\npong\nready"), MatchResult::Found(5));
+    }
+
+    #[test]
+    fn glob_matches_line_with_crlf_endings() {
+        let mut m = Matcher::Glob {
+            pat: glob::Pattern::new("pong").unwrap(),
+            window: Vec::new(),
+            context_amount: None,
+        };
+        assert_eq!(m.push(b"boot\r\npong\r\nready"), MatchResult::Found(6));
+    }
+
+    #[test]
+    fn glob_matches_first_line_with_crlf() {
+        let mut m = Matcher::Glob {
+            pat: glob::Pattern::new("boot").unwrap(),
+            window: Vec::new(),
+            context_amount: None,
+        };
+        assert_eq!(m.push(b"boot\r\npong\r\nready"), MatchResult::Found(0));
+    }
+
+    #[test]
+    fn glob_matches_last_partial_line() {
+        let mut m = Matcher::Glob {
+            pat: glob::Pattern::new("pong").unwrap(),
+            window: Vec::new(),
+            context_amount: None,
+        };
+        // No trailing newline — last line still tested
+        assert_eq!(m.push(b"boot\r\npong"), MatchResult::Found(6));
+    }
+
+    #[test]
+    fn glob_no_match_returns_no_match() {
+        let mut m = Matcher::Glob {
+            pat: glob::Pattern::new("pong").unwrap(),
+            window: Vec::new(),
+            context_amount: None,
+        };
+        assert_eq!(m.push(b"boot\r\nready\r\ndone"), MatchResult::NoMatch);
+    }
+
+    #[test]
+    fn glob_matches_wildcard_pattern() {
+        let mut m = Matcher::Glob {
+            pat: glob::Pattern::new("error*").unwrap(),
+            window: Vec::new(),
+            context_amount: None,
+        };
+        assert_eq!(
+            m.push(b"boot\r\nerror: flash failed\r\nready"),
+            MatchResult::Found(6)
+        );
+    }
+
+    #[test]
+    fn validate_match_request_glob_invalid_rejected() {
+        let req = MatchRequest {
+            pattern: "[unclosed".into(),
+            config: MatchConfig {
+                mode: MatchMode::Glob,
+                pattern_encoding: PatternEncoding::Utf8,
+                context_amount_of_matched_bytes: None,
+            },
+        };
+        assert!(validate_match_request(&req).is_err());
     }
 }

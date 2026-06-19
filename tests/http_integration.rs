@@ -1165,7 +1165,15 @@ async fn get_status_returns_config_and_counters() {
     assert_eq!(s["is_open"], json!(true));
     assert_eq!(s["tx_bytes"], json!(0));
     assert_eq!(s["rx_bytes"], json!(0));
+    assert_eq!(s["read_ops"], json!(0));
+    assert_eq!(s["write_ops"], json!(0));
+    assert_eq!(s["truncation_count"], json!(0));
+    assert_eq!(s["notification_drop_count"], json!(0));
     assert!(s["last_activity_ms"].is_null());
+    assert!(
+        s["port_info"].is_null(),
+        "port_info should be null for loopback connections"
+    );
 
     // Write some data — tx counter should increase
     client
@@ -1205,6 +1213,10 @@ async fn get_status_returns_config_and_counters() {
     let s = result.structured_content.expect("structured");
     assert_eq!(s["tx_bytes"], json!(5), "tx should be 5: {s:?}");
     assert_eq!(s["rx_bytes"], json!(5), "rx should be 5: {s:?}");
+    assert_eq!(s["read_ops"], json!(1), "read_ops should be 1: {s:?}");
+    assert_eq!(s["write_ops"], json!(1), "write_ops should be 1: {s:?}");
+    assert_eq!(s["truncation_count"], json!(0));
+    assert_eq!(s["notification_drop_count"], json!(0));
     assert!(
         !s["last_activity_ms"].is_null(),
         "last_activity_ms should be set after I/O: {s:?}"

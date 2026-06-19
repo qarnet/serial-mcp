@@ -320,6 +320,9 @@ pub struct GetStatusResult {
     pub truncation_count: u64,
     #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
     pub notification_drop_count: u64,
+    /// OS-level port identity captured at open time. `null` for connections
+    /// without identity data (e.g. loopback tests).
+    pub port_info: Option<crate::serial::PortInfo>,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]

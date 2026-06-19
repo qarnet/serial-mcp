@@ -151,6 +151,7 @@ pub async fn subscribe(
     // reads from the serial port. This subscribe worker consumes from the
     // mpsc channel fed by the pump.
     let conn = Arc::clone(&connection);
+    connection.record_read_op();
     let session = rx_sessions.get_or_create(connection).await;
     let event_rx = session.register_streaming();
 
@@ -274,7 +275,6 @@ async fn stream_rx_via_session(
     let conn_id = session.connection_id().to_string();
     let logger = format!("serial:{conn_id}");
     let start = Instant::now();
-    conn.record_read_op();
     // Subscribe does not use max_buffered_bytes as a stop condition (it
     // streams each chunk immediately). We pass 0 so the controller never
     // stops on MaxBufferedBytes; instead we rely on timeout, match_found,

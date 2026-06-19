@@ -593,6 +593,7 @@ impl SerialConnection {
             write_ops: self.write_ops.load(Ordering::SeqCst),
             truncation_count: self.truncation_count.load(Ordering::SeqCst),
             notification_drop_count: self.notification_drop_count.load(Ordering::SeqCst),
+            port_info: self.port_info.clone(),
         }
     }
 
@@ -1041,6 +1042,10 @@ pub struct ConnectionStatus {
     pub truncation_count: u64,
     #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
     pub notification_drop_count: u64,
+    /// OS-level port identity captured at open time (vid, pid, serial,
+    /// manufacturer, etc.). `null` for connections opened without
+    /// identity data (e.g. loopback tests).
+    pub port_info: Option<PortInfo>,
 }
 
 fn find_connection_by_port<'a>(

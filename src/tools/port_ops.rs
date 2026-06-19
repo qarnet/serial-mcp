@@ -134,6 +134,7 @@ pub async fn get_status(
         write_ops: status.write_ops,
         truncation_count: status.truncation_count,
         notification_drop_count: status.notification_drop_count,
+        port_info: status.port_info,
     }))
 }
 
@@ -335,18 +336,7 @@ pub async fn save_profile(
         defaults,
     };
 
-    // Check overwrite policy against in-memory profiles first.
-    if !args.overwrite {
-        let lock = profiles.read().await;
-        if lock.iter().any(|p| p.name == args.profile_name) {
-            return Err(format!(
-                "Profile '{}' already exists. Set overwrite=true to replace.",
-                args.profile_name
-            ));
-        }
-    }
-
-    let created = crate::profiles::save_profile(profiles_path, &profile)?;
+    let created = crate::profiles::save_profile(profiles_path, &profile, args.overwrite)?;
 
     // Reload profiles into memory.
     let reloaded = crate::profiles::load_profiles(profiles_path);

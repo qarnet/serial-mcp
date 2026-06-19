@@ -210,9 +210,18 @@ pub fn default_profiles_path() -> PathBuf {
 /// replaced an existing profile with the same name.
 ///
 /// Writes to a temporary file first, then renames for atomicity.
-pub fn save_profile(path: &PathBuf, profile: &Profile) -> Result<bool, String> {
+/// When `overwrite` is false and a profile with the same name already
+/// exists, returns an error.
+pub fn save_profile(path: &PathBuf, profile: &Profile, overwrite: bool) -> Result<bool, String> {
     let mut profiles = load_profiles(path);
     let existing_idx = profiles.iter().position(|p| p.name == profile.name);
+
+    if existing_idx.is_some() && !overwrite {
+        return Err(format!(
+            "Profile '{}' already exists. Set overwrite=true to replace.",
+            profile.name
+        ));
+    }
 
     match existing_idx {
         Some(idx) => {
@@ -227,16 +236,17 @@ pub fn save_profile(path: &PathBuf, profile: &Profile) -> Result<bool, String> {
     let toml = toml::to_string_pretty(&ProfilesFile { profile: profiles })
         .map_err(|e| format!("Failed to serialize profiles: {e}"))?;
 
-    // Atomic write: temp file + rename.
     let dir = path
         .parent()
         .ok_or_else(|| "Profiles path has no parent directory".to_string())?;
     std::fs::create_dir_all(dir).map_err(|e| format!("Cannot create profile dir: {e}"))?;
 
-    let mut tmp = path.clone();
-    tmp.set_extension("tmp");
-    std::fs::write(&tmp, toml).map_err(|e| format!("Failed to write profiles: {e}"))?;
-    std::fs::rename(&tmp, path).map_err(|e| format!("Failed to commit profiles: {e}"))?;
+    let mut tmp = tempfile::NamedTempFile::new_in(dir)
+        .map_err(|e| format!("Failed to create temp file: {e}"))?;
+    std::io::Write::write_all(&mut tmp, toml.as_bytes())
+        .map_err(|e| format!("Failed to write profiles: {e}"))?;
+    tmp.persist(path)
+        .map_err(|e| format!("Failed to commit profiles: {e}"))?;
 
     tracing::info!(
         "Profile '{}' {} (path: {})",
@@ -266,10 +276,12 @@ pub fn delete_profile(path: &PathBuf, name: &str) -> Result<(), String> {
         .ok_or_else(|| "Profiles path has no parent directory".to_string())?;
     std::fs::create_dir_all(dir).map_err(|e| format!("Cannot create profile dir: {e}"))?;
 
-    let mut tmp = path.clone();
-    tmp.set_extension("tmp");
-    std::fs::write(&tmp, toml).map_err(|e| format!("Failed to write profiles: {e}"))?;
-    std::fs::rename(&tmp, path).map_err(|e| format!("Failed to commit profiles: {e}"))?;
+    let mut tmp = tempfile::NamedTempFile::new_in(dir)
+        .map_err(|e| format!("Failed to create temp file: {e}"))?;
+    std::io::Write::write_all(&mut tmp, toml.as_bytes())
+        .map_err(|e| format!("Failed to write profiles: {e}"))?;
+    tmp.persist(path)
+        .map_err(|e| format!("Failed to commit profiles: {e}"))?;
 
     tracing::info!("Profile '{}' deleted (path: {})", name, path.display());
     Ok(())
@@ -519,5 +531,176 @@ baud_rate = 9600
         std::fs::write(&path, "not valid toml {{{").unwrap();
         let profiles = load_profiles(&path);
         assert!(profiles.is_empty());
+    }
+
+    // ── save_profile / delete_profile ──────────────────────────────────
+
+    fn temp_profiles_path() -> PathBuf {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("profiles.toml");
+        // Prevent tempdir from being dropped — leak it into test scope.
+        // (The test function owns dir until it returns.)
+        std::mem::forget(dir);
+        path
+    }
+
+    fn make_test_profile(name: &str) -> Profile {
+        Profile {
+            name: name.into(),
+            selector: ProfileSelector {
+                vid: Some(0x1234),
+                ..Default::default()
+            },
+            defaults: ProfileDefaults::default(),
+        }
+    }
+
+    #[test]
+    fn save_profile_creates_new() {
+        let path = temp_profiles_path();
+        let profile = make_test_profile("test-device");
+        let created = save_profile(&path, &profile, false).unwrap();
+        assert!(created, "new profile should report created=true");
+
+        let loaded = load_profiles(&path);
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].name, "test-device");
+        assert_eq!(loaded[0].selector.vid, Some(0x1234));
+    }
+
+    #[test]
+    fn save_profile_overwrites_existing() {
+        let path = temp_profiles_path();
+        save_profile(&path, &make_test_profile("test-device"), false).unwrap();
+
+        // Same name with overwrite=true — should update
+        let mut updated = make_test_profile("test-device");
+        updated.defaults.baud_rate = 9600;
+        let created = save_profile(&path, &updated, true).unwrap();
+        assert!(!created, "overwrite should report created=false");
+
+        let loaded = load_profiles(&path);
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].defaults.baud_rate, 9600);
+    }
+
+    #[test]
+    fn save_profile_rejects_existing_without_overwrite() {
+        let path = temp_profiles_path();
+        save_profile(&path, &make_test_profile("test-device"), false).unwrap();
+
+        let result = save_profile(&path, &make_test_profile("test-device"), false);
+        assert!(
+            result.is_err(),
+            "should reject duplicate without overwrite flag"
+        );
+    }
+
+    #[test]
+    fn save_profile_appends_second_profile() {
+        let path = temp_profiles_path();
+        save_profile(&path, &make_test_profile("dev-a"), false).unwrap();
+        save_profile(&path, &make_test_profile("dev-b"), false).unwrap();
+
+        let loaded = load_profiles(&path);
+        assert_eq!(loaded.len(), 2);
+    }
+
+    #[test]
+    fn delete_profile_removes_existing() {
+        let path = temp_profiles_path();
+        save_profile(&path, &make_test_profile("dev-a"), false).unwrap();
+        save_profile(&path, &make_test_profile("dev-b"), false).unwrap();
+
+        delete_profile(&path, "dev-a").unwrap();
+        let loaded = load_profiles(&path);
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].name, "dev-b");
+    }
+
+    #[test]
+    fn delete_profile_nonexistent_returns_error() {
+        let path = temp_profiles_path();
+        let result = delete_profile(&path, "no-such-profile");
+        assert!(result.is_err());
+    }
+
+    // ── transport / hardware_id selector ───────────────────────────────
+
+    #[test]
+    fn transport_match_usb() {
+        let p = Profile {
+            name: "usb-only".into(),
+            selector: ProfileSelector {
+                transport: Some("usb".into()),
+                ..Default::default()
+            },
+            defaults: ProfileDefaults::default(),
+        };
+        assert!(p.matches(&make_port("/dev/ttyACM0", None, None, None)));
+        let mut pci_port = make_port("/dev/ttyS0", None, None, None);
+        pci_port.transport = crate::serial::PortTransport::Pci;
+        assert!(!p.matches(&pci_port));
+    }
+
+    #[test]
+    fn transport_match_unknown() {
+        let p = Profile {
+            name: "unknown-only".into(),
+            selector: ProfileSelector {
+                transport: Some("unknown".into()),
+                ..Default::default()
+            },
+            defaults: ProfileDefaults::default(),
+        };
+        let mut unknown_port = make_port("/dev/ttyX", None, None, None);
+        unknown_port.transport = crate::serial::PortTransport::Unknown;
+        assert!(p.matches(&unknown_port));
+    }
+
+    #[test]
+    fn transport_match_case_sensitive() {
+        let p = Profile {
+            name: "usb-exact".into(),
+            selector: ProfileSelector {
+                transport: Some("USB".into()),
+                ..Default::default()
+            },
+            defaults: ProfileDefaults::default(),
+        };
+        // Display output is lowercase — "USB" does not match "usb"
+        assert!(!p.matches(&make_port("/dev/ttyACM0", None, None, None)));
+    }
+
+    #[test]
+    fn hardware_id_match() {
+        let p = Profile {
+            name: "by-hwid".into(),
+            selector: ProfileSelector {
+                hardware_id: Some("USB\\VID_1234&PID_5678".into()),
+                ..Default::default()
+            },
+            defaults: ProfileDefaults::default(),
+        };
+        let mut port = make_port("/dev/ttyACM0", None, None, None);
+        port.hardware_id = Some("USB\\VID_1234&PID_5678".into());
+        assert!(p.matches(&port));
+
+        port.hardware_id = Some("USB\\VID_AAAA&PID_BBBB".into());
+        assert!(!p.matches(&port));
+    }
+
+    #[test]
+    fn hardware_id_no_match_when_port_has_none() {
+        let p = Profile {
+            name: "hwid-required".into(),
+            selector: ProfileSelector {
+                hardware_id: Some("USB\\VID_1234&PID_5678".into()),
+                ..Default::default()
+            },
+            defaults: ProfileDefaults::default(),
+        };
+        // Port with no hardware_id should not match
+        assert!(!p.matches(&make_port("/dev/ttyACM0", None, None, None)));
     }
 }

@@ -33,6 +33,7 @@ regex = "1"
 pico-args = { version = "0.5.0", features = ["eq-separator"] }
 toml = "0.8"
 dirs = "6"
+tempfile = "3"
 
 [[bin]]
 name = "serial-mcp"
@@ -50,7 +51,6 @@ proptest = "1.6"
 proptest-derive = "0.5"
 libfuzzer-sys = "0.4"
 arbitrary = { version = "1", features = ["derive"] }
-tempfile = "3"
 jsonschema = "0.26"
 reqwest = { version = "0.12", features = ["blocking", "json", "rustls-tls"], default-features = false }
 mutants = "0.0.4"
