@@ -151,7 +151,7 @@ impl RxSession {
     }
 
     /// Ensure the pump task is running. Idempotent.
-    fn ensure_pump_running(&self) {
+    pub(crate) fn ensure_pump_running(&self) {
         let mut task_slot = self.pump_task.lock().expect("pump_task mutex poisoned");
         if let Some(handle) = task_slot.take() {
             if handle.is_finished() {
@@ -330,17 +330,25 @@ async fn pump_loop(
             Err(e) => {
                 error!("rx_session: read error on {conn_id}: {e}");
                 // Detect fatal disconnects and update connection state.
-                if let crate::error::SerialError::IoError(ref io_err) = e {
-                    if crate::serial::is_fatal_disconnect(io_err) {
-                        connection
-                            .mark_disconnected(format!("Read error: {e}"))
-                            .await;
-                    }
+                let is_fatal = if let crate::error::SerialError::IoError(ref io_err) = e {
+                    crate::serial::is_fatal_disconnect(io_err)
+                } else {
+                    false
+                };
+                if is_fatal {
+                    connection
+                        .mark_disconnected(format!("Read error: {e}"))
+                        .await;
+                    // Do NOT fanout RxEvent::Error — consumers survive
+                    // the disconnect and resume after reconnect.
+                    // The read/subscribe loops check connection state
+                    // and pause their timeouts during Disconnected.
+                } else {
+                    consumers
+                        .lock()
+                        .expect("consumers mutex poisoned")
+                        .fanout(RxEvent::Error(e.to_string()));
                 }
-                consumers
-                    .lock()
-                    .expect("consumers mutex poisoned")
-                    .fanout(RxEvent::Error(e.to_string()));
                 break;
             }
         }

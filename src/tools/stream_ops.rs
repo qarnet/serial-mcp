@@ -295,6 +295,16 @@ async fn stream_rx_via_session(
     let mut accumulated: Vec<u8> = Vec::new();
 
     loop {
+        // Pause timeouts while the connection is disconnected or reconnecting.
+        let state = conn.state();
+        if state == crate::serial::ConnectionState::Disconnected
+            || state == crate::serial::ConnectionState::Reconnecting
+        {
+            ctrl.reset_silence_timer();
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            continue;
+        }
+
         if let RxStopDecision::Stop(outcome) = ctrl.check_timeout() {
             stop_outcome = Some(outcome);
             break;

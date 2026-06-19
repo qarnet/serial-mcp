@@ -99,6 +99,7 @@ pub async fn read_bytes_via_session(
     peer: Option<&Peer<RoleServer>>,
     mut matcher: Option<Matcher>,
     no_new_rx_timeout_ms: Option<u64>,
+    conn: Option<Arc<crate::serial::SerialConnection>>,
 ) -> Result<ReadOutcome, String> {
     const SETTLE_MS: u64 = 50;
 
@@ -148,6 +149,18 @@ pub async fn read_bytes_via_session(
     };
 
     loop {
+        // Pause timeouts while the connection is disconnected or reconnecting.
+        if let Some(ref conn) = conn {
+            let state = conn.state();
+            if state == crate::serial::ConnectionState::Disconnected
+                || state == crate::serial::ConnectionState::Reconnecting
+            {
+                ctrl.reset_silence_timer();
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                continue;
+            }
+        }
+
         if let RxStopDecision::Stop(outcome) = ctrl.check_timeout() {
             return Ok(make_outcome(
                 accumulated,

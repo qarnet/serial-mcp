@@ -1616,3 +1616,90 @@ async fn native_read_glob_matches_pong_line() {
     client.cancel().await.ok();
     drop(fw);
 }
+
+// ── Test 25: reconnect tool works on an open connection ──────────────────
+
+#[tokio::test]
+#[ignore = "requires native_sim firmware binary"]
+#[cfg(unix)]
+async fn native_auto_reconnect_preserves_connection() {
+    let fw = NativeSimFirmware::spawn().await.expect("spawn zephyr.exe");
+    let pty_path = fw.pty_path().to_string();
+
+    let server = TestServer::start().await;
+    let (client, _rx) = connect_client(&server).await.unwrap();
+
+    let result = client
+        .peer()
+        .call_tool(tool_request(
+            "open",
+            json!({
+                "port": pty_path,
+                "name": "reconnect-test",
+                "baud_rate": 115200,
+                "reconnect_policy": {
+                    "enabled": true,
+                    "max_attempts": 10,
+                    "initial_delay_ms": 200,
+                    "max_delay_ms": 1000,
+                    "backoff_multiplier": 1.5
+                }
+            }),
+        ))
+        .await
+        .expect("open call");
+    assert_ne!(result.is_error, Some(true), "open failed: {result:?}");
+    let id = result
+        .structured_content
+        .as_ref()
+        .and_then(|s| s["connection_id"].as_str().map(str::to_string))
+        .expect("connection_id");
+
+    let status = client
+        .peer()
+        .call_tool(tool_request("get_status", json!({ "connection_id": id })))
+        .await
+        .unwrap();
+    let s = status.structured_content.expect("status");
+    assert_eq!(s["state"], json!("open"));
+
+    // Initial data test.
+    write_raw(&client, &id, "ping\r\n").await;
+    let data = read_str(&client, &id, 2000).await;
+    assert!(data.contains("pong"), "expected pong after first ping");
+
+    // Reconnect while already connected — succeeds immediately.
+    let result = client
+        .peer()
+        .call_tool(tool_request("reconnect", json!({"connection_id": id})))
+        .await
+        .expect("reconnect call");
+    assert_ne!(
+        result.is_error,
+        Some(true),
+        "reconnect should succeed when already open: {result:?}"
+    );
+
+    let status = client
+        .peer()
+        .call_tool(tool_request("get_status", json!({ "connection_id": id })))
+        .await
+        .unwrap();
+    let s = status.structured_content.expect("status");
+    assert_eq!(
+        s["state"],
+        json!("open"),
+        "expected open after reconnect, got: {s:?}"
+    );
+
+    // Verify data flows again.
+    flush_both(&client, &id).await;
+    write_raw(&client, &id, "ping\r\n").await;
+    let data = read_str(&client, &id, 2000).await;
+    assert!(data.contains("pong"), "expected pong after reconnect");
+    assert_eq!(s["connection_id"], json!(id));
+
+    close_connection(&client, &id).await;
+    client.cancel().await.ok();
+    drop(fw);
+}

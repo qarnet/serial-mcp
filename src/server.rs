@@ -81,11 +81,37 @@ impl SerialHandler {
     pub fn new() -> Self {
         let path = crate::profiles::default_profiles_path();
         let profiles = crate::profiles::load_profiles(&path);
-        Self::with_manager_and_security(
+        let handler = Self::with_manager_and_security(
             Arc::new(ConnectionManager::new()),
             SecurityManager::from_patterns::<[&str; 0]>([]),
         )
-        .with_profiles(path, profiles)
+        .with_profiles(path, profiles);
+        handler.spawn_reconnect_supervisor();
+        handler
+    }
+
+    /// Start the background reconnect supervisor task.
+    /// Requires a Tokio runtime to be active (panics otherwise).
+    pub fn spawn_reconnect_supervisor(&self) {
+        let connections = Arc::clone(&self.connections);
+        let rx_sessions = Arc::clone(&self.rx_sessions);
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                let all = connections.list_all().await;
+                for (id, conn) in all {
+                    let state = conn.state();
+                    if state == crate::serial::ConnectionState::Disconnected {
+                        let policy = conn.reconnect_policy.lock().expect("poisoned").clone();
+                        if policy.enabled {
+                            connections
+                                .start_reconnect(&id, Arc::clone(&rx_sessions))
+                                .await;
+                        }
+                    }
+                }
+            }
+        });
     }
 
     /// Replace the loaded profiles with the given vector and path.
@@ -143,7 +169,7 @@ impl SerialHandler {
         streams: StreamRegistry,
         budget: Arc<dyn BufferBudget>,
     ) -> Self {
-        Self {
+        let handler = Self {
             connections,
             streams,
             security,
@@ -153,7 +179,9 @@ impl SerialHandler {
             budget,
             profiles: Arc::new(tokio::sync::RwLock::new(Vec::new())),
             profiles_path: crate::profiles::default_profiles_path(),
-        }
+        };
+        handler.spawn_reconnect_supervisor();
+        handler
     }
 
     #[tool(
@@ -201,6 +229,8 @@ impl SerialHandler {
         ctx: RequestContext<RoleServer>,
     ) -> Result<Json<CloseResult>, String> {
         let connection_id = args.connection_id.clone();
+        // Cancel any running reconnect task so it doesn't try to reopen.
+        self.connections.cancel_reconnect(&connection_id).await;
         let result = port_ops::close(&self.connections, args).await?;
         // Shut down RX session (pump + consumers) for this connection.
         self.rx_sessions.remove(&connection_id).await;

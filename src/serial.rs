@@ -1133,6 +1133,7 @@ struct ConnectionRegistry {
     connections: HashMap<String, Arc<SerialConnection>>,
     opening_ports: HashSet<String>,
     closing_ports: HashSet<String>,
+    reconnect_tasks: HashMap<String, tokio::task::JoinHandle<()>>,
 }
 
 impl ConnectionManager {
@@ -1208,6 +1209,13 @@ impl ConnectionManager {
         };
 
         let port = connection.port().to_string();
+        // Abort any running reconnect task for this connection.
+        {
+            let mut state = self.state.lock().await;
+            if let Some(handle) = state.reconnect_tasks.remove(id) {
+                handle.abort();
+            }
+        }
         connection.log().closed();
         let result = connection.close().await;
 
@@ -1224,6 +1232,97 @@ impl ConnectionManager {
             .get(id)
             .cloned()
             .ok_or_else(|| SerialError::ConnectionNotFound(id.to_string()))
+    }
+
+    /// Return all currently-registered connections with their ids.
+    pub async fn list_all(&self) -> Vec<(String, Arc<SerialConnection>)> {
+        self.state
+            .lock()
+            .await
+            .connections
+            .iter()
+            .map(|(k, v)| (k.clone(), Arc::clone(v)))
+            .collect()
+    }
+
+    /// Start a background reconnect task for the given connection.
+    /// The task retries `reconnect()` with exponential backoff,
+    /// respecting the connection's `ReconnectPolicy`. On success,
+    /// restarts the RX pump via `rx_sessions`.
+    pub async fn start_reconnect(
+        &self,
+        id: &str,
+        rx_sessions: Arc<crate::rx_session::RxSessionManager>,
+    ) {
+        let conn = match self.get(id).await {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        let policy = conn.reconnect_policy.lock().expect("poisoned").clone();
+        if !policy.enabled {
+            return;
+        }
+        // Avoid spawning a duplicate task. Prune finished handles first.
+        {
+            let mut state = self.state.lock().await;
+            state.reconnect_tasks.retain(|_, h| !h.is_finished());
+            if state.reconnect_tasks.contains_key(id) {
+                return;
+            }
+        }
+
+        let id_owned = id.to_string();
+        let conn_clone = Arc::clone(&conn);
+        let handle = tokio::spawn(async move {
+            let mut delay_ms = policy.initial_delay_ms;
+            let mut attempts: u32 = 0;
+            loop {
+                // Check if still disconnected / not cancelled.
+                let state = conn_clone.state();
+                if state == ConnectionState::Open || state == ConnectionState::Closed {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+
+                match conn_clone.reconnect().await {
+                    Ok(()) => {
+                        // Reset attempt counter after successful reconnect.
+                        conn_clone.reconnect_attempts.store(0, Ordering::SeqCst);
+                        // Restart the RX pump so data flows again.
+                        if let Some(session) = rx_sessions.get(&id_owned).await {
+                            session.ensure_pump_running();
+                        }
+                        break;
+                    }
+                    Err(_e) => {
+                        attempts += 1;
+                        if policy.max_attempts > 0 && attempts >= policy.max_attempts {
+                            conn_clone
+                                .log()
+                                .record(None, crate::log_buffer::LogEvent::ReconnectExhausted);
+                            break;
+                        }
+                        // Exponential backoff with cap.
+                        delay_ms = ((delay_ms as f64) * policy.backoff_multiplier)
+                            .min(policy.max_delay_ms as f64)
+                            as u64;
+                    }
+                }
+            }
+            // Task completes: handle stays in reconnect_tasks; supervisor
+            // prunes finished handles on its next poll.
+        });
+
+        let mut state = self.state.lock().await;
+        state.reconnect_tasks.insert(id.to_string(), handle);
+    }
+
+    /// Cancel a running reconnect task for the given connection.
+    pub async fn cancel_reconnect(&self, id: &str) {
+        let mut state = self.state.lock().await;
+        if let Some(handle) = state.reconnect_tasks.remove(id) {
+            handle.abort();
+        }
     }
 
     /// Number of currently open connections.

@@ -150,6 +150,13 @@ impl RxStopController {
         }
     }
 
+    /// Reset the silence timer without recording new data.
+    /// Used when the connection is in a disconnected/reconnecting state
+    /// where we don't want the silence timer to fire.
+    pub fn reset_silence_timer(&mut self) {
+        self.silence_deadline = self.silence_duration.map(|dur| Instant::now() + dur);
+    }
+
     /// Record incoming data and evaluate stop conditions.
     ///
     /// Call this after receiving a data chunk. The caller provides:
