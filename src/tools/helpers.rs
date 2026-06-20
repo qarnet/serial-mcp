@@ -126,7 +126,6 @@ pub async fn read_bytes_via_session(
         None => None,
     };
     let mut collected_frames: Vec<crate::framing::Frame> = Vec::new();
-
     let make_outcome = |frames: Vec<crate::framing::Frame>,
                         bytes: Vec<u8>,
                         elapsed_ms: u64,
@@ -162,6 +161,20 @@ pub async fn read_bytes_via_session(
         }
     };
 
+    // Helper to flush any partial frame from the decoder and take collected frames.
+    // Call at every return point to ensure incomplete frames aren't dropped.
+    fn finalize_frames(
+        decoder: &mut Option<crate::framing::FrameDecoder>,
+        collected: &mut Vec<crate::framing::Frame>,
+    ) -> Vec<crate::framing::Frame> {
+        if let Some(ref mut dec) = *decoder {
+            if let Some(partial) = dec.flush_partial() {
+                collected.push(partial);
+            }
+        }
+        std::mem::take(collected)
+    }
+
     loop {
         // Pause timeouts while the connection is disconnected or reconnecting.
         if let Some(ref conn) = conn {
@@ -177,7 +190,7 @@ pub async fn read_bytes_via_session(
 
         if let RxStopDecision::Stop(outcome) = ctrl.check_timeout() {
             return Ok(make_outcome(
-                std::mem::take(&mut collected_frames),
+                finalize_frames(&mut decoder, &mut collected_frames),
                 accumulated,
                 read_start.elapsed().as_millis() as u64,
                 outcome.meta,
@@ -187,7 +200,7 @@ pub async fn read_bytes_via_session(
         }
         if let RxStopDecision::Stop(outcome) = ctrl.check_silence_timeout() {
             return Ok(make_outcome(
-                std::mem::take(&mut collected_frames),
+                finalize_frames(&mut decoder, &mut collected_frames),
                 accumulated,
                 read_start.elapsed().as_millis() as u64,
                 outcome.meta,
@@ -203,13 +216,13 @@ pub async fn read_bytes_via_session(
         let event = tokio::select! {
             _ = ct.cancelled() => {
                 let outcome = ctrl.cancelled();
-                return Ok(make_outcome(std::mem::take(&mut collected_frames), accumulated, read_start.elapsed().as_millis() as u64, outcome.meta, outcome.matched, outcome.match_index));
+                return Ok(make_outcome(finalize_frames(&mut decoder, &mut collected_frames), accumulated, read_start.elapsed().as_millis() as u64, outcome.meta, outcome.matched, outcome.match_index));
             }
             msg = tokio::time::timeout(Duration::from_millis(wait), event_rx.recv()) => match msg {
                 Ok(Some(e)) => e,
                 Ok(None) => {
                     let outcome = ctrl.channel_closed();
-                    return Ok(make_outcome(std::mem::take(&mut collected_frames), accumulated, read_start.elapsed().as_millis() as u64, outcome.meta, outcome.matched, outcome.match_index));
+                    return Ok(make_outcome(finalize_frames(&mut decoder, &mut collected_frames), accumulated, read_start.elapsed().as_millis() as u64, outcome.meta, outcome.matched, outcome.match_index));
                 }
                 Err(_) => {
                     if let (Some(token), Some(peer)) = (progress_token.clone(), peer) {
@@ -251,7 +264,7 @@ pub async fn read_bytes_via_session(
                             let bytes_returned = accumulated.len();
                             let meta = RxStopMetadata::max_frames(bytes_observed, bytes_returned);
                             return Ok(make_outcome(
-                                std::mem::take(&mut collected_frames),
+                                finalize_frames(&mut decoder, &mut collected_frames),
                                 accumulated,
                                 read_start.elapsed().as_millis() as u64,
                                 meta,
@@ -269,7 +282,7 @@ pub async fn read_bytes_via_session(
                     ctrl.push_data(chunk_len, buffered_len, match_result)
                 {
                     return Ok(make_outcome(
-                        std::mem::take(&mut collected_frames),
+                        finalize_frames(&mut decoder, &mut collected_frames),
                         accumulated,
                         read_start.elapsed().as_millis() as u64,
                         outcome.meta,
@@ -299,7 +312,7 @@ pub async fn read_bytes_via_session(
             RxEvent::Closed => {
                 let outcome = ctrl.connection_closed();
                 return Ok(make_outcome(
-                    std::mem::take(&mut collected_frames),
+                    finalize_frames(&mut decoder, &mut collected_frames),
                     accumulated,
                     read_start.elapsed().as_millis() as u64,
                     outcome.meta,
@@ -328,7 +341,7 @@ pub async fn read_bytes_via_session(
 
         if let RxStopDecision::Stop(outcome) = ctrl.check_timeout() {
             return Ok(make_outcome(
-                std::mem::take(&mut collected_frames),
+                finalize_frames(&mut decoder, &mut collected_frames),
                 accumulated,
                 read_start.elapsed().as_millis() as u64,
                 outcome.meta,
@@ -338,7 +351,7 @@ pub async fn read_bytes_via_session(
         }
         if let RxStopDecision::Stop(outcome) = ctrl.check_silence_timeout() {
             return Ok(make_outcome(
-                std::mem::take(&mut collected_frames),
+                finalize_frames(&mut decoder, &mut collected_frames),
                 accumulated,
                 read_start.elapsed().as_millis() as u64,
                 outcome.meta,
@@ -350,7 +363,7 @@ pub async fn read_bytes_via_session(
         let event = tokio::select! {
             _ = ct.cancelled() => {
                 let outcome = ctrl.cancelled();
-                return Ok(make_outcome(std::mem::take(&mut collected_frames), accumulated, read_start.elapsed().as_millis() as u64, outcome.meta, outcome.matched, outcome.match_index));
+                return Ok(make_outcome(finalize_frames(&mut decoder, &mut collected_frames), accumulated, read_start.elapsed().as_millis() as u64, outcome.meta, outcome.matched, outcome.match_index));
             }
             msg = tokio::time::timeout(Duration::from_millis(settle), event_rx.recv()) => match msg {
                 Ok(Some(e)) => Some(e),
@@ -376,7 +389,7 @@ pub async fn read_bytes_via_session(
                             let bytes_returned = accumulated.len();
                             let meta = RxStopMetadata::max_frames(bytes_observed, bytes_returned);
                             return Ok(make_outcome(
-                                std::mem::take(&mut collected_frames),
+                                finalize_frames(&mut decoder, &mut collected_frames),
                                 accumulated,
                                 read_start.elapsed().as_millis() as u64,
                                 meta,
@@ -426,7 +439,7 @@ pub async fn read_bytes_via_session(
     // otherwise it's DataComplete.
     if let RxStopDecision::Stop(outcome) = ctrl.check_max_buffered_bytes() {
         return Ok(make_outcome(
-            std::mem::take(&mut collected_frames),
+            finalize_frames(&mut decoder, &mut collected_frames),
             accumulated,
             read_start.elapsed().as_millis() as u64,
             outcome.meta,
@@ -436,7 +449,7 @@ pub async fn read_bytes_via_session(
     }
     let outcome = ctrl.data_complete();
     Ok(make_outcome(
-        std::mem::take(&mut collected_frames),
+        finalize_frames(&mut decoder, &mut collected_frames),
         accumulated,
         read_start.elapsed().as_millis() as u64,
         outcome.meta,
@@ -850,5 +863,95 @@ mod tests {
         // pre_start=0, match_end=6, shaped="preOK>" (6 bytes)
         assert_eq!(shaped.data, b"preOK>");
         assert_eq!(shaped.match_index, 3);
+    }
+
+    // ── Framing validation: invalid configs reject early ──────────────────
+
+    fn make_closed_rx() -> tokio::sync::mpsc::Receiver<RxEvent> {
+        let (_, rx) = tokio::sync::mpsc::channel::<RxEvent>(1);
+        rx // sender dropped → channel closed
+    }
+
+    #[tokio::test]
+    async fn read_via_session_rejects_empty_delimiter() {
+        let rx = make_closed_rx();
+        let ct = tokio_util::sync::CancellationToken::new();
+        let framing = Some(crate::framing::FramingConfig {
+            mode: crate::framing::FramingMode::Delimiter {
+                delimiter: "".into(),
+                delimiter_encoding: crate::match_config::PatternEncoding::Utf8,
+            },
+            ..Default::default()
+        });
+        let result =
+            read_bytes_via_session(rx, 128, None, &ct, None, None, None, None, None, framing).await;
+        match result {
+            Ok(_) => panic!("empty delimiter should be rejected"),
+            Err(err) => assert!(err.contains("Delimiter must not be empty"), "got: {err}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn read_via_session_rejects_invalid_prefix_size() {
+        let rx = make_closed_rx();
+        let ct = tokio_util::sync::CancellationToken::new();
+        let framing = Some(crate::framing::FramingConfig {
+            mode: crate::framing::FramingMode::LengthPrefixed {
+                prefix_size: 3,
+                endianness: crate::framing::Endianness::Big,
+                initial_offset: None,
+            },
+            ..Default::default()
+        });
+        let result =
+            read_bytes_via_session(rx, 128, None, &ct, None, None, None, None, None, framing).await;
+        match result {
+            Ok(_) => panic!("prefix_size=3 should be rejected"),
+            Err(err) => assert!(err.contains("prefix_size must be 1, 2, or 4"), "got: {err}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn read_via_session_rejects_empty_markers() {
+        let rx = make_closed_rx();
+        let ct = tokio_util::sync::CancellationToken::new();
+        let framing = Some(crate::framing::FramingConfig {
+            mode: crate::framing::FramingMode::StartEnd {
+                start: "".into(),
+                end: "X".into(),
+                marker_encoding: crate::match_config::PatternEncoding::Utf8,
+                include_markers: false,
+            },
+            ..Default::default()
+        });
+        let result =
+            read_bytes_via_session(rx, 128, None, &ct, None, None, None, None, None, framing).await;
+        match result {
+            Ok(_) => panic!("empty markers should be rejected"),
+            Err(err) => assert!(
+                err.contains("Start and end markers must not be empty"),
+                "got: {err}"
+            ),
+        }
+    }
+
+    #[tokio::test]
+    async fn read_via_session_rejects_invalid_regex() {
+        let rx = make_closed_rx();
+        let ct = tokio_util::sync::CancellationToken::new();
+        let framing = Some(crate::framing::FramingConfig {
+            mode: crate::framing::FramingMode::Line,
+            parser: Some(crate::framing::ParserConfig {
+                parser_type: crate::framing::ParserType::ShellPrompt,
+                custom_prompt: Some("[invalid".to_string()),
+            }),
+            ..Default::default()
+        });
+        let result =
+            read_bytes_via_session(rx, 128, None, &ct, None, None, None, None, None, framing).await;
+        match result {
+            Ok(_) => panic!("invalid regex should be rejected"),
+            Err(err) => assert!(err.contains("Invalid prompt regex"), "got: {err}"),
+        }
     }
 }

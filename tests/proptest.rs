@@ -685,3 +685,84 @@ fn lifecycle_unsubscribe_noop_does_not_panic() {
         );
     });
 }
+
+// ── FramingConfig roundtrip ──────────────────────────────────────────────
+
+#[test]
+fn framing_config_roundtrip_all_modes() {
+    use serial_mcp::framing::*;
+    use serial_mcp::match_config::PatternEncoding;
+
+    // Line + AT parser
+    let c1 = FramingConfig {
+        mode: FramingMode::Line,
+        parser: Some(ParserConfig {
+            parser_type: ParserType::AtCommand,
+            custom_prompt: None,
+        }),
+        max_frames: Some(10),
+        include_terminators: true,
+    };
+    let json = serde_json::to_value(&c1).unwrap();
+    let c2: FramingConfig = serde_json::from_value(json).unwrap();
+    assert!(matches!(c2.mode, FramingMode::Line));
+    assert!(c2.parser.is_some());
+    assert_eq!(c2.max_frames, Some(10));
+    assert!(c2.include_terminators);
+
+    // Delimiter
+    let c3 = FramingConfig {
+        mode: FramingMode::Delimiter {
+            delimiter: "|".into(),
+            delimiter_encoding: PatternEncoding::Utf8,
+        },
+        parser: None,
+        max_frames: None,
+        include_terminators: false,
+    };
+    let json = serde_json::to_value(&c3).unwrap();
+    let c4: FramingConfig = serde_json::from_value(json).unwrap();
+    assert!(matches!(c4.mode, FramingMode::Delimiter { .. }));
+    assert!(c4.parser.is_none());
+
+    // Length-prefixed + JSON parser
+    let c5 = FramingConfig {
+        mode: FramingMode::LengthPrefixed {
+            prefix_size: 2,
+            endianness: Endianness::Little,
+            initial_offset: Some(4),
+        },
+        parser: Some(ParserConfig {
+            parser_type: ParserType::JsonLines,
+            custom_prompt: None,
+        }),
+        max_frames: Some(0),
+        include_terminators: false,
+    };
+    let json = serde_json::to_value(&c5).unwrap();
+    let c6: FramingConfig = serde_json::from_value(json).unwrap();
+    assert!(matches!(c6.mode, FramingMode::LengthPrefixed { .. }));
+    assert!(c6.parser.is_some());
+    assert_eq!(c6.max_frames, Some(0));
+
+    // Start/end + shell prompt parser
+    let c7 = FramingConfig {
+        mode: FramingMode::StartEnd {
+            start: "STX".into(),
+            end: "ETX".into(),
+            marker_encoding: PatternEncoding::Base64,
+            include_markers: true,
+        },
+        parser: Some(ParserConfig {
+            parser_type: ParserType::ShellPrompt,
+            custom_prompt: Some("^>>> $".into()),
+        }),
+        max_frames: None,
+        include_terminators: false,
+    };
+    let json = serde_json::to_value(&c7).unwrap();
+    let c8: FramingConfig = serde_json::from_value(json).unwrap();
+    assert!(matches!(c8.mode, FramingMode::StartEnd { .. }));
+    assert!(c8.parser.is_some());
+    assert!(c8.max_frames.is_none());
+}

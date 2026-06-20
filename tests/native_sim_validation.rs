@@ -1979,3 +1979,198 @@ async fn native_subscribe_line_framing_emits_per_frame() {
     client.cancel().await.ok();
     drop(fw);
 }
+
+// ── Test 30: max_frames stops read after N frames ─────────────────────
+
+#[tokio::test]
+#[ignore = "requires native_sim firmware binary"]
+#[cfg(unix)]
+async fn native_read_framing_max_frames_stops() {
+    let fw = NativeSimFirmware::spawn().await.expect("spawn zephyr.exe");
+    let pty_path = fw.pty_path().to_string();
+
+    let server = TestServer::start().await;
+    let (client, _rx) = connect_client(&server).await.unwrap();
+    let id = open_pty(&client, &pty_path).await;
+    sync_boot(&client, &id).await;
+    flush_both(&client, &id).await;
+
+    // Start read with max_frames=2.
+    let read_handle = {
+        let peer = client.peer().clone();
+        let id2 = id.clone();
+        tokio::spawn(async move {
+            peer.call_tool(tool_request(
+                "read",
+                json!({
+                    "connection_id": id2,
+                    "timeout_ms": 3000,
+                    "max_buffered_bytes": 512,
+                    "encoding": "utf8",
+                    "framing": {
+                        "mode": { "type": "line" },
+                        "max_frames": 2
+                    }
+                }),
+            ))
+            .await
+        })
+    };
+
+    // Send 3 commands that each produce one line of output.
+    // read should stop after capturing 2 frames.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    write_cmd(&client, &id, "ping").await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    write_cmd(&client, &id, "info").await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    write_cmd(&client, &id, "ping").await;
+
+    let result = read_handle.await.unwrap().expect("read task");
+    assert_ne!(result.is_error, Some(true), "{result:?}");
+    let s = result.structured_content.expect("structured");
+    assert_eq!(s["stop_reason"], json!("max_frames"));
+    let frames = s["frames"].as_array().expect("frames array");
+    assert_eq!(
+        frames.len(),
+        2,
+        "max_frames=2 should return exactly 2 frames, got {frames:?}"
+    );
+
+    close_connection(&client, &id).await;
+    client.cancel().await.ok();
+    drop(fw);
+}
+
+// ── Test 31: framing + match combined returns both ────────────────────
+
+#[tokio::test]
+#[ignore = "requires native_sim firmware binary"]
+#[cfg(unix)]
+async fn native_read_framing_plus_match_combined() {
+    let fw = NativeSimFirmware::spawn().await.expect("spawn zephyr.exe");
+    let pty_path = fw.pty_path().to_string();
+
+    let server = TestServer::start().await;
+    let (client, _rx) = connect_client(&server).await.unwrap();
+    let id = open_pty(&client, &pty_path).await;
+    sync_boot(&client, &id).await;
+    flush_both(&client, &id).await;
+
+    // Read with both framing (line) and match on the word "pong".
+    let read_handle = {
+        let peer = client.peer().clone();
+        let id2 = id.clone();
+        tokio::spawn(async move {
+            peer.call_tool(tool_request(
+                "read",
+                json!({
+                    "connection_id": id2,
+                    "timeout_ms": 3000,
+                    "max_buffered_bytes": 512,
+                    "encoding": "utf8",
+                    "framing": { "mode": { "type": "line" } },
+                    "match": {
+                        "pattern": "pong",
+                        "config": {
+                            "mode": "literal_substring",
+                            "pattern_encoding": "utf8"
+                        }
+                    }
+                }),
+            ))
+            .await
+        })
+    };
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    write_cmd(&client, &id, "ping").await;
+
+    let result = read_handle.await.unwrap().expect("read task");
+    assert_ne!(result.is_error, Some(true), "{result:?}");
+    let s = result.structured_content.expect("structured");
+    assert_eq!(s["stop_reason"], json!("match_found"));
+    assert_eq!(s["matched"], json!(true));
+    // Frames should still be returned (pong line captured before match triggered).
+    let frames = s["frames"].as_array().expect("frames array");
+    assert!(
+        !frames.is_empty(),
+        "combined framing+match should return frames"
+    );
+    let f0 = &frames[0];
+    assert_eq!(f0["frame_type"], json!("line"));
+    assert!(f0["data"].as_str().unwrap().contains("pong"));
+
+    close_connection(&client, &id).await;
+    client.cancel().await.ok();
+    drop(fw);
+}
+
+// ── Test 33: subscribe max_frames stops after N frames ────────────────
+
+#[tokio::test]
+#[ignore = "requires native_sim firmware binary"]
+#[cfg(unix)]
+async fn native_subscribe_framing_max_frames_stops() {
+    let fw = NativeSimFirmware::spawn().await.expect("spawn zephyr.exe");
+    let pty_path = fw.pty_path().to_string();
+
+    let server = TestServer::start().await;
+    let (client, mut rx) = connect_client(&server).await.unwrap();
+    let id = open_pty(&client, &pty_path).await;
+    sync_boot(&client, &id).await;
+
+    // Subscribe with max_frames=2, long timeout.
+    client
+        .peer()
+        .call_tool(tool_request(
+            "subscribe",
+            json!({
+                "connection_id": id,
+                "poll_interval_ms": 50,
+                "max_buffered_bytes": 8192,
+                "timeout_ms": 5000,
+                "encoding": "utf8",
+                "framing": {
+                    "mode": { "type": "line" },
+                    "max_frames": 2
+                }
+            }),
+        ))
+        .await
+        .unwrap();
+
+    // Send 4 commands — each produces one line, stream stops after 2 frames.
+    write_cmd(&client, &id, "ping").await;
+    write_cmd(&client, &id, "info").await;
+    write_cmd(&client, &id, "ping").await;
+    write_cmd(&client, &id, "info").await;
+
+    let mut frame_count = 0;
+    let mut stop_reason = String::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while tokio::time::Instant::now() < deadline {
+        match next_notification(&mut rx, Duration::from_secs(2)).await {
+            Ok(event) => {
+                let data = event.data.as_object().unwrap();
+                if let Some(reason) = data.get("stop_reason") {
+                    stop_reason = reason.as_str().unwrap_or("").to_string();
+                    break;
+                }
+                if data.contains_key("frame_index") {
+                    frame_count += 1;
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    assert_eq!(
+        stop_reason, "max_frames",
+        "subscribe with max_frames=2 should stop with max_frames, got {stop_reason}"
+    );
+    assert_eq!(frame_count, 2, "expected exactly 2 frame notifications");
+
+    close_connection(&client, &id).await;
+    client.cancel().await.ok();
+    drop(fw);
+}

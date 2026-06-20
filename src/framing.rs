@@ -986,4 +986,393 @@ mod tests {
             matches!(frames[2].parsed, Some(ParsedFrame::AtCommand { ref command, .. }) if command.as_deref() == Some("CGREG"))
         );
     }
+
+    // ── Negative / edge-case tests ───────────────────────────────────────
+
+    #[test]
+    fn line_decoder_no_terminator_then_flush() {
+        let config = FramingConfig::default();
+        let mut dec = FrameDecoder::new(&config).unwrap();
+        let frames = dec.push(b"hello");
+        assert!(frames.is_empty());
+        assert_eq!(dec.pending_len(), 5);
+        let partial = dec.flush_partial().expect("partial frame");
+        assert_eq!(partial.data, b"hello");
+        assert_eq!(partial.index, 0);
+        assert_eq!(partial.frame_type, "line");
+        assert!(partial.parsed.is_none());
+    }
+
+    #[test]
+    fn delimiter_decoder_empty_rejected() {
+        let config = FramingConfig {
+            mode: FramingMode::Delimiter {
+                delimiter: "".into(),
+                delimiter_encoding: PatternEncoding::Utf8,
+            },
+            ..Default::default()
+        };
+        match FrameDecoder::new(&config) {
+            Ok(_) => panic!("empty delimiter should be rejected"),
+            Err(err) => assert!(err.contains("Delimiter must not be empty"), "got: {err}"),
+        }
+    }
+
+    #[test]
+    fn length_prefixed_zero_payload() {
+        let config = FramingConfig {
+            mode: FramingMode::LengthPrefixed {
+                prefix_size: 1,
+                endianness: Endianness::Big,
+                initial_offset: None,
+            },
+            ..Default::default()
+        };
+        let mut dec = FrameDecoder::new(&config).unwrap();
+        // Prefix 0x00 means zero-length payload — should emit empty frame.
+        // The next byte \x05 starts a new length-prefixed frame.
+        let frames = dec.push(b"\x00\x05hello");
+        assert_eq!(frames.len(), 2);
+        assert!(frames[0].data.is_empty());
+        assert_eq!(frames[1].data, b"hello");
+    }
+
+    #[test]
+    fn length_prefixed_incomplete_payload() {
+        let config = FramingConfig {
+            mode: FramingMode::LengthPrefixed {
+                prefix_size: 1,
+                endianness: Endianness::Big,
+                initial_offset: None,
+            },
+            ..Default::default()
+        };
+        let mut dec = FrameDecoder::new(&config).unwrap();
+        // Prefix says 10 bytes, but only 3 arrive — no frame emitted.
+        let frames = dec.push(b"\x0aABC");
+        assert!(frames.is_empty());
+        assert!(dec.pending_len() >= 3);
+    }
+
+    #[test]
+    fn length_prefixed_invalid_prefix_size() {
+        let config = FramingConfig {
+            mode: FramingMode::LengthPrefixed {
+                prefix_size: 3,
+                endianness: Endianness::Big,
+                initial_offset: None,
+            },
+            ..Default::default()
+        };
+        match FrameDecoder::new(&config) {
+            Ok(_) => panic!("prefix_size=3 should be rejected"),
+            Err(err) => assert!(err.contains("prefix_size must be 1, 2, or 4"), "got: {err}"),
+        }
+    }
+
+    #[test]
+    fn length_prefixed_u32_big_endian() {
+        let config = FramingConfig {
+            mode: FramingMode::LengthPrefixed {
+                prefix_size: 4,
+                endianness: Endianness::Big,
+                initial_offset: None,
+            },
+            ..Default::default()
+        };
+        let mut dec = FrameDecoder::new(&config).unwrap();
+        let mut buf = vec![0x00, 0x00, 0x00, 0x05];
+        buf.extend_from_slice(b"hello");
+        let frames = dec.push(&buf);
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].data, b"hello");
+    }
+
+    #[test]
+    fn length_prefixed_u32_little_endian() {
+        let config = FramingConfig {
+            mode: FramingMode::LengthPrefixed {
+                prefix_size: 4,
+                endianness: Endianness::Little,
+                initial_offset: None,
+            },
+            ..Default::default()
+        };
+        let mut dec = FrameDecoder::new(&config).unwrap();
+        let mut buf = vec![0x05, 0x00, 0x00, 0x00];
+        buf.extend_from_slice(b"hello");
+        let frames = dec.push(&buf);
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].data, b"hello");
+    }
+
+    #[test]
+    fn start_end_no_start_marker() {
+        let config = FramingConfig {
+            mode: FramingMode::StartEnd {
+                start: "STX".into(),
+                end: "ETX".into(),
+                marker_encoding: PatternEncoding::Utf8,
+                include_markers: false,
+            },
+            ..Default::default()
+        };
+        let mut dec = FrameDecoder::new(&config).unwrap();
+        let frames = dec.push(b"noise_without_markers");
+        assert!(frames.is_empty());
+        // Buffer should be pruned to at most start.len() - 1 bytes.
+        assert!(dec.pending_len() <= 2); // "STX" has len 3, keep ≤ 2
+    }
+
+    #[test]
+    fn start_end_start_no_end_then_flush() {
+        let config = FramingConfig {
+            mode: FramingMode::StartEnd {
+                start: "<".into(),
+                end: ">".into(),
+                marker_encoding: PatternEncoding::Utf8,
+                include_markers: false,
+            },
+            ..Default::default()
+        };
+        let mut dec = FrameDecoder::new(&config).unwrap();
+        let frames = dec.push(b"<data_without_end");
+        assert!(frames.is_empty(), "no end marker yet");
+        let partial = dec.flush_partial().expect("partial frame after flush");
+        assert_eq!(partial.data, b"data_without_end");
+    }
+
+    #[test]
+    fn start_end_empty_markers_rejected() {
+        let config = FramingConfig {
+            mode: FramingMode::StartEnd {
+                start: "".into(),
+                end: "X".into(),
+                marker_encoding: PatternEncoding::Utf8,
+                include_markers: false,
+            },
+            ..Default::default()
+        };
+        match FrameDecoder::new(&config) {
+            Ok(_) => panic!("empty markers should be rejected"),
+            Err(err) => assert!(
+                err.contains("Start and end markers must not be empty"),
+                "got: {err}"
+            ),
+        }
+    }
+
+    #[test]
+    fn start_end_start_split_across_chunks() {
+        let config = FramingConfig {
+            mode: FramingMode::StartEnd {
+                start: "ABC".into(),
+                end: "X".into(),
+                marker_encoding: PatternEncoding::Utf8,
+                include_markers: false,
+            },
+            ..Default::default()
+        };
+        let mut dec = FrameDecoder::new(&config).unwrap();
+        // First chunk: "AB" — partial start marker
+        let frames = dec.push(b"AB");
+        assert!(frames.is_empty());
+        // Second chunk: "CdX" — completes start, then data 'd', then end 'X'
+        let frames = dec.push(b"CdX");
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].data, b"d");
+    }
+
+    #[test]
+    fn delimiter_invalid_encoding_rejected() {
+        let config = FramingConfig {
+            mode: FramingMode::Delimiter {
+                // "!!!" is not valid base64
+                delimiter: "!!!".into(),
+                delimiter_encoding: crate::match_config::PatternEncoding::Base64,
+            },
+            ..Default::default()
+        };
+        match FrameDecoder::new(&config) {
+            Ok(_) => panic!("expected error for invalid delimiter encoding"),
+            Err(err) => assert!(err.contains("Invalid delimiter encoding"), "got: {err}"),
+        }
+    }
+
+    #[test]
+    fn start_end_invalid_encoding_rejected() {
+        let config = FramingConfig {
+            mode: FramingMode::StartEnd {
+                start: "!!!".into(),
+                end: "X".into(),
+                marker_encoding: crate::match_config::PatternEncoding::Base64,
+                include_markers: false,
+            },
+            ..Default::default()
+        };
+        match FrameDecoder::new(&config) {
+            Ok(_) => panic!("expected error for invalid marker encoding"),
+            Err(err) => assert!(err.contains("Invalid start marker encoding"), "got: {err}"),
+        }
+    }
+
+    #[test]
+    fn at_parser_empty_input() {
+        let p = AtCommandParser;
+        let result = p.parse(b"");
+        assert!(matches!(result, ParsedFrame::Raw));
+    }
+
+    #[test]
+    fn at_parser_cme_error() {
+        let p = AtCommandParser;
+        // +CME ERROR matches the + prefix + colon branch before the
+        // +CME ERROR starts_with check, so it returns response_type="response"
+        // with command="CME ERROR" (a parser limitation).
+        let result = p.parse(b"+CME ERROR: 100");
+        assert!(matches!(
+            result,
+            ParsedFrame::AtCommand {
+                response_type,
+                command: Some(ref c),
+                ..
+            } if response_type == "response" && c == "CME ERROR"
+        ));
+    }
+
+    #[test]
+    fn at_parser_cms_error() {
+        let p = AtCommandParser;
+        let result = p.parse(b"+CMS ERROR: 500");
+        assert!(matches!(
+            result,
+            ParsedFrame::AtCommand {
+                response_type,
+                command: Some(ref c),
+                ..
+            } if response_type == "response" && c == "CMS ERROR"
+        ));
+    }
+
+    #[test]
+    fn json_parser_empty_input() {
+        let p = JsonLinesParser;
+        let result = p.parse(b"");
+        assert!(matches!(result, ParsedFrame::Raw));
+    }
+
+    #[test]
+    fn shell_prompt_empty_input() {
+        let p = ShellPromptParser { custom: None };
+        let result = p.parse(b"");
+        assert!(matches!(result, ParsedFrame::Raw));
+    }
+
+    #[test]
+    fn shell_prompt_custom_regex_invalid() {
+        let config = FramingConfig {
+            mode: FramingMode::Line,
+            parser: Some(ParserConfig {
+                parser_type: ParserType::ShellPrompt,
+                custom_prompt: Some("[invalid".to_string()),
+            }),
+            ..Default::default()
+        };
+        match FrameDecoder::new(&config) {
+            Ok(_) => panic!("invalid regex should be rejected"),
+            Err(err) => assert!(err.contains("Invalid prompt regex"), "got: {err}"),
+        }
+    }
+
+    #[test]
+    fn shell_prompt_custom_regex_match() {
+        let p = ShellPromptParser {
+            custom: Some(regex::bytes::Regex::new("^>>> $").unwrap()),
+        };
+        let result = p.parse(b">>> ");
+        assert!(
+            matches!(result, ParsedFrame::ShellPrompt { prompt_type, .. } if prompt_type == "custom")
+        );
+    }
+
+    #[test]
+    fn raw_parser_passthrough() {
+        let p = RawParser;
+        let result = p.parse(b"anything");
+        assert!(matches!(result, ParsedFrame::Raw));
+    }
+
+    #[test]
+    fn max_frames_zero_edge() {
+        let config = FramingConfig {
+            mode: FramingMode::Line,
+            max_frames: Some(0),
+            ..Default::default()
+        };
+        let mut dec = FrameDecoder::new(&config).unwrap();
+        // Push one line — the decoder returns the frame regardless.
+        // max_frames is checked by the caller (read_bytes_via_session),
+        // not by the decoder itself. So decoder still emits the frame.
+        let frames = dec.push(b"hello\n");
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].data, b"hello");
+    }
+
+    #[test]
+    fn length_prefixed_initial_offset() {
+        let config = FramingConfig {
+            mode: FramingMode::LengthPrefixed {
+                prefix_size: 1,
+                endianness: Endianness::Big,
+                initial_offset: Some(4),
+            },
+            ..Default::default()
+        };
+        let mut dec = FrameDecoder::new(&config).unwrap();
+        // 4 skip bytes + 1 prefix (0x05) + 5 payload bytes.
+        let frames = dec.push(b"XXXX\x05hello");
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].data, b"hello");
+    }
+
+    #[test]
+    fn delimiter_include_terminators() {
+        let config = FramingConfig {
+            mode: FramingMode::Delimiter {
+                delimiter: "|".into(),
+                delimiter_encoding: PatternEncoding::Utf8,
+            },
+            include_terminators: true,
+            ..Default::default()
+        };
+        let mut dec = FrameDecoder::new(&config).unwrap();
+        let frames = dec.push(b"a|b|");
+        assert_eq!(frames.len(), 2);
+        assert_eq!(frames[0].data, b"a|"); // terminator included
+        assert_eq!(frames[1].data, b"b|");
+    }
+
+    #[test]
+    fn flush_partial_empty_buffer() {
+        let config = FramingConfig::default();
+        let mut dec = FrameDecoder::new(&config).unwrap();
+        assert!(dec.flush_partial().is_none(), "empty buf => no frame");
+    }
+
+    #[test]
+    fn combined_line_json_parser() {
+        let config = FramingConfig {
+            mode: FramingMode::Line,
+            parser: Some(ParserConfig {
+                parser_type: ParserType::JsonLines,
+                custom_prompt: None,
+            }),
+            ..Default::default()
+        };
+        let mut dec = FrameDecoder::new(&config).unwrap();
+        let frames = dec.push(b"{\"a\":1}\n{\"b\":2}\n");
+        assert_eq!(frames.len(), 2);
+        assert!(matches!(frames[0].parsed, Some(ParsedFrame::Json(_))));
+        assert!(matches!(frames[1].parsed, Some(ParsedFrame::Json(_))));
+    }
 }
