@@ -59,7 +59,7 @@ async fn initialize_handshake_succeeds() {
 }
 
 #[tokio::test]
-async fn list_tools_returns_all_thirteen_tools() {
+async fn list_tools_returns_all_twenty_two_tools() {
     let server = common::spawned::SpawnedServer::start().await;
     let (client, _rx) = common::spawned::spawn_client(&server).await.unwrap();
 

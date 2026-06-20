@@ -122,6 +122,11 @@ impl LogBuffer {
         self.enabled
     }
 
+    /// Return the configured capacity (maximum number of events).
+    pub fn capacity(&self) -> usize {
+        self.capacity
+    }
+
     /// Record a typed event with an optional direction.
     pub fn record(&self, direction: Option<&str>, event: LogEvent) {
         if !self.enabled {

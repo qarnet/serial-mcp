@@ -440,7 +440,7 @@ pub async fn get_log(
 
     Ok(Json(GetLogResult {
         log_enabled: log.is_enabled(),
-        capacity: 1024, // TODO: expose from LogBuffer
+        capacity: log.capacity(),
         total_events: total,
         events,
     }))

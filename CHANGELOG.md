@@ -2,7 +2,9 @@
 
 | Version | Date | Highlights |
 |---|---|---|
-| [Unreleased](#unreleased) | — | Software-only test migration: XIAO/E83/hardware-loopback tests replaced by native_sim PTY; CI runs without any hardware |
+| [Unreleased](#unreleased) | — | — |
+| [0.6.0](#060) | 2026-06-20 | Frame decoding (4 modes + 3 parsers), regex/glob matching, auto-reconnect, event log, connection profiles, port identity, reconfigure, get_status, per-frame graceful degradation |
+| [0.5.1](#051) | 2026-06-14 | Software-only test migration: native_sim PTY replaces all hardware tests |
 | [0.5.0](#050) | 2026-06-06 | RX redesign (Plans 1-7): session pump, unified stop controller, match options, buffer budgets, silence timeout, context shaping |
 | [0.4.1](#041) | 2026-06-04 | CI/release hardening, schema-validated config examples, docs cleanup |
 | [0.4.0](#040) | 2026-06-04 | Crate rename to `serial-mcp`, `read_line` + `get_version` tools, text encoding, RX guard, flexible args |
@@ -18,7 +20,79 @@
 
 ---
 
-## [Unreleased]
+## [0.6.0]
+
+Major feature release. 10 new tools (22 total), frame decoder, auto-reconnect,
+event log, connection profiles, regex/glob matching, and port identity.
+
+**Added — Tools (6 new):**
+- `save_profile` / `delete_profile` — manage named port configurations
+- `get_log` / `clear_log` / `export_log` — per-connection event log
+- `reconnect` — manually trigger reconnection on an open connection
+
+**Added — Tool enhancements:**
+- `get_status` — connection introspection (state, counters, port info, reconnect attempts)
+- `reconfigure` — hot serial port reconfiguration (baud, data bits, parity, flow control)
+- `open` now accepts `reconnect_policy` for auto-reconnect configuration
+- `list_ports` now returns VID/PID/serial number/transport for each port
+- `read` and `subscribe` now accept `framing` option for frame decoding
+- `read` and `subscribe` match option now supports `regex` and `glob` modes
+- `read` result includes `frames`, `match_frame_index`, `frames_dropped`
+- `subscribe` stop notification includes `match_frame_index`, `frames_emitted`
+- `subscribe` emits per-frame notifications when framing is active
+- `subscribe` flushes partial frames on close/timeout with `"partial": true`
+
+**Added — Frame decoder (`src/framing.rs`):**
+- 4 boundary detection modes: line, delimiter, length-prefixed, start/end marker
+- 3 protocol parsers: AT command, JSON lines, shell prompt
+- `max_frames` stop condition with `RxStopReason::MaxFrames`
+- Partial frame flush on read end (incomplete data emitted as final frame)
+- Per-frame graceful degradation (encoding failures skip frame, count drops)
+
+**Added — Auto-reconnect:**
+- `ConnectionState` enum (Open, Disconnected, Reconnecting)
+- `ReconnectPolicy` struct (enabled, max_attempts, initial_delay, backoff)
+- Background supervisor task with exponential backoff
+- Read/subscribe loops pause during disconnect, resume on reconnect
+- Exit immediately on disconnect when reconnect not configured
+
+**Added — Event log (`src/log_buffer.rs`):**
+- 19 event types (open, close, read, write, match, truncation, drops, etc.)
+- Bounded ring buffer per connection
+- `serial://connections/{id}/log` resource template
+
+**Added — Connection profiles:**
+- Save/load named port configurations
+- Transport and hardware_id selector fields
+- Forward-compatible fields (reconnect_policy, decoder, safety_policy)
+- Atomic file writes via `tempfile::NamedTempFile::persist()`
+
+**Added — Matching:**
+- `regex` mode using `regex::bytes::Regex` on raw bytes
+- `glob` mode with per-line whole-match via `glob::Pattern`
+- When framing is active, match operates on decoded frame data (per-frame)
+
+**Changed:**
+- `subscribe` stop notification ordering: partial frame before stop notification
+- Close handler waits for subscribe task to finish (`join_without_abort`)
+- `build_read_result` uses `filter_map` for per-frame encoding (graceful degradation)
+- `RxStopReason` enum: added `MaxFrames` variant
+- `ReadResult` struct: added `match_frame_index`, `frames_dropped` fields
+- `FrameResult` and `ParsedFrameResult` types for structured frame output
+
+**Fixed:**
+- Subscribe dropped partial frames on close/timeout (flush_partial now called)
+- Subscribe silently ignored `match` option when `framing` was active
+- `flush_partial` notification errors silently discarded (now logged + counted)
+- Read/subscribe hung forever on disconnect without reconnect policy
+
+**Dependencies:**
+- Added `regex` crate for regex/glob matching
+- Promoted `tempfile` from dev-dependency to production dependency
+
+---
+
+## [0.5.1]
 
 Migration to software-only validation. No physical hardware, board
 bring-up, USB-serial adapters, or `pyocd`/`PicoProbe` workflows

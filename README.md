@@ -8,6 +8,7 @@
 **Serial monitors are something agents can't work with well natively. serial-mcp fixes this by giving agents powerful tools for reading, writing and subscribing to serial ports.**
 
 Non-blocking reads with timeouts and pattern matching, background RX streaming,
+frame decoding with AT/JSON/shell parsers, auto-reconnect, event logging,
 and full line control (DTR/RTS, BREAK, flow control) — so Claude, Codex, or any
 MCP client can flash, reset, and talk to your board without freezing the session.
 
@@ -19,8 +20,8 @@ Exposes serial ports as MCP tools so agents like Claude can interact with
 embedded devices, Arduino boards, STM32 microcontrollers, and any UART/USB-serial
 hardware — all through natural language.
 
-**16 tools** — list_ports, list_connections, open, close, read, write, flush, set_dtr_rts, set_flow_control, send_break, subscribe, unsubscribe, get_status, reconfigure, list_profiles, open_profile  
-**3 resources** — `serial://ports`, `serial://connections`, `serial://connections/{id}`  
+**22 tools** — list_ports, list_connections, open, close, read, write, flush, set_dtr_rts, set_flow_control, send_break, subscribe, unsubscribe, get_status, reconfigure, list_profiles, open_profile, save_profile, delete_profile, get_log, clear_log, export_log, reconnect  
+**4 resources** — `serial://ports`, `serial://connections`, `serial://connections/{id}`, `serial://connections/{id}/raw`, `serial://connections/{id}/log` (3 resource templates + 1 static)  
 **2 prompt templates** — `diagnose_port`, `interactive_terminal`  
 
 ## Install
@@ -119,8 +120,9 @@ every time.
 |---|---|
 | `data_complete` | Operation finished its data collection normally |
 | `timeout` | Wall-clock timeout (`timeout_ms`) elapsed |
-| `match_found` | A literal byte pattern was matched |
+| `match_found` | A byte pattern was matched (raw or decoded frame data) |
 | `max_buffered_bytes` | Buffer budget limit reached |
+| `max_frames` | Frame count limit (`max_frames` in framing config) reached |
 | `no_new_rx_timeout` | Silence timeout elapsed (no new bytes within window) |
 | `connection_closed` | The underlying serial port was closed |
 | `cancelled` | The MCP client cancelled the request |
@@ -138,15 +140,68 @@ every time.
 | `truncated` | `true` when `bytes_returned < bytes_observed` (data was capped) |
 | `matched` | `true` when a configured pattern was found |
 | `match_index` | Byte offset of the match within the returned `data` |
+| `match_frame_index` | When framing + match: which frame contained the match |
+| `frames` | Decoded frames (present when `framing` option is used) |
+| `frames_dropped` | Frames skipped due to encoding failures (rare) |
 
 **Matching:** Set `match.pattern` + optional `match.pattern_encoding` on
-`read` or `subscribe`. The operation stops when the literal byte substring is
-found. Add `match.context_amount_of_matched_bytes` to return up to N bytes
+`read` or `subscribe`. Three match modes:
+- `literal_substring` — byte-substring match (default)
+- `regex` — regular expression match on raw bytes
+- `glob` — per-line glob pattern match (`*` and `?` wildcards)
+
+When framing is active, match operates on **decoded frame data** (per-frame),
+so agents can match against structured content (e.g., `"OK"` in an AT response,
+`"sensor":"temp"` in a JSON object) without thinking about raw frame delimiters.
+The `match_frame_index` field indicates which frame contained the match.
+
+Add `match.context_amount_of_matched_bytes` to return up to N bytes
 *before* the match plus the matched bytes (shaped context).
 
 **Silence timeout:** Set `no_new_rx_timeout_ms` to stop when no new bytes
 arrive within the specified window. Distinct from wall-clock `timeout_ms` —
 the silence timer resets on every received chunk.
+
+**Frame decoding:** Set `framing` on `read` or `subscribe` to split the byte
+stream into structured frames. Four boundary detection modes:
+
+| Mode | How boundaries are detected |
+|---|---|
+| `line` | Split on `\n` (optionally preceded by `\r`). Default. |
+| `delimiter` | Split on a user-supplied byte sequence. |
+| `length_prefixed` | Read a 1/2/4-byte length prefix, then that many bytes. |
+| `start_end` | Find frames between start and end marker sequences. |
+
+Each frame can be parsed by an optional parser:
+- `at_command` — AT command responses, URCs, OK/ERROR status
+- `json_lines` — each frame deserialized as a JSON object
+- `shell_prompt` — detect `$`, `#`, `>`, `user@host:~$` prompt patterns
+- `raw` — no parsing (default when parser omitted)
+
+`read` returns frames in the `frames` array (with `data`, `frame_index`,
+`frame_type`, and optional `parsed` fields). `subscribe` emits one
+notification per frame (with `frame_index`, `frame_type`, `data`, `parsed`).
+Set `max_frames` to stop after collecting N frames. Partial frames (incomplete
+data without a boundary) are flushed on timeout/close and marked with
+`"partial": true` in subscribe notifications.
+
+**Auto-reconnect:** Set `reconnect_policy` on `open` to automatically
+reconnect after a fatal disconnect (cable unplug, device reset). Configurable:
+max attempts, initial delay, max delay, exponential backoff multiplier.
+A background supervisor task manages reconnection. Use the `reconnect` tool
+to trigger a manual reconnect. When reconnect is not enabled, read/subscribe
+exit immediately on disconnect with `connection_closed` stop reason.
+
+**Event log:** Each connection maintains a bounded ring buffer of events
+(open, close, read, write, match found, truncation, notification drops,
+disconnects, reconnects). Use `get_log` to query, `clear_log` to reset,
+and `export_log` for a full dump. The `serial://connections/{id}/log`
+resource provides access via MCP resource reads.
+
+**Connection profiles:** Save and load named port configurations with
+`save_profile` and `open_profile`. Profiles store baud rate, data bits,
+parity, flow control, and optional reconnect policy. `list_profiles` shows
+all saved profiles. `delete_profile` removes one.
 
 ## Example Agent Flow
 

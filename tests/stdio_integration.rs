@@ -67,7 +67,7 @@ async fn stdio_initialize_handshake_succeeds() {
 }
 
 #[tokio::test]
-async fn stdio_list_tools_returns_all_thirteen_tools() {
+async fn stdio_list_tools_returns_all_twenty_two_tools() {
     let client = start_stdio_client().await;
 
     let result = client
