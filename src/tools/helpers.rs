@@ -87,6 +87,9 @@ pub struct ReadOutcome {
     pub matched: bool,
     /// Byte offset within `bytes` where the match starts, or `None`.
     pub match_index: Option<usize>,
+    /// When framing is active and match was found, the index of the frame
+    /// that contained the match.
+    pub match_frame_index: Option<usize>,
     /// Decoded frames, empty when framing was not configured.
     pub frames: Vec<crate::framing::Frame>,
 }
@@ -131,13 +134,15 @@ pub async fn read_bytes_via_session(
                         elapsed_ms: u64,
                         meta: RxStopMetadata,
                         matched: bool,
-                        match_index: Option<usize>| {
+                        match_index: Option<usize>,
+                        match_frame_index: Option<usize>| {
         let outcome = ReadOutcome {
             bytes,
             elapsed_ms,
             meta,
             matched,
             match_index,
+            match_frame_index,
             frames,
         };
         if !outcome.matched || context_amount.is_none() {
@@ -157,6 +162,7 @@ pub async fn read_bytes_via_session(
             meta: RxStopMetadata::match_found(outcome.meta.bytes_observed, bytes_returned),
             matched: true,
             match_index: Some(shaped.match_index),
+            match_frame_index: outcome.match_frame_index,
             frames: outcome.frames,
         }
     };
@@ -196,6 +202,7 @@ pub async fn read_bytes_via_session(
                 outcome.meta,
                 outcome.matched,
                 outcome.match_index,
+                None,
             ));
         }
         if let RxStopDecision::Stop(outcome) = ctrl.check_silence_timeout() {
@@ -206,6 +213,7 @@ pub async fn read_bytes_via_session(
                 outcome.meta,
                 outcome.matched,
                 outcome.match_index,
+                None,
             ));
         }
 
@@ -216,13 +224,13 @@ pub async fn read_bytes_via_session(
         let event = tokio::select! {
             _ = ct.cancelled() => {
                 let outcome = ctrl.cancelled();
-                return Ok(make_outcome(finalize_frames(&mut decoder, &mut collected_frames), accumulated, read_start.elapsed().as_millis() as u64, outcome.meta, outcome.matched, outcome.match_index));
+                return Ok(make_outcome(finalize_frames(&mut decoder, &mut collected_frames), accumulated, read_start.elapsed().as_millis() as u64, outcome.meta, outcome.matched, outcome.match_index, None));
             }
             msg = tokio::time::timeout(Duration::from_millis(wait), event_rx.recv()) => match msg {
                 Ok(Some(e)) => e,
                 Ok(None) => {
                     let outcome = ctrl.channel_closed();
-                    return Ok(make_outcome(finalize_frames(&mut decoder, &mut collected_frames), accumulated, read_start.elapsed().as_millis() as u64, outcome.meta, outcome.matched, outcome.match_index));
+                    return Ok(make_outcome(finalize_frames(&mut decoder, &mut collected_frames), accumulated, read_start.elapsed().as_millis() as u64, outcome.meta, outcome.matched, outcome.match_index, None));
                 }
                 Err(_) => {
                     if let (Some(token), Some(peer)) = (progress_token.clone(), peer) {
@@ -256,8 +264,38 @@ pub async fn read_bytes_via_session(
 
                 // Feed to frame decoder (full chunk, not just take portion).
                 if let Some(ref mut dec) = decoder {
+                    let prev_frame_count = collected_frames.len();
                     let new_frames = dec.push(&chunk);
                     collected_frames.extend(new_frames);
+
+                    // Match on decoded frame data when framing is active.
+                    // Per-frame matching: reset matcher window for each new frame.
+                    let mut frame_match: Option<(Vec<u8>, usize, usize)> = None;
+                    if let Some(ref mut m) = matcher {
+                        for frame in collected_frames.iter().skip(prev_frame_count) {
+                            m.reset_window();
+                            if let crate::match_config::MatchResult::Found(idx) =
+                                m.push(&frame.data)
+                            {
+                                frame_match = Some((frame.data.clone(), idx, frame.index));
+                                break;
+                            }
+                        }
+                    }
+                    if let Some((matched_data, match_idx, frame_idx)) = frame_match {
+                        let bytes_observed = ctrl.bytes_observed();
+                        let meta = RxStopMetadata::match_found(bytes_observed, accumulated.len());
+                        return Ok(make_outcome(
+                            finalize_frames(&mut decoder, &mut collected_frames),
+                            matched_data,
+                            read_start.elapsed().as_millis() as u64,
+                            meta,
+                            true,
+                            Some(match_idx),
+                            Some(frame_idx),
+                        ));
+                    }
+
                     if let Some(limit) = max_frames {
                         if collected_frames.len() >= limit {
                             let bytes_observed = ctrl.bytes_observed();
@@ -270,25 +308,30 @@ pub async fn read_bytes_via_session(
                                 meta,
                                 false,
                                 None,
+                                None,
                             ));
                         }
                     }
                 }
 
-                let match_result = matcher.as_mut().map(|m| m.push(&chunk[..take]));
-                let buffered_len = accumulated.len();
+                // When framing is NOT active, match on raw chunk bytes.
+                if decoder.is_none() {
+                    let match_result = matcher.as_mut().map(|m| m.push(&chunk[..take]));
+                    let buffered_len = accumulated.len();
 
-                if let RxStopDecision::Stop(outcome) =
-                    ctrl.push_data(chunk_len, buffered_len, match_result)
-                {
-                    return Ok(make_outcome(
-                        finalize_frames(&mut decoder, &mut collected_frames),
-                        accumulated,
-                        read_start.elapsed().as_millis() as u64,
-                        outcome.meta,
-                        outcome.matched,
-                        outcome.match_index,
-                    ));
+                    if let RxStopDecision::Stop(outcome) =
+                        ctrl.push_data(chunk_len, buffered_len, match_result)
+                    {
+                        return Ok(make_outcome(
+                            finalize_frames(&mut decoder, &mut collected_frames),
+                            accumulated,
+                            read_start.elapsed().as_millis() as u64,
+                            outcome.meta,
+                            outcome.matched,
+                            outcome.match_index,
+                            None,
+                        ));
+                    }
                 }
 
                 // Without a matcher or framing, first-byte-then-settle semantics.
@@ -318,6 +361,7 @@ pub async fn read_bytes_via_session(
                     outcome.meta,
                     outcome.matched,
                     outcome.match_index,
+                    None,
                 ));
             }
             RxEvent::Error(msg) => {
@@ -347,6 +391,7 @@ pub async fn read_bytes_via_session(
                 outcome.meta,
                 outcome.matched,
                 outcome.match_index,
+                None,
             ));
         }
         if let RxStopDecision::Stop(outcome) = ctrl.check_silence_timeout() {
@@ -357,13 +402,14 @@ pub async fn read_bytes_via_session(
                 outcome.meta,
                 outcome.matched,
                 outcome.match_index,
+                None,
             ));
         }
 
         let event = tokio::select! {
             _ = ct.cancelled() => {
                 let outcome = ctrl.cancelled();
-                return Ok(make_outcome(finalize_frames(&mut decoder, &mut collected_frames), accumulated, read_start.elapsed().as_millis() as u64, outcome.meta, outcome.matched, outcome.match_index));
+                return Ok(make_outcome(finalize_frames(&mut decoder, &mut collected_frames), accumulated, read_start.elapsed().as_millis() as u64, outcome.meta, outcome.matched, outcome.match_index, None));
             }
             msg = tokio::time::timeout(Duration::from_millis(settle), event_rx.recv()) => match msg {
                 Ok(Some(e)) => Some(e),
@@ -394,6 +440,7 @@ pub async fn read_bytes_via_session(
                                 read_start.elapsed().as_millis() as u64,
                                 meta,
                                 false,
+                                None,
                                 None,
                             ));
                         }
@@ -445,6 +492,7 @@ pub async fn read_bytes_via_session(
             outcome.meta,
             outcome.matched,
             outcome.match_index,
+            None,
         ));
     }
     let outcome = ctrl.data_complete();
@@ -455,6 +503,7 @@ pub async fn read_bytes_via_session(
         outcome.meta,
         outcome.matched,
         outcome.match_index,
+        None,
     ))
 }
 
@@ -485,25 +534,33 @@ pub fn build_read_result(
     let data = codec::encode(encoding, &outcome.bytes)
         .map_err(|e| format!("Data encoding failed - {e}"))?;
 
+    let mut frames_dropped: usize = 0;
     let frames = if outcome.frames.is_empty() {
         None
     } else {
-        let encoded_frames: Result<Vec<FrameResult>, String> = outcome
+        let encoded_frames: Vec<FrameResult> = outcome
             .frames
             .iter()
-            .map(|f| {
-                let fdata = codec::encode(encoding, &f.data)
-                    .map_err(|e| format!("Frame data encoding failed - {e}"))?;
-                Ok(FrameResult {
+            .filter_map(|f| match codec::encode(encoding, &f.data) {
+                Ok(fdata) => Some(FrameResult {
                     data: fdata,
                     encoding: encoding.to_string(),
                     frame_index: f.index,
                     frame_type: f.frame_type.clone(),
                     parsed: f.parsed.as_ref().map(convert_parsed_frame),
-                })
+                }),
+                Err(e) => {
+                    tracing::warn!("Frame {} encoding failed: {e}", f.index);
+                    frames_dropped += 1;
+                    None
+                }
             })
             .collect();
-        Some(encoded_frames?)
+        if encoded_frames.is_empty() {
+            None
+        } else {
+            Some(encoded_frames)
+        }
     };
 
     Ok(Json(ReadResult {
@@ -521,7 +578,9 @@ pub fn build_read_result(
         bytes_returned: outcome.meta.bytes_returned,
         matched: outcome.matched,
         match_index: outcome.match_index,
+        match_frame_index: outcome.match_frame_index,
         frames,
+        frames_dropped,
     }))
 }
 
@@ -686,6 +745,7 @@ mod tests {
             meta: RxStopMetadata::timeout(0),
             matched: false,
             match_index: None,
+            match_frame_index: None,
             frames: vec![],
         };
         let Json(result) =
@@ -705,6 +765,7 @@ mod tests {
             meta: RxStopMetadata::timeout(0),
             matched: false,
             match_index: None,
+            match_frame_index: None,
             frames: vec![],
         };
         let Json(result) =
@@ -722,6 +783,7 @@ mod tests {
             meta: RxStopMetadata::data_complete(2, 2),
             matched: false,
             match_index: None,
+            match_frame_index: None,
             frames: vec![],
         };
         let Json(result) =
@@ -747,6 +809,7 @@ mod tests {
             meta: RxStopMetadata::data_complete(2, 2),
             matched: false,
             match_index: None,
+            match_frame_index: None,
             frames: vec![],
         };
         let Json(result) = build_read_result(
@@ -769,6 +832,7 @@ mod tests {
             meta: RxStopMetadata::match_found(16, 16),
             matched: true,
             match_index: Some(6),
+            match_frame_index: None,
             frames: vec![],
         };
         let Json(result) = build_read_result(

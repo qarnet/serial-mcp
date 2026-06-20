@@ -306,9 +306,20 @@ pub struct ReadResult {
     #[serde(default)]
     #[schemars(schema_with = "crate::schema_helpers::option_uint_schema")]
     pub match_index: Option<usize>,
+    /// When framing is active and a match was found, the index of the frame
+    /// that contained the match. `null` when no match, or framing not used,
+    /// or match found in raw stream (no framing).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "crate::schema_helpers::option_uint_schema")]
+    pub match_frame_index: Option<usize>,
     /// Decoded frames, present when the `framing` option was used.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub frames: Option<Vec<FrameResult>>,
+    /// Number of frames dropped due to encoding failures.
+    /// Always 0 unless per-frame encoding fails (rare).
+    #[serde(default)]
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub frames_dropped: usize,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]

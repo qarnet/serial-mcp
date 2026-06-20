@@ -293,6 +293,17 @@ impl Matcher {
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
+
+    /// Reset the internal window to start fresh matching.
+    /// Used for per-frame matching when framing is active.
+    pub fn reset_window(&mut self) {
+        let window = match self {
+            Self::Literal { window, .. }
+            | Self::Regex { window, .. }
+            | Self::Glob { window, .. } => window,
+        };
+        window.clear();
+    }
 }
 
 // ---- Validation helper ------------------------------------------------------

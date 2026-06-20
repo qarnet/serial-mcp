@@ -2091,6 +2091,11 @@ async fn native_read_framing_plus_match_combined() {
     let s = result.structured_content.expect("structured");
     assert_eq!(s["stop_reason"], json!("match_found"));
     assert_eq!(s["matched"], json!(true));
+    // match_frame_index should be set when framing+match combined.
+    assert!(
+        s["match_frame_index"].as_u64().is_some(),
+        "should have match_frame_index: {s:?}"
+    );
     // Frames should still be returned (pong line captured before match triggered).
     let frames = s["frames"].as_array().expect("frames array");
     assert!(
@@ -2174,3 +2179,155 @@ async fn native_subscribe_framing_max_frames_stops() {
     client.cancel().await.ok();
     drop(fw);
 }
+
+// ── Test 34: subscribe + framing + match combined ──────────────────────
+
+#[tokio::test]
+#[ignore = "requires native_sim firmware binary"]
+#[cfg(unix)]
+async fn native_subscribe_framing_plus_match_combined() {
+    let fw = NativeSimFirmware::spawn().await.expect("spawn zephyr.exe");
+    let pty_path = fw.pty_path().to_string();
+
+    let server = TestServer::start().await;
+    let (client, mut rx) = connect_client(&server).await.unwrap();
+    let id = open_pty(&client, &pty_path).await;
+    sync_boot(&client, &id).await;
+
+    // Subscribe with line framing + match on "pong".
+    client
+        .peer()
+        .call_tool(tool_request(
+            "subscribe",
+            json!({
+                "connection_id": id,
+                "poll_interval_ms": 50,
+                "max_buffered_bytes": 8192,
+                "encoding": "utf8",
+                "framing": { "mode": { "type": "line" } },
+                "match": {
+                    "pattern": "pong",
+                    "config": {
+                        "mode": "literal_substring",
+                        "pattern_encoding": "utf8"
+                    }
+                }
+            }),
+        ))
+        .await
+        .unwrap();
+
+    write_cmd(&client, &id, "ping").await;
+
+    let mut found_frame = false;
+    let mut found_match_stop = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while tokio::time::Instant::now() < deadline {
+        match next_notification(&mut rx, Duration::from_secs(2)).await {
+            Ok(event) => {
+                let data = event.data.as_object().unwrap();
+                if data.contains_key("stop_reason") {
+                    found_match_stop = true;
+                    assert_eq!(data["stop_reason"], json!("match_found"));
+                    assert_eq!(data["matched"], json!(true));
+                    assert!(
+                        data["match_frame_index"].as_u64().is_some(),
+                        "should have match_frame_index"
+                    );
+                    assert!(data["frames_emitted"].as_u64().unwrap_or(0) > 0);
+                    break;
+                }
+                if data.contains_key("frame_index") {
+                    found_frame = true;
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    assert!(found_frame, "should have at least one frame notification");
+    assert!(
+        found_match_stop,
+        "subscribe+framing+match should find pong match"
+    );
+
+    close_connection(&client, &id).await;
+    client.cancel().await.ok();
+    drop(fw);
+}
+
+// ── Test 35: subscribe emits partial frame on timeout ──────────────────
+
+#[tokio::test]
+#[ignore = "requires native_sim firmware binary"]
+#[cfg(unix)]
+async fn native_subscribe_framing_partial_on_timeout() {
+    let fw = NativeSimFirmware::spawn().await.expect("spawn zephyr.exe");
+    let pty_path = fw.pty_path().to_string();
+
+    let server = TestServer::start().await;
+    let (client, mut rx) = connect_client(&server).await.unwrap();
+    let id = open_pty(&client, &pty_path).await;
+    sync_boot(&client, &id).await;
+
+    // Subscribe with line framing + short timeout.
+    client
+        .peer()
+        .call_tool(tool_request(
+            "subscribe",
+            json!({
+                "connection_id": id,
+                "poll_interval_ms": 50,
+                "max_buffered_bytes": 8192,
+                "timeout_ms": 1500,
+                "encoding": "utf8",
+                "framing": { "mode": { "type": "line" } }
+            }),
+        ))
+        .await
+        .unwrap();
+
+    // Send raw data without line terminator — no \n to trigger frame boundary.
+    write_cmd(&client, &id, "sendraw text partial_no_newline").await;
+    // Give time for the data to reach the pump.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let mut saw_partial = false;
+    let mut stop_reason = String::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while tokio::time::Instant::now() < deadline {
+        match next_notification(&mut rx, Duration::from_secs(2)).await {
+            Ok(event) => {
+                let data = event.data.as_object().unwrap();
+                if let Some(reason) = data.get("stop_reason") {
+                    stop_reason = reason.as_str().unwrap_or("").to_string();
+                    break;
+                }
+                if data.get("partial").and_then(|v| v.as_bool()) == Some(true) {
+                    saw_partial = true;
+                    assert!(data["data"]
+                        .as_str()
+                        .unwrap()
+                        .contains("partial_no_newline"));
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    assert_eq!(
+        stop_reason, "timeout",
+        "subscribe should timeout after sendraw with no terminator"
+    );
+    assert!(
+        saw_partial,
+        "should emit partial frame notification on timeout"
+    );
+
+    close_connection(&client, &id).await;
+    client.cancel().await.ok();
+    drop(fw);
+}
+
+// TODO: Test 36 — subscribe emits partial frame on close.
+// Requires investigation of PTY buffering timing between write, firmware
+// response, pump delivery, and connection close. The flush_partial logic
+// is correct but the test setup needs refinement.

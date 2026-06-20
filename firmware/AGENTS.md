@@ -178,6 +178,7 @@ Tests match on exact phrase `Spam complete`.
 | `hold on` | `hold on\r\n` | halt firmware TX drain (ring buffer fills) |
 | `hold off` | `hold off\r\n` | resume firmware TX drain |
 | `jsonout` | 3 JSON lines: `{"sensor":"temp",...}` | emits JSON objects for parser testing |
+| `sendraw hex <hex>` / `sendraw text <str>` | (raw bytes, no `\r\n`) | sends raw data without line terminator for partial-frame testing |
 
 ## Test Expectations
 

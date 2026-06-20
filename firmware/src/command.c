@@ -90,6 +90,52 @@ static void spam_timer_cb(struct k_timer *timer)
 	}
 }
 
+static void cmd_sendraw(struct app_state *state, char *args)
+{
+	char *saveptr = NULL;
+	char *mode = strtok_r(args, " ", &saveptr);
+	char *data;
+
+	if (!mode || *mode == '\0') {
+		uart_drv_send_str(state->uart,
+				  "ERR usage: sendraw hex|text <data>\r\n");
+		return;
+	}
+
+	if (strcmp(mode, "hex") == 0) {
+		data = strtok_r(NULL, "", &saveptr);
+		if (!data) {
+			uart_drv_send_str(state->uart,
+					  "ERR usage: sendraw hex <hexdata>\r\n");
+			return;
+		}
+		uint8_t byte;
+		char pair[3] = {0};
+		while (*data) {
+			/* skip whitespace */
+			while (*data == ' ')
+				data++;
+			if (!*data || !data[1])
+				break;
+			pair[0] = data[0];
+			pair[1] = data[1];
+			byte = (uint8_t)strtoul(pair, NULL, 16);
+			uart_drv_send(state->uart, &byte, 1);
+			data += 2;
+		}
+	} else if (strcmp(mode, "text") == 0) {
+		data = strtok_r(NULL, "", &saveptr);
+		if (!data) {
+			data = "";
+		}
+		uart_drv_send_str(state->uart, data);
+		/* No \r\n appended */
+	} else {
+		uart_drv_send_str(state->uart,
+				  "ERR usage: sendraw hex|text <data>\r\n");
+	}
+}
+
 static void cmd_ping(struct app_state *state)
 {
 	uart_drv_send_str(state->uart, "pong\r\n");
@@ -462,6 +508,8 @@ void command_process(struct app_state *state, char *line)
 		exit(42);
 	} else if (strcmp(cmd, "jsonout") == 0) {
 		cmd_jsonout(state);
+	} else if (strcmp(cmd, "sendraw") == 0) {
+		cmd_sendraw(state, saveptr ? saveptr : "");
 	} else {
 		uart_drv_printf(state->uart, "ERR unknown command: %s\r\n", cmd);
 	}

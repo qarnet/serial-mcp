@@ -294,7 +294,7 @@ proptest! {
         stop_reason in valid_stop_reason(), truncated: bool,
         bytes_obs in any_usize(), bytes_ret in any_usize(),
     ) {
-        let r = ReadResult { connection_id: id, name: None, bytes_read: br, encoding: enc, data, timeout_ms: timeout, no_new_rx_timeout_ms: None, elapsed_ms: elapsed, stop_reason, truncated, bytes_observed: bytes_obs, bytes_returned: bytes_ret, matched: false, match_index: None, frames: None };
+        let r = ReadResult { connection_id: id, name: None, bytes_read: br, encoding: enc, data, timeout_ms: timeout, no_new_rx_timeout_ms: None, elapsed_ms: elapsed, stop_reason, truncated, bytes_observed: bytes_obs, bytes_returned: bytes_ret, matched: false, match_index: None, match_frame_index: None, frames: None, frames_dropped: 0 };
         let v = serde_json::to_value(&r).unwrap();
         assert_schema_valid!(ReadResult, v);
     }

@@ -1375,4 +1375,72 @@ mod tests {
         assert!(matches!(frames[0].parsed, Some(ParsedFrame::Json(_))));
         assert!(matches!(frames[1].parsed, Some(ParsedFrame::Json(_))));
     }
+
+    // ── Coverage gap tests ──────────────────────────────────────────────
+
+    #[test]
+    fn delimiter_decoder_empty_segments() {
+        let config = FramingConfig {
+            mode: FramingMode::Delimiter {
+                delimiter: "|".into(),
+                delimiter_encoding: PatternEncoding::Utf8,
+            },
+            ..Default::default()
+        };
+        // "||" → two empty frames
+        let mut dec = FrameDecoder::new(&config).unwrap();
+        let frames = dec.push(b"||");
+        assert_eq!(frames.len(), 2);
+        assert!(frames[0].data.is_empty());
+        assert!(frames[1].data.is_empty());
+
+        // "a||b|" → three frames: "a", "", "b"
+        let mut dec = FrameDecoder::new(&config).unwrap();
+        let frames = dec.push(b"a||b|");
+        assert_eq!(frames.len(), 3);
+        assert_eq!(frames[0].data, b"a");
+        assert!(frames[1].data.is_empty());
+        assert_eq!(frames[2].data, b"b");
+    }
+
+    #[test]
+    fn length_prefixed_prefix_split_across_chunks() {
+        let config = FramingConfig {
+            mode: FramingMode::LengthPrefixed {
+                prefix_size: 2,
+                endianness: Endianness::Big,
+                initial_offset: None,
+            },
+            ..Default::default()
+        };
+        // Push half the u16 prefix first.
+        let mut dec = FrameDecoder::new(&config).unwrap();
+        let frames = dec.push(b"\x00");
+        assert!(frames.is_empty());
+        // Push rest of prefix + payload.
+        let frames = dec.push(b"\x05hello");
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].data, b"hello");
+    }
+
+    #[test]
+    fn start_end_end_marker_split_across_chunks() {
+        let config = FramingConfig {
+            mode: FramingMode::StartEnd {
+                start: "STX".into(),
+                end: "ETX".into(),
+                marker_encoding: PatternEncoding::Utf8,
+                include_markers: false,
+            },
+            ..Default::default()
+        };
+        let mut dec = FrameDecoder::new(&config).unwrap();
+        // Start + data + partial end "ET"
+        let frames = dec.push(b"STXdataET");
+        assert!(frames.is_empty(), "end marker ETX not yet complete");
+        // Complete the end marker: "X" → "ETX"
+        let frames = dec.push(b"X");
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].data, b"data");
+    }
 }
