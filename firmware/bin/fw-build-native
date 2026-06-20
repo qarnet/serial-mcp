@@ -15,10 +15,15 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=firmware/bin/fw-common.sh
 source "$SCRIPT_DIR/fw-common.sh"
 
+_fw_require_env
+
 cd "$(_fw_repo_dir)"
 
 BUILD_DIR="${SERIAL_MCP_FW_BUILD_DIR:-$(_fw_repo_dir)/build/native_sim}"
 
+# NOTE: CMAKE_EXPORT_COMPILE_COMMANDS is intentionally not passed here.
+# The sysbuild outer layer does not consume it (produces a CMake warning),
+# and the inner Zephyr firmware build forces it ON unconditionally
+# (cmake/modules/kernel.cmake), so compile_commands.json is always emitted.
 exec west build -b native_sim firmware/ -d "$BUILD_DIR" --pristine -- \
-  -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
   "$@"

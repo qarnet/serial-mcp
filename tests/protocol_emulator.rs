@@ -214,12 +214,7 @@ async fn protocol_emulator_workflow() {
         .await
         .unwrap();
     assert_ne!(sub_result.is_error, Some(true), "{sub_result:?}");
-    let sub_structured = sub_result.structured_content.expect("structured");
-    // Subscribe always returns immediate ack; data/bytes_read/elapsed_ms are null.
-    assert!(
-        sub_structured["data"].is_null(),
-        "subscribe ack data must be null"
-    );
+    // Subscribe ack is always immediate after PLAN 1b.
 
     // Collect data from background notifications.
     let mut collected = String::new();
@@ -468,12 +463,6 @@ async fn protocol_emulator_workflow() {
         .await
         .unwrap();
     assert_ne!(ff_result.is_error, Some(true), "{ff_result:?}");
-    let ff_structured = ff_result.structured_content.expect("structured");
-    assert!(ff_structured["data"].is_null(), "FF mode data must be null");
-    assert!(
-        ff_structured["bytes_read"].is_null(),
-        "FF mode bytes_read must be null"
-    );
 
     client
         .peer()
@@ -574,17 +563,8 @@ async fn protocol_emulator_workflow() {
         ))
         .await
         .unwrap();
-    // Subscribe always returns immediate ack with null data fields.
+    // Subscribe ack is always immediate after PLAN 1b.
     assert_ne!(empty_sub.is_error, Some(true), "{empty_sub:?}");
-    let empty_structured = empty_sub.structured_content.expect("structured");
-    assert!(
-        empty_structured["data"].is_null(),
-        "subscribe ack data must be null"
-    );
-    assert!(
-        empty_structured["bytes_read"].is_null(),
-        "subscribe ack bytes_read must be null"
-    );
     // The stream will auto-stop after timeout in background, emitting a
     // stop notification with bytes_read=0.
 

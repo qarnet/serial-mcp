@@ -8,7 +8,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use std::time::{Duration, Instant};
@@ -107,6 +107,38 @@ impl From<FlowControl> for serialport::FlowControl {
     }
 }
 
+pub(crate) fn data_bits_to_str(d: DataBits) -> String {
+    match d {
+        DataBits::Five => "5".into(),
+        DataBits::Six => "6".into(),
+        DataBits::Seven => "7".into(),
+        DataBits::Eight => "8".into(),
+    }
+}
+
+pub(crate) fn stop_bits_to_str(s: StopBits) -> String {
+    match s {
+        StopBits::One => "1".into(),
+        StopBits::Two => "2".into(),
+    }
+}
+
+pub(crate) fn parity_to_str(p: Parity) -> String {
+    match p {
+        Parity::None => "none".into(),
+        Parity::Odd => "odd".into(),
+        Parity::Even => "even".into(),
+    }
+}
+
+pub(crate) fn flow_control_to_str(f: FlowControl) -> String {
+    match f {
+        FlowControl::None => "none".into(),
+        FlowControl::Software => "software".into(),
+        FlowControl::Hardware => "hardware".into(),
+    }
+}
+
 /// Concrete parameters required to open a serial port.
 #[derive(Debug, Clone, JsonSchema)]
 pub struct ConnectionConfig {
@@ -117,16 +149,166 @@ pub struct ConnectionConfig {
     pub stop_bits: StopBits,
     pub parity: Parity,
     pub flow_control: FlowControl,
+    /// OS-level port identity (VID, PID, serial, transport, etc.)
+    /// Captured at open time for status and profile save operations.
+    pub port_info: Option<PortInfo>,
+    /// Log buffer capacity in events. 0 or None disables logging.
+    /// Default: 1024.
+    #[serde(default = "default_log_capacity")]
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub log_capacity: usize,
+    /// Whether logging is enabled. Default: true when capacity > 0.
+    #[serde(default = "default_true")]
+    pub log_enabled: bool,
+}
+
+fn default_log_capacity() -> usize {
+    1024
+}
+
+fn default_true() -> bool {
+    true
+}
+
+// ---- Connection state -------------------------------------------------------
+
+/// The health state of a live serial connection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ConnectionState {
+    Open,
+    Disconnected,
+    Reconnecting,
+    Closed,
+}
+
+impl ConnectionState {
+    pub fn is_healthy(&self) -> bool {
+        matches!(self, ConnectionState::Open)
+    }
+}
+
+/// Reconnect policy for a connection. When enabled and the port
+/// disappears, the server will try to re-establish the connection
+/// automatically with exponential backoff.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ReconnectPolicy {
+    /// Enable automatic reconnect. Default: false.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Maximum reconnect attempts. 0 = unlimited. Default: 10.
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    #[serde(default = "default_max_reconnect_attempts")]
+    pub max_attempts: u32,
+    /// Initial delay between reconnect attempts in milliseconds. Default: 500.
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    #[serde(default = "default_initial_reconnect_delay_ms")]
+    pub initial_delay_ms: u64,
+    /// Maximum delay between attempts in milliseconds. Default: 30000.
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    #[serde(default = "default_max_reconnect_delay_ms")]
+    pub max_delay_ms: u64,
+    /// Backoff multiplier. Default: 2.0.
+    #[serde(default = "default_backoff_multiplier")]
+    pub backoff_multiplier: f64,
+}
+
+impl Default for ReconnectPolicy {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_attempts: 10,
+            initial_delay_ms: 500,
+            max_delay_ms: 30_000,
+            backoff_multiplier: 2.0,
+        }
+    }
+}
+
+fn default_max_reconnect_attempts() -> u32 {
+    10
+}
+fn default_initial_reconnect_delay_ms() -> u64 {
+    500
+}
+fn default_max_reconnect_delay_ms() -> u64 {
+    30_000
+}
+fn default_backoff_multiplier() -> f64 {
+    2.0
+}
+
+/// Classify an I/O error as a fatal disconnect (port vanished).
+pub fn is_fatal_disconnect(err: &std::io::Error) -> bool {
+    use std::io::ErrorKind;
+    matches!(
+        err.kind(),
+        ErrorKind::NotFound
+            | ErrorKind::PermissionDenied
+            | ErrorKind::ConnectionReset
+            | ErrorKind::ConnectionAborted
+            | ErrorKind::BrokenPipe
+            | ErrorKind::Interrupted
+    )
 }
 
 // ---- Port enumeration --------------------------------------------------------
 
-/// Information about a serial port reported by the OS.
-#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+/// Transport type observed on the host OS for a serial port.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum PortTransport {
+    Usb,
+    Pci,
+    Bluetooth,
+    Unknown,
+}
+
+impl std::fmt::Display for PortTransport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PortTransport::Usb => f.write_str("usb"),
+            PortTransport::Pci => f.write_str("pci"),
+            PortTransport::Bluetooth => f.write_str("bluetooth"),
+            PortTransport::Unknown => f.write_str("unknown"),
+        }
+    }
+}
+
+/// Information about a single serial port on the system.
+///
+/// Fields are populated from OS-level enumeration. USB ports carry
+/// the richest identity; other transports provide more limited metadata.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct PortInfo {
+    /// OS-level path, e.g. `/dev/ttyUSB0` or `COM3`.
     pub name: String,
+    /// Short platform-local name, e.g. `ttyUSB0`.
+    pub display_name: String,
+    /// Human-readable description (manufacturer + product when available).
     pub description: String,
+    /// Formatted hardware identifier string.
     pub hardware_id: Option<String>,
+    /// Transport type — `usb`, `pci`, `bluetooth`, or `unknown`.
+    pub transport: PortTransport,
+    /// USB Vendor ID. `None` for non-USB ports.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vid: Option<u16>,
+    /// USB Product ID. `None` for non-USB ports.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pid: Option<u16>,
+    /// USB serial number string from the device descriptor.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub serial_number: Option<String>,
+    /// USB manufacturer string.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub manufacturer: Option<String>,
+    /// USB product string.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub product: Option<String>,
+    /// USB interface index. `None` when not available or not a USB port.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub interface: Option<u8>,
 }
 
 impl PortInfo {
@@ -137,11 +319,69 @@ impl PortInfo {
     }
 
     fn from_os(port: SerialPortInfo) -> Self {
+        let transport = transport_from_os(&port.port_type);
+        let (vid, pid, serial_number, manufacturer, product, interface) =
+            usb_fields(&port.port_type);
+        let description = describe_port(&port);
+        let hardware_id = format_hardware_id(&port);
+        let display_name = short_display_name(&port.port_name);
+
         PortInfo {
-            hardware_id: format_hardware_id(&port),
-            description: describe_port(&port),
+            display_name,
             name: port.port_name,
+            description,
+            hardware_id,
+            transport,
+            vid,
+            pid,
+            serial_number,
+            manufacturer,
+            product,
+            interface,
         }
+    }
+}
+
+/// Extract the last path component or the full name when no separator exists.
+fn short_display_name(port_name: &str) -> String {
+    port_name
+        .rsplit(&['/', '\\'][..])
+        .next()
+        .unwrap_or(port_name)
+        .to_string()
+}
+
+fn transport_from_os(port_type: &SerialPortType) -> PortTransport {
+    match port_type {
+        SerialPortType::UsbPort(_) => PortTransport::Usb,
+        SerialPortType::PciPort => PortTransport::Pci,
+        SerialPortType::BluetoothPort => PortTransport::Bluetooth,
+        SerialPortType::Unknown => PortTransport::Unknown,
+    }
+}
+
+#[allow(clippy::type_complexity)]
+fn usb_fields(
+    port_type: &SerialPortType,
+) -> (
+    Option<u16>,
+    Option<u16>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<u8>,
+) {
+    if let SerialPortType::UsbPort(info) = port_type {
+        (
+            Some(info.vid),
+            Some(info.pid),
+            info.serial_number.clone(),
+            info.manufacturer.clone(),
+            info.product.clone(),
+            info.interface,
+        )
+    } else {
+        (None, None, None, None, None, None)
     }
 }
 
@@ -188,6 +428,27 @@ pub trait SerialIo: AsyncRead + AsyncWrite + Send + Unpin {
     fn set_dtr_rts(&mut self, dtr: bool, rts: bool) -> std::io::Result<()>;
     fn set_flow_control(&mut self, flow_control: FlowControl) -> std::io::Result<()>;
     fn set_break_state(&self, asserted: bool) -> std::io::Result<()>;
+
+    /// Reconfigure baud rate on an already-open port. Default is no-op
+    /// for backends that don't support hardware reconfiguration.
+    fn reconfigure_baud_rate(&mut self, _baud_rate: u32) -> std::io::Result<()> {
+        Ok(())
+    }
+
+    /// Reconfigure data bits on an already-open port.
+    fn reconfigure_data_bits(&mut self, _data_bits: serialport::DataBits) -> std::io::Result<()> {
+        Ok(())
+    }
+
+    /// Reconfigure stop bits on an already-open port.
+    fn reconfigure_stop_bits(&mut self, _stop_bits: serialport::StopBits) -> std::io::Result<()> {
+        Ok(())
+    }
+
+    /// Reconfigure parity on an already-open port.
+    fn reconfigure_parity(&mut self, _parity: serialport::Parity) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 impl SerialIo for SerialStream {
@@ -213,6 +474,22 @@ impl SerialIo for SerialStream {
             self.clear_break().map_err(io_error_from_serialport)
         }
     }
+
+    fn reconfigure_baud_rate(&mut self, baud_rate: u32) -> std::io::Result<()> {
+        SerialPort::set_baud_rate(self, baud_rate).map_err(io_error_from_serialport)
+    }
+
+    fn reconfigure_data_bits(&mut self, data_bits: serialport::DataBits) -> std::io::Result<()> {
+        SerialPort::set_data_bits(self, data_bits).map_err(io_error_from_serialport)
+    }
+
+    fn reconfigure_stop_bits(&mut self, stop_bits: serialport::StopBits) -> std::io::Result<()> {
+        SerialPort::set_stop_bits(self, stop_bits).map_err(io_error_from_serialport)
+    }
+
+    fn reconfigure_parity(&mut self, parity: serialport::Parity) -> std::io::Result<()> {
+        SerialPort::set_parity(self, parity).map_err(io_error_from_serialport)
+    }
 }
 
 fn io_error_from_serialport(err: serialport::Error) -> std::io::Error {
@@ -227,11 +504,41 @@ pub struct SerialConnection {
     id: String,
     port: String,
     name: Option<String>,
-    baud_rate: u32,
+    baud_rate: StdMutex<u32>,
+    data_bits: StdMutex<DataBits>,
+    stop_bits: StdMutex<StopBits>,
+    parity: StdMutex<Parity>,
     flow_control: StdMutex<FlowControl>,
     io: Mutex<Option<Box<dyn SerialIo>>>,
     close_token: CancellationToken,
     closed: AtomicBool,
+    /// Total bytes written to the device via the `write` tool.
+    tx_bytes: AtomicU64,
+    /// Total bytes read from the device and delivered through any RX path.
+    rx_bytes: AtomicU64,
+    /// Wall-clock time of the last rx or tx byte operation.
+    last_activity: StdMutex<Option<std::time::SystemTime>>,
+    /// Number of successful `read` or `subscribe` operations.
+    read_ops: AtomicU64,
+    /// Number of successful `write` operations.
+    write_ops: AtomicU64,
+    /// Number of RX operations where data was truncated
+    /// (bytes_returned < bytes_observed).
+    truncation_count: AtomicU64,
+    /// Number of notification drops (encoding errors or disconnected peers).
+    notification_drop_count: AtomicU64,
+    /// OS-level port identity captured at open time.
+    port_info: Option<PortInfo>,
+    /// Per-connection event log buffer.
+    log: Arc<crate::log_buffer::LogBuffer>,
+    /// Current connection health state.
+    state: StdMutex<ConnectionState>,
+    /// Reconnect policy for this connection.
+    pub(crate) reconnect_policy: StdMutex<ReconnectPolicy>,
+    /// Count of reconnect attempts since the last disconnect.
+    reconnect_attempts: AtomicU64,
+    /// Last fatal I/O error message and timestamp.
+    last_error: StdMutex<Option<(std::time::SystemTime, String)>>,
 }
 
 impl fmt::Debug for SerialConnection {
@@ -264,21 +571,42 @@ impl SerialConnection {
                 stop_bits: StopBits::One,
                 parity: Parity::None,
                 flow_control: FlowControl::None,
+                port_info: None,
+                log_capacity: 1024,
+                log_enabled: true,
             },
             io,
         )
     }
 
     pub fn from_io_with_config(config: ConnectionConfig, io: Box<dyn SerialIo>) -> Self {
+        let log = crate::log_buffer::LogBuffer::new_shared(config.log_capacity, config.log_enabled);
+        log.opened();
         Self {
             id: Uuid::new_v4().to_string(),
             port: config.port,
             name: config.name,
-            baud_rate: config.baud_rate,
+            baud_rate: StdMutex::new(config.baud_rate),
+            data_bits: StdMutex::new(config.data_bits),
+            stop_bits: StdMutex::new(config.stop_bits),
+            parity: StdMutex::new(config.parity),
             flow_control: StdMutex::new(config.flow_control),
             io: Mutex::new(Some(io)),
             close_token: CancellationToken::new(),
             closed: AtomicBool::new(false),
+            tx_bytes: AtomicU64::new(0),
+            rx_bytes: AtomicU64::new(0),
+            last_activity: StdMutex::new(None),
+            read_ops: AtomicU64::new(0),
+            write_ops: AtomicU64::new(0),
+            truncation_count: AtomicU64::new(0),
+            notification_drop_count: AtomicU64::new(0),
+            port_info: config.port_info,
+            log: crate::log_buffer::LogBuffer::new_shared(config.log_capacity, config.log_enabled),
+            state: StdMutex::new(ConnectionState::Open),
+            reconnect_policy: StdMutex::new(ReconnectPolicy::default()),
+            reconnect_attempts: AtomicU64::new(0),
+            last_error: StdMutex::new(None),
         }
     }
 
@@ -295,7 +623,7 @@ impl SerialConnection {
     }
 
     pub fn baud_rate(&self) -> u32 {
-        self.baud_rate
+        *self.baud_rate.lock().expect("baud_rate mutex poisoned")
     }
 
     pub fn flow_control(&self) -> FlowControl {
@@ -303,6 +631,209 @@ impl SerialConnection {
             .flow_control
             .lock()
             .expect("flow_control mutex poisoned")
+    }
+
+    pub fn data_bits(&self) -> DataBits {
+        *self.data_bits.lock().expect("data_bits mutex poisoned")
+    }
+
+    pub fn stop_bits(&self) -> StopBits {
+        *self.stop_bits.lock().expect("stop_bits mutex poisoned")
+    }
+
+    pub fn parity(&self) -> Parity {
+        *self.parity.lock().expect("parity mutex poisoned")
+    }
+
+    /// Return the OS-level port identity captured at open time.
+    pub fn port_info(&self) -> Option<&PortInfo> {
+        self.port_info.as_ref()
+    }
+
+    /// Return the per-connection event log buffer.
+    pub fn log(&self) -> &Arc<crate::log_buffer::LogBuffer> {
+        &self.log
+    }
+
+    /// Return the current connection health state.
+    pub fn state(&self) -> ConnectionState {
+        *self.state.lock().expect("state mutex poisoned")
+    }
+
+    /// Set the connection state and log the transition.
+    fn set_state(&self, new_state: ConnectionState) {
+        *self.state.lock().expect("state mutex poisoned") = new_state;
+    }
+
+    /// Mark the connection as disconnected due to a fatal I/O error.
+    /// Takes the io handle out (sets to None), cancels in-flight operations,
+    /// and clears RX buffers.
+    pub async fn mark_disconnected(&self, error_message: String) {
+        let was_healthy = self.state().is_healthy();
+        self.set_state(ConnectionState::Disconnected);
+        self.last_error
+            .lock()
+            .expect("poisoned")
+            .replace((std::time::SystemTime::now(), error_message.clone()));
+        // We do NOT cancel close_token here — that is reserved for explicit
+        // close(). The pump and in-flight reads will time out naturally and
+        // retry when the port is reconnected.
+        self.log.rx_data(0); // dummy to trigger log
+        self.log.record(
+            None,
+            crate::log_buffer::LogEvent::Disconnect {
+                error: error_message,
+            },
+        );
+        // Take the io handle out so subsequent I/O calls get ConnectionClosed
+        let mut io_lock = self.io.lock().await;
+        if let Some(mut io) = io_lock.take() {
+            // Best-effort: clear OS buffers and shutdown
+            let _ = io.clear_os_buffers(FlushTarget::Input);
+            let _ = io.shutdown().await;
+        }
+        if was_healthy {
+            tracing::warn!("Connection {} disconnected", self.display_name());
+        }
+    }
+
+    /// Attempt to re-establish the serial port connection.
+    ///
+    /// Rebuilds a `SerialStream` from the stored config and replaces the
+    /// current `io` handle in place. Preserves all counters, id, name,
+    /// and log buffer. Called by auto-reconnect tasks and the reconnect
+    /// tool.
+    pub async fn reconnect(&self) -> Result<()> {
+        let state = self.state();
+        if state == ConnectionState::Open {
+            return Ok(()); // already connected
+        }
+        if state == ConnectionState::Closed {
+            return Err(SerialError::ConnectionClosed(self.display_name()));
+        }
+
+        self.set_state(ConnectionState::Reconnecting);
+        self.reconnect_attempts.fetch_add(1, Ordering::SeqCst);
+        let attempt = self.reconnect_attempts.load(Ordering::SeqCst) as u32;
+        self.log.record(
+            None,
+            crate::log_buffer::LogEvent::ReconnectStart { attempt },
+        );
+
+        let config = self.build_config();
+        match build_stream(&config) {
+            Ok(stream) => {
+                let mut io_lock = self.io.lock().await;
+                *io_lock = Some(Box::new(stream));
+                self.closed.store(false, Ordering::SeqCst);
+                self.set_state(ConnectionState::Open);
+                self.log
+                    .record(None, crate::log_buffer::LogEvent::ReconnectSuccess);
+                tracing::info!("Connection {} reconnected", self.display_name());
+                Ok(())
+            }
+            Err(e) => {
+                self.set_state(ConnectionState::Disconnected);
+                let msg = e.to_string();
+                self.log.record(
+                    None,
+                    crate::log_buffer::LogEvent::ReconnectFailed {
+                        attempt,
+                        error: msg,
+                    },
+                );
+                Err(e)
+            }
+        }
+    }
+
+    /// Build a `ConnectionConfig` from the current connection state,
+    /// for use in reconnect.
+    fn build_config(&self) -> ConnectionConfig {
+        ConnectionConfig {
+            port: self.port.clone(),
+            name: self.name.clone(),
+            baud_rate: self.baud_rate(),
+            data_bits: self.data_bits(),
+            stop_bits: self.stop_bits(),
+            parity: self.parity(),
+            flow_control: self.flow_control(),
+            port_info: self.port_info.clone(),
+            log_capacity: 1024, // preserve log config
+            log_enabled: self.log.is_enabled(),
+        }
+    }
+
+    /// Record `n` bytes written to the device.
+    pub fn record_tx_bytes(&self, n: usize) {
+        self.tx_bytes.fetch_add(n as u64, Ordering::SeqCst);
+        *self.last_activity.lock().expect("poisoned") = Some(std::time::SystemTime::now());
+    }
+
+    /// Record `n` bytes read from the device.
+    pub fn record_rx_bytes(&self, n: usize) {
+        self.rx_bytes.fetch_add(n as u64, Ordering::SeqCst);
+        *self.last_activity.lock().expect("poisoned") = Some(std::time::SystemTime::now());
+    }
+
+    /// Return the last I/O activity as milliseconds since Unix epoch.
+    pub fn last_activity_ms(&self) -> Option<u64> {
+        self.last_activity.lock().expect("poisoned").and_then(|t| {
+            t.duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .ok()
+        })
+    }
+
+    /// Record one successful read or subscribe operation.
+    pub fn record_read_op(&self) {
+        self.read_ops.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// Record one successful write operation.
+    pub fn record_write_op(&self) {
+        self.write_ops.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// Record one RX truncation (bytes_returned < bytes_observed).
+    pub fn record_truncation(&self) {
+        self.truncation_count.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// Record one notification drop (encoding error or disconnected peer).
+    pub fn record_notification_drop(&self) {
+        self.notification_drop_count.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// Build a snapshot of the current status of this connection.
+    pub fn status_snapshot(&self) -> ConnectionStatus {
+        ConnectionStatus {
+            connection_id: self.id().to_string(),
+            name: self.name().map(str::to_string),
+            port: self.port().to_string(),
+            baud_rate: self.baud_rate(),
+            data_bits: data_bits_to_str(self.data_bits()),
+            stop_bits: stop_bits_to_str(self.stop_bits()),
+            parity: parity_to_str(self.parity()),
+            flow_control: flow_control_to_str(self.flow_control()),
+            is_closed: self.closed.load(Ordering::SeqCst),
+            tx_bytes: self.tx_bytes.load(Ordering::SeqCst),
+            rx_bytes: self.rx_bytes.load(Ordering::SeqCst),
+            last_activity_ms: self.last_activity_ms(),
+            read_ops: self.read_ops.load(Ordering::SeqCst),
+            write_ops: self.write_ops.load(Ordering::SeqCst),
+            truncation_count: self.truncation_count.load(Ordering::SeqCst),
+            notification_drop_count: self.notification_drop_count.load(Ordering::SeqCst),
+            port_info: self.port_info.clone(),
+            state: self.state(),
+            reconnect_attempts: self.reconnect_attempts.load(Ordering::SeqCst),
+            last_error: self
+                .last_error
+                .lock()
+                .expect("poisoned")
+                .as_ref()
+                .map(|(_, msg)| msg.clone()),
+        }
     }
 
     pub fn cancel_token(&self) -> CancellationToken {
@@ -333,12 +864,14 @@ impl SerialConnection {
     /// Write a byte slice, flushing before returning.
     pub async fn write(&self, data: &[u8]) -> Result<usize> {
         self.ensure_open()?;
+        self.log.tx_data(data.len());
         let mut io = self.io.lock().await;
         let io = io
             .as_mut()
             .ok_or_else(|| SerialError::ConnectionClosed(self.display_name()))?;
         io.write_all(data).await?;
         io.flush().await?;
+        self.record_tx_bytes(data.len());
         Ok(data.len())
     }
 
@@ -359,10 +892,12 @@ impl SerialConnection {
                 let io = io
                     .as_mut()
                     .ok_or_else(|| SerialError::ConnectionClosed(self.display_name()))?;
-                tokio::select! {
+                let n = tokio::select! {
                     _ = self.close_token.cancelled() => Err(SerialError::ConnectionClosed(self.display_name())),
                     res = io.read(dst) => Ok(res?),
-                }
+                }?;
+                self.record_rx_bytes(n);
+                Ok(n)
             }
             Some(ms) => {
                 let deadline = Instant::now() + Duration::from_millis(ms);
@@ -384,7 +919,10 @@ impl SerialConnection {
                             _ = self.close_token.cancelled() => return Err(SerialError::ConnectionClosed(self.display_name())),
                             res = timeout(poll_dur, io.read(dst)) => res,
                         } {
-                            Ok(Ok(n)) if n > 0 => return Ok(n),
+                            Ok(Ok(n)) if n > 0 => {
+                                self.record_rx_bytes(n);
+                                return Ok(n);
+                            }
                             Ok(Ok(_)) => {}
                             Ok(Err(e)) => return Err(SerialError::from(e)),
                             Err(_elapsed) => {}
@@ -462,6 +1000,69 @@ impl SerialConnection {
         self.set_break_state(false).await
     }
 
+    /// Reconfigure serial parameters on a live connection. Parameters passed
+    /// as `None` are left unchanged. Returns the effective config after the
+    /// operation completes.
+    pub async fn reconfigure(
+        &self,
+        baud_rate: Option<u32>,
+        data_bits: Option<DataBits>,
+        stop_bits: Option<StopBits>,
+        parity: Option<Parity>,
+        flow_control: Option<FlowControl>,
+    ) -> Result<ConnectionStatus> {
+        self.ensure_open()?;
+
+        if let Some(rate) = baud_rate {
+            ensure_valid_baud_rate(rate)?;
+        }
+
+        // Apply requested changes to the underlying serial port hardware.
+        {
+            let mut io = self.io.lock().await;
+            let io = io
+                .as_mut()
+                .ok_or_else(|| SerialError::ConnectionClosed(self.display_name()))?;
+
+            if let Some(rate) = baud_rate {
+                io.reconfigure_baud_rate(rate).map_err(SerialError::from)?;
+            }
+            if let Some(db) = data_bits {
+                io.reconfigure_data_bits(db.into())
+                    .map_err(SerialError::from)?;
+            }
+            if let Some(sb) = stop_bits {
+                io.reconfigure_stop_bits(sb.into())
+                    .map_err(SerialError::from)?;
+            }
+            if let Some(p) = parity {
+                io.reconfigure_parity(p.into()).map_err(SerialError::from)?;
+            }
+            if let Some(fc) = flow_control {
+                io.set_flow_control(fc).map_err(SerialError::from)?;
+            }
+        }
+
+        // Update stored configuration.
+        if let Some(rate) = baud_rate {
+            *self.baud_rate.lock().expect("poisoned") = rate;
+        }
+        if let Some(db) = data_bits {
+            *self.data_bits.lock().expect("poisoned") = db;
+        }
+        if let Some(sb) = stop_bits {
+            *self.stop_bits.lock().expect("poisoned") = sb;
+        }
+        if let Some(p) = parity {
+            *self.parity.lock().expect("poisoned") = p;
+        }
+        if let Some(fc) = flow_control {
+            *self.flow_control.lock().expect("poisoned") = fc;
+        }
+
+        Ok(self.status_snapshot())
+    }
+
     pub async fn close(&self) -> Result<()> {
         if self.closed.swap(true, Ordering::SeqCst) {
             return Ok(());
@@ -479,7 +1080,7 @@ impl SerialConnection {
 }
 
 /// Which OS-side buffer(s) a flush should clear.
-#[derive(Debug, Clone, Copy, Deserialize, Serialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum FlushTarget {
     /// Bytes the OS has received from the device but the app has not yet read.
@@ -532,6 +1133,7 @@ struct ConnectionRegistry {
     connections: HashMap<String, Arc<SerialConnection>>,
     opening_ports: HashSet<String>,
     closing_ports: HashSet<String>,
+    reconnect_tasks: HashMap<String, tokio::task::JoinHandle<()>>,
 }
 
 impl ConnectionManager {
@@ -607,6 +1209,14 @@ impl ConnectionManager {
         };
 
         let port = connection.port().to_string();
+        // Abort any running reconnect task for this connection.
+        {
+            let mut state = self.state.lock().await;
+            if let Some(handle) = state.reconnect_tasks.remove(id) {
+                handle.abort();
+            }
+        }
+        connection.log().closed();
         let result = connection.close().await;
 
         self.state.lock().await.closing_ports.remove(&port);
@@ -622,6 +1232,97 @@ impl ConnectionManager {
             .get(id)
             .cloned()
             .ok_or_else(|| SerialError::ConnectionNotFound(id.to_string()))
+    }
+
+    /// Return all currently-registered connections with their ids.
+    pub async fn list_all(&self) -> Vec<(String, Arc<SerialConnection>)> {
+        self.state
+            .lock()
+            .await
+            .connections
+            .iter()
+            .map(|(k, v)| (k.clone(), Arc::clone(v)))
+            .collect()
+    }
+
+    /// Start a background reconnect task for the given connection.
+    /// The task retries `reconnect()` with exponential backoff,
+    /// respecting the connection's `ReconnectPolicy`. On success,
+    /// restarts the RX pump via `rx_sessions`.
+    pub async fn start_reconnect(
+        &self,
+        id: &str,
+        rx_sessions: Arc<crate::rx_session::RxSessionManager>,
+    ) {
+        let conn = match self.get(id).await {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        let policy = conn.reconnect_policy.lock().expect("poisoned").clone();
+        if !policy.enabled {
+            return;
+        }
+        // Avoid spawning a duplicate task. Prune finished handles first.
+        {
+            let mut state = self.state.lock().await;
+            state.reconnect_tasks.retain(|_, h| !h.is_finished());
+            if state.reconnect_tasks.contains_key(id) {
+                return;
+            }
+        }
+
+        let id_owned = id.to_string();
+        let conn_clone = Arc::clone(&conn);
+        let handle = tokio::spawn(async move {
+            let mut delay_ms = policy.initial_delay_ms;
+            let mut attempts: u32 = 0;
+            loop {
+                // Check if still disconnected / not cancelled.
+                let state = conn_clone.state();
+                if state == ConnectionState::Open || state == ConnectionState::Closed {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+
+                match conn_clone.reconnect().await {
+                    Ok(()) => {
+                        // Reset attempt counter after successful reconnect.
+                        conn_clone.reconnect_attempts.store(0, Ordering::SeqCst);
+                        // Restart the RX pump so data flows again.
+                        if let Some(session) = rx_sessions.get(&id_owned).await {
+                            session.ensure_pump_running();
+                        }
+                        break;
+                    }
+                    Err(_e) => {
+                        attempts += 1;
+                        if policy.max_attempts > 0 && attempts >= policy.max_attempts {
+                            conn_clone
+                                .log()
+                                .record(None, crate::log_buffer::LogEvent::ReconnectExhausted);
+                            break;
+                        }
+                        // Exponential backoff with cap.
+                        delay_ms = ((delay_ms as f64) * policy.backoff_multiplier)
+                            .min(policy.max_delay_ms as f64)
+                            as u64;
+                    }
+                }
+            }
+            // Task completes: handle stays in reconnect_tasks; supervisor
+            // prunes finished handles on its next poll.
+        });
+
+        let mut state = self.state.lock().await;
+        state.reconnect_tasks.insert(id.to_string(), handle);
+    }
+
+    /// Cancel a running reconnect task for the given connection.
+    pub async fn cancel_reconnect(&self, id: &str) {
+        let mut state = self.state.lock().await;
+        if let Some(handle) = state.reconnect_tasks.remove(id) {
+            handle.abort();
+        }
     }
 
     /// Number of currently open connections.
@@ -651,6 +1352,47 @@ pub struct ConnectionSummary {
     #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
     pub baud_rate: u32,
     pub flow_control: FlowControl,
+}
+
+/// Full status snapshot of a connection used by the `get_status` tool.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ConnectionStatus {
+    pub connection_id: String,
+    pub name: Option<String>,
+    pub port: String,
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub baud_rate: u32,
+    pub data_bits: String,
+    pub stop_bits: String,
+    pub parity: String,
+    pub flow_control: String,
+    pub is_closed: bool,
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub tx_bytes: u64,
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub rx_bytes: u64,
+    /// Last I/O activity as milliseconds since Unix epoch, or null.
+    #[schemars(schema_with = "crate::schema_helpers::option_uint_schema")]
+    pub last_activity_ms: Option<u64>,
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub read_ops: u64,
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub write_ops: u64,
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub truncation_count: u64,
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub notification_drop_count: u64,
+    /// OS-level port identity captured at open time (vid, pid, serial,
+    /// manufacturer, etc.). `null` for connections opened without
+    /// identity data (e.g. loopback tests).
+    pub port_info: Option<PortInfo>,
+    /// Current connection health state.
+    pub state: ConnectionState,
+    /// Number of reconnect attempts since last disconnect.
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub reconnect_attempts: u64,
+    /// Last fatal error message, or null.
+    pub last_error: Option<String>,
 }
 
 fn find_connection_by_port<'a>(
@@ -829,6 +1571,9 @@ mod tests {
             stop_bits: StopBits::One,
             parity: Parity::None,
             flow_control: FlowControl::None,
+            port_info: None,
+            log_capacity: 1024,
+            log_enabled: true,
         });
         let owner_id = mgr.insert(c1).await.unwrap();
 

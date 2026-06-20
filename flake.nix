@@ -256,15 +256,34 @@
 
           shellHook = ''
             ${pkgs.lib.optionalString pkgs.stdenv.isLinux ''
-              # Pull full NCS toolchain env into shell so `west` works without
-              # wrapping every command in `nrfutil sdk-manager toolchain launch`.
+              # ── NCS toolchain env ──────────────────────────────────────────
+              # Dynamically loaded via nrfutil. All toolchain/SDK paths are
+              # resolved at runtime — no hardcoded hashes.
               if command -v nrfutil >/dev/null 2>&1; then
-                eval "$(nrfutil sdk-manager toolchain env --ncs-version v3.3.0 --as-script sh 2>/dev/null)"
+                eval "$(nrfutil sdk-manager toolchain env --ncs-version v3.3.0 --as-script sh)"
+              else
+                printf 'nrfutil not found — NCS toolchain not loaded.\n' >&2
+                printf 'Install nrfutil or enter nix develop.\n' >&2
               fi
 
-              if [ -n "''${ZEPHYR_SDK_INSTALL_DIR:-}" ]; then
-                NCS_ROOT="$(dirname "$(dirname "$(dirname "$(dirname "$ZEPHYR_SDK_INSTALL_DIR")")")")"
-                export ZEPHYR_BASE="$NCS_ROOT/v3.3.0/zephyr"
+              # ── ZEPHYR_BASE derivation ─────────────────────────────────────
+              if [ -z "''${ZEPHYR_BASE:-}" ]; then
+                _zephyr_candidate=""
+                # Strategy 1: derive from toolchain layout (nrfutil-managed)
+                if [ -n "''${ZEPHYR_SDK_INSTALL_DIR:-}" ]; then
+                  _ncs_root="$(dirname "$(dirname "$(dirname "$(dirname "$ZEPHYR_SDK_INSTALL_DIR")")")")"
+                  _zephyr_candidate="$_ncs_root/v3.3.0/zephyr"
+                fi
+                # Strategy 2: well-known user-home path
+                if [ ! -d "''${_zephyr_candidate:-}" ] && [ -d "$HOME/ncs/v3.3.0/zephyr" ]; then
+                  _zephyr_candidate="$HOME/ncs/v3.3.0/zephyr"
+                fi
+                if [ -n "''${_zephyr_candidate:-}" ] && [ -d "$_zephyr_candidate" ]; then
+                  export ZEPHYR_BASE="$_zephyr_candidate"
+                else
+                  printf 'ZEPHYR_BASE could not be derived.\n' >&2
+                  printf 'Set it manually: export ZEPHYR_BASE=/path/to/ncs/v3.3.0/zephyr\n' >&2
+                fi
               fi
 
               export PATH="$PWD/scripts:$PWD/firmware/bin:$PATH"

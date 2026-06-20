@@ -17,6 +17,10 @@
  *   slow on [<us>]                        → slow consumer mode (delay reads)
  *   slow off                             → normal consumer mode
  *   write cmd <id> <rest...>             → execute <rest> tagged with <id>
+ *   binary on|off                        → binary trace mode
+ *   txbuf status                         → TX ring buffer occupancy
+ *   ack on|off                           → pre-execution ack per command
+ *   hold on|off                          → stall firmware TX drain
  *   touch                                 → exit(42) — bootloader entry trigger
  */
 
@@ -83,6 +87,52 @@ static void spam_timer_cb(struct k_timer *timer)
 		uart_drv_printf(spam->drv, "Spam complete: %u bytes sent\r\n",
 				 spam->total_bytes);
 		spam->active = false;
+	}
+}
+
+static void cmd_sendraw(struct app_state *state, char *args)
+{
+	char *saveptr = NULL;
+	char *mode = strtok_r(args, " ", &saveptr);
+	char *data;
+
+	if (!mode || *mode == '\0') {
+		uart_drv_send_str(state->uart,
+				  "ERR usage: sendraw hex|text <data>\r\n");
+		return;
+	}
+
+	if (strcmp(mode, "hex") == 0) {
+		data = strtok_r(NULL, "", &saveptr);
+		if (!data) {
+			uart_drv_send_str(state->uart,
+					  "ERR usage: sendraw hex <hexdata>\r\n");
+			return;
+		}
+		uint8_t byte;
+		char pair[3] = {0};
+		while (*data) {
+			/* skip whitespace */
+			while (*data == ' ')
+				data++;
+			if (!*data || !data[1])
+				break;
+			pair[0] = data[0];
+			pair[1] = data[1];
+			byte = (uint8_t)strtoul(pair, NULL, 16);
+			uart_drv_send(state->uart, &byte, 1);
+			data += 2;
+		}
+	} else if (strcmp(mode, "text") == 0) {
+		data = strtok_r(NULL, "", &saveptr);
+		if (!data) {
+			data = "";
+		}
+		uart_drv_send_str(state->uart, data);
+		/* No \r\n appended */
+	} else {
+		uart_drv_send_str(state->uart,
+				  "ERR usage: sendraw hex|text <data>\r\n");
 	}
 }
 
@@ -315,6 +365,68 @@ static void cmd_binary(struct app_state *state, char *arg)
 	}
 }
 
+static void cmd_txbuf_status(struct app_state *state)
+{
+	struct uart_drv *drv = state->uart;
+	unsigned int key = irq_lock();
+	uint32_t len = ring_buf_size_get(&drv->tx_ringbuf);
+	bool busy = drv->tx_busy;
+	irq_unlock(key);
+
+	uart_drv_printf(state->uart, "txbuf len=%u busy=%u\r\n", len, busy);
+}
+
+static void cmd_ack(struct app_state *state, char *arg)
+{
+	if (!arg || *arg == '\0') {
+		uart_drv_send_str(state->uart, "ERR usage: ack on|off\r\n");
+		return;
+	}
+
+	if (strcmp(arg, "on") == 0) {
+		state->ack_enabled = true;
+		state->ack_seq = 0;
+		uart_drv_send_str(state->uart, "ack on\r\n");
+	} else if (strcmp(arg, "off") == 0) {
+		state->ack_enabled = false;
+		uart_drv_send_str(state->uart, "ack off\r\n");
+	} else {
+		uart_drv_send_str(state->uart, "ERR usage: ack on|off\r\n");
+	}
+}
+
+static void cmd_hold(struct app_state *state, char *arg)
+{
+	if (!arg || *arg == '\0') {
+		uart_drv_send_str(state->uart, "ERR usage: hold on|off\r\n");
+		return;
+	}
+
+	if (strcmp(arg, "on") == 0) {
+		uart_drv_send_str(state->uart, "hold on\r\n");
+		state->uart->tx_hold = true;
+	} else if (strcmp(arg, "off") == 0) {
+		uart_drv_send_str(state->uart, "hold off\r\n");
+		state->uart->tx_hold = false;
+		/* Re-enable TX IRQ so pending data can drain. */
+		uart_irq_tx_enable(state->uart->dev);
+	} else {
+		uart_drv_send_str(state->uart, "ERR usage: hold on|off\r\n");
+	}
+}
+
+static void cmd_jsonout(struct app_state *state)
+{
+	/* Emit JSON lines for parser testing.
+	   Each line is a complete JSON object terminated by \r\n. */
+	uart_drv_printf(state->uart,
+			"{\"sensor\":\"temp\",\"value\":25.5,\"unit\":\"C\"}\r\n");
+	uart_drv_printf(state->uart,
+			"{\"sensor\":\"humidity\",\"value\":60,\"unit\":\"%%\"}\r\n");
+	uart_drv_printf(state->uart,
+			"{\"sensor\":\"pressure\",\"value\":1013.25,\"unit\":\"hPa\"}\r\n");
+}
+
 void command_init(struct app_state *state, struct uart_drv *drv)
 {
 	memset(state, 0, sizeof(*state));
@@ -340,6 +452,10 @@ void command_process(struct app_state *state, char *line)
 
 	if (state->slow_mode) {
 		k_usleep(state->slow_delay_us);
+	}
+
+	if (state->ack_enabled) {
+		uart_drv_printf(state->uart, "ack %u\r\n", state->ack_seq++);
 	}
 
 	if (strcmp(cmd, "ping") == 0) {
@@ -376,9 +492,24 @@ void command_process(struct app_state *state, char *line)
 		cmd_write(state, saveptr ? saveptr : "");
 	} else if (strcmp(cmd, "binary") == 0) {
 		cmd_binary(state, saveptr ? saveptr : "");
+	} else if (strcmp(cmd, "txbuf") == 0) {
+		char *sub = strtok_r(NULL, " ", &saveptr);
+		if (sub && strcmp(sub, "status") == 0) {
+			cmd_txbuf_status(state);
+		} else {
+			uart_drv_send_str(state->uart, "ERR usage: txbuf status\r\n");
+		}
+	} else if (strcmp(cmd, "ack") == 0) {
+		cmd_ack(state, saveptr ? saveptr : "");
+	} else if (strcmp(cmd, "hold") == 0) {
+		cmd_hold(state, saveptr ? saveptr : "");
 	} else if (strcmp(cmd, "touch") == 0) {
 		uart_drv_send_str(state->uart, "touch exit(42)\r\n");
 		exit(42);
+	} else if (strcmp(cmd, "jsonout") == 0) {
+		cmd_jsonout(state);
+	} else if (strcmp(cmd, "sendraw") == 0) {
+		cmd_sendraw(state, saveptr ? saveptr : "");
 	} else {
 		uart_drv_printf(state->uart, "ERR unknown command: %s\r\n", cmd);
 	}

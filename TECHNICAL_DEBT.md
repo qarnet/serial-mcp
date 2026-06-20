@@ -2,22 +2,7 @@
 
 ## RX cleanup after PLAN 1 and PLAN 2
 
-### 1. Remove or refactor obsolete direct-read helpers
-
-Current issue:
-- Old direct-read helpers still exist in `src/tools/helpers.rs`.
-- Public RX tools no longer use them.
-- Their semantics now diverge from unified `RxSession`-based RX behavior.
-
-Why it matters:
-- Confusing for future maintainers.
-- Easy source of accidental regressions if reused later.
-
-Likely follow-up:
-- delete unused helpers, or
-- rewrite them as thin wrappers over session-based helpers if tests still need shared logic.
-
-### 2. Simplify subscribe final-stop payload fields
+### 1. Simplify subscribe final-stop payload fields
 
 Current issue:
 - Final subscribe stop payload includes overlapping counters such as `bytes_read`,
@@ -31,7 +16,7 @@ Likely follow-up:
 - decide canonical field set for subscribe stop notifications,
 - remove or deprecate overlapping counters once compatibility plan is clear.
 
-### 3. Update docs to match unified RX + metadata model
+### 2. Update docs to match unified RX + metadata model
 
 Current issue:
 - README, tool descriptions, and related docs may not fully explain:
@@ -48,7 +33,7 @@ Why it matters:
 Likely follow-up:
 - full documentation pass after PLAN 3/4 settle naming and semantics.
 
-### 4. Reduce duplicated `tx_session` test coverage
+### 3. Reduce duplicated `tx_session` test coverage
 
 Current issue:
 - `src/tx_session.rs` unit tests and `tests/tx_session.rs` integration tests cover many same cases.
@@ -62,7 +47,7 @@ Likely follow-up:
 - keep low-level behavior checks close to `src/tx_session.rs`,
 - keep only tool-surface or cross-module wiring coverage in `tests/tx_session.rs`.
 
-### 5. Add better live coverage for TX output flush semantics
+### 4. Add better live coverage for TX output flush semantics
 
 Current issue:
 - PTY and unit tests cover TX ordering and basic output flush behavior.

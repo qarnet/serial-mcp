@@ -9,7 +9,7 @@
 //! - `MatchRequest` — the JSON-serialisable request shape
 //! - `MatchMode` — only `literal_substring` for now, extensible later
 //! - `PatternEncoding` — alias for the encoding used to decode the pattern
-//! - `ByteMatcher` — stateful byte-substring matcher (finds first occurrence)
+//! - `Matcher` — stateful pattern matcher supporting literal, regex, and glob
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -64,10 +64,29 @@ impl Default for MatchConfig {
 pub enum MatchMode {
     /// Literal byte-substring match on raw RX bytes.
     LiteralSubstring,
+    /// Regular expression match using the `regex` crate's bytes API.
+    /// The pattern is compiled as `regex::bytes::Regex` and matches on
+    /// raw bytes (no UTF-8 requirement). Use the standard regex syntax.
+    Regex,
+    /// Glob pattern match. Lines are split on `\n` and each line is
+    /// tested against the glob pattern via `glob::Pattern::matches`.
+    /// This is a per-line whole-match: the glob must describe the
+    /// entire line. Use `*` and `?` wildcards.
+    Glob,
 }
 
 fn default_match_mode() -> MatchMode {
     MatchMode::LiteralSubstring
+}
+
+impl std::fmt::Display for MatchMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            MatchMode::LiteralSubstring => f.write_str("literal_substring"),
+            MatchMode::Regex => f.write_str("regex"),
+            MatchMode::Glob => f.write_str("glob"),
+        }
+    }
 }
 
 /// Pattern encoding — just an alias for the codec `Encoding` type with a
@@ -107,20 +126,35 @@ impl From<PatternEncoding> for codec::Encoding {
 
 // ---- Byte matcher ----------------------------------------------------------
 
-/// Stateful literal byte-substring matcher.
+/// Stateful byte pattern matcher supporting literal, regex, and glob modes.
 ///
-/// Call [`ByteMatcher::push`] with each incoming chunk. When the concatenated
+/// Call [`Matcher::push`] with each incoming chunk. When the concatenated
 /// bytes contain a match, returns [`MatchResult::Found`] with the byte offset.
 /// Callers are responsible for truncating buffered data that can no longer
-/// participate in a future match (everything at and before the match start
-/// plus the needle length).
-pub struct ByteMatcher {
-    needle: Vec<u8>,
-    /// Rolling buffer that mirrors whatever the caller accumulates, used only
-    /// for substring search. The caller owns the authoritative accumulation.
-    window: Vec<u8>,
-    /// Number of pre-match context bytes to include in shaped results.
-    context_amount: Option<usize>,
+/// participate in a future match.
+pub enum Matcher {
+    /// Literal byte-substring match.
+    Literal {
+        needle: Vec<u8>,
+        /// Rolling buffer mirroring the caller's accumulation, used for
+        /// substring search.
+        window: Vec<u8>,
+        /// Pre-match context byte count for payload shaping.
+        context_amount: Option<usize>,
+    },
+    /// Regular expression match on raw bytes.
+    Regex {
+        re: regex::bytes::Regex,
+        window: Vec<u8>,
+        context_amount: Option<usize>,
+    },
+    /// Glob pattern per-line match. Lines are split on `\n` and each
+    /// line is tested against the glob pattern.
+    Glob {
+        pat: glob::Pattern,
+        window: Vec<u8>,
+        context_amount: Option<usize>,
+    },
 }
 
 /// Result of checking for a match after pushing a chunk.
@@ -132,94 +166,183 @@ pub enum MatchResult {
     Found(usize),
 }
 
-impl ByteMatcher {
-    /// Create a new matcher for the given needle bytes.
+impl Matcher {
+    /// Create a new literal matcher for the given needle bytes.
     ///
     /// Returns `None` if the needle is empty (empty patterns never match).
-    pub fn new(needle: Vec<u8>) -> Option<Self> {
+    pub fn new_literal(needle: Vec<u8>) -> Option<Self> {
         if needle.is_empty() {
             return None;
         }
-        Some(Self {
+        Some(Self::Literal {
             needle,
             window: Vec::new(),
             context_amount: None,
         })
     }
 
-    /// Create a new matcher with a context amount for pre-match context shaping.
-    pub fn with_context(needle: Vec<u8>, context_amount: Option<usize>) -> Option<Self> {
-        if needle.is_empty() {
-            return None;
+    /// Create a new matcher with a context amount from an existing builder.
+    /// Used by `validate_match_request` to set context after construction.
+    pub fn with_context(self, context_amount: Option<usize>) -> Self {
+        match self {
+            Self::Literal { needle, window, .. } => Self::Literal {
+                needle,
+                window,
+                context_amount,
+            },
+            Self::Regex { re, window, .. } => Self::Regex {
+                re,
+                window,
+                context_amount,
+            },
+            Self::Glob { pat, window, .. } => Self::Glob {
+                pat,
+                window,
+                context_amount,
+            },
         }
-        Some(Self {
-            needle,
-            window: Vec::new(),
-            context_amount,
-        })
     }
 
     /// Return the configured context amount.
     pub fn context_amount(&self) -> Option<usize> {
-        self.context_amount
+        match self {
+            Self::Literal { context_amount, .. }
+            | Self::Regex { context_amount, .. }
+            | Self::Glob { context_amount, .. } => *context_amount,
+        }
     }
 
-    /// Return a reference to the needle bytes.
-    pub fn needle(&self) -> &[u8] {
-        &self.needle
+    /// Return the matched needle length for the last found match.
+    /// For literal mode: matches `needle.len()`.
+    /// For regex/glob: returns `None` (caller uses match length from stop outcome).
+    pub fn needle_len(&self) -> Option<usize> {
+        match self {
+            Self::Literal { needle, .. } => Some(needle.len()),
+            _ => None,
+        }
     }
 
-    /// Scan the current window for the needle. Does not push new data.
+    /// Scan the current window for a match. Does not push new data.
     pub fn check(&self) -> MatchResult {
-        find_subslice(&self.window, &self.needle).map_or(MatchResult::NoMatch, MatchResult::Found)
+        match self {
+            Self::Literal { needle, window, .. } => {
+                find_subslice(window, needle).map_or(MatchResult::NoMatch, MatchResult::Found)
+            }
+            Self::Regex { re, window, .. } => re
+                .find(window)
+                .map_or(MatchResult::NoMatch, |m| MatchResult::Found(m.start())),
+            Self::Glob { pat, window, .. } => {
+                let decoded = String::from_utf8_lossy(window);
+                let mut byte_offset: usize = 0;
+                for line in decoded.split('\n') {
+                    // Strip trailing \r for line content matching (handles
+                    // both \n and \r\n line endings from UART/serial).
+                    let line_content = line.strip_suffix('\r').unwrap_or(line);
+                    if pat.matches(line_content) {
+                        return MatchResult::Found(byte_offset);
+                    }
+                    // Advance past the raw bytes of this line plus the \n separator.
+                    // split('\n') preserves \r, so line.len() counts both \r and
+                    // the line content correctly.
+                    byte_offset += line.len() + 1; // +1 for \n
+                }
+                MatchResult::NoMatch
+            }
+        }
     }
 
     /// Append a chunk to the internal window and check for a match in the
     /// combined data. Returns the byte offset within the total accumulated
-    /// buffer where the needle starts, or `NoMatch`.
+    /// buffer where the match starts, or `NoMatch`.
     pub fn push(&mut self, chunk: &[u8]) -> MatchResult {
-        self.window.extend_from_slice(chunk);
+        match self {
+            Self::Literal { window, .. }
+            | Self::Regex { window, .. }
+            | Self::Glob { window, .. } => {
+                window.extend_from_slice(chunk);
+            }
+        }
         self.check()
     }
 
-    /// Truncate the internal window to `len` bytes from the front.  Call this
-    /// after consuming match data or after `max_buffered_bytes` is reached,
-    /// keeping only the tail that could still be part of a subsequent match.
-    #[cfg_attr(mutants, mutants::skip)] // drain(..0) is a no-op; `> 0` and `>= 0` are equivalent
+    /// Truncate the internal window to keep at most `keep` bytes from the
+    /// back. Call after consuming match data to prevent unbounded growth.
+    #[cfg_attr(mutants, mutants::skip)]
     pub fn truncate_front(&mut self, keep: usize) {
-        let drop = self.window.len().saturating_sub(keep);
+        let window = match self {
+            Self::Literal { window, .. }
+            | Self::Regex { window, .. }
+            | Self::Glob { window, .. } => window,
+        };
+        let drop = window.len().saturating_sub(keep);
         if drop > 0 {
-            self.window.drain(..drop);
+            window.drain(..drop);
         }
     }
 
     /// Current window length.
     pub fn len(&self) -> usize {
-        self.window.len()
+        match self {
+            Self::Literal { window, .. }
+            | Self::Regex { window, .. }
+            | Self::Glob { window, .. } => window.len(),
+        }
     }
 
     /// Whether the window is empty.
     pub fn is_empty(&self) -> bool {
-        self.window.is_empty()
+        self.len() == 0
+    }
+
+    /// Reset the internal window to start fresh matching.
+    /// Used for per-frame matching when framing is active.
+    pub fn reset_window(&mut self) {
+        let window = match self {
+            Self::Literal { window, .. }
+            | Self::Regex { window, .. }
+            | Self::Glob { window, .. } => window,
+        };
+        window.clear();
     }
 }
 
 // ---- Validation helper ------------------------------------------------------
 
 /// Validate a `MatchRequest`, decode the pattern into raw bytes, and return
-/// an owned `ByteMatcher` ready to use.
-pub fn validate_match_request(req: &MatchRequest) -> Result<ByteMatcher, String> {
-    match req.config.mode {
-        MatchMode::LiteralSubstring => {}
-    }
+/// a `Matcher` ready to use.
+pub fn validate_match_request(req: &MatchRequest) -> Result<Matcher, String> {
     let encoding: codec::Encoding = req.config.pattern_encoding.into();
-    let needle = codec::decode(encoding, &req.pattern)
+    let decoded = codec::decode(encoding, &req.pattern)
         .map_err(|e| format!("Pattern decoding failed - {e}"))?;
-    if needle.is_empty() {
+    if decoded.is_empty() {
         return Err("Pattern must not be empty after decoding".into());
     }
-    ByteMatcher::with_context(needle, req.config.context_amount_of_matched_bytes)
-        .ok_or_else(|| "Pattern must not be empty after decoding".into())
+
+    let context = req.config.context_amount_of_matched_bytes;
+
+    match req.config.mode {
+        MatchMode::LiteralSubstring => Matcher::new_literal(decoded)
+            .map(|m| m.with_context(context))
+            .ok_or_else(|| "Pattern must not be empty after decoding".into()),
+        MatchMode::Regex => {
+            let re = regex::bytes::Regex::new(&String::from_utf8_lossy(&decoded))
+                .map_err(|e| format!("Invalid regex pattern: {e}"))?;
+            Ok(Matcher::Regex {
+                re,
+                window: Vec::new(),
+                context_amount: context,
+            })
+        }
+        MatchMode::Glob => {
+            let pat = glob::Pattern::new(&String::from_utf8_lossy(&decoded))
+                .map_err(|e| format!("Invalid glob pattern: {e}"))?;
+            Ok(Matcher::Glob {
+                pat,
+                window: Vec::new(),
+                context_amount: context,
+            })
+        }
+    }
 }
 
 // ---- Context shaping -------------------------------------------------------
@@ -286,13 +409,13 @@ mod tests {
 
     #[test]
     fn byte_matcher_finds_immediate_match() {
-        let mut m = ByteMatcher::new(b"OK>".to_vec()).unwrap();
+        let mut m = Matcher::new_literal(b"OK>".to_vec()).unwrap();
         assert_eq!(m.push(b"OK>"), MatchResult::Found(0));
     }
 
     #[test]
     fn byte_matcher_finds_offset_match() {
-        let mut m = ByteMatcher::new(b"OK>".to_vec()).unwrap();
+        let mut m = Matcher::new_literal(b"OK>".to_vec()).unwrap();
         assert_eq!(m.push(b"hell"), MatchResult::NoMatch);
         assert_eq!(m.push(b"O"), MatchResult::NoMatch);
         assert_eq!(m.push(b"K>!"), MatchResult::Found(4));
@@ -300,12 +423,12 @@ mod tests {
 
     #[test]
     fn byte_matcher_rejects_empty_needle() {
-        assert!(ByteMatcher::new(Vec::new()).is_none());
+        assert!(Matcher::new_literal(Vec::new()).is_none());
     }
 
     #[test]
     fn byte_matcher_truncate_front_works() {
-        let mut m = ByteMatcher::new(b"OK>".to_vec()).unwrap();
+        let mut m = Matcher::new_literal(b"OK>".to_vec()).unwrap();
         m.push(b"AAAABBB");
         // truncate_front keeps the last 3 bytes from window: "BBB"
         m.truncate_front(3);
@@ -325,7 +448,7 @@ mod tests {
             },
         };
         let matcher = validate_match_request(&req).unwrap();
-        assert_eq!(matcher.needle(), b"OK>");
+        assert_eq!(matcher.needle_len(), Some(3)); // OK> = 3 bytes
     }
 
     #[test]
@@ -353,7 +476,7 @@ mod tests {
 
     #[test]
     fn byte_matcher_no_match_returns_no_match() {
-        let mut m = ByteMatcher::new(b"XYZ".to_vec()).unwrap();
+        let mut m = Matcher::new_literal(b"XYZ".to_vec()).unwrap();
         assert_eq!(m.push(b"ABCDEF"), MatchResult::NoMatch);
         assert_eq!(m.check(), MatchResult::NoMatch);
     }
@@ -401,25 +524,29 @@ mod tests {
 
     #[test]
     fn byte_matcher_with_context_stores_amount() {
-        let m = ByteMatcher::with_context(b"OK>".to_vec(), Some(64)).unwrap();
+        let m = Matcher::new_literal(b"OK>".to_vec())
+            .map(|m| m.with_context(Some(64)))
+            .unwrap();
         assert_eq!(m.context_amount(), Some(64));
     }
 
     #[test]
     fn byte_matcher_with_context_none_same_as_new() {
-        let m = ByteMatcher::with_context(b"OK>".to_vec(), None).unwrap();
+        let m = Matcher::new_literal(b"OK>".to_vec())
+            .map(|m| m.with_context(None))
+            .unwrap();
         assert_eq!(m.context_amount(), None);
     }
 
     #[test]
     fn byte_matcher_is_empty_on_fresh_instance() {
-        let m = ByteMatcher::new(b"OK>".to_vec()).unwrap();
+        let m = Matcher::new_literal(b"OK>".to_vec()).unwrap();
         assert!(m.is_empty());
     }
 
     #[test]
     fn byte_matcher_is_not_empty_after_push() {
-        let mut m = ByteMatcher::new(b"OK>".to_vec()).unwrap();
+        let mut m = Matcher::new_literal(b"OK>".to_vec()).unwrap();
         m.push(b"hello");
         assert!(!m.is_empty());
     }
@@ -436,5 +563,145 @@ mod tests {
         };
         let matcher = validate_match_request(&req).unwrap();
         assert_eq!(matcher.context_amount(), Some(128));
+    }
+
+    // ── Regex matching ─────────────────────────────────────────────────
+
+    #[test]
+    fn regex_matches_simple_pattern() {
+        let mut m = Matcher::Regex {
+            re: regex::bytes::Regex::new("world").unwrap(),
+            window: Vec::new(),
+            context_amount: None,
+        };
+        assert_eq!(m.push(b"hello "), MatchResult::NoMatch);
+        assert_eq!(m.push(b"world"), MatchResult::Found(6));
+    }
+
+    #[test]
+    fn regex_matches_wildcard_dot() {
+        let mut m = Matcher::Regex {
+            re: regex::bytes::Regex::new("po.g").unwrap(),
+            window: Vec::new(),
+            context_amount: None,
+        };
+        assert_eq!(m.push(b"test"), MatchResult::NoMatch);
+        assert_eq!(m.push(b"pong"), MatchResult::Found(4));
+    }
+
+    #[test]
+    fn regex_no_match_returns_no_match() {
+        let mut m = Matcher::Regex {
+            re: regex::bytes::Regex::new("world").unwrap(),
+            window: Vec::new(),
+            context_amount: None,
+        };
+        assert_eq!(m.push(b"hello moon"), MatchResult::NoMatch);
+    }
+
+    #[test]
+    fn validate_match_request_regex_utf8() {
+        let req = MatchRequest {
+            pattern: "po.g".into(),
+            config: MatchConfig {
+                mode: MatchMode::Regex,
+                pattern_encoding: PatternEncoding::Utf8,
+                context_amount_of_matched_bytes: None,
+            },
+        };
+        let matcher = validate_match_request(&req).unwrap();
+        assert!(matcher.needle_len().is_none()); // regex has no fixed needle
+    }
+
+    #[test]
+    fn validate_match_request_regex_invalid_rejected() {
+        let req = MatchRequest {
+            pattern: "[invalid".into(),
+            config: MatchConfig {
+                mode: MatchMode::Regex,
+                pattern_encoding: PatternEncoding::Utf8,
+                context_amount_of_matched_bytes: None,
+            },
+        };
+        assert!(validate_match_request(&req).is_err());
+    }
+
+    // ── Glob matching ──────────────────────────────────────────────────
+
+    #[test]
+    fn glob_matches_line() {
+        let mut m = Matcher::Glob {
+            pat: glob::Pattern::new("pong").unwrap(),
+            window: Vec::new(),
+            context_amount: None,
+        };
+        assert_eq!(m.push(b"boot\npong\nready"), MatchResult::Found(5));
+    }
+
+    #[test]
+    fn glob_matches_line_with_crlf_endings() {
+        let mut m = Matcher::Glob {
+            pat: glob::Pattern::new("pong").unwrap(),
+            window: Vec::new(),
+            context_amount: None,
+        };
+        assert_eq!(m.push(b"boot\r\npong\r\nready"), MatchResult::Found(6));
+    }
+
+    #[test]
+    fn glob_matches_first_line_with_crlf() {
+        let mut m = Matcher::Glob {
+            pat: glob::Pattern::new("boot").unwrap(),
+            window: Vec::new(),
+            context_amount: None,
+        };
+        assert_eq!(m.push(b"boot\r\npong\r\nready"), MatchResult::Found(0));
+    }
+
+    #[test]
+    fn glob_matches_last_partial_line() {
+        let mut m = Matcher::Glob {
+            pat: glob::Pattern::new("pong").unwrap(),
+            window: Vec::new(),
+            context_amount: None,
+        };
+        // No trailing newline — last line still tested
+        assert_eq!(m.push(b"boot\r\npong"), MatchResult::Found(6));
+    }
+
+    #[test]
+    fn glob_no_match_returns_no_match() {
+        let mut m = Matcher::Glob {
+            pat: glob::Pattern::new("pong").unwrap(),
+            window: Vec::new(),
+            context_amount: None,
+        };
+        assert_eq!(m.push(b"boot\r\nready\r\ndone"), MatchResult::NoMatch);
+    }
+
+    #[test]
+    fn glob_matches_wildcard_pattern() {
+        let mut m = Matcher::Glob {
+            pat: glob::Pattern::new("error*").unwrap(),
+            window: Vec::new(),
+            context_amount: None,
+        };
+        assert_eq!(
+            m.push(b"boot\r\nerror: flash failed\r\nready"),
+            MatchResult::Found(6)
+        );
+    }
+
+    #[test]
+    fn validate_match_request_glob_invalid_rejected() {
+        let req = MatchRequest {
+            pattern: "[unclosed".into(),
+            config: MatchConfig {
+                mode: MatchMode::Glob,
+                pattern_encoding: PatternEncoding::Utf8,
+                context_amount_of_matched_bytes: None,
+            },
+        };
+        assert!(validate_match_request(&req).is_err());
     }
 }

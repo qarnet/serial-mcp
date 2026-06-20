@@ -172,6 +172,9 @@ proptest! {
             stop_bits: sb.clone(),
             parity: p.clone(),
             flow_control: fc.clone(),
+            log_capacity: 1024,
+            log_enabled: true,
+            reconnect_policy: Default::default(),
         };
         assert_roundtrip!(args);
 
@@ -208,7 +211,7 @@ proptest! {
         max_buffered_bytes in any_usize(),
         enc in valid_encoding(),
     ) {
-        let args = ReadArgs { connection_id: id, timeout_ms: timeout, max_buffered_bytes, encoding: enc, r#match: None, no_new_rx_timeout_ms: None };
+        let args = ReadArgs { connection_id: id, timeout_ms: timeout, max_buffered_bytes, encoding: enc, r#match: None, no_new_rx_timeout_ms: None, framing: None };
         assert_roundtrip!(args);
     }
 
@@ -246,6 +249,7 @@ proptest! {
             max_buffered_bytes,
             poll_interval_ms: poll,
             r#match: None,
+            framing: None,
         };
         assert_roundtrip!(args);
     }
@@ -290,7 +294,7 @@ proptest! {
         stop_reason in valid_stop_reason(), truncated: bool,
         bytes_obs in any_usize(), bytes_ret in any_usize(),
     ) {
-        let r = ReadResult { connection_id: id, name: None, bytes_read: br, encoding: enc, data, timeout_ms: timeout, no_new_rx_timeout_ms: None, elapsed_ms: elapsed, stop_reason, truncated, bytes_observed: bytes_obs, bytes_returned: bytes_ret, matched: false, match_index: None };
+        let r = ReadResult { connection_id: id, name: None, bytes_read: br, encoding: enc, data, timeout_ms: timeout, no_new_rx_timeout_ms: None, elapsed_ms: elapsed, stop_reason, truncated, bytes_observed: bytes_obs, bytes_returned: bytes_ret, matched: false, match_index: None, match_frame_index: None, frames: None, frames_dropped: 0 };
         let v = serde_json::to_value(&r).unwrap();
         assert_schema_valid!(ReadResult, v);
     }
@@ -322,25 +326,11 @@ proptest! {
         id in opaque_id(), enc in valid_encoding(),
         max_buffered_bytes in any_usize(), poll in any_u64(), replaced: bool,
     ) {
-        // Fire-and-forget: all Optional fields are null
+        // SubscribeResult — subscribe is always background (PLAN 1b).
         let r = SubscribeResult {
             connection_id: id.clone(), name: None, encoding: enc.clone(),
             max_buffered_bytes, poll_interval_ms: poll,
             replaced_previous: replaced,
-            data: None, bytes_read: None, elapsed_ms: None, timeout_ms: None,
-        };
-        let v = serde_json::to_value(&r).unwrap();
-        assert!(v["data"].is_null(), "data must be null in FF mode");
-        assert!(v["bytes_read"].is_null(), "bytes_read must be null in FF mode");
-        assert_schema_valid!(SubscribeResult, v);
-
-        // Blocking: all Optional fields are present
-        let r = SubscribeResult {
-            connection_id: id, name: None, encoding: enc,
-            max_buffered_bytes, poll_interval_ms: poll,
-            replaced_previous: replaced,
-            data: Some("sensor data".into()), bytes_read: Some(42),
-            elapsed_ms: Some(1500), timeout_ms: Some(3000),
         };
         let v = serde_json::to_value(&r).unwrap();
         assert_schema_valid!(SubscribeResult, v);
@@ -517,6 +507,9 @@ proptest! {
             stop_bits: "1".into(),
             parity: "none".into(),
             flow_control: "none".into(),
+            log_capacity: 1024,
+            log_enabled: true,
+            reconnect_policy: Default::default(),
         };
         assert_roundtrip!(args);
     }
@@ -567,6 +560,7 @@ fn all_result_types_have_valid_schema() {
 
 #[test]
 fn subscribe_result_ff_null_fields_match_schema() {
+    // Subscribe is always background after PLAN 1b; no nullable vestigial fields remain.
     let r = SubscribeResult {
         connection_id: "abc".into(),
         name: None,
@@ -574,25 +568,8 @@ fn subscribe_result_ff_null_fields_match_schema() {
         max_buffered_bytes: 1024,
         poll_interval_ms: 200,
         replaced_previous: false,
-        data: None,
-        bytes_read: None,
-        elapsed_ms: None,
-        timeout_ms: None,
     };
     let v = serde_json::to_value(&r).unwrap();
-    assert!(v["data"].is_null(), "data must serialize as null");
-    assert!(
-        v["bytes_read"].is_null(),
-        "bytes_read must serialize as null"
-    );
-    assert!(
-        v["elapsed_ms"].is_null(),
-        "elapsed_ms must serialize as null"
-    );
-    assert!(
-        v["timeout_ms"].is_null(),
-        "timeout_ms must serialize as null"
-    );
     validate_schema::<SubscribeResult>(&v);
     roundtrip_stable(&r);
 }
@@ -606,25 +583,8 @@ fn subscribe_result_blocking_filled_fields_match_schema() {
         max_buffered_bytes: 2048,
         poll_interval_ms: 100,
         replaced_previous: true,
-        data: None,
-        bytes_read: None,
-        elapsed_ms: None,
-        timeout_ms: None,
     };
     let v = serde_json::to_value(&r).unwrap();
-    assert!(v["data"].is_null(), "data must be null after PLAN 1b");
-    assert!(
-        v["bytes_read"].is_null(),
-        "bytes_read must be null after PLAN 1b"
-    );
-    assert!(
-        v["elapsed_ms"].is_null(),
-        "elapsed_ms must be null after PLAN 1b"
-    );
-    assert!(
-        v["timeout_ms"].is_null(),
-        "timeout_ms must be null after PLAN 1b"
-    );
     validate_schema::<SubscribeResult>(&v);
     roundtrip_stable(&r);
 }
@@ -724,4 +684,85 @@ fn lifecycle_unsubscribe_noop_does_not_panic() {
             "no-op unsubscribe must report was_active=false"
         );
     });
+}
+
+// ── FramingConfig roundtrip ──────────────────────────────────────────────
+
+#[test]
+fn framing_config_roundtrip_all_modes() {
+    use serial_mcp::framing::*;
+    use serial_mcp::match_config::PatternEncoding;
+
+    // Line + AT parser
+    let c1 = FramingConfig {
+        mode: FramingMode::Line,
+        parser: Some(ParserConfig {
+            parser_type: ParserType::AtCommand,
+            custom_prompt: None,
+        }),
+        max_frames: Some(10),
+        include_terminators: true,
+    };
+    let json = serde_json::to_value(&c1).unwrap();
+    let c2: FramingConfig = serde_json::from_value(json).unwrap();
+    assert!(matches!(c2.mode, FramingMode::Line));
+    assert!(c2.parser.is_some());
+    assert_eq!(c2.max_frames, Some(10));
+    assert!(c2.include_terminators);
+
+    // Delimiter
+    let c3 = FramingConfig {
+        mode: FramingMode::Delimiter {
+            delimiter: "|".into(),
+            delimiter_encoding: PatternEncoding::Utf8,
+        },
+        parser: None,
+        max_frames: None,
+        include_terminators: false,
+    };
+    let json = serde_json::to_value(&c3).unwrap();
+    let c4: FramingConfig = serde_json::from_value(json).unwrap();
+    assert!(matches!(c4.mode, FramingMode::Delimiter { .. }));
+    assert!(c4.parser.is_none());
+
+    // Length-prefixed + JSON parser
+    let c5 = FramingConfig {
+        mode: FramingMode::LengthPrefixed {
+            prefix_size: 2,
+            endianness: Endianness::Little,
+            initial_offset: Some(4),
+        },
+        parser: Some(ParserConfig {
+            parser_type: ParserType::JsonLines,
+            custom_prompt: None,
+        }),
+        max_frames: Some(0),
+        include_terminators: false,
+    };
+    let json = serde_json::to_value(&c5).unwrap();
+    let c6: FramingConfig = serde_json::from_value(json).unwrap();
+    assert!(matches!(c6.mode, FramingMode::LengthPrefixed { .. }));
+    assert!(c6.parser.is_some());
+    assert_eq!(c6.max_frames, Some(0));
+
+    // Start/end + shell prompt parser
+    let c7 = FramingConfig {
+        mode: FramingMode::StartEnd {
+            start: "STX".into(),
+            end: "ETX".into(),
+            marker_encoding: PatternEncoding::Base64,
+            include_markers: true,
+        },
+        parser: Some(ParserConfig {
+            parser_type: ParserType::ShellPrompt,
+            custom_prompt: Some("^>>> $".into()),
+        }),
+        max_frames: None,
+        include_terminators: false,
+    };
+    let json = serde_json::to_value(&c7).unwrap();
+    let c8: FramingConfig = serde_json::from_value(json).unwrap();
+    assert!(matches!(c8.mode, FramingMode::StartEnd { .. }));
+    assert!(c8.parser.is_some());
+    assert!(c8.max_frames.is_none());
 }

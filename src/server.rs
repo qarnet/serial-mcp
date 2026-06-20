@@ -5,6 +5,7 @@
 //! instead of parsing free-form text.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use base64::Engine as _;
@@ -71,15 +72,53 @@ pub struct SerialHandler {
     rx_sessions: Arc<RxSessionManager>,
     tx_sessions: Arc<TxSessionManager>,
     budget: Arc<dyn BufferBudget>,
+    profiles: Arc<tokio::sync::RwLock<Vec<crate::profiles::Profile>>>,
+    profiles_path: PathBuf,
 }
 
 #[tool_router]
 impl SerialHandler {
     pub fn new() -> Self {
-        Self::with_manager_and_security(
+        let path = crate::profiles::default_profiles_path();
+        let profiles = crate::profiles::load_profiles(&path);
+        let handler = Self::with_manager_and_security(
             Arc::new(ConnectionManager::new()),
             SecurityManager::from_patterns::<[&str; 0]>([]),
         )
+        .with_profiles(path, profiles);
+        handler.spawn_reconnect_supervisor();
+        handler
+    }
+
+    /// Start the background reconnect supervisor task.
+    /// Requires a Tokio runtime to be active (panics otherwise).
+    pub fn spawn_reconnect_supervisor(&self) {
+        let connections = Arc::clone(&self.connections);
+        let rx_sessions = Arc::clone(&self.rx_sessions);
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                let all = connections.list_all().await;
+                for (id, conn) in all {
+                    let state = conn.state();
+                    if state == crate::serial::ConnectionState::Disconnected {
+                        let policy = conn.reconnect_policy.lock().expect("poisoned").clone();
+                        if policy.enabled {
+                            connections
+                                .start_reconnect(&id, Arc::clone(&rx_sessions))
+                                .await;
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    /// Replace the loaded profiles with the given vector and path.
+    pub fn with_profiles(mut self, path: PathBuf, profiles: Vec<crate::profiles::Profile>) -> Self {
+        self.profiles = Arc::new(tokio::sync::RwLock::new(profiles));
+        self.profiles_path = path;
+        self
     }
 
     /// Construct a handler with a caller-supplied [`ConnectionManager`].
@@ -130,7 +169,7 @@ impl SerialHandler {
         streams: StreamRegistry,
         budget: Arc<dyn BufferBudget>,
     ) -> Self {
-        Self {
+        let handler = Self {
             connections,
             streams,
             security,
@@ -138,7 +177,11 @@ impl SerialHandler {
             rx_sessions: Arc::new(RxSessionManager::new()),
             tx_sessions: Arc::new(TxSessionManager::new()),
             budget,
-        }
+            profiles: Arc::new(tokio::sync::RwLock::new(Vec::new())),
+            profiles_path: crate::profiles::default_profiles_path(),
+        };
+        handler.spawn_reconnect_supervisor();
+        handler
     }
 
     #[tool(
@@ -186,13 +229,21 @@ impl SerialHandler {
         ctx: RequestContext<RoleServer>,
     ) -> Result<Json<CloseResult>, String> {
         let connection_id = args.connection_id.clone();
+        // Cancel any running reconnect task so it doesn't try to reopen.
+        self.connections.cancel_reconnect(&connection_id).await;
         let result = port_ops::close(&self.connections, args).await?;
         // Shut down RX session (pump + consumers) for this connection.
+        // This closes the pump channel, causing the subscribe task's
+        // event_rx.recv() to return None, which exits the loop and
+        // triggers flush_partial for any buffered partial frame.
         self.rx_sessions.remove(&connection_id).await;
         // Shut down TX session (worker) for this connection.
         self.tx_sessions.remove(&connection_id).await;
-        // Abort any active RX subscription tied to this connection.
-        self.streams.lock().await.remove(&connection_id);
+        // Wait for the subscribe task to finish naturally (flush partial,
+        // emit stop notification) before cleaning up.
+        if let Some(handle) = self.streams.lock().await.remove(&connection_id) {
+            handle.join_without_abort().await;
+        }
         self.notify_resource_changed(&connection_id, &ctx).await;
         Ok(result)
     }
@@ -210,7 +261,7 @@ impl SerialHandler {
     }
 
     #[tool(
-        description = "Read data from a serial port connection. With no match option, reads available bytes with timeout and burst-settle. With match, accumulates future bytes until the pattern is found, timeout, max_buffered_bytes, connection close, or cancellation. The match option specifies a literal byte-substring pattern to detect; match_encoding controls how the pattern string is decoded to raw bytes.",
+        description = "Read data from a serial port connection. Returns only future bytes — data received after the call starts, not previously buffered data. With no options, reads available bytes with timeout and burst-settle. With match, accumulates until a pattern is found. With framing, splits the byte stream into structured frames (line, delimiter, length-prefixed, start/end marker) and optionally parses content (AT commands, JSON lines, shell prompts). Match and framing can be combined. Set no_new_rx_timeout_ms to stop when no new bytes arrive within the specified silence window.",
         title = "Read Serial Data",
         annotations(read_only_hint = true, open_world_hint = false),
         execution(task_support = "optional")
@@ -295,7 +346,7 @@ impl SerialHandler {
     }
 
     #[tool(
-        description = "Subscribe to a connection: starts a background stream that forwards received bytes as MCP `notifications/message` events with logger=\"serial:<connection_id>\". When timeout_ms is set, the stream auto-stops after that duration. When omitted, the stream runs until unsubscribe, connection close, or error. With the match option, the stream also detects the first byte-substring match, emits a final notification with matched=true and match_index, then stops. Replaces any prior subscription on the same connection. A final notification with stop_reason is emitted when the stream ends.",
+        description = "Subscribe to a connection: starts a background stream that forwards received bytes as MCP `notifications/message` events with logger=\"serial:<connection_id>\". When timeout_ms is set, the stream auto-stops after that duration. When omitted, the stream runs until unsubscribe, connection close, or error. Set no_new_rx_timeout_ms to stop after a period of silence. With match, detects the first byte pattern. With framing, emits per-frame notifications with structured data (line, delimiter, length-prefixed, start/end marker) and optional parsing (AT commands, JSON lines, shell prompts). Replaces any prior subscription on the same connection. A final notification with stop_reason, truncated, bytes_observed, bytes_returned, elapsed_ms is emitted when the stream ends.",
         title = "Subscribe to RX Stream",
         annotations(
             destructive_hint = false,
@@ -340,6 +391,130 @@ impl SerialHandler {
         Parameters(args): Parameters<UnsubscribeArgs>,
     ) -> Result<Json<UnsubscribeResult>, String> {
         stream_ops::unsubscribe(&self.connections, &self.rx_sessions, &self.streams, args).await
+    }
+
+    #[tool(
+        description = "Get the current status and configuration of an open serial connection",
+        title = "Get Connection Status",
+        annotations(read_only_hint = true, open_world_hint = false)
+    )]
+    async fn get_status(
+        &self,
+        Parameters(args): Parameters<GetStatusArgs>,
+    ) -> Result<Json<GetStatusResult>, String> {
+        port_ops::get_status(&self.connections, args).await
+    }
+
+    #[tool(
+        description = "Reconfigure serial parameters (baud rate, data bits, stop bits, parity, flow control) on a live connection without closing and reopening it. Omitted parameters are left unchanged.",
+        title = "Reconfigure Serial Port",
+        annotations(destructive_hint = true, open_world_hint = false)
+    )]
+    async fn reconfigure(
+        &self,
+        Parameters(args): Parameters<ReconfigureArgs>,
+    ) -> Result<Json<ReconfigureResult>, String> {
+        port_ops::reconfigure(&self.connections, args).await
+    }
+
+    #[tool(
+        description = "List all configured serial device profiles. Profiles define selector rules and default settings so agents can open devices by name instead of fragile port paths.",
+        title = "List Profiles",
+        annotations(read_only_hint = true, open_world_hint = false)
+    )]
+    async fn list_profiles(&self) -> Result<Json<ListProfilesResult>, String> {
+        let profiles = self.profiles.read().await;
+        port_ops::list_profiles(&profiles)
+    }
+
+    #[tool(
+        description = "Open a serial port by profile name rather than raw port path. The server matches the profile's selector against live ports and applies the profile's default configuration.",
+        title = "Open by Profile",
+        annotations(destructive_hint = false, open_world_hint = false)
+    )]
+    async fn open_profile(
+        &self,
+        Parameters(args): Parameters<OpenProfileArgs>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<Json<OpenResult>, String> {
+        let profiles = self.profiles.read().await;
+        let result =
+            port_ops::open_profile(&self.connections, &self.security, &profiles, args).await?;
+        let connection_id = result.0.connection_id.clone();
+        self.notify_resource_changed(&connection_id, &ctx).await;
+        Ok(result)
+    }
+
+    #[tool(
+        description = "Save a new profile by snapshotting an open connection's port identity and current serial configuration. Use this after opening a device to create a reusable profile that can be selected by name in later sessions.",
+        title = "Save Profile",
+        annotations(destructive_hint = true, open_world_hint = false)
+    )]
+    async fn save_profile(
+        &self,
+        Parameters(args): Parameters<SaveProfileArgs>,
+    ) -> Result<Json<SaveProfileResult>, String> {
+        port_ops::save_profile(&self.connections, &self.profiles, &self.profiles_path, args).await
+    }
+
+    #[tool(
+        description = "Delete a profile by name, removing it from the profiles configuration file.",
+        title = "Delete Profile",
+        annotations(destructive_hint = true, open_world_hint = false)
+    )]
+    async fn delete_profile(
+        &self,
+        Parameters(args): Parameters<DeleteProfileArgs>,
+    ) -> Result<Json<DeleteProfileResult>, String> {
+        port_ops::delete_profile(&self.profiles, &self.profiles_path, args).await
+    }
+
+    #[tool(
+        description = "Retrieve the event log for an open serial connection. Returns timestamped JSONL entries for RX data, TX data, matches, errors, and lifecycle events. Use since_ms to filter by time and limit to cap the number of entries returned.",
+        title = "Get Log",
+        annotations(read_only_hint = true, open_world_hint = false)
+    )]
+    async fn get_log(
+        &self,
+        Parameters(args): Parameters<GetLogArgs>,
+    ) -> Result<Json<GetLogResult>, String> {
+        port_ops::get_log(&self.connections, args).await
+    }
+
+    #[tool(
+        description = "Clear the event log buffer for a connection. Resets the log to empty.",
+        title = "Clear Log",
+        annotations(destructive_hint = true, open_world_hint = false)
+    )]
+    async fn clear_log(
+        &self,
+        Parameters(args): Parameters<ClearLogArgs>,
+    ) -> Result<Json<ClearLogResult>, String> {
+        port_ops::clear_log(&self.connections, args).await
+    }
+
+    #[tool(
+        description = "Export the event log for a connection to a JSONL file on disk. Each line is a JSON object representing one log entry.",
+        title = "Export Log",
+        annotations(destructive_hint = true, open_world_hint = false)
+    )]
+    async fn export_log(
+        &self,
+        Parameters(args): Parameters<ExportLogArgs>,
+    ) -> Result<Json<ExportLogResult>, String> {
+        port_ops::export_log(&self.connections, args).await
+    }
+
+    #[tool(
+        description = "Attempt to reconnect a disconnected serial connection. Rebuilds the port stream from the original configuration, preserving connection_id, counters, and log buffer. Succeeds immediately if already connected.",
+        title = "Reconnect",
+        annotations(destructive_hint = false, open_world_hint = false)
+    )]
+    async fn reconnect(
+        &self,
+        Parameters(args): Parameters<ReconnectArgs>,
+    ) -> Result<Json<ReconnectResult>, String> {
+        port_ops::reconnect(&self.connections, args).await
     }
 }
 
@@ -540,6 +715,17 @@ impl ServerHandler for SerialHandler {
             .with_mime_type("application/octet-stream".to_string())
             .with_priority(0.6)
             .with_audience(vec![Role::User, Role::Assistant]),
+            RawResourceTemplate::new(
+                URI_CONNECTION_LOG_TEMPLATE,
+                "Event log for a serial connection",
+            )
+            .with_description(
+                "JSONL event log for the connection. Substitute {id} with a connection_id. Each line is a JSON object with timestamp, direction, and event fields."
+                    .to_string(),
+            )
+            .with_mime_type("application/x-ndjson".to_string())
+            .with_priority(0.5)
+            .with_audience(vec![Role::User, Role::Assistant]),
         ];
         let (resource_templates, next_cursor) =
             paginate(&all, request.and_then(|r| r.cursor), PAGE_SIZE);
@@ -615,6 +801,26 @@ impl ServerHandler for SerialHandler {
                 )
                 .with_mime_type("application/octet-stream")]))
             }
+            ResourceUriKind::ConnectionLog(id) => {
+                let conn = self.connections.get(&id).await.map_err(|_| {
+                    McpError::resource_not_found(
+                        "connection_not_found",
+                        Some(serde_json::json!({ "uri": uri, "connection_id": id })),
+                    )
+                })?;
+                let events = conn.log().snapshot();
+                let mut body = String::new();
+                for event in &events {
+                    let line = serde_json::to_string(event)
+                        .map_err(|e| McpError::internal_error(format!("serialize: {e}"), None))?;
+                    body.push_str(&line);
+                    body.push('\n');
+                }
+                Ok(ReadResourceResult::new(vec![ResourceContents::text(
+                    body, uri,
+                )
+                .with_mime_type("application/x-ndjson")]))
+            }
             ResourceUriKind::Unknown => Err(McpError::resource_not_found(
                 "resource_not_found",
                 Some(serde_json::json!({ "uri": uri })),
@@ -669,7 +875,8 @@ impl ServerHandler for SerialHandler {
 
 use crate::resources::{
     parse_resource_uri, ConnectionsResource, ResourceUriKind, URI_CONNECTIONS,
-    URI_CONNECTION_PREFIX, URI_CONNECTION_RAW_TEMPLATE, URI_CONNECTION_TEMPLATE, URI_PORTS,
+    URI_CONNECTION_LOG_TEMPLATE, URI_CONNECTION_PREFIX, URI_CONNECTION_RAW_TEMPLATE,
+    URI_CONNECTION_TEMPLATE, URI_PORTS,
 };
 
 #[cfg(test)]

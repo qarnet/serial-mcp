@@ -5,7 +5,7 @@ use tracing::{debug, info};
 
 use crate::buffer_budget::BufferBudget;
 use crate::codec;
-use crate::match_config::{validate_match_request, ByteMatcher};
+use crate::match_config::{validate_match_request, Matcher};
 use crate::rx_session::RxSessionManager;
 use crate::serial::ConnectionManager;
 use crate::serial::FlushTarget;
@@ -41,6 +41,7 @@ pub async fn write(
     })?;
 
     debug!("Wrote {} bytes to {}", bytes_written, args.connection_id);
+    connection.record_write_op();
     Ok(Json(WriteResult {
         connection_id: args.connection_id,
         name: connection.name().map(str::to_string),
@@ -86,7 +87,7 @@ pub async fn read(
     }
 
     // Resolve matcher if provided.
-    let matcher: Option<ByteMatcher> = match &args.r#match {
+    let matcher: Option<Matcher> = match &args.r#match {
         Some(m) => Some(validate_match_request(m)?),
         None => None,
     };
@@ -123,19 +124,35 @@ pub async fn read(
         Some(&peer),
         matcher,
         args.no_new_rx_timeout_ms,
+        Some(Arc::clone(&connection)),
+        args.framing,
     )
     .await?;
 
     session.prune_consumers();
 
-    build_read_result(
+    let result = build_read_result(
         outcome,
         args.connection_id,
         connection.name().map(str::to_string),
         encoding,
         args.timeout_ms,
         args.no_new_rx_timeout_ms,
-    )
+    )?;
+    connection.record_read_op();
+    let log = connection.log();
+    log.rx_data(result.0.bytes_read);
+    if result.0.truncated {
+        connection.record_truncation();
+        log.truncated(result.0.bytes_observed, result.0.bytes_returned);
+    }
+    if result.0.matched {
+        // Extract pattern info from the result
+        if let Some(ref m) = args.r#match {
+            log.match_found(&m.pattern, &m.config.mode.to_string());
+        }
+    }
+    Ok(result)
 }
 
 pub async fn flush(

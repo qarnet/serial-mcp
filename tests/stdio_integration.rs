@@ -29,6 +29,16 @@ const EXPECTED_TOOLS: &[&str] = &[
     "send_break",
     "subscribe",
     "unsubscribe",
+    "get_status",
+    "reconfigure",
+    "list_profiles",
+    "open_profile",
+    "save_profile",
+    "delete_profile",
+    "get_log",
+    "clear_log",
+    "export_log",
+    "reconnect",
 ];
 
 fn build_stdio_server() {
@@ -57,7 +67,7 @@ async fn stdio_initialize_handshake_succeeds() {
 }
 
 #[tokio::test]
-async fn stdio_list_tools_returns_all_twelve_tools() {
+async fn stdio_list_tools_returns_all_twenty_two_tools() {
     let client = start_stdio_client().await;
 
     let result = client
@@ -92,8 +102,8 @@ async fn stdio_list_resources_returns_statics_and_templates() {
         .unwrap();
     assert_eq!(
         templates.resource_templates.len(),
-        2,
-        "expected 2 resource templates (connection + raw)"
+        3,
+        "expected 3 resource templates (connection + raw + log)"
     );
 
     client.cancel().await.ok();

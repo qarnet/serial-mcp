@@ -172,6 +172,13 @@ Tests match on exact phrase `Spam complete`.
 | `write cmd <id> <rest>` | `ack N exec><rest>\r\n` then execute nested command | helps detect ordering/drop issues |
 | `binary on` | `binary on\r\n` | mainly trace-focused mode |
 | `binary off` | `binary off\r\n` | |
+| `txbuf status` | `txbuf len=N busy=B\r\n` | TX ring buffer occupancy and busy flag |
+| `ack on` | `ack on\r\n` | enable pre-execution ack (`ack <seq>\r\n` before command runs) |
+| `ack off` | `ack off\r\n` | disable pre-execution ack |
+| `hold on` | `hold on\r\n` | halt firmware TX drain (ring buffer fills) |
+| `hold off` | `hold off\r\n` | resume firmware TX drain |
+| `jsonout` | 3 JSON lines: `{"sensor":"temp",...}` | emits JSON objects for parser testing |
+| `sendraw hex <hex>` / `sendraw text <str>` | (raw bytes, no `\r\n`) | sends raw data without line terminator for partial-frame testing |
 
 ## Test Expectations
 
@@ -182,7 +189,7 @@ cargo test --test native_sim_validation -- --ignored
 cargo test --test native_sim_connection_lifecycle -- --ignored --test-threads=1
 ```
 
-11 + 6 software-only tests, no hardware required. `--test-threads=1` is
+22 + 6 software-only tests, no hardware required. `--test-threads=1` is
 required for the lifecycle suite because the firmware process is killed
 on `Drop` and parallel close can race with the OS layer.
 The bootloader touch flow is exercised via the `touch` command in the

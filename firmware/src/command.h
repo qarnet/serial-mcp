@@ -30,6 +30,9 @@ struct app_state {
 	uint32_t next_cmd_id;
 
 	bool binary_mode;
+
+	bool ack_enabled;
+	uint32_t ack_seq;
 };
 
 void command_init(struct app_state *state, struct uart_drv *drv);

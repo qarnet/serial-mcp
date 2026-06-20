@@ -6,6 +6,7 @@ pub const URI_CONNECTIONS: &str = "serial://connections";
 pub const URI_CONNECTION_PREFIX: &str = "serial://connections/";
 pub const URI_CONNECTION_TEMPLATE: &str = "serial://connections/{id}";
 pub const URI_CONNECTION_RAW_TEMPLATE: &str = "serial://connections/{id}/raw";
+pub const URI_CONNECTION_LOG_TEMPLATE: &str = "serial://connections/{id}/log";
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum ResourceUriKind {
@@ -13,6 +14,7 @@ pub enum ResourceUriKind {
     ConnectionsList,
     ConnectionDetail(String),
     ConnectionDetailRaw(String),
+    ConnectionLog(String),
     Unknown,
 }
 
@@ -21,18 +23,23 @@ pub fn parse_resource_uri(uri: &str) -> ResourceUriKind {
         URI_PORTS => ResourceUriKind::Ports,
         URI_CONNECTIONS => ResourceUriKind::ConnectionsList,
         other => match other.strip_prefix(URI_CONNECTION_PREFIX) {
-            Some(rest) if !rest.is_empty() => match rest.strip_suffix("/raw") {
-                Some(id) if !id.is_empty() && !id.contains('/') => {
-                    ResourceUriKind::ConnectionDetailRaw(id.to_string())
-                }
-                _ => {
-                    if rest.contains('/') {
-                        ResourceUriKind::Unknown
-                    } else {
-                        ResourceUriKind::ConnectionDetail(rest.to_string())
+            Some(rest) if !rest.is_empty() => {
+                if let Some(id) = rest.strip_suffix("/raw") {
+                    if !id.is_empty() && !id.contains('/') {
+                        return ResourceUriKind::ConnectionDetailRaw(id.to_string());
                     }
                 }
-            },
+                if let Some(id) = rest.strip_suffix("/log") {
+                    if !id.is_empty() && !id.contains('/') {
+                        return ResourceUriKind::ConnectionLog(id.to_string());
+                    }
+                }
+                if rest.contains('/') {
+                    ResourceUriKind::Unknown
+                } else {
+                    ResourceUriKind::ConnectionDetail(rest.to_string())
+                }
+            }
             _ => ResourceUriKind::Unknown,
         },
     }
