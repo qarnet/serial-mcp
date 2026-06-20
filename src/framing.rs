@@ -351,7 +351,10 @@ impl FrameDecoder {
                             read_length_prefix(&self.buf[..needed], *prefix_size, *endianness);
                         *next_payload_len = Some(len);
                     }
-                    let payload_len = next_payload_len.unwrap();
+                    let payload_len = match *next_payload_len {
+                        Some(len) => len,
+                        None => break, // not yet known, wait for more data
+                    };
                     let header_len = *prefix_size as usize;
                     let total_needed = header_len + payload_len;
                     if self.buf.len() < total_needed {
@@ -656,24 +659,35 @@ fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 }
 
 /// Read a length prefix from the given bytes.
+/// `prefix_size` must be 1, 2, or 4 (validated at construction).
+/// Returns 0 for invalid sizes as a safe fallback.
 fn read_length_prefix(bytes: &[u8], prefix_size: u8, endianness: Endianness) -> usize {
     match prefix_size {
         1 => bytes[0] as usize,
         2 => {
-            let arr: [u8; 2] = bytes[..2].try_into().unwrap();
+            let arr: [u8; 2] = bytes[..2]
+                .try_into()
+                .expect("prefix_size=2 but buffer too short");
             match endianness {
                 Endianness::Big => u16::from_be_bytes(arr) as usize,
                 Endianness::Little => u16::from_le_bytes(arr) as usize,
             }
         }
         4 => {
-            let arr: [u8; 4] = bytes[..4].try_into().unwrap();
+            let arr: [u8; 4] = bytes[..4]
+                .try_into()
+                .expect("prefix_size=4 but buffer too short");
             match endianness {
                 Endianness::Big => u32::from_be_bytes(arr) as usize,
                 Endianness::Little => u32::from_le_bytes(arr) as usize,
             }
         }
-        _ => unreachable!(),
+        _ => {
+            // Invalid prefix_size — should never happen because
+            // FrameDecoder::new() rejects sizes other than 1/2/4.
+            // Return 0 as a safe fallback (zero-length frame).
+            0
+        }
     }
 }
 
