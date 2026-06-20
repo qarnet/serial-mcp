@@ -233,11 +233,17 @@ impl SerialHandler {
         self.connections.cancel_reconnect(&connection_id).await;
         let result = port_ops::close(&self.connections, args).await?;
         // Shut down RX session (pump + consumers) for this connection.
+        // This closes the pump channel, causing the subscribe task's
+        // event_rx.recv() to return None, which exits the loop and
+        // triggers flush_partial for any buffered partial frame.
         self.rx_sessions.remove(&connection_id).await;
         // Shut down TX session (worker) for this connection.
         self.tx_sessions.remove(&connection_id).await;
-        // Abort any active RX subscription tied to this connection.
-        self.streams.lock().await.remove(&connection_id);
+        // Wait for the subscribe task to finish naturally (flush partial,
+        // emit stop notification) before cleaning up.
+        if let Some(handle) = self.streams.lock().await.remove(&connection_id) {
+            handle.join_without_abort().await;
+        }
         self.notify_resource_changed(&connection_id, &ctx).await;
         Ok(result)
     }

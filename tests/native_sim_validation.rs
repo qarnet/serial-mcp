@@ -2327,7 +2327,88 @@ async fn native_subscribe_framing_partial_on_timeout() {
     drop(fw);
 }
 
-// TODO: Test 36 — subscribe emits partial frame on close.
-// Requires investigation of PTY buffering timing between write, firmware
-// response, pump delivery, and connection close. The flush_partial logic
-// is correct but the test setup needs refinement.
+// ── Test 36: subscribe flushes partial frame on close ──────────────────
+//
+// When the connection is closed via the "close" tool, the pump channel
+// closes, the subscribe loop exits, and flush_partial emits any buffered
+// data as a partial frame notification. The close handler now waits for
+// the subscribe task to finish (join_without_abort) before cleanup.
+
+#[tokio::test]
+#[ignore = "requires native_sim firmware binary"]
+#[cfg(unix)]
+async fn native_subscribe_framing_partial_on_close() {
+    let fw = NativeSimFirmware::spawn().await.expect("spawn zephyr.exe");
+    let pty_path = fw.pty_path().to_string();
+
+    let server = TestServer::start().await;
+    let (client, mut rx) = connect_client(&server).await.unwrap();
+    let id = open_pty(&client, &pty_path).await;
+    sync_boot(&client, &id).await;
+
+    // Subscribe with line framing, no timeout.
+    client
+        .peer()
+        .call_tool(tool_request(
+            "subscribe",
+            json!({
+                "connection_id": id,
+                "poll_interval_ms": 50,
+                "max_buffered_bytes": 8192,
+                "encoding": "utf8",
+                "framing": { "mode": { "type": "line" } }
+            }),
+        ))
+        .await
+        .unwrap();
+
+    // Send raw data without line terminator — decoder buffers it as partial.
+    write_cmd(&client, &id, "sendraw text before_close").await;
+    // Give the pump time to receive the raw data from the firmware.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    // Close the connection. The close handler now waits for the subscribe
+    // task to finish naturally, allowing flush_partial to emit the partial
+    // frame notification before the task is cleaned up.
+    close_connection(&client, &id).await;
+
+    let mut saw_partial = false;
+    let mut saw_stop = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while tokio::time::Instant::now() < deadline {
+        match next_notification(&mut rx, Duration::from_secs(2)).await {
+            Ok(event) => {
+                let data = event.data.as_object().unwrap();
+                if data.get("partial").and_then(|v| v.as_bool()) == Some(true) {
+                    saw_partial = true;
+                    assert!(
+                        data["data"].as_str().unwrap().contains("before_close"),
+                        "partial frame should contain before_close: {data:?}"
+                    );
+                }
+                if data.contains_key("stop_reason") {
+                    saw_stop = true;
+                    let reason = data["stop_reason"].as_str().unwrap_or("");
+                    // Close can produce connection_closed, channel_closed,
+                    // or read_error depending on pump exit timing.
+                    assert!(
+                        reason == "connection_closed"
+                            || reason == "channel_closed"
+                            || reason == "read_error",
+                        "expected close-related stop reason, got {reason}"
+                    );
+                    break;
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    assert!(
+        saw_partial,
+        "should emit partial frame notification on close"
+    );
+    assert!(saw_stop, "should emit stop notification on close");
+
+    client.cancel().await.ok();
+    drop(fw);
+}

@@ -183,11 +183,26 @@ pub async fn read_bytes_via_session(
 
     loop {
         // Pause timeouts while the connection is disconnected or reconnecting.
+        // If reconnect is NOT enabled, exit with connection_closed so the
+        // caller receives partial data and any buffered frames.
         if let Some(ref conn) = conn {
             let state = conn.state();
             if state == crate::serial::ConnectionState::Disconnected
                 || state == crate::serial::ConnectionState::Reconnecting
             {
+                let reconnect_enabled = conn.reconnect_policy.lock().expect("poisoned").enabled;
+                if !reconnect_enabled {
+                    let outcome = ctrl.connection_closed();
+                    return Ok(make_outcome(
+                        finalize_frames(&mut decoder, &mut collected_frames),
+                        accumulated,
+                        read_start.elapsed().as_millis() as u64,
+                        outcome.meta,
+                        outcome.matched,
+                        outcome.match_index,
+                        None,
+                    ));
+                }
                 ctrl.reset_silence_timer();
                 tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                 continue;

@@ -504,11 +504,18 @@ async fn subscribe_closed_from_other_session_stops_streaming_task() {
     assert_ne!(close_result.is_error, Some(true), "{close_result:?}");
 
     let _ = peer.write_all(b"should not stream after close").await;
+    // After close, the subscribe task exits and may emit a stop notification.
+    // We should NOT receive a data streaming event, but a stop notification
+    // is expected and acceptable.
     let maybe_event = tokio::time::timeout(Duration::from_millis(250), rx_a.recv()).await;
-    assert!(
-        maybe_event.is_err(),
-        "received unexpected stream event after close"
-    );
+    if let Ok(Some(event)) = maybe_event {
+        // If we got an event, it should be a stop notification, not data.
+        let data = event.data.as_object().unwrap();
+        assert!(
+            data.contains_key("stop_reason"),
+            "received unexpected data event after close: {data:?}"
+        );
+    }
 
     client_a.cancel().await.ok();
     client_b.cancel().await.ok();

@@ -39,6 +39,17 @@ impl StreamHandle {
         self.join.abort();
         let _ = (&mut self.join).await;
     }
+
+    /// Wait for the streaming task to finish naturally (without aborting).
+    /// Used by the close handler to let flush_partial run before cleanup.
+    pub async fn join_without_abort(self) {
+        // Move join handle out, then forget self to prevent Drop abort.
+        let me = std::mem::ManuallyDrop::new(self);
+        // Safety: ManuallyDrop prevents Drop from running. We read the
+        // JoinHandle out and await it. The StreamHandle shell is leaked.
+        let join = unsafe { std::ptr::read(&me.join) };
+        let _ = join.await;
+    }
 }
 
 impl Drop for StreamHandle {
@@ -318,10 +329,17 @@ async fn stream_rx_via_session(
 
     loop {
         // Pause timeouts while the connection is disconnected or reconnecting.
+        // If reconnect is NOT enabled, exit the loop so flush_partial can run
+        // and the client receives a stop notification with the partial frame.
         let state = conn.state();
         if state == crate::serial::ConnectionState::Disconnected
             || state == crate::serial::ConnectionState::Reconnecting
         {
+            let reconnect_enabled = conn.reconnect_policy.lock().expect("poisoned").enabled;
+            if !reconnect_enabled {
+                stop_outcome = Some(ctrl.connection_closed());
+                break;
+            }
             ctrl.reset_silence_timer();
             tokio::time::sleep(Duration::from_millis(50)).await;
             continue;
@@ -666,7 +684,12 @@ async fn stream_rx_via_session(
                     logger: Some(logger.clone()),
                     data: payload,
                 };
-                let _ = peer.notify_logging_message(param).await;
+                if let Err(e) = peer.notify_logging_message(param).await {
+                    warn!("RX partial frame notify failed on {conn_id}: {e}");
+                    conn.record_notification_drop();
+                    conn.log()
+                        .notification_dropped(&format!("partial frame notify: {e}"));
+                }
             }
             total_returned += partial.data.len();
         }
