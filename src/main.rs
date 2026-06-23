@@ -148,12 +148,12 @@ async fn run_stdio(
     info!("Starting Serial MCP Server v{}", env!("CARGO_PKG_VERSION"));
     let connections = Arc::new(ConnectionManager::new());
     let streams: StreamRegistry = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
-    let handler = SerialHandler::with_manager_security_streams_and_budget(
-        connections,
-        security,
-        streams,
-        budget,
-    );
+    let handler = SerialHandler::builder()
+        .connections(connections)
+        .streams(streams)
+        .security(security)
+        .budget(budget)
+        .build();
     let service = handler.serve(stdio()).await.map_err(|e| {
         error!("Failed to start server: {:?}", e);
         e
@@ -185,12 +185,12 @@ async fn run_http(
 
     let service = StreamableHttpService::new(
         move || {
-            Ok(SerialHandler::with_manager_security_streams_and_budget(
-                Arc::clone(&manager_for_service),
-                security.clone(),
-                Arc::clone(&streams_for_service),
-                Arc::clone(&budget_for_service),
-            ))
+            Ok(SerialHandler::builder()
+                .connections(Arc::clone(&manager_for_service))
+                .streams(Arc::clone(&streams_for_service))
+                .security(security.clone())
+                .budget(Arc::clone(&budget_for_service))
+                .build())
         },
         LocalSessionManager::default().into(),
         StreamableHttpServerConfig::default().with_cancellation_token(shutdown.child_token()),

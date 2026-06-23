@@ -1281,6 +1281,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn char_matcher_found_raw_spans_two_chunks() {
+        // Match pattern "OK" split across two RxEvent::Data chunks.
+        let (tx, rx) = mpsc::channel(8);
+        tx.send(RxEvent::Data(b"xxO".to_vec())).await.unwrap();
+        tx.send(RxEvent::Data(b"Kyy".to_vec())).await.unwrap();
+        let matcher = Matcher::new_literal(b"OK".to_vec());
+        let out = read_bytes_via_session(
+            rx,
+            256,
+            Some(1000),
+            &fresh_ct(),
+            None,
+            None,
+            matcher,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(out.meta.stop_reason, RxStopReason::MatchFound);
+        assert!(out.matched);
+        assert_eq!(out.match_index, Some(2));
+        assert_eq!(out.bytes, b"xxOKyy");
+        drop(tx);
+    }
+
+    #[tokio::test]
     async fn char_matcher_silence_timeout() {
         // With a matcher active the main loop never breaks to settle, so the
         // silence timer governs. One byte, then quiet → no_new_rx_timeout.

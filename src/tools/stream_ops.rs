@@ -480,9 +480,18 @@ async fn stream_rx_via_session(
                                 match_index: match_offset,
                             });
                         }
-                        FrameOutcome::SinkStop(_) => {
+                        FrameOutcome::SinkStop(RxStopReason::PeerDisconnected) => {
                             // peer disconnected while emitting a non-matching frame
                             stop_outcome = Some(ctrl.peer_disconnected());
+                        }
+                        FrameOutcome::SinkStop(reason) => {
+                            // Unexpected: a new sink stop reason was added to
+                            // RxFrameSink. Map to a generic stop rather than
+                            // silently mis-categorizing.
+                            warn!(
+                                "unexpected sink stop reason {reason:?} on {conn_id}; treating as connection_closed"
+                            );
+                            stop_outcome = Some(ctrl.connection_closed());
                         }
                         FrameOutcome::MaxFrames => {
                             stop_outcome = Some(crate::stop_controller::RxStopOutcome {

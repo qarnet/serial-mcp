@@ -219,4 +219,81 @@ mod tests {
         assert!(matches!(out, FrameOutcome::Continue));
         assert_eq!(sink.frames.len(), 2);
     }
+
+    #[tokio::test]
+    async fn consume_frames_match_takes_priority_over_max_frames_subscribe_semantics() {
+        // subscribe: SinkStop(MatchFound) wins over MaxFrames.
+        let mut dec = line_decoder();
+        let mut matcher = Matcher::new_literal(b"b".to_vec());
+        let mut seen = 0;
+        let mut sink = CollectSink {
+            frames: vec![],
+            matches: vec![],
+            stop_on_match: true,
+        };
+        let out = consume_frames(
+            b"a\nb\nc\n",
+            &mut dec,
+            &mut matcher,
+            Some(2),
+            &mut seen,
+            &mut sink,
+        )
+        .await;
+        assert!(matches!(
+            out,
+            FrameOutcome::SinkStop(RxStopReason::MatchFound)
+        ));
+        assert_eq!(seen, 2); // "a", "b" processed; "c" not (stopped at match)
+    }
+
+    #[tokio::test]
+    async fn consume_frames_match_takes_priority_over_max_frames_read_semantics() {
+        // read: collect post-match frames, so MaxFrames triggers after all 3.
+        let mut dec = line_decoder();
+        let mut matcher = Matcher::new_literal(b"b".to_vec());
+        let mut seen = 0;
+        let mut sink = CollectSink {
+            frames: vec![],
+            matches: vec![],
+            stop_on_match: false,
+        };
+        let out = consume_frames(
+            b"a\nb\nc\n",
+            &mut dec,
+            &mut matcher,
+            Some(2),
+            &mut seen,
+            &mut sink,
+        )
+        .await;
+        assert!(matches!(out, FrameOutcome::MaxFrames));
+        assert_eq!(seen, 3); // all 3 processed; match recorded as side-effect
+        assert_eq!(sink.matches, vec![1]);
+    }
+
+    #[tokio::test]
+    async fn consume_frames_resets_matcher_window_per_frame() {
+        // "xA" + "B" across two frames would match "AB" if the matcher
+        // carried state between frames. Verify only frame 2 ("AB\n") matches.
+        let mut dec = line_decoder();
+        let mut matcher = Matcher::new_literal(b"AB".to_vec());
+        let mut seen = 0;
+        let mut sink = CollectSink {
+            frames: vec![],
+            matches: vec![],
+            stop_on_match: false,
+        };
+        let _out = consume_frames(
+            b"xA\nB\nAB\n",
+            &mut dec,
+            &mut matcher,
+            None,
+            &mut seen,
+            &mut sink,
+        )
+        .await;
+        assert_eq!(sink.matches, vec![2], "only frame 2 (AB) should match");
+        assert_eq!(seen, 3);
+    }
 }

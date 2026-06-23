@@ -76,18 +76,106 @@ pub struct SerialHandler {
     profiles_path: PathBuf,
 }
 
+/// Injectable configuration for [`SerialHandler`].
+///
+/// Every field has a sensible default produced by [`SerialHandlerOptions::default`].
+/// Use [`SerialHandler::builder`] to override individual fields, then `.build()`.
+#[derive(Clone)]
+pub struct SerialHandlerOptions {
+    pub connections: Arc<ConnectionManager>,
+    pub streams: StreamRegistry,
+    pub security: SecurityManager,
+    pub budget: Arc<dyn BufferBudget>,
+    // profiles / profiles_path are intentionally NOT here: they are applied
+    // post-build via `with_profiles`, matching today's flow.
+}
+
+impl Default for SerialHandlerOptions {
+    fn default() -> Self {
+        use crate::limits::{DEFAULT_MAX_PROGRAM_BUFFERED_BYTES, DEFAULT_MAX_TOOL_BUFFERED_BYTES};
+        Self {
+            connections: Arc::new(ConnectionManager::new()),
+            streams: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            security: SecurityManager::from_patterns::<[&str; 0]>([]),
+            budget: Arc::new(crate::buffer_budget::AtomicBudget::new(
+                DEFAULT_MAX_PROGRAM_BUFFERED_BYTES,
+                DEFAULT_MAX_TOOL_BUFFERED_BYTES,
+            )),
+        }
+    }
+}
+
+/// Builder for [`SerialHandler`]. Start with [`SerialHandler::builder`].
+#[derive(Default)]
+pub struct SerialHandlerBuilder {
+    options: SerialHandlerOptions,
+}
+
+impl SerialHandlerBuilder {
+    pub fn connections(mut self, connections: Arc<ConnectionManager>) -> Self {
+        self.options.connections = connections;
+        self
+    }
+    pub fn streams(mut self, streams: StreamRegistry) -> Self {
+        self.options.streams = streams;
+        self
+    }
+    pub fn security(mut self, security: SecurityManager) -> Self {
+        self.options.security = security;
+        self
+    }
+    pub fn budget(mut self, budget: Arc<dyn BufferBudget>) -> Self {
+        self.options.budget = budget;
+        self
+    }
+
+    /// Consume the builder and produce a [`SerialHandler`].
+    ///
+    /// Spawns the reconnect supervisor exactly once.
+    pub fn build(self) -> SerialHandler {
+        let SerialHandlerOptions {
+            connections,
+            streams,
+            security,
+            budget,
+        } = self.options;
+        let handler = SerialHandler {
+            connections,
+            streams,
+            security,
+            subscribers: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            rx_sessions: Arc::new(RxSessionManager::new()),
+            tx_sessions: Arc::new(TxSessionManager::new()),
+            budget,
+            profiles: Arc::new(tokio::sync::RwLock::new(Vec::new())),
+            profiles_path: crate::profiles::default_profiles_path(),
+        };
+        handler.spawn_reconnect_supervisor();
+        handler
+    }
+}
+
 #[tool_router]
 impl SerialHandler {
+    /// Entry point for the builder.
+    pub fn builder() -> SerialHandlerBuilder {
+        SerialHandlerBuilder::default()
+    }
+
+    /// Default handler: default connections, empty allowlist, default budget,
+    /// profiles loaded from the default path, reconnect supervisor spawned.
     pub fn new() -> Self {
         let path = crate::profiles::default_profiles_path();
         let profiles = crate::profiles::load_profiles(&path);
-        let handler = Self::with_manager_and_security(
-            Arc::new(ConnectionManager::new()),
-            SecurityManager::from_patterns::<[&str; 0]>([]),
-        )
-        .with_profiles(path, profiles);
-        handler.spawn_reconnect_supervisor();
-        handler
+        Self::builder().build().with_profiles(path, profiles)
+    }
+
+    /// Replace the loaded profiles with the given vector and path.
+    /// (Unchanged from today — kept as a post-build setter.)
+    pub fn with_profiles(mut self, path: PathBuf, profiles: Vec<crate::profiles::Profile>) -> Self {
+        self.profiles = Arc::new(tokio::sync::RwLock::new(profiles));
+        self.profiles_path = path;
+        self
     }
 
     /// Start the background reconnect supervisor task.
@@ -112,76 +200,6 @@ impl SerialHandler {
                 }
             }
         });
-    }
-
-    /// Replace the loaded profiles with the given vector and path.
-    pub fn with_profiles(mut self, path: PathBuf, profiles: Vec<crate::profiles::Profile>) -> Self {
-        self.profiles = Arc::new(tokio::sync::RwLock::new(profiles));
-        self.profiles_path = path;
-        self
-    }
-
-    /// Construct a handler with a caller-supplied [`ConnectionManager`].
-    ///
-    /// Used by integration tests that want to pre-populate the registry
-    /// with a fake (in-memory) connection before exposing the handler over
-    /// MCP, instead of going through the OS-level `open` path.
-    pub fn with_manager(connections: Arc<ConnectionManager>) -> Self {
-        Self::with_manager_and_security(
-            connections,
-            SecurityManager::from_patterns::<[&str; 0]>([]),
-        )
-    }
-
-    pub fn with_manager_and_security(
-        connections: Arc<ConnectionManager>,
-        security: SecurityManager,
-    ) -> Self {
-        use crate::limits::{DEFAULT_MAX_PROGRAM_BUFFERED_BYTES, DEFAULT_MAX_TOOL_BUFFERED_BYTES};
-        let budget: Arc<dyn BufferBudget> = Arc::new(crate::buffer_budget::AtomicBudget::new(
-            DEFAULT_MAX_PROGRAM_BUFFERED_BYTES,
-            DEFAULT_MAX_TOOL_BUFFERED_BYTES,
-        ));
-        Self::with_manager_security_streams_and_budget(
-            connections,
-            security,
-            Arc::new(tokio::sync::Mutex::new(HashMap::new())),
-            budget,
-        )
-    }
-
-    pub fn with_manager_security_and_streams(
-        connections: Arc<ConnectionManager>,
-        security: SecurityManager,
-        streams: StreamRegistry,
-    ) -> Self {
-        use crate::limits::{DEFAULT_MAX_PROGRAM_BUFFERED_BYTES, DEFAULT_MAX_TOOL_BUFFERED_BYTES};
-        let budget: Arc<dyn BufferBudget> = Arc::new(crate::buffer_budget::AtomicBudget::new(
-            DEFAULT_MAX_PROGRAM_BUFFERED_BYTES,
-            DEFAULT_MAX_TOOL_BUFFERED_BYTES,
-        ));
-        Self::with_manager_security_streams_and_budget(connections, security, streams, budget)
-    }
-
-    pub fn with_manager_security_streams_and_budget(
-        connections: Arc<ConnectionManager>,
-        security: SecurityManager,
-        streams: StreamRegistry,
-        budget: Arc<dyn BufferBudget>,
-    ) -> Self {
-        let handler = Self {
-            connections,
-            streams,
-            security,
-            subscribers: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
-            rx_sessions: Arc::new(RxSessionManager::new()),
-            tx_sessions: Arc::new(TxSessionManager::new()),
-            budget,
-            profiles: Arc::new(tokio::sync::RwLock::new(Vec::new())),
-            profiles_path: crate::profiles::default_profiles_path(),
-        };
-        handler.spawn_reconnect_supervisor();
-        handler
     }
 
     #[tool(
@@ -916,5 +934,82 @@ mod tests {
         let cursor = base64::engine::general_purpose::STANDARD.encode(usize::MAX.to_string());
         let (page, _next) = paginate(&items, Some(cursor), usize::MAX);
         assert_eq!(page, vec![] as Vec<i32>);
+    }
+
+    use crate::buffer_budget::{AtomicBudget, BufferBudget};
+    use crate::limits::{DEFAULT_MAX_PROGRAM_BUFFERED_BYTES, DEFAULT_MAX_TOOL_BUFFERED_BYTES};
+    use crate::security::SecurityManager;
+
+    /// Assert two `SerialHandler`s have field-for-field equivalent *configuration*.
+    fn assert_handler_configs_match(a: &SerialHandler, b: &SerialHandler) {
+        assert_eq!(
+            a.budget.tool_limit(),
+            b.budget.tool_limit(),
+            "budget.tool_limit mismatch"
+        );
+        assert_eq!(
+            a.budget.program_limit(),
+            b.budget.program_limit(),
+            "budget.program_limit mismatch"
+        );
+        assert_eq!(
+            a.security.allowlist_summary(),
+            b.security.allowlist_summary(),
+            "security summary mismatch"
+        );
+    }
+
+    #[tokio::test]
+    async fn builder_default_matches_new_defaults() {
+        let from_new = SerialHandler::new();
+        let from_builder = SerialHandler::builder()
+            .connections(Arc::new(ConnectionManager::new()))
+            .security(SecurityManager::from_patterns::<[&str; 0]>([]))
+            .build();
+
+        assert_handler_configs_match(&from_new, &from_builder);
+        assert_eq!(
+            from_builder.budget.tool_limit(),
+            DEFAULT_MAX_TOOL_BUFFERED_BYTES
+        );
+        assert_eq!(
+            from_builder.budget.program_limit(),
+            DEFAULT_MAX_PROGRAM_BUFFERED_BYTES
+        );
+    }
+
+    #[tokio::test]
+    async fn builder_custom_budget_overrides_default() {
+        let budget: Arc<dyn BufferBudget> = Arc::new(AtomicBudget::new(4096, 2048));
+        let handler = SerialHandler::builder()
+            .connections(Arc::new(ConnectionManager::new()))
+            .budget(budget)
+            .build();
+        assert_eq!(handler.budget.tool_limit(), 2048);
+        assert_eq!(handler.budget.program_limit(), 4096);
+    }
+    #[tokio::test]
+    async fn builder_custom_streams_preserved() {
+        let streams: StreamRegistry = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+        let handler = SerialHandler::builder()
+            .connections(Arc::new(ConnectionManager::new()))
+            .streams(Arc::clone(&streams))
+            .build();
+        // Same Arc pointer must be retained (injectable, not copied).
+        assert!(
+            Arc::ptr_eq(&handler.streams, &streams),
+            "streams Arc not retained"
+        );
+    }
+
+    #[tokio::test]
+    async fn builder_with_profiles_applies_path_and_profiles() {
+        let path = std::path::PathBuf::from("/nonexistent/test-profiles.json");
+        let handler = SerialHandler::builder()
+            .connections(Arc::new(ConnectionManager::new()))
+            .build()
+            .with_profiles(path.clone(), Vec::new());
+        assert_eq!(handler.profiles_path, path);
+        assert!(handler.profiles.read().await.is_empty());
     }
 }
