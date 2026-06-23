@@ -7,7 +7,7 @@ use tracing::{debug, info};
 
 use crate::serial::{ConnectionManager, SerialConnection};
 use crate::tools::helpers::{
-    clamp_timeout_or_err, log_tool_err, lookup_connection, parse_flow_control, MAX_TIMEOUT_MS,
+    clamp_timeout_or_err, log_tool_err, lookup_connection, MAX_TIMEOUT_MS,
 };
 use crate::tools::types::{
     SendBreakArgs, SendBreakResult, SetDtrRtsArgs, SetDtrRtsResult, SetFlowControlArgs,
@@ -57,7 +57,7 @@ pub async fn set_flow_control(
         args.connection_id, args.flow_control
     );
 
-    let flow_control = parse_flow_control(&args.flow_control)?;
+    let flow_control = args.flow_control.parse::<crate::serial::FlowControl>()?;
     let connection = lookup_connection(connections, &args.connection_id).await?;
     connection
         .set_flow_control(flow_control)

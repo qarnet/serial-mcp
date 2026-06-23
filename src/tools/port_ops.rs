@@ -160,22 +160,22 @@ pub async fn reconfigure(
     let data_bits = args
         .data_bits
         .as_deref()
-        .map(parse_string_data_bits)
+        .map(|s| s.parse::<crate::serial::DataBits>())
         .transpose()?;
     let stop_bits = args
         .stop_bits
         .as_deref()
-        .map(parse_string_stop_bits)
+        .map(|s| s.parse::<crate::serial::StopBits>())
         .transpose()?;
     let parity = args
         .parity
         .as_deref()
-        .map(parse_string_parity)
+        .map(|s| s.parse::<crate::serial::Parity>())
         .transpose()?;
     let flow_control = args
         .flow_control
         .as_deref()
-        .map(crate::tools::helpers::parse_flow_control)
+        .map(|s| s.parse::<crate::serial::FlowControl>())
         .transpose()?;
 
     let status = conn
@@ -201,33 +201,6 @@ pub async fn reconfigure(
         parity: status.parity,
         flow_control: status.flow_control,
     }))
-}
-
-fn parse_string_data_bits(s: &str) -> Result<crate::serial::DataBits, String> {
-    match s {
-        "5" => Ok(crate::serial::DataBits::Five),
-        "6" => Ok(crate::serial::DataBits::Six),
-        "7" => Ok(crate::serial::DataBits::Seven),
-        "8" => Ok(crate::serial::DataBits::Eight),
-        other => Err(format!("Invalid data_bits: {other}")),
-    }
-}
-
-fn parse_string_stop_bits(s: &str) -> Result<crate::serial::StopBits, String> {
-    match s {
-        "1" => Ok(crate::serial::StopBits::One),
-        "2" => Ok(crate::serial::StopBits::Two),
-        other => Err(format!("Invalid stop_bits: {other}")),
-    }
-}
-
-fn parse_string_parity(s: &str) -> Result<crate::serial::Parity, String> {
-    match s {
-        "none" => Ok(crate::serial::Parity::None),
-        "odd" => Ok(crate::serial::Parity::Odd),
-        "even" => Ok(crate::serial::Parity::Even),
-        other => Err(format!("Invalid parity: {other}")),
-    }
 }
 
 pub fn list_profiles(

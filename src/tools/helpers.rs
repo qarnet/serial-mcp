@@ -14,9 +14,7 @@ use crate::codec::{self, Encoding};
 use crate::match_config::{shape_match_context, Matcher};
 use crate::rx_metadata::RxStopMetadata;
 use crate::rx_session::RxEvent;
-use crate::serial::{
-    ConnectionConfig, ConnectionManager, DataBits, FlowControl, Parity, SerialConnection, StopBits,
-};
+use crate::serial::{ConnectionConfig, ConnectionManager, SerialConnection};
 use crate::stop_controller::{RxStopController, RxStopDecision};
 use crate::tools::types::*;
 
@@ -637,52 +635,14 @@ pub fn parse_open_args(args: OpenArgs) -> Result<ConnectionConfig, String> {
         port: args.port,
         name: args.name,
         baud_rate: args.baud_rate,
-        data_bits: parse_data_bits(&args.data_bits)?,
-        stop_bits: parse_stop_bits(&args.stop_bits)?,
-        parity: parse_parity(&args.parity)?,
-        flow_control: parse_flow_control(&args.flow_control)?,
+        data_bits: args.data_bits.parse()?,
+        stop_bits: args.stop_bits.parse()?,
+        parity: args.parity.parse()?,
+        flow_control: args.flow_control.parse()?,
         port_info: None,
         log_capacity: args.log_capacity,
         log_enabled: args.log_enabled,
     })
-}
-
-pub fn parse_data_bits(raw: &str) -> Result<DataBits, String> {
-    match raw {
-        "5" => Ok(DataBits::Five),
-        "6" => Ok(DataBits::Six),
-        "7" => Ok(DataBits::Seven),
-        "8" => Ok(DataBits::Eight),
-        other => Err(format!("Invalid data_bits {other:?} (expected 5/6/7/8)")),
-    }
-}
-
-pub fn parse_stop_bits(raw: &str) -> Result<StopBits, String> {
-    match raw {
-        "1" => Ok(StopBits::One),
-        "2" => Ok(StopBits::Two),
-        other => Err(format!("Invalid stop_bits {other:?} (expected 1/2)")),
-    }
-}
-
-pub fn parse_parity(raw: &str) -> Result<Parity, String> {
-    match raw.to_lowercase().as_str() {
-        "none" => Ok(Parity::None),
-        "odd" => Ok(Parity::Odd),
-        "even" => Ok(Parity::Even),
-        other => Err(format!("Invalid parity {other:?} (expected none/odd/even)")),
-    }
-}
-
-pub fn parse_flow_control(raw: &str) -> Result<FlowControl, String> {
-    match raw.to_lowercase().as_str() {
-        "none" => Ok(FlowControl::None),
-        "software" => Ok(FlowControl::Software),
-        "hardware" => Ok(FlowControl::Hardware),
-        other => Err(format!(
-            "Invalid flow_control {other:?} (expected none/software/hardware)"
-        )),
-    }
 }
 
 // ------------------------------------------------------------------
@@ -738,9 +698,10 @@ mod tests {
 
     #[test]
     fn open_args_reject_invalid_parity() {
-        assert!(parse_parity("weird").is_err());
-        assert!(parse_parity("none").is_ok());
-        assert!(parse_parity("Even").is_ok());
+        use crate::serial::Parity;
+        assert!("weird".parse::<Parity>().is_err());
+        assert!("none".parse::<Parity>().is_ok());
+        assert!("Even".parse::<Parity>().is_ok());
     }
 
     #[test]
