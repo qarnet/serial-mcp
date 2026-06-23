@@ -11,13 +11,14 @@ use tracing::error;
 use tokio::sync::mpsc;
 
 use crate::codec::{self, Encoding};
-use crate::match_config::{shape_match_context, Matcher};
+use crate::match_config::{shape_match_context, validate_match_request, MatchRequest, Matcher};
 use crate::rx_metadata::RxStopMetadata;
 use crate::rx_session::RxEvent;
-use crate::serial::{
-    ConnectionConfig, ConnectionManager, DataBits, FlowControl, Parity, SerialConnection, StopBits,
-};
+use crate::serial::{ConnectionConfig, ConnectionManager, SerialConnection};
 use crate::stop_controller::{RxStopController, RxStopDecision};
+use crate::tools::rx_consume::{
+    consume_frames, disconnect_state, DisconnectState, FrameOutcome, RxFrameSink, SinkFlow,
+};
 use crate::tools::types::*;
 
 pub use crate::limits::{
@@ -60,6 +61,30 @@ pub fn clamp_poll_interval_or_err(name: &str, value: u64, min: u64) -> Result<u6
 }
 
 // ------------------------------------------------------------------
+// Budget error mapping
+// ------------------------------------------------------------------
+
+/// Map a [`crate::buffer_budget::BufferBudgetError`] to a user-facing error
+/// string. `field` is the fully-qualified argument name
+/// (e.g. `"read.max_buffered_bytes"`) used to prefix the limit/zero messages.
+pub fn map_budget_err(field: &str, e: crate::buffer_budget::BufferBudgetError) -> String {
+    use crate::buffer_budget::BufferBudgetError;
+    match e {
+        BufferBudgetError::OverToolLimit {
+            requested,
+            tool_limit,
+        } => format!("{field}={requested} exceeds per-tool limit {tool_limit}"),
+        BufferBudgetError::ZeroRequest => format!("{field} must be > 0"),
+        BufferBudgetError::InsufficientProgramBudget {
+            requested,
+            available,
+        } => format!(
+            "insufficient program buffer budget: requested {requested}, available {available}"
+        ),
+    }
+}
+
+// ------------------------------------------------------------------
 // Connection lookup
 // ------------------------------------------------------------------
 
@@ -71,6 +96,138 @@ pub async fn lookup_connection(
         .get(id)
         .await
         .map_err(|_| format!("Connection ID {id} not found"))
+}
+
+// ------------------------------------------------------------------
+// RX request validation (shared by read and subscribe)
+// ------------------------------------------------------------------
+
+/// Per-tool limits and the error-message label for [`validate_rx_request`].
+pub struct RxLimits {
+    /// Tool name used to prefix error messages ("read" or "subscribe").
+    pub tool: &'static str,
+    /// Minimum allowed `max_buffered_bytes`.
+    pub min_buffered: usize,
+    /// Maximum allowed `max_buffered_bytes`.
+    pub max_buffered: usize,
+}
+
+/// The common, validated inputs shared by `read` and `subscribe`.
+#[derive(Debug)]
+pub struct ResolvedRxArgs {
+    pub encoding: Encoding,
+    pub connection: Arc<SerialConnection>,
+    pub max_buffered_bytes: usize,
+    pub matcher: Option<Matcher>,
+}
+
+/// Accessors for the request fields common to `read` and `subscribe`.
+pub trait RxRequestArgs {
+    fn connection_id(&self) -> &str;
+    fn encoding(&self) -> &str;
+    fn max_buffered_bytes(&self) -> usize;
+    fn timeout_ms(&self) -> Option<u64>;
+    fn no_new_rx_timeout_ms(&self) -> Option<u64>;
+    fn match_request(&self) -> Option<&MatchRequest>;
+}
+
+impl RxRequestArgs for ReadArgs {
+    fn connection_id(&self) -> &str {
+        &self.connection_id
+    }
+    fn encoding(&self) -> &str {
+        &self.encoding
+    }
+    fn max_buffered_bytes(&self) -> usize {
+        self.max_buffered_bytes
+    }
+    fn timeout_ms(&self) -> Option<u64> {
+        self.timeout_ms
+    }
+    fn no_new_rx_timeout_ms(&self) -> Option<u64> {
+        self.no_new_rx_timeout_ms
+    }
+    fn match_request(&self) -> Option<&MatchRequest> {
+        self.r#match.as_ref()
+    }
+}
+
+impl RxRequestArgs for SubscribeArgs {
+    fn connection_id(&self) -> &str {
+        &self.connection_id
+    }
+    fn encoding(&self) -> &str {
+        &self.encoding
+    }
+    fn max_buffered_bytes(&self) -> usize {
+        self.max_buffered_bytes
+    }
+    fn timeout_ms(&self) -> Option<u64> {
+        self.timeout_ms
+    }
+    fn no_new_rx_timeout_ms(&self) -> Option<u64> {
+        self.no_new_rx_timeout_ms
+    }
+    fn match_request(&self) -> Option<&MatchRequest> {
+        self.r#match.as_ref()
+    }
+}
+
+/// Validate and resolve the inputs common to `read` and `subscribe`: encoding,
+/// connection lookup, `max_buffered_bytes` bounds, `timeout_ms` / silence
+/// timeout, and matcher resolution. Error messages are prefixed with
+/// `limits.tool` to match each tool's existing wording.
+///
+/// Does NOT reserve the buffer budget — the caller does that (subscribe must
+/// drop any prior subscription before reserving).
+pub async fn validate_rx_request<A: RxRequestArgs>(
+    connections: &Arc<ConnectionManager>,
+    args: &A,
+    limits: RxLimits,
+) -> Result<ResolvedRxArgs, String> {
+    let encoding = parse_encoding(args.encoding())?;
+    let connection = lookup_connection(connections, args.connection_id()).await?;
+
+    let max_buffered_bytes = require_min_or_err(
+        &format!("{}.max_buffered_bytes", limits.tool),
+        args.max_buffered_bytes(),
+        limits.min_buffered,
+    )?;
+    let max_buffered_bytes = clamp_or_err(
+        &format!("{}.max_buffered_bytes", limits.tool),
+        max_buffered_bytes,
+        limits.max_buffered,
+    )?;
+
+    if let Some(timeout_ms) = args.timeout_ms() {
+        clamp_timeout_or_err(
+            &format!("{}.timeout_ms", limits.tool),
+            timeout_ms,
+            MAX_TIMEOUT_MS,
+        )?;
+    }
+    if let Some(silence_ms) = args.no_new_rx_timeout_ms() {
+        if silence_ms == 0 {
+            return Err(format!("{}.no_new_rx_timeout_ms must be > 0", limits.tool));
+        }
+        clamp_timeout_or_err(
+            &format!("{}.no_new_rx_timeout_ms", limits.tool),
+            silence_ms,
+            MAX_TIMEOUT_MS,
+        )?;
+    }
+
+    let matcher = match args.match_request() {
+        Some(m) => Some(validate_match_request(m)?),
+        None => None,
+    };
+
+    Ok(ResolvedRxArgs {
+        encoding,
+        connection,
+        max_buffered_bytes,
+        matcher,
+    })
 }
 
 // ------------------------------------------------------------------
@@ -92,6 +249,45 @@ pub struct ReadOutcome {
     pub match_frame_index: Option<usize>,
     /// Decoded frames, empty when framing was not configured.
     pub frames: Vec<crate::framing::Frame>,
+}
+
+/// `read`'s frame sink: collects every frame and records the first match so the
+/// caller can return it. Always returns `Continue` — read includes frames
+/// decoded after the matching one (legacy behavior).
+struct ReadFrameSink<'a> {
+    collected: &'a mut Vec<crate::framing::Frame>,
+    match_data: Option<Vec<u8>>,
+    match_index: Option<usize>,
+    match_frame_index: Option<usize>,
+}
+
+impl<'a> ReadFrameSink<'a> {
+    fn new(collected: &'a mut Vec<crate::framing::Frame>) -> Self {
+        Self {
+            collected,
+            match_data: None,
+            match_index: None,
+            match_frame_index: None,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl RxFrameSink for ReadFrameSink<'_> {
+    async fn on_frame(
+        &mut self,
+        frame: crate::framing::Frame,
+        matched: bool,
+        match_index: Option<usize>,
+    ) -> SinkFlow {
+        if matched && self.match_data.is_none() {
+            self.match_data = Some(frame.data.clone());
+            self.match_index = match_index;
+            self.match_frame_index = Some(frame.index);
+        }
+        self.collected.push(frame);
+        SinkFlow::Continue
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -125,10 +321,13 @@ pub async fn read_bytes_via_session(
     // Frame decoder state.
     let max_frames = framing.as_ref().and_then(|f| f.max_frames);
     let mut decoder: Option<crate::framing::FrameDecoder> = match framing.as_ref() {
+        // read is a synchronous request/response: propagate decoder-init errors
+        // to the caller. (subscribe degrades to raw mode instead — see stream_ops.rs.)
         Some(cfg) => Some(crate::framing::FrameDecoder::new(cfg)?),
         None => None,
     };
     let mut collected_frames: Vec<crate::framing::Frame> = Vec::new();
+    let mut frames_seen: usize = 0;
     let make_outcome = |frames: Vec<crate::framing::Frame>,
                         bytes: Vec<u8>,
                         elapsed_ms: u64,
@@ -181,55 +380,64 @@ pub async fn read_bytes_via_session(
         std::mem::take(collected)
     }
 
+    // Collapse the repeated "flush partial frames → build outcome → return"
+    // tail. Captures `decoder`, `collected_frames`, `read_start`, and
+    // `make_outcome` from the enclosing scope. Valid only in return position.
+    macro_rules! finish {
+        ($bytes:expr, $meta:expr, $matched:expr, $match_index:expr, $match_frame_index:expr) => {
+            return Ok(make_outcome(
+                finalize_frames(&mut decoder, &mut collected_frames),
+                $bytes,
+                read_start.elapsed().as_millis() as u64,
+                $meta,
+                $matched,
+                $match_index,
+                $match_frame_index,
+            ))
+        };
+    }
+
     loop {
         // Pause timeouts while the connection is disconnected or reconnecting.
         // If reconnect is NOT enabled, exit with connection_closed so the
         // caller receives partial data and any buffered frames.
         if let Some(ref conn) = conn {
-            let state = conn.state();
-            if state == crate::serial::ConnectionState::Disconnected
-                || state == crate::serial::ConnectionState::Reconnecting
-            {
-                let reconnect_enabled = conn.reconnect_policy.lock().expect("poisoned").enabled;
-                if !reconnect_enabled {
+            match disconnect_state(conn, &mut ctrl) {
+                DisconnectState::Closed => {
                     let outcome = ctrl.connection_closed();
-                    return Ok(make_outcome(
-                        finalize_frames(&mut decoder, &mut collected_frames),
+                    finish!(
                         accumulated,
-                        read_start.elapsed().as_millis() as u64,
                         outcome.meta,
                         outcome.matched,
                         outcome.match_index,
-                        None,
-                    ));
+                        None
+                    );
                 }
-                ctrl.reset_silence_timer();
-                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                continue;
+                DisconnectState::Reconnecting => {
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                    continue;
+                }
+                DisconnectState::Active => {}
             }
         }
 
         if let RxStopDecision::Stop(outcome) = ctrl.check_timeout() {
-            return Ok(make_outcome(
-                finalize_frames(&mut decoder, &mut collected_frames),
+            finish!(
                 accumulated,
-                read_start.elapsed().as_millis() as u64,
                 outcome.meta,
                 outcome.matched,
                 outcome.match_index,
-                None,
-            ));
+                None
+            );
         }
         if let RxStopDecision::Stop(outcome) = ctrl.check_silence_timeout() {
-            return Ok(make_outcome(
-                finalize_frames(&mut decoder, &mut collected_frames),
+            finish!(
                 accumulated,
-                read_start.elapsed().as_millis() as u64,
                 outcome.meta,
                 outcome.matched,
                 outcome.match_index,
-                None,
-            ));
+                None
+            );
         }
 
         let remaining = deadline.saturating_duration_since(Instant::now());
@@ -239,13 +447,13 @@ pub async fn read_bytes_via_session(
         let event = tokio::select! {
             _ = ct.cancelled() => {
                 let outcome = ctrl.cancelled();
-                return Ok(make_outcome(finalize_frames(&mut decoder, &mut collected_frames), accumulated, read_start.elapsed().as_millis() as u64, outcome.meta, outcome.matched, outcome.match_index, None));
+                finish!(accumulated, outcome.meta, outcome.matched, outcome.match_index, None);
             }
             msg = tokio::time::timeout(Duration::from_millis(wait), event_rx.recv()) => match msg {
                 Ok(Some(e)) => e,
                 Ok(None) => {
                     let outcome = ctrl.channel_closed();
-                    return Ok(make_outcome(finalize_frames(&mut decoder, &mut collected_frames), accumulated, read_start.elapsed().as_millis() as u64, outcome.meta, outcome.matched, outcome.match_index, None));
+                    finish!(accumulated, outcome.meta, outcome.matched, outcome.match_index, None);
                 }
                 Err(_) => {
                     if let (Some(token), Some(peer)) = (progress_token.clone(), peer) {
@@ -277,55 +485,33 @@ pub async fn read_bytes_via_session(
                 let take = chunk.len().min(room);
                 accumulated.extend_from_slice(&chunk[..take]);
 
-                // Feed to frame decoder (full chunk, not just take portion).
+                // Feed to frame decoder via the shared consumer.
                 if let Some(ref mut dec) = decoder {
-                    let prev_frame_count = collected_frames.len();
-                    let new_frames = dec.push(&chunk);
-                    collected_frames.extend(new_frames);
-
-                    // Match on decoded frame data when framing is active.
-                    // Per-frame matching: reset matcher window for each new frame.
-                    let mut frame_match: Option<(Vec<u8>, usize, usize)> = None;
-                    if let Some(ref mut m) = matcher {
-                        for frame in collected_frames.iter().skip(prev_frame_count) {
-                            m.reset_window();
-                            if let crate::match_config::MatchResult::Found(idx) =
-                                m.push(&frame.data)
-                            {
-                                frame_match = Some((frame.data.clone(), idx, frame.index));
-                                break;
-                            }
-                        }
+                    let mut sink = ReadFrameSink::new(&mut collected_frames);
+                    let outcome = consume_frames(
+                        &chunk,
+                        dec,
+                        &mut matcher,
+                        max_frames,
+                        &mut frames_seen,
+                        &mut sink,
+                    )
+                    .await;
+                    let ReadFrameSink {
+                        match_data,
+                        match_index,
+                        match_frame_index,
+                        ..
+                    } = sink;
+                    if let Some(data) = match_data {
+                        let meta =
+                            RxStopMetadata::match_found(ctrl.bytes_observed(), accumulated.len());
+                        finish!(data, meta, true, match_index, match_frame_index);
                     }
-                    if let Some((matched_data, match_idx, frame_idx)) = frame_match {
-                        let bytes_observed = ctrl.bytes_observed();
-                        let meta = RxStopMetadata::match_found(bytes_observed, accumulated.len());
-                        return Ok(make_outcome(
-                            finalize_frames(&mut decoder, &mut collected_frames),
-                            matched_data,
-                            read_start.elapsed().as_millis() as u64,
-                            meta,
-                            true,
-                            Some(match_idx),
-                            Some(frame_idx),
-                        ));
-                    }
-
-                    if let Some(limit) = max_frames {
-                        if collected_frames.len() >= limit {
-                            let bytes_observed = ctrl.bytes_observed();
-                            let bytes_returned = accumulated.len();
-                            let meta = RxStopMetadata::max_frames(bytes_observed, bytes_returned);
-                            return Ok(make_outcome(
-                                finalize_frames(&mut decoder, &mut collected_frames),
-                                accumulated,
-                                read_start.elapsed().as_millis() as u64,
-                                meta,
-                                false,
-                                None,
-                                None,
-                            ));
-                        }
+                    if let FrameOutcome::MaxFrames = outcome {
+                        let meta =
+                            RxStopMetadata::max_frames(ctrl.bytes_observed(), accumulated.len());
+                        finish!(accumulated, meta, false, None, None);
                     }
                 }
 
@@ -337,15 +523,13 @@ pub async fn read_bytes_via_session(
                     if let RxStopDecision::Stop(outcome) =
                         ctrl.push_data(chunk_len, buffered_len, match_result)
                     {
-                        return Ok(make_outcome(
-                            finalize_frames(&mut decoder, &mut collected_frames),
+                        finish!(
                             accumulated,
-                            read_start.elapsed().as_millis() as u64,
                             outcome.meta,
                             outcome.matched,
                             outcome.match_index,
-                            None,
-                        ));
+                            None
+                        );
                     }
                 }
 
@@ -369,15 +553,13 @@ pub async fn read_bytes_via_session(
             }
             RxEvent::Closed => {
                 let outcome = ctrl.connection_closed();
-                return Ok(make_outcome(
-                    finalize_frames(&mut decoder, &mut collected_frames),
+                finish!(
                     accumulated,
-                    read_start.elapsed().as_millis() as u64,
                     outcome.meta,
                     outcome.matched,
                     outcome.match_index,
-                    None,
-                ));
+                    None
+                );
             }
             RxEvent::Error(msg) => {
                 return Err(log_tool_err("read", "Data reading failed", msg));
@@ -385,10 +567,12 @@ pub async fn read_bytes_via_session(
         }
     }
 
-    // Settle phase: gather burst after first byte (only when no matcher
-    // and no framing). With a matcher or framing, the loop above continues
-    // until match/frames/timeout/max/closed.
-    let _start_len = accumulated.len();
+    // Settle phase: plain-read burst gather. Reached only when neither a matcher
+    // nor framing is active (the sole `break` above requires both to be None).
+    debug_assert!(
+        decoder.is_none() && matcher.is_none(),
+        "settle phase reached with active decoder/matcher"
+    );
     while accumulated.len() < max_bytes {
         let remaining = deadline
             .saturating_duration_since(Instant::now())
@@ -399,32 +583,28 @@ pub async fn read_bytes_via_session(
         }
 
         if let RxStopDecision::Stop(outcome) = ctrl.check_timeout() {
-            return Ok(make_outcome(
-                finalize_frames(&mut decoder, &mut collected_frames),
+            finish!(
                 accumulated,
-                read_start.elapsed().as_millis() as u64,
                 outcome.meta,
                 outcome.matched,
                 outcome.match_index,
-                None,
-            ));
+                None
+            );
         }
         if let RxStopDecision::Stop(outcome) = ctrl.check_silence_timeout() {
-            return Ok(make_outcome(
-                finalize_frames(&mut decoder, &mut collected_frames),
+            finish!(
                 accumulated,
-                read_start.elapsed().as_millis() as u64,
                 outcome.meta,
                 outcome.matched,
                 outcome.match_index,
-                None,
-            ));
+                None
+            );
         }
 
         let event = tokio::select! {
             _ = ct.cancelled() => {
                 let outcome = ctrl.cancelled();
-                return Ok(make_outcome(finalize_frames(&mut decoder, &mut collected_frames), accumulated, read_start.elapsed().as_millis() as u64, outcome.meta, outcome.matched, outcome.match_index, None));
+                finish!(accumulated, outcome.meta, outcome.matched, outcome.match_index, None);
             }
             msg = tokio::time::timeout(Duration::from_millis(settle), event_rx.recv()) => match msg {
                 Ok(Some(e)) => Some(e),
@@ -439,28 +619,6 @@ pub async fn read_bytes_via_session(
                 let take = chunk.len().min(room);
                 accumulated.extend_from_slice(&chunk[..take]);
                 ctrl.record_data(0, accumulated.len());
-
-                // Feed to frame decoder.
-                if let Some(ref mut dec) = decoder {
-                    let new_frames = dec.push(&chunk);
-                    collected_frames.extend(new_frames);
-                    if let Some(limit) = max_frames {
-                        if collected_frames.len() >= limit {
-                            let bytes_observed = ctrl.bytes_observed();
-                            let bytes_returned = accumulated.len();
-                            let meta = RxStopMetadata::max_frames(bytes_observed, bytes_returned);
-                            return Ok(make_outcome(
-                                finalize_frames(&mut decoder, &mut collected_frames),
-                                accumulated,
-                                read_start.elapsed().as_millis() as u64,
-                                meta,
-                                false,
-                                None,
-                                None,
-                            ));
-                        }
-                    }
-                }
 
                 if let (Some(token), Some(peer)) = (progress_token.clone(), peer) {
                     let elapsed_ms = effective_timeout.saturating_sub(
@@ -489,37 +647,26 @@ pub async fn read_bytes_via_session(
         }
     }
 
-    // Flush any partial frame remaining in the decoder.
-    if let Some(ref mut dec) = decoder {
-        if let Some(partial) = dec.flush_partial() {
-            collected_frames.push(partial);
-        }
-    }
-
     // After settle phase, determine the stop reason.
     // If we filled the buffer during settle, it's MaxBufferedBytes;
     // otherwise it's DataComplete.
     if let RxStopDecision::Stop(outcome) = ctrl.check_max_buffered_bytes() {
-        return Ok(make_outcome(
-            finalize_frames(&mut decoder, &mut collected_frames),
+        finish!(
             accumulated,
-            read_start.elapsed().as_millis() as u64,
             outcome.meta,
             outcome.matched,
             outcome.match_index,
-            None,
-        ));
+            None
+        );
     }
     let outcome = ctrl.data_complete();
-    Ok(make_outcome(
-        finalize_frames(&mut decoder, &mut collected_frames),
+    finish!(
         accumulated,
-        read_start.elapsed().as_millis() as u64,
         outcome.meta,
         outcome.matched,
         outcome.match_index,
-        None,
-    ))
+        None
+    );
 }
 
 pub(crate) fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
@@ -562,7 +709,7 @@ pub fn build_read_result(
                     encoding: encoding.to_string(),
                     frame_index: f.index,
                     frame_type: f.frame_type.clone(),
-                    parsed: f.parsed.as_ref().map(convert_parsed_frame),
+                    parsed: f.parsed.clone(),
                 }),
                 Err(e) => {
                     tracing::warn!("Frame {} encoding failed: {e}", f.index);
@@ -599,33 +746,6 @@ pub fn build_read_result(
     }))
 }
 
-/// Convert a `ParsedFrame` (from the framing module) to a `ParsedFrameResult`
-/// (the API type in tools/types). The two enums have identical variants.
-fn convert_parsed_frame(parsed: &crate::framing::ParsedFrame) -> ParsedFrameResult {
-    match parsed {
-        crate::framing::ParsedFrame::AtCommand {
-            response_type,
-            command,
-            status,
-            fields,
-        } => ParsedFrameResult::AtCommand {
-            response_type: response_type.clone(),
-            command: command.clone(),
-            status: status.clone(),
-            fields: fields.clone(),
-        },
-        crate::framing::ParsedFrame::Json(v) => ParsedFrameResult::Json(v.clone()),
-        crate::framing::ParsedFrame::ShellPrompt {
-            prompt,
-            prompt_type,
-        } => ParsedFrameResult::ShellPrompt {
-            prompt: prompt.clone(),
-            prompt_type: prompt_type.clone(),
-        },
-        crate::framing::ParsedFrame::Raw => ParsedFrameResult::Raw,
-    }
-}
-
 // ------------------------------------------------------------------
 // Parsers
 // ------------------------------------------------------------------
@@ -640,52 +760,14 @@ pub fn parse_open_args(args: OpenArgs) -> Result<ConnectionConfig, String> {
         port: args.port,
         name: args.name,
         baud_rate: args.baud_rate,
-        data_bits: parse_data_bits(&args.data_bits)?,
-        stop_bits: parse_stop_bits(&args.stop_bits)?,
-        parity: parse_parity(&args.parity)?,
-        flow_control: parse_flow_control(&args.flow_control)?,
+        data_bits: args.data_bits.parse()?,
+        stop_bits: args.stop_bits.parse()?,
+        parity: args.parity.parse()?,
+        flow_control: args.flow_control.parse()?,
         port_info: None,
         log_capacity: args.log_capacity,
         log_enabled: args.log_enabled,
     })
-}
-
-pub fn parse_data_bits(raw: &str) -> Result<DataBits, String> {
-    match raw {
-        "5" => Ok(DataBits::Five),
-        "6" => Ok(DataBits::Six),
-        "7" => Ok(DataBits::Seven),
-        "8" => Ok(DataBits::Eight),
-        other => Err(format!("Invalid data_bits {other:?} (expected 5/6/7/8)")),
-    }
-}
-
-pub fn parse_stop_bits(raw: &str) -> Result<StopBits, String> {
-    match raw {
-        "1" => Ok(StopBits::One),
-        "2" => Ok(StopBits::Two),
-        other => Err(format!("Invalid stop_bits {other:?} (expected 1/2)")),
-    }
-}
-
-pub fn parse_parity(raw: &str) -> Result<Parity, String> {
-    match raw.to_lowercase().as_str() {
-        "none" => Ok(Parity::None),
-        "odd" => Ok(Parity::Odd),
-        "even" => Ok(Parity::Even),
-        other => Err(format!("Invalid parity {other:?} (expected none/odd/even)")),
-    }
-}
-
-pub fn parse_flow_control(raw: &str) -> Result<FlowControl, String> {
-    match raw.to_lowercase().as_str() {
-        "none" => Ok(FlowControl::None),
-        "software" => Ok(FlowControl::Software),
-        "hardware" => Ok(FlowControl::Hardware),
-        other => Err(format!(
-            "Invalid flow_control {other:?} (expected none/software/hardware)"
-        )),
-    }
 }
 
 // ------------------------------------------------------------------
@@ -700,6 +782,9 @@ pub fn log_tool_err<E: std::fmt::Display>(op: &str, context: &str, err: E) -> St
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rx_metadata::RxStopReason;
+    use crate::rx_session::RxEvent;
+    use tokio::sync::mpsc;
 
     #[test]
     fn open_args_parsed_strictly() {
@@ -741,9 +826,10 @@ mod tests {
 
     #[test]
     fn open_args_reject_invalid_parity() {
-        assert!(parse_parity("weird").is_err());
-        assert!(parse_parity("none").is_ok());
-        assert!(parse_parity("Even").is_ok());
+        use crate::serial::Parity;
+        assert!("weird".parse::<Parity>().is_err());
+        assert!("none".parse::<Parity>().is_ok());
+        assert!("Even".parse::<Parity>().is_ok());
     }
 
     #[test]
@@ -1032,5 +1118,472 @@ mod tests {
             Ok(_) => panic!("invalid regex should be rejected"),
             Err(err) => assert!(err.contains("Invalid prompt regex"), "got: {err}"),
         }
+    }
+
+    fn fresh_ct() -> tokio_util::sync::CancellationToken {
+        tokio_util::sync::CancellationToken::new()
+    }
+
+    // ── Plain read (settle phase) ──────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn char_plain_read_single_chunk_data_complete() {
+        let (tx, rx) = mpsc::channel(8);
+        tx.send(RxEvent::Data(b"hello".to_vec())).await.unwrap();
+        drop(tx); // sender closed → settle gathers the chunk, then ends normally
+        let out = read_bytes_via_session(
+            rx,
+            256,
+            Some(1000),
+            &fresh_ct(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(out.bytes, b"hello");
+        assert_eq!(out.meta.stop_reason, RxStopReason::DataComplete);
+        assert!(!out.matched);
+        assert!(out.frames.is_empty());
+    }
+
+    #[tokio::test]
+    async fn char_plain_read_timeout_empty() {
+        let (_tx, rx) = mpsc::channel(8); // keep sender alive so recv blocks (no channel-close)
+        let out = read_bytes_via_session(
+            rx,
+            256,
+            Some(80),
+            &fresh_ct(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(out.bytes.is_empty());
+        assert_eq!(out.meta.stop_reason, RxStopReason::Timeout);
+    }
+
+    #[tokio::test]
+    async fn char_plain_read_max_buffered_truncates() {
+        let (tx, rx) = mpsc::channel(8);
+        tx.send(RxEvent::Data(b"0123456789".to_vec()))
+            .await
+            .unwrap();
+        let out = read_bytes_via_session(
+            rx,
+            4,
+            Some(1000),
+            &fresh_ct(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(out.bytes.len(), 4);
+        assert_eq!(out.meta.stop_reason, RxStopReason::MaxBufferedBytes);
+        assert!(out.meta.truncated);
+        assert_eq!(out.meta.bytes_observed, 10);
+        assert_eq!(out.meta.bytes_returned, 4);
+    }
+
+    // ── Lifecycle stop reasons ─────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn char_channel_closed_before_data() {
+        let (tx, rx) = mpsc::channel(8);
+        drop(tx); // no data ever; main loop sees recv() == None
+        let out = read_bytes_via_session(
+            rx,
+            256,
+            Some(1000),
+            &fresh_ct(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(out.meta.stop_reason, RxStopReason::ChannelClosed);
+    }
+
+    #[tokio::test]
+    async fn char_connection_closed_event() {
+        let (tx, rx) = mpsc::channel(8);
+        tx.send(RxEvent::Closed).await.unwrap();
+        let out = read_bytes_via_session(
+            rx,
+            256,
+            Some(1000),
+            &fresh_ct(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(out.meta.stop_reason, RxStopReason::ConnectionClosed);
+    }
+
+    #[tokio::test]
+    async fn char_cancelled() {
+        let ct = fresh_ct();
+        ct.cancel();
+        let (_tx, rx) = mpsc::channel(8);
+        let out =
+            read_bytes_via_session(rx, 256, Some(1000), &ct, None, None, None, None, None, None)
+                .await
+                .unwrap();
+        assert_eq!(out.meta.stop_reason, RxStopReason::Cancelled);
+    }
+
+    // ── Matcher (raw, no framing) ──────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn char_matcher_found_raw() {
+        let (tx, rx) = mpsc::channel(8);
+        tx.send(RxEvent::Data(b"xxOKyy".to_vec())).await.unwrap();
+        let matcher = Matcher::new_literal(b"OK".to_vec());
+        let out = read_bytes_via_session(
+            rx,
+            256,
+            Some(1000),
+            &fresh_ct(),
+            None,
+            None,
+            matcher,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(out.meta.stop_reason, RxStopReason::MatchFound);
+        assert!(out.matched);
+        assert_eq!(out.match_index, Some(2));
+        assert_eq!(out.bytes, b"xxOKyy");
+    }
+
+    #[tokio::test]
+    async fn char_matcher_found_raw_spans_two_chunks() {
+        // Match pattern "OK" split across two RxEvent::Data chunks.
+        let (tx, rx) = mpsc::channel(8);
+        tx.send(RxEvent::Data(b"xxO".to_vec())).await.unwrap();
+        tx.send(RxEvent::Data(b"Kyy".to_vec())).await.unwrap();
+        let matcher = Matcher::new_literal(b"OK".to_vec());
+        let out = read_bytes_via_session(
+            rx,
+            256,
+            Some(1000),
+            &fresh_ct(),
+            None,
+            None,
+            matcher,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(out.meta.stop_reason, RxStopReason::MatchFound);
+        assert!(out.matched);
+        assert_eq!(out.match_index, Some(2));
+        assert_eq!(out.bytes, b"xxOKyy");
+        drop(tx);
+    }
+
+    #[tokio::test]
+    async fn char_matcher_silence_timeout() {
+        // With a matcher active the main loop never breaks to settle, so the
+        // silence timer governs. One byte, then quiet → no_new_rx_timeout.
+        let (tx, rx) = mpsc::channel(8);
+        tx.send(RxEvent::Data(b"a".to_vec())).await.unwrap();
+        let matcher = Matcher::new_literal(b"ZZ".to_vec()); // never matches
+        let out = read_bytes_via_session(
+            rx,
+            256,
+            Some(5000),
+            &fresh_ct(),
+            None,
+            None,
+            matcher,
+            Some(60),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(out.meta.stop_reason, RxStopReason::NoNewRxTimeout);
+        assert!(!out.matched);
+        drop(tx);
+    }
+
+    // ── Framing ────────────────────────────────────────────────────────────────
+
+    fn line_framing(max_frames: Option<usize>) -> crate::framing::FramingConfig {
+        crate::framing::FramingConfig {
+            mode: crate::framing::FramingMode::Line,
+            max_frames,
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn char_framing_max_frames() {
+        let (tx, rx) = mpsc::channel(8);
+        tx.send(RxEvent::Data(b"a\nb\n".to_vec())).await.unwrap();
+        let out = read_bytes_via_session(
+            rx,
+            256,
+            Some(1000),
+            &fresh_ct(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(line_framing(Some(2))),
+        )
+        .await
+        .unwrap();
+        assert_eq!(out.meta.stop_reason, RxStopReason::MaxFrames);
+        assert_eq!(out.frames.len(), 2);
+        drop(tx);
+    }
+
+    #[tokio::test]
+    async fn char_framing_match_sets_frame_index() {
+        let (tx, rx) = mpsc::channel(8);
+        tx.send(RxEvent::Data(b"a\nb\n".to_vec())).await.unwrap();
+        let matcher = Matcher::new_literal(b"b".to_vec());
+        let out = read_bytes_via_session(
+            rx,
+            256,
+            Some(1000),
+            &fresh_ct(),
+            None,
+            None,
+            matcher,
+            None,
+            None,
+            Some(line_framing(None)),
+        )
+        .await
+        .unwrap();
+        assert_eq!(out.meta.stop_reason, RxStopReason::MatchFound);
+        assert!(out.matched);
+        assert_eq!(out.match_index, Some(0));
+        assert_eq!(out.match_frame_index, Some(1));
+        assert_eq!(out.bytes, b"b");
+        drop(tx);
+    }
+
+    #[tokio::test]
+    async fn char_framing_match_includes_post_match_frames() {
+        let (tx, rx) = mpsc::channel(8);
+        tx.send(RxEvent::Data(b"hit\nafter\n".to_vec()))
+            .await
+            .unwrap();
+        let matcher = Matcher::new_literal(b"hit".to_vec());
+        let out = read_bytes_via_session(
+            rx,
+            256,
+            Some(1000),
+            &fresh_ct(),
+            None,
+            None,
+            matcher,
+            None,
+            None,
+            Some(line_framing(None)),
+        )
+        .await
+        .unwrap();
+        assert_eq!(out.meta.stop_reason, RxStopReason::MatchFound);
+        assert_eq!(out.match_frame_index, Some(0));
+        assert_eq!(out.bytes, b"hit");
+        // read includes the frame decoded AFTER the matching one in the same chunk.
+        assert_eq!(out.frames.len(), 2);
+        drop(tx);
+    }
+
+    #[tokio::test]
+    async fn char_framing_partial_frame_flushed_on_timeout() {
+        // "ab" with no newline → buffered partial frame, flushed on timeout.
+        let (tx, rx) = mpsc::channel(8);
+        tx.send(RxEvent::Data(b"ab".to_vec())).await.unwrap();
+        let out = read_bytes_via_session(
+            rx,
+            256,
+            Some(80),
+            &fresh_ct(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(line_framing(None)),
+        )
+        .await
+        .unwrap();
+        assert_eq!(out.meta.stop_reason, RxStopReason::Timeout);
+        assert_eq!(out.frames.len(), 1);
+        assert_eq!(out.frames[0].data, b"ab");
+    }
+
+    struct TestRxArgs {
+        connection_id: String,
+        encoding: String,
+        max_buffered_bytes: usize,
+        timeout_ms: Option<u64>,
+        no_new_rx_timeout_ms: Option<u64>,
+        match_request: Option<MatchRequest>,
+    }
+
+    impl RxRequestArgs for TestRxArgs {
+        fn connection_id(&self) -> &str {
+            &self.connection_id
+        }
+        fn encoding(&self) -> &str {
+            &self.encoding
+        }
+        fn max_buffered_bytes(&self) -> usize {
+            self.max_buffered_bytes
+        }
+        fn timeout_ms(&self) -> Option<u64> {
+            self.timeout_ms
+        }
+        fn no_new_rx_timeout_ms(&self) -> Option<u64> {
+            self.no_new_rx_timeout_ms
+        }
+        fn match_request(&self) -> Option<&MatchRequest> {
+            self.match_request.as_ref()
+        }
+    }
+
+    fn valid_args(id: &str) -> TestRxArgs {
+        TestRxArgs {
+            connection_id: id.into(),
+            encoding: "utf-8".into(),
+            max_buffered_bytes: 256,
+            timeout_ms: Some(1000),
+            no_new_rx_timeout_ms: None,
+            match_request: None,
+        }
+    }
+
+    fn read_limits() -> RxLimits {
+        RxLimits {
+            tool: "read",
+            min_buffered: MIN_READ_BYTES,
+            max_buffered: MAX_READ_BYTES,
+        }
+    }
+
+    async fn fake_conn() -> (Arc<ConnectionManager>, String, tokio::io::DuplexStream) {
+        let connections = Arc::new(ConnectionManager::new());
+        let (conn, peer) = crate::serial::test_support::loopback_connection("/dev/fake-validate");
+        let id = connections.insert(conn).await.unwrap();
+        (connections, id, peer)
+    }
+
+    #[tokio::test]
+    async fn validate_rx_request_ok() {
+        let (connections, id, _peer) = fake_conn().await;
+        let resolved = validate_rx_request(&connections, &valid_args(&id), read_limits())
+            .await
+            .unwrap();
+        assert_eq!(resolved.max_buffered_bytes, 256);
+        assert!(resolved.matcher.is_none());
+        assert_eq!(resolved.connection.port(), "/dev/fake-validate");
+    }
+
+    #[tokio::test]
+    async fn validate_rx_request_rejects_bad_encoding() {
+        let (connections, id, _peer) = fake_conn().await;
+        let mut a = valid_args(&id);
+        a.encoding = "rot13".into();
+        let err = validate_rx_request(&connections, &a, read_limits())
+            .await
+            .unwrap_err();
+        assert!(err.to_lowercase().contains("encoding"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn validate_rx_request_rejects_unknown_connection() {
+        let connections = Arc::new(ConnectionManager::new());
+        let err = validate_rx_request(&connections, &valid_args("nope"), read_limits())
+            .await
+            .unwrap_err();
+        assert!(err.contains("Connection ID nope not found"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn validate_rx_request_rejects_buffered_below_min() {
+        let (connections, id, _peer) = fake_conn().await;
+        let mut a = valid_args(&id);
+        a.max_buffered_bytes = 0;
+        let err = validate_rx_request(&connections, &a, read_limits())
+            .await
+            .unwrap_err();
+        assert!(err.contains("read.max_buffered_bytes"), "got: {err}");
+        assert!(err.contains("below minimum"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn validate_rx_request_rejects_buffered_above_max() {
+        let (connections, id, _peer) = fake_conn().await;
+        let mut a = valid_args(&id);
+        a.max_buffered_bytes = MAX_READ_BYTES + 1;
+        let err = validate_rx_request(&connections, &a, read_limits())
+            .await
+            .unwrap_err();
+        assert!(err.contains("exceeds maximum"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn validate_rx_request_rejects_zero_silence_with_tool_prefix() {
+        let (connections, id, _peer) = fake_conn().await;
+        let mut a = valid_args(&id);
+        a.no_new_rx_timeout_ms = Some(0);
+        let subscribe_limits = RxLimits {
+            tool: "subscribe",
+            min_buffered: MIN_STREAM_CHUNK_BYTES,
+            max_buffered: MAX_STREAM_CHUNK_BYTES,
+        };
+        let err = validate_rx_request(&connections, &a, subscribe_limits)
+            .await
+            .unwrap_err();
+        assert_eq!(err, "subscribe.no_new_rx_timeout_ms must be > 0");
+    }
+
+    #[tokio::test]
+    async fn validate_rx_request_rejects_oversized_timeout() {
+        let (connections, id, _peer) = fake_conn().await;
+        let mut a = valid_args(&id);
+        a.timeout_ms = Some(MAX_TIMEOUT_MS + 1);
+        let err = validate_rx_request(&connections, &a, read_limits())
+            .await
+            .unwrap_err();
+        assert!(err.contains("read.timeout_ms"), "got: {err}");
+        assert!(err.contains("exceeds maximum"), "got: {err}");
     }
 }

@@ -11,15 +11,17 @@ use tracing::{debug, error, info, warn};
 
 use crate::buffer_budget::BufferBudget;
 use crate::codec;
-use crate::match_config::{shape_match_context, validate_match_request, Matcher};
-use crate::rx_metadata::RxStopMetadata;
+use crate::match_config::{shape_match_context, Matcher};
+use crate::rx_metadata::{RxStopMetadata, RxStopReason};
 use crate::rx_session::{RxEvent, RxSessionManager};
 use crate::serial::ConnectionManager;
 use crate::stop_controller::{RxStopController, RxStopDecision};
 use crate::tools::helpers::{
-    clamp_or_err, clamp_poll_interval_or_err, clamp_timeout_or_err, lookup_connection,
-    parse_encoding, require_min_or_err, MAX_STREAM_CHUNK_BYTES, MAX_TIMEOUT_MS,
-    MIN_POLL_INTERVAL_MS, MIN_STREAM_CHUNK_BYTES,
+    clamp_poll_interval_or_err, map_budget_err, validate_rx_request, ResolvedRxArgs, RxLimits,
+    MAX_STREAM_CHUNK_BYTES, MIN_POLL_INTERVAL_MS, MIN_STREAM_CHUNK_BYTES,
+};
+use crate::tools::rx_consume::{
+    consume_frames, disconnect_state, DisconnectState, FrameOutcome, RxFrameSink, SinkFlow,
 };
 use crate::tools::types::{SubscribeArgs, SubscribeResult, UnsubscribeArgs, UnsubscribeResult};
 
@@ -80,40 +82,27 @@ pub async fn subscribe(
         args.no_new_rx_timeout_ms
     );
 
-    let encoding = parse_encoding(&args.encoding)?;
-    let connection = lookup_connection(connections, &args.connection_id).await?;
-
-    let max_buffered_bytes = require_min_or_err(
-        "subscribe.max_buffered_bytes",
-        args.max_buffered_bytes,
-        MIN_STREAM_CHUNK_BYTES,
-    )?;
-    let max_buffered_bytes = clamp_or_err(
-        "subscribe.max_buffered_bytes",
+    let ResolvedRxArgs {
+        encoding,
+        connection,
         max_buffered_bytes,
-        MAX_STREAM_CHUNK_BYTES,
-    )?;
+        matcher,
+    } = validate_rx_request(
+        connections,
+        &args,
+        RxLimits {
+            tool: "subscribe",
+            min_buffered: MIN_STREAM_CHUNK_BYTES,
+            max_buffered: MAX_STREAM_CHUNK_BYTES,
+        },
+    )
+    .await?;
+    // poll_interval_ms is subscribe-specific; validated after the shared preamble.
     let poll_ms = clamp_poll_interval_or_err(
         "subscribe.poll_interval_ms",
         args.poll_interval_ms,
         MIN_POLL_INTERVAL_MS,
     )?;
-
-    if let Some(timeout_ms) = args.timeout_ms {
-        clamp_timeout_or_err("subscribe.timeout_ms", timeout_ms, MAX_TIMEOUT_MS)?;
-    }
-    if let Some(silence_ms) = args.no_new_rx_timeout_ms {
-        if silence_ms == 0 {
-            return Err("subscribe.no_new_rx_timeout_ms must be > 0".into());
-        }
-        clamp_timeout_or_err("subscribe.no_new_rx_timeout_ms", silence_ms, MAX_TIMEOUT_MS)?;
-    }
-
-    // Resolve matcher if provided.
-    let matcher: Option<Matcher> = match &args.r#match {
-        Some(m) => Some(validate_match_request(m)?),
-        None => None,
-    };
 
     // Drop any existing subscription on this connection FIRST.
     // This aborts the old task and releases its budget reservation
@@ -135,22 +124,9 @@ pub async fn subscribe(
     // Yield to allow the old task's reservation to start releasing.
     tokio::task::yield_now().await;
 
-    let _reservation = budget.try_reserve(max_buffered_bytes).map_err(|e| {
-        match e {
-            crate::buffer_budget::BufferBudgetError::OverToolLimit { requested, tool_limit } => {
-                format!("subscribe.max_buffered_bytes={requested} exceeds per-tool limit {tool_limit}")
-            }
-            crate::buffer_budget::BufferBudgetError::ZeroRequest => {
-                "subscribe.max_buffered_bytes must be > 0".into()
-            }
-            crate::buffer_budget::BufferBudgetError::InsufficientProgramBudget {
-                requested,
-                available,
-            } => {
-                format!("insufficient program buffer budget: requested {requested}, available {available}")
-            }
-        }
-    })?;
+    let _reservation = budget
+        .try_reserve(max_buffered_bytes)
+        .map_err(|e| map_budget_err("subscribe.max_buffered_bytes", e))?;
 
     let id = args.connection_id.clone();
     let name = connection.name().map(str::to_string);
@@ -253,6 +229,99 @@ pub async fn unsubscribe(
     }))
 }
 
+/// `subscribe`'s frame sink: emits one notification per decoded frame, tracking
+/// cumulative returned bytes. Stops at the matching frame (preserving the legacy
+/// quirk that a failed emit of the *matching* frame still reports the match).
+struct SubscribeFrameSink<'a> {
+    peer: Peer<RoleServer>,
+    conn: &'a Arc<crate::serial::SerialConnection>,
+    logger: &'a str,
+    conn_id: &'a str,
+    encoding: crate::codec::Encoding,
+    total_returned: &'a mut usize,
+    match_offset: &'a mut Option<usize>,
+    match_frame_index: &'a mut Option<usize>,
+}
+
+#[async_trait::async_trait]
+impl RxFrameSink for SubscribeFrameSink<'_> {
+    async fn on_frame(
+        &mut self,
+        frame: crate::framing::Frame,
+        matched: bool,
+        match_index: Option<usize>,
+    ) -> SinkFlow {
+        let encoded = match codec::encode(self.encoding, &frame.data) {
+            Ok(s) => s,
+            Err(e) => {
+                warn!("RX frame encoding error on {}: {e}", self.conn_id);
+                self.conn.record_notification_drop();
+                self.conn
+                    .log()
+                    .notification_dropped(&format!("frame encoding error: {e}"));
+                return SinkFlow::Continue;
+            }
+        };
+
+        let mut payload = serde_json::json!({
+            "connection_id": self.conn_id,
+            "frame_index": frame.index,
+            "frame_type": frame.frame_type,
+            "encoding": self.encoding.to_string(),
+            "data": encoded,
+        });
+        if let Some(ref parsed) = frame.parsed {
+            match serde_json::to_value(parsed) {
+                Ok(v) => payload["parsed"] = v,
+                Err(e) => {
+                    warn!(
+                        "RX frame parsed serialization error on {}: {e}",
+                        self.conn_id
+                    )
+                }
+            }
+        }
+        if matched {
+            payload["matched"] = serde_json::json!(true);
+        }
+
+        let param = LoggingMessageNotificationParam {
+            level: LoggingLevel::Info,
+            logger: Some(self.logger.to_string()),
+            data: payload,
+        };
+        let emit = self.peer.notify_logging_message(param).await;
+
+        if matched {
+            // Quirk: a failed emit of the matching frame still reports the match
+            // (logs + record_notification_drop only), distinct from the non-matching
+            // path below which returns PeerDisconnected. Intentional — see the
+            // read/subscribe framing invariants in AGENTS.md.
+            // KNOWN GAP: not characterization-tested (requires a peer disconnect
+            // mid-emit on the matching frame); preserved by faithful translation.
+            if let Err(e) = emit {
+                error!("RX frame stream peer disconnected: {e}");
+                self.conn.record_notification_drop();
+            }
+            *self.total_returned += frame.data.len();
+            *self.match_offset = match_index;
+            *self.match_frame_index = Some(frame.index);
+            return SinkFlow::Stop(RxStopReason::MatchFound);
+        }
+
+        if let Err(e) = emit {
+            error!("RX frame stream peer disconnected: {e}");
+            self.conn.record_notification_drop();
+            self.conn
+                .log()
+                .notification_dropped(&format!("frame peer disconnected: {e}"));
+            return SinkFlow::Stop(RxStopReason::PeerDisconnected);
+        }
+        *self.total_returned += frame.data.len();
+        SinkFlow::Continue
+    }
+}
+
 /// Stream RX data sourced from an [`RxSession`] consumer channel.
 ///
 /// Replaces the old `stream_rx` helper that read directly from
@@ -301,6 +370,7 @@ async fn stream_rx_via_session(
     let deadline = ctrl.deadline();
     let mut stop_outcome: Option<crate::stop_controller::RxStopOutcome> = None;
     let mut match_frame_index: Option<usize> = None;
+    let mut match_offset: Option<usize> = None;
 
     // Track total bytes sent via per-chunk data notifications, so
     // bytes_returned in the stop payload reflects cumulative delivered
@@ -316,6 +386,10 @@ async fn stream_rx_via_session(
     // Frame decoder state.
     let max_frames = framing.as_ref().and_then(|f| f.max_frames);
     let mut decoder = match framing.as_ref() {
+        // subscribe is a background task that already returned Ok(SubscribeResult);
+        // it cannot surface a sync error, so a bad framing config degrades to raw
+        // chunk mode rather than failing. (read propagates the error instead — see
+        // helpers.rs.)
         Some(cfg) => match crate::framing::FrameDecoder::new(cfg) {
             Ok(d) => Some(d),
             Err(e) => {
@@ -326,23 +400,22 @@ async fn stream_rx_via_session(
         None => None,
     };
     let mut frames_emitted: usize = 0;
+    let peer_owned = peer.clone();
 
     loop {
         // Pause timeouts while the connection is disconnected or reconnecting.
         // If reconnect is NOT enabled, exit the loop so flush_partial can run
         // and the client receives a stop notification with the partial frame.
-        let state = conn.state();
-        if state == crate::serial::ConnectionState::Disconnected
-            || state == crate::serial::ConnectionState::Reconnecting
-        {
-            let reconnect_enabled = conn.reconnect_policy.lock().expect("poisoned").enabled;
-            if !reconnect_enabled {
+        match disconnect_state(&conn, &mut ctrl) {
+            DisconnectState::Closed => {
                 stop_outcome = Some(ctrl.connection_closed());
                 break;
             }
-            ctrl.reset_silence_timer();
-            tokio::time::sleep(Duration::from_millis(50)).await;
-            continue;
+            DisconnectState::Reconnecting => {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                continue;
+            }
+            DisconnectState::Active => {}
         }
 
         if let RxStopDecision::Stop(outcome) = ctrl.check_timeout() {
@@ -387,142 +460,62 @@ async fn stream_rx_via_session(
                 let mut suppress_chunk_notification = false;
                 if let Some(ref mut dec) = decoder {
                     suppress_chunk_notification = true;
-                    let new_frames = dec.push(&chunk);
-                    for frame in new_frames {
-                        frames_emitted += 1;
-
-                        // Encode frame data for the notification.
-                        let encoded = match codec::encode(encoding, &frame.data) {
-                            Ok(s) => s,
-                            Err(e) => {
-                                warn!("RX frame encoding error on {conn_id}: {e}");
-                                conn.record_notification_drop();
-                                conn.log()
-                                    .notification_dropped(&format!("frame encoding error: {e}"));
-                                continue;
-                            }
-                        };
-
-                        // Build frame notification payload.
-                        let mut payload = serde_json::json!({
-                            "connection_id": conn_id,
-                            "frame_index": frame.index,
-                            "frame_type": frame.frame_type,
-                            "encoding": encoding.to_string(),
-                            "data": encoded,
-                        });
-                        if let Some(ref parsed) = frame.parsed {
-                            let parsed_json = match parsed {
-                                crate::framing::ParsedFrame::AtCommand {
-                                    response_type,
-                                    command,
-                                    status,
-                                    fields,
-                                } => {
-                                    let mut p = serde_json::json!({
-                                        "parser": "at_command",
-                                        "response_type": response_type,
-                                        "fields": fields,
-                                    });
-                                    if let Some(c) = command {
-                                        p["command"] = serde_json::json!(c);
-                                    }
-                                    if let Some(s) = status {
-                                        p["status"] = serde_json::json!(s);
-                                    }
-                                    p
-                                }
-                                crate::framing::ParsedFrame::Json(v) => {
-                                    let mut p = serde_json::json!({"parser": "json"});
-                                    if let Some(obj) = v.as_object() {
-                                        for (key, val) in obj {
-                                            p[key] = val.clone();
-                                        }
-                                    }
-                                    p
-                                }
-                                crate::framing::ParsedFrame::ShellPrompt {
-                                    prompt,
-                                    prompt_type,
-                                } => serde_json::json!({
-                                    "parser": "shell_prompt",
-                                    "prompt": prompt,
-                                    "prompt_type": prompt_type,
-                                }),
-                                crate::framing::ParsedFrame::Raw => serde_json::json!({
-                                    "parser": "raw",
-                                }),
-                            };
-                            payload["parsed"] = parsed_json;
-                        }
-
-                        // Per-frame match on decoded frame data.
-                        if let Some(ref mut m) = matcher {
-                            m.reset_window();
-                            if let crate::match_config::MatchResult::Found(idx) =
-                                m.push(&frame.data)
-                            {
-                                payload["matched"] = serde_json::json!(true);
-                                // Emit this frame before stopping.
-                                let param = LoggingMessageNotificationParam {
-                                    level: LoggingLevel::Info,
-                                    logger: Some(logger.clone()),
-                                    data: payload,
-                                };
-                                if let Err(e) = peer.notify_logging_message(param).await {
-                                    error!("RX frame stream peer disconnected: {e}");
-                                    conn.record_notification_drop();
-                                }
-                                total_returned += frame.data.len();
-                                stop_outcome = Some(crate::stop_controller::RxStopOutcome {
-                                    meta: RxStopMetadata::match_found(
-                                        ctrl.bytes_observed(),
-                                        total_returned,
-                                    ),
-                                    matched: true,
-                                    match_index: Some(idx),
-                                });
-                                match_frame_index = Some(frame.index);
-                                break;
-                            }
-                        }
-
-                        // Emit the frame notification.
-                        let param = LoggingMessageNotificationParam {
-                            level: LoggingLevel::Info,
-                            logger: Some(logger.clone()),
-                            data: payload,
-                        };
-                        if let Err(e) = peer.notify_logging_message(param).await {
-                            error!("RX frame stream peer disconnected: {e}");
-                            conn.record_notification_drop();
-                            conn.log()
-                                .notification_dropped(&format!("frame peer disconnected: {e}"));
-                            stop_outcome = Some(ctrl.peer_disconnected());
-                            break;
-                        }
-                        total_returned += frame.data.len();
-
-                        if stop_outcome.is_some() {
-                            break;
-                        }
-                    }
-
-                    // Check max_frames stop condition.
-                    if let Some(limit) = max_frames {
-                        if frames_emitted >= limit && stop_outcome.is_none() {
-                            let bytes_observed = ctrl.bytes_observed();
-                            let meta = RxStopMetadata::max_frames(bytes_observed, total_returned);
+                    let mut sink = SubscribeFrameSink {
+                        peer: peer_owned.clone(),
+                        conn: &conn,
+                        logger: logger.as_str(),
+                        conn_id: conn_id.as_str(),
+                        encoding,
+                        total_returned: &mut total_returned,
+                        match_offset: &mut match_offset,
+                        match_frame_index: &mut match_frame_index,
+                    };
+                    let outcome = consume_frames(
+                        &chunk,
+                        dec,
+                        &mut matcher,
+                        max_frames,
+                        &mut frames_emitted,
+                        &mut sink,
+                    )
+                    .await;
+                    match outcome {
+                        FrameOutcome::SinkStop(RxStopReason::MatchFound) => {
                             stop_outcome = Some(crate::stop_controller::RxStopOutcome {
-                                meta,
+                                meta: RxStopMetadata::match_found(
+                                    ctrl.bytes_observed(),
+                                    total_returned,
+                                ),
+                                matched: true,
+                                match_index: match_offset,
+                            });
+                        }
+                        FrameOutcome::SinkStop(RxStopReason::PeerDisconnected) => {
+                            // peer disconnected while emitting a non-matching frame
+                            stop_outcome = Some(ctrl.peer_disconnected());
+                        }
+                        FrameOutcome::SinkStop(reason) => {
+                            // Unexpected: a new sink stop reason was added to
+                            // RxFrameSink. Map to a generic stop rather than
+                            // silently mis-categorizing.
+                            warn!(
+                                "unexpected sink stop reason {reason:?} on {conn_id}; treating as connection_closed"
+                            );
+                            stop_outcome = Some(ctrl.connection_closed());
+                        }
+                        FrameOutcome::MaxFrames => {
+                            stop_outcome = Some(crate::stop_controller::RxStopOutcome {
+                                meta: RxStopMetadata::max_frames(
+                                    ctrl.bytes_observed(),
+                                    total_returned,
+                                ),
                                 matched: false,
                                 match_index: None,
                             });
-                            break;
                         }
+                        FrameOutcome::Continue => {}
                     }
                 }
-
                 if stop_outcome.is_some() {
                     break;
                 }
@@ -636,48 +629,12 @@ async fn stream_rx_via_session(
                     "partial": true,
                 });
                 if let Some(ref parsed) = partial.parsed {
-                    let parsed_json = match parsed {
-                        crate::framing::ParsedFrame::AtCommand {
-                            response_type,
-                            command,
-                            status,
-                            fields,
-                        } => {
-                            let mut p = serde_json::json!({
-                                "parser": "at_command",
-                                "response_type": response_type,
-                                "fields": fields,
-                            });
-                            if let Some(c) = command {
-                                p["command"] = serde_json::json!(c);
-                            }
-                            if let Some(s) = status {
-                                p["status"] = serde_json::json!(s);
-                            }
-                            p
+                    match serde_json::to_value(parsed) {
+                        Ok(v) => payload["parsed"] = v,
+                        Err(e) => {
+                            warn!("RX partial frame parsed serialization error on {conn_id}: {e}")
                         }
-                        crate::framing::ParsedFrame::Json(v) => {
-                            let mut p = serde_json::json!({"parser": "json"});
-                            if let Some(obj) = v.as_object() {
-                                for (key, val) in obj {
-                                    p[key] = val.clone();
-                                }
-                            }
-                            p
-                        }
-                        crate::framing::ParsedFrame::ShellPrompt {
-                            prompt,
-                            prompt_type,
-                        } => serde_json::json!({
-                            "parser": "shell_prompt",
-                            "prompt": prompt,
-                            "prompt_type": prompt_type,
-                        }),
-                        crate::framing::ParsedFrame::Raw => serde_json::json!({
-                            "parser": "raw",
-                        }),
-                    };
-                    payload["parsed"] = parsed_json;
+                    }
                 }
                 let param = LoggingMessageNotificationParam {
                     level: LoggingLevel::Info,
@@ -702,18 +659,6 @@ async fn stream_rx_via_session(
     if truncated {
         conn.record_truncation();
         conn.log().truncated(bytes_observed, total_returned);
-    }
-    if outcome.matched {
-        if let Some(ref m) = matcher {
-            // Log the match pattern. For regex/glob, mode is known; for literal, needle len.
-            let mode = match &m {
-                crate::match_config::Matcher::Literal { .. } => "literal_substring".to_string(),
-                crate::match_config::Matcher::Regex { .. } => "regex".to_string(),
-                crate::match_config::Matcher::Glob { .. } => "glob".to_string(),
-            };
-            // pattern is not directly accessible — deferred
-            let _ = mode;
-        }
     }
     let stop_meta = RxStopMetadata {
         stop_reason: outcome.meta.stop_reason,
@@ -771,4 +716,48 @@ async fn stream_rx_via_session(
         "RX stream ended for {conn_id}: reason={} bytes={} elapsed={}ms",
         stop_meta.stop_reason, stop_meta.bytes_observed, elapsed_ms
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::framing::ParsedFrame;
+
+    #[test]
+    fn parsed_frame_serializes_with_inlined_object_shape() {
+        let at = ParsedFrame::AtCommand {
+            response_type: "data".into(),
+            command: Some("CGREG".into()),
+            status: Some("OK".into()),
+            fields: vec!["1".into(), "2".into()],
+        };
+        let v = serde_json::to_value(&at).unwrap();
+        assert_eq!(v["parser"], "at_command");
+        assert_eq!(v["response_type"], "data");
+        assert_eq!(v["command"], "CGREG");
+        assert_eq!(v["status"], "OK");
+        assert_eq!(v["fields"], serde_json::json!(["1", "2"]));
+
+        // command/status omitted when None.
+        let at_min = ParsedFrame::AtCommand {
+            response_type: "urc".into(),
+            command: None,
+            status: None,
+            fields: vec![],
+        };
+        let v = serde_json::to_value(&at_min).unwrap();
+        assert!(v.get("command").is_none());
+        assert!(v.get("status").is_none());
+
+        // JSON object fields are inlined alongside "parser".
+        let j = ParsedFrame::Json(serde_json::json!({"sensor": "temp", "value": 25.5}));
+        let v = serde_json::to_value(&j).unwrap();
+        assert_eq!(v["parser"], "json");
+        assert_eq!(v["sensor"], "temp");
+        assert_eq!(v["value"], 25.5);
+
+        assert_eq!(
+            serde_json::to_value(&ParsedFrame::Raw).unwrap()["parser"],
+            "raw"
+        );
+    }
 }

@@ -1807,10 +1807,11 @@ dependencies = [
 
 [[package]]
 name = "serial-mcp"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "anyhow",
  "arbitrary",
+ "async-trait",
  "axum",
  "base64",
  "dirs",

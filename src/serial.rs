@@ -139,6 +139,58 @@ pub(crate) fn flow_control_to_str(f: FlowControl) -> String {
     }
 }
 
+// ---- String parsing (single source of truth) --------------------------------
+
+impl std::str::FromStr for DataBits {
+    type Err = String;
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s {
+            "5" => Ok(DataBits::Five),
+            "6" => Ok(DataBits::Six),
+            "7" => Ok(DataBits::Seven),
+            "8" => Ok(DataBits::Eight),
+            other => Err(format!("Invalid data_bits {other:?} (expected 5/6/7/8)")),
+        }
+    }
+}
+
+impl std::str::FromStr for StopBits {
+    type Err = String;
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s {
+            "1" => Ok(StopBits::One),
+            "2" => Ok(StopBits::Two),
+            other => Err(format!("Invalid stop_bits {other:?} (expected 1/2)")),
+        }
+    }
+}
+
+impl std::str::FromStr for Parity {
+    type Err = String;
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "none" => Ok(Parity::None),
+            "odd" => Ok(Parity::Odd),
+            "even" => Ok(Parity::Even),
+            other => Err(format!("Invalid parity {other:?} (expected none/odd/even)")),
+        }
+    }
+}
+
+impl std::str::FromStr for FlowControl {
+    type Err = String;
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "none" => Ok(FlowControl::None),
+            "software" => Ok(FlowControl::Software),
+            "hardware" => Ok(FlowControl::Hardware),
+            other => Err(format!(
+                "Invalid flow_control {other:?} (expected none/software/hardware)"
+            )),
+        }
+    }
+}
+
 /// Concrete parameters required to open a serial port.
 #[derive(Debug, Clone, JsonSchema)]
 pub struct ConnectionConfig {
@@ -1627,5 +1679,86 @@ mod tests {
 
         let err = reader.await.unwrap().unwrap_err();
         assert!(matches!(err, SerialError::ConnectionClosed(_)));
+    }
+
+    #[test]
+    fn from_str_parses_config_enums() {
+        use std::str::FromStr;
+        assert!(matches!("5".parse::<DataBits>(), Ok(DataBits::Five)));
+        assert!(matches!("8".parse::<DataBits>(), Ok(DataBits::Eight)));
+        assert!("9".parse::<DataBits>().is_err());
+
+        assert!(matches!("1".parse::<StopBits>(), Ok(StopBits::One)));
+        assert!(matches!("2".parse::<StopBits>(), Ok(StopBits::Two)));
+        assert!("3".parse::<StopBits>().is_err());
+
+        // Parity / flow_control are case-insensitive (the intended shared behavior).
+        assert!(matches!(Parity::from_str("none"), Ok(Parity::None)));
+        assert!(matches!(Parity::from_str("Even"), Ok(Parity::Even)));
+        assert!(matches!("ODD".parse::<Parity>(), Ok(Parity::Odd)));
+        assert!("weird".parse::<Parity>().is_err());
+
+        assert!(matches!(
+            "NONE".parse::<FlowControl>(),
+            Ok(FlowControl::None)
+        ));
+        assert!(matches!(
+            "Software".parse::<FlowControl>(),
+            Ok(FlowControl::Software)
+        ));
+        assert!(matches!(
+            "hardware".parse::<FlowControl>(),
+            Ok(FlowControl::Hardware)
+        ));
+        assert!("xon".parse::<FlowControl>().is_err());
+    }
+
+    #[test]
+    fn from_str_round_trips_with_to_str() {
+        for d in [
+            DataBits::Five,
+            DataBits::Six,
+            DataBits::Seven,
+            DataBits::Eight,
+        ] {
+            let s = data_bits_to_str(d);
+            assert_eq!(data_bits_to_str(s.parse::<DataBits>().unwrap()), s);
+        }
+        for sb in [StopBits::One, StopBits::Two] {
+            let s = stop_bits_to_str(sb);
+            assert_eq!(stop_bits_to_str(s.parse::<StopBits>().unwrap()), s);
+        }
+        for p in [Parity::None, Parity::Odd, Parity::Even] {
+            let s = parity_to_str(p);
+            assert_eq!(parity_to_str(s.parse::<Parity>().unwrap()), s);
+        }
+        for f in [
+            FlowControl::None,
+            FlowControl::Software,
+            FlowControl::Hardware,
+        ] {
+            let s = flow_control_to_str(f);
+            assert_eq!(flow_control_to_str(s.parse::<FlowControl>().unwrap()), s);
+        }
+    }
+
+    #[test]
+    fn from_str_error_messages_are_descriptive() {
+        assert!("9"
+            .parse::<DataBits>()
+            .unwrap_err()
+            .contains("expected 5/6/7/8"));
+        assert!("3"
+            .parse::<StopBits>()
+            .unwrap_err()
+            .contains("expected 1/2"));
+        assert!("weird"
+            .parse::<Parity>()
+            .unwrap_err()
+            .contains("expected none/odd/even"));
+        assert!("xon"
+            .parse::<FlowControl>()
+            .unwrap_err()
+            .contains("expected none/software/hardware"));
     }
 }

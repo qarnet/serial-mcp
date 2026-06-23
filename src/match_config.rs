@@ -132,6 +132,7 @@ impl From<PatternEncoding> for codec::Encoding {
 /// bytes contain a match, returns [`MatchResult::Found`] with the byte offset.
 /// Callers are responsible for truncating buffered data that can no longer
 /// participate in a future match.
+#[derive(Debug)]
 pub enum Matcher {
     /// Literal byte-substring match.
     Literal {

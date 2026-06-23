@@ -1,8 +1,8 @@
 # Technical Debt
 
-## RX cleanup after PLAN 1 and PLAN 2
+## RX / subscribe stop payload
 
-### 1. Simplify subscribe final-stop payload fields
+### Simplify subscribe final-stop payload fields
 
 Current issue:
 - Final subscribe stop payload includes overlapping counters such as `bytes_read`,
@@ -16,24 +16,9 @@ Likely follow-up:
 - decide canonical field set for subscribe stop notifications,
 - remove or deprecate overlapping counters once compatibility plan is clear.
 
-### 2. Update docs to match unified RX + metadata model
+## Testing
 
-Current issue:
-- README, tool descriptions, and related docs may not fully explain:
-  - unified `RxSession` RX model
-  - future-only semantics
-  - `stop_reason`
-  - `truncated`
-  - `bytes_observed` / `bytes_returned`
-
-Why it matters:
-- Agents depend on precise semantics.
-- Stale docs cause wrong tool usage patterns.
-
-Likely follow-up:
-- full documentation pass after PLAN 3/4 settle naming and semantics.
-
-### 3. Reduce duplicated `tx_session` test coverage
+### Reduce duplicated `tx_session` test coverage
 
 Current issue:
 - `src/tx_session.rs` unit tests and `tests/tx_session.rs` integration tests cover many same cases.
@@ -47,7 +32,7 @@ Likely follow-up:
 - keep low-level behavior checks close to `src/tx_session.rs`,
 - keep only tool-surface or cross-module wiring coverage in `tests/tx_session.rs`.
 
-### 4. Add better live coverage for TX output flush semantics
+### Add better live coverage for TX output flush semantics
 
 Current issue:
 - PTY and unit tests cover TX ordering and basic output flush behavior.

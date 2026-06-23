@@ -5,14 +5,13 @@ use tracing::{debug, info};
 
 use crate::buffer_budget::BufferBudget;
 use crate::codec;
-use crate::match_config::{validate_match_request, Matcher};
 use crate::rx_session::RxSessionManager;
 use crate::serial::ConnectionManager;
 use crate::serial::FlushTarget;
 use crate::tools::helpers::{
-    build_read_result, clamp_or_err, clamp_timeout_or_err, log_tool_err, lookup_connection,
-    parse_encoding, read_bytes_via_session, require_min_or_err, MAX_READ_BYTES, MAX_TIMEOUT_MS,
-    MAX_WRITE_BYTES, MIN_READ_BYTES,
+    build_read_result, clamp_or_err, log_tool_err, lookup_connection, map_budget_err,
+    parse_encoding, read_bytes_via_session, validate_rx_request, ResolvedRxArgs, RxLimits,
+    MAX_READ_BYTES, MAX_WRITE_BYTES, MIN_READ_BYTES,
 };
 use crate::tools::types::{FlushArgs, FlushResult, ReadArgs, ReadResult, WriteArgs, WriteResult};
 
@@ -64,51 +63,26 @@ pub async fn read(
         args.connection_id, args.timeout_ms, args.no_new_rx_timeout_ms
     );
 
-    let encoding = parse_encoding(&args.encoding)?;
-    let connection = lookup_connection(connections, &args.connection_id).await?;
-    let max_buffered_bytes = require_min_or_err(
-        "read.max_buffered_bytes",
-        args.max_buffered_bytes,
-        MIN_READ_BYTES,
-    )?;
-    let max_buffered_bytes = clamp_or_err(
-        "read.max_buffered_bytes",
+    let ResolvedRxArgs {
+        encoding,
+        connection,
         max_buffered_bytes,
-        MAX_READ_BYTES,
-    )?;
-    if let Some(timeout_ms) = args.timeout_ms {
-        clamp_timeout_or_err("read.timeout_ms", timeout_ms, MAX_TIMEOUT_MS)?;
-    }
-    if let Some(silence_ms) = args.no_new_rx_timeout_ms {
-        if silence_ms == 0 {
-            return Err("read.no_new_rx_timeout_ms must be > 0".into());
-        }
-        clamp_timeout_or_err("read.no_new_rx_timeout_ms", silence_ms, MAX_TIMEOUT_MS)?;
-    }
-
-    // Resolve matcher if provided.
-    let matcher: Option<Matcher> = match &args.r#match {
-        Some(m) => Some(validate_match_request(m)?),
-        None => None,
-    };
+        matcher,
+    } = validate_rx_request(
+        connections,
+        &args,
+        RxLimits {
+            tool: "read",
+            min_buffered: MIN_READ_BYTES,
+            max_buffered: MAX_READ_BYTES,
+        },
+    )
+    .await?;
 
     // Reserve budget before registering consumer.
-    let _reservation = budget.try_reserve(max_buffered_bytes).map_err(|e| {
-        match e {
-            crate::buffer_budget::BufferBudgetError::OverToolLimit { requested, tool_limit } => {
-                format!("read.max_buffered_bytes={requested} exceeds per-tool limit {tool_limit}")
-            }
-            crate::buffer_budget::BufferBudgetError::ZeroRequest => {
-                "read.max_buffered_bytes must be > 0".into()
-            }
-            crate::buffer_budget::BufferBudgetError::InsufficientProgramBudget {
-                requested,
-                available,
-            } => {
-                format!("insufficient program buffer budget: requested {requested}, available {available}")
-            }
-        }
-    })?;
+    let _reservation = budget
+        .try_reserve(max_buffered_bytes)
+        .map_err(|e| map_budget_err("read.max_buffered_bytes", e))?;
 
     let progress_token = meta.get_progress_token();
 

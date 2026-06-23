@@ -6,6 +6,7 @@ use tracing::{debug, info};
 use crate::security::SecurityManager;
 use crate::serial::{ConnectionManager, PortInfo};
 use crate::tools::helpers::log_tool_err;
+use crate::tools::helpers::lookup_connection;
 use crate::tools::helpers::parse_open_args;
 use crate::tools::types::{
     ClearLogArgs, ClearLogResult, CloseArgs, CloseResult, DeleteProfileArgs, DeleteProfileResult,
@@ -114,10 +115,7 @@ pub async fn get_status(
     args: GetStatusArgs,
 ) -> Result<Json<GetStatusResult>, String> {
     debug!("Getting status for {}", args.connection_id);
-    let conn = connections
-        .get(&args.connection_id)
-        .await
-        .map_err(|_| format!("Connection ID {} not found", args.connection_id))?;
+    let conn = lookup_connection(connections, &args.connection_id).await?;
 
     let status = conn.status_snapshot();
     info!(
@@ -156,31 +154,28 @@ pub async fn reconfigure(
     let conn_id = &args.connection_id;
     debug!("Reconfiguring {}", conn_id);
 
-    let conn = connections
-        .get(conn_id)
-        .await
-        .map_err(|_| format!("Connection ID {conn_id} not found"))?;
+    let conn = lookup_connection(connections, conn_id).await?;
 
     let baud_rate = args.baud_rate;
     let data_bits = args
         .data_bits
         .as_deref()
-        .map(parse_string_data_bits)
+        .map(|s| s.parse::<crate::serial::DataBits>())
         .transpose()?;
     let stop_bits = args
         .stop_bits
         .as_deref()
-        .map(parse_string_stop_bits)
+        .map(|s| s.parse::<crate::serial::StopBits>())
         .transpose()?;
     let parity = args
         .parity
         .as_deref()
-        .map(parse_string_parity)
+        .map(|s| s.parse::<crate::serial::Parity>())
         .transpose()?;
     let flow_control = args
         .flow_control
         .as_deref()
-        .map(crate::tools::helpers::parse_flow_control)
+        .map(|s| s.parse::<crate::serial::FlowControl>())
         .transpose()?;
 
     let status = conn
@@ -206,33 +201,6 @@ pub async fn reconfigure(
         parity: status.parity,
         flow_control: status.flow_control,
     }))
-}
-
-fn parse_string_data_bits(s: &str) -> Result<crate::serial::DataBits, String> {
-    match s {
-        "5" => Ok(crate::serial::DataBits::Five),
-        "6" => Ok(crate::serial::DataBits::Six),
-        "7" => Ok(crate::serial::DataBits::Seven),
-        "8" => Ok(crate::serial::DataBits::Eight),
-        other => Err(format!("Invalid data_bits: {other}")),
-    }
-}
-
-fn parse_string_stop_bits(s: &str) -> Result<crate::serial::StopBits, String> {
-    match s {
-        "1" => Ok(crate::serial::StopBits::One),
-        "2" => Ok(crate::serial::StopBits::Two),
-        other => Err(format!("Invalid stop_bits: {other}")),
-    }
-}
-
-fn parse_string_parity(s: &str) -> Result<crate::serial::Parity, String> {
-    match s {
-        "none" => Ok(crate::serial::Parity::None),
-        "odd" => Ok(crate::serial::Parity::Odd),
-        "even" => Ok(crate::serial::Parity::Even),
-        other => Err(format!("Invalid parity: {other}")),
-    }
 }
 
 pub fn list_profiles(
@@ -310,10 +278,7 @@ pub async fn save_profile(
     profiles_path: &std::path::PathBuf,
     args: SaveProfileArgs,
 ) -> Result<Json<SaveProfileResult>, String> {
-    let conn = connections
-        .get(&args.connection_id)
-        .await
-        .map_err(|_| format!("Connection ID {} not found", args.connection_id))?;
+    let conn = lookup_connection(connections, &args.connection_id).await?;
 
     let info = conn
         .port_info()
@@ -393,10 +358,7 @@ pub async fn reconnect(
     connections: &Arc<ConnectionManager>,
     args: ReconnectArgs,
 ) -> Result<Json<ReconnectResult>, String> {
-    let conn = connections
-        .get(&args.connection_id)
-        .await
-        .map_err(|_| format!("Connection ID {} not found", args.connection_id))?;
+    let conn = lookup_connection(connections, &args.connection_id).await?;
 
     conn.reconnect()
         .await
@@ -416,10 +378,7 @@ pub async fn get_log(
     connections: &Arc<ConnectionManager>,
     args: GetLogArgs,
 ) -> Result<Json<GetLogResult>, String> {
-    let conn = connections
-        .get(&args.connection_id)
-        .await
-        .map_err(|_| format!("Connection ID {} not found", args.connection_id))?;
+    let conn = lookup_connection(connections, &args.connection_id).await?;
 
     let log = conn.log();
     let all = log.snapshot();
@@ -450,10 +409,7 @@ pub async fn clear_log(
     connections: &Arc<ConnectionManager>,
     args: ClearLogArgs,
 ) -> Result<Json<ClearLogResult>, String> {
-    let conn = connections
-        .get(&args.connection_id)
-        .await
-        .map_err(|_| format!("Connection ID {} not found", args.connection_id))?;
+    let conn = lookup_connection(connections, &args.connection_id).await?;
     conn.log().clear();
     Ok(Json(ClearLogResult {
         connection_id: args.connection_id,
@@ -464,10 +420,7 @@ pub async fn export_log(
     connections: &Arc<ConnectionManager>,
     args: ExportLogArgs,
 ) -> Result<Json<ExportLogResult>, String> {
-    let conn = connections
-        .get(&args.connection_id)
-        .await
-        .map_err(|_| format!("Connection ID {} not found", args.connection_id))?;
+    let conn = lookup_connection(connections, &args.connection_id).await?;
 
     let events = conn.log().snapshot();
     let count = events.len();

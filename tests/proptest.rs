@@ -18,9 +18,10 @@ use serde_json::Value;
 
 use serial_mcp::codec::{self, Encoding};
 use serial_mcp::limits::*;
+use serial_mcp::serial::{DataBits, FlowControl, Parity, StopBits};
 use serial_mcp::tools::helpers::{
-    clamp_or_err, clamp_poll_interval_or_err, clamp_timeout_or_err, parse_data_bits,
-    parse_flow_control, parse_open_args, parse_parity, parse_stop_bits, require_min_or_err,
+    clamp_or_err, clamp_poll_interval_or_err, clamp_timeout_or_err, parse_open_args,
+    require_min_or_err,
 };
 use serial_mcp::tools::types::{
     CloseArgs, CloseResult, FlushArgs, FlushResult, ListConnectionsResult, OpenArgs, OpenResult,
@@ -182,10 +183,10 @@ proptest! {
             assert_eq!(config.port, port);
             assert_eq!(config.baud_rate, baud);
         }
-        parse_data_bits(&db).unwrap();
-        parse_stop_bits(&sb).unwrap();
-        parse_parity(&p).unwrap();
-        parse_flow_control(&fc).unwrap();
+        db.parse::<DataBits>().unwrap();
+        sb.parse::<StopBits>().unwrap();
+        p.parse::<Parity>().unwrap();
+        fc.parse::<FlowControl>().unwrap();
     }
 
     #[test]
@@ -449,50 +450,50 @@ proptest! {
 
     #[test]
     fn parse_data_bits_accepts_valid(d in valid_data_bits()) {
-        assert!(parse_data_bits(&d).is_ok());
+        assert!(d.parse::<DataBits>().is_ok());
     }
 
     #[test]
     fn parse_data_bits_rejects_garbage(d in "[A-Za-z0-9]{1,5}") {
         let known = ["5", "6", "7", "8"];
         if known.contains(&d.as_str()) { return Ok(()); }
-        assert!(parse_data_bits(&d).is_err(), "{d:?} must fail");
+        assert!(d.parse::<DataBits>().is_err(), "{d:?} must fail");
     }
 
     #[test]
     fn parse_stop_bits_accepts_valid(s in valid_stop_bits()) {
-        assert!(parse_stop_bits(&s).is_ok());
+        assert!(s.parse::<StopBits>().is_ok());
     }
 
     #[test]
     fn parse_stop_bits_rejects_garbage(s in "[A-Za-z0-9]{1,5}") {
         let known = ["1", "2"];
         if known.contains(&s.as_str()) { return Ok(()); }
-        assert!(parse_stop_bits(&s).is_err(), "{s:?} must fail");
+        assert!(s.parse::<StopBits>().is_err(), "{s:?} must fail");
     }
 
     #[test]
     fn parse_parity_accepts_valid(p in valid_parity()) {
-        assert!(parse_parity(&p).is_ok());
+        assert!(p.parse::<Parity>().is_ok());
     }
 
     #[test]
     fn parse_parity_rejects_garbage(p in "[A-Za-z]{2,10}") {
         let lower = p.to_lowercase();
         if lower == "none" || lower == "odd" || lower == "even" { return Ok(()); }
-        assert!(parse_parity(&p).is_err(), "{p:?} must fail");
+        assert!(p.parse::<Parity>().is_err(), "{p:?} must fail");
     }
 
     #[test]
     fn parse_flow_control_accepts_valid(fc in valid_flow_control()) {
-        assert!(parse_flow_control(&fc).is_ok());
+        assert!(fc.parse::<FlowControl>().is_ok());
     }
 
     #[test]
     fn parse_flow_control_rejects_garbage(fc in "[A-Za-z]{2,10}") {
         let lower = fc.to_lowercase();
         if lower == "none" || lower == "software" || lower == "hardware" { return Ok(()); }
-        assert!(parse_flow_control(&fc).is_err(), "{fc:?} must fail");
+        assert!(fc.parse::<FlowControl>().is_err(), "{fc:?} must fail");
     }
 
     #[test]

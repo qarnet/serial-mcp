@@ -4,6 +4,8 @@
 
 - Root server: `src/main.rs` selects stdio vs HTTP transport, parses CLI limits, and mounts HTTP at `/mcp`.
 - MCP surface lives in `src/server.rs`; tool handlers are split under `src/tools/`, prompts under `src/prompts/`, resources under `src/resources/`.
+- `SerialHandler` is built via `SerialHandler::builder()...build()` (`src/server.rs`). The old `with_manager*` telescoping constructors are gone; `new()` is a thin wrapper over the builder. Inject `connections`, `streams`, `security`, `budget` through the builder; `with_profiles()` stays as a post-build setter.
+- Shared RX framing lives in `src/tools/rx_consume.rs` (`consume_frames` + `RxFrameSink` trait + `disconnect_state`); both `read` and `subscribe` route framing through it, but their raw (no-framing) paths stay per-tool by design (see "Invariants easy to break").
 - Connection lifecycle is in `src/serial.rs`; shared RX/TX coordination is in `src/rx_session.rs`, `src/tx_session.rs`, and `src/stop_controller.rs`.
 - `build.rs` injects `GIT_HASH` / `GIT_HASH_AVAILABLE`.
 
@@ -42,6 +44,10 @@ cargo test --test native_sim_connection_lifecycle -- --ignored --test-threads=1
 - Do not emit non-standard schema `"format": "uint"`; use helpers in `src/schema_helpers.rs`.
 - `open` must enforce allowlist checks before `ConnectionManager::open()`.
 - Open/close changes must notify resource subscribers via `notify_resource_list_changed()`.
+- `read` and `subscribe` share stop-reason vocabulary via `RxStopController`, but their RX loops are **not** interchangeable sink swaps. Raw-path semantics differ by design: `read` is bounded and only scans `chunk[..take]` up to `max_bytes`; `subscribe` scans full chunks across the whole subscription lifetime.
+- Framing semantics also differ by design: `read` keeps later frames decoded from the same chunk after the first matching frame, while `subscribe` stops on the matching frame and does not emit later frames from that chunk.
+- Both tools already catch cross-chunk matches in raw mode because matcher state is sliding-window based. In framed mode both match per-frame, so patterns spanning frames are intentionally not matched.
+- Match metadata differs too: `read` match meta uses `accumulated.len()` for `bytes_returned`; `subscribe` uses cumulative emitted bytes (`total_returned`). Preserve these differences unless intentionally redesigning the API.
 - Production code convention here: no `unwrap`/`expect`, no `println!`, no committed `todo!()` / `unimplemented!()`.
 
 ## Test map
@@ -52,8 +58,8 @@ cargo test --test native_sim_connection_lifecycle -- --ignored --test-threads=1
 - `tests/stdio_integration.rs` spawns binary over stdin/stdout.
 - `tests/protocol_emulator*.rs` are protocol hardening tests.
 - `tests/config_schema_validation.rs` validates generated schemas against vendored examples; ignored case fetches upstream schemas.
-- `tests/native_sim_validation.rs` — native_sim firmware over PTY. 11 tests, < 2s, pure software. Env: `SERIAL_MCP_NATIVE_SIM_BIN` (default `build/native_sim/firmware/zephyr/zephyr.exe`).
-- `tests/native_sim_connection_lifecycle.rs` — software-only lifecycle: named connection, `set_flow_control`, close-while-read, reopen, touch-command bootloader entry. Run with `--test-threads=1`.
+- `tests/native_sim_validation.rs` — native_sim firmware over PTY. 35 tests, < 2s, pure software. Env: `SERIAL_MCP_NATIVE_SIM_BIN` (default `build/native_sim/firmware/zephyr/zephyr.exe`).
+- `tests/native_sim_connection_lifecycle.rs` — software-only lifecycle (6 tests): named connection, `set_flow_control`, close-while-read, reopen, touch-command bootloader entry. Run with `--test-threads=1`.
 - There are no hardware-required tests in this repo. All test coverage is runnable on a normal Linux host.
 
 ## Firmware / NCS

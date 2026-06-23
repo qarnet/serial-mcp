@@ -79,11 +79,11 @@ impl TestServer {
         let shutdown_for_service = shutdown.child_token();
         let service = StreamableHttpService::new(
             move || {
-                Ok(SerialHandler::with_manager_security_and_streams(
-                    Arc::clone(&manager_for_service),
-                    security.clone(),
-                    Arc::clone(&streams_for_service),
-                ))
+                Ok(SerialHandler::builder()
+                    .connections(Arc::clone(&manager_for_service))
+                    .streams(Arc::clone(&streams_for_service))
+                    .security(security.clone())
+                    .build())
             },
             LocalSessionManager::default().into(),
             StreamableHttpServerConfig::default().with_cancellation_token(shutdown_for_service),

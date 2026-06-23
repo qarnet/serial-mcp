@@ -568,8 +568,11 @@ struct JsonLinesParser;
 impl FrameParser for JsonLinesParser {
     fn parse(&self, data: &[u8]) -> ParsedFrame {
         match serde_json::from_slice::<serde_json::Value>(data) {
-            Ok(val) => ParsedFrame::Json(val),
-            Err(_) => ParsedFrame::Raw,
+            // `ParsedFrame::Json` is internally tagged (`parser` + the object's
+            // fields inlined), so only JSON *objects* can be represented.
+            // Non-object JSON (arrays, scalars) is treated as Raw.
+            Ok(val) if val.is_object() => ParsedFrame::Json(val),
+            _ => ParsedFrame::Raw,
         }
     }
 }
@@ -948,6 +951,16 @@ mod tests {
         let p = JsonLinesParser;
         let result = p.parse(b"not json");
         assert!(matches!(result, ParsedFrame::Raw));
+    }
+
+    #[test]
+    fn json_parser_non_object_is_raw() {
+        let p = JsonLinesParser;
+        assert!(matches!(p.parse(b"[1,2,3]"), ParsedFrame::Raw));
+        assert!(matches!(p.parse(b"42"), ParsedFrame::Raw));
+        assert!(matches!(p.parse(b"\"hi\""), ParsedFrame::Raw));
+        // Objects still parse as Json.
+        assert!(matches!(p.parse(b"{\"k\":1}"), ParsedFrame::Json(_)));
     }
 
     #[test]

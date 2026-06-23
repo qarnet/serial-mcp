@@ -1,6 +1,6 @@
 [package]
 name = "serial-mcp"
-version = "0.6.0"
+version = "0.6.1"
 edition = "2021"
 authors = [
     "Thomas Kirschner <thomaskirschner85@yahoo.de>",
@@ -13,6 +13,7 @@ keywords = ["mcp", "serial", "communication", "embedded", "protocol"]
 categories = ["development-tools", "embedded"]
 
 [dependencies]
+async-trait = "0.1"
 rmcp = { version = "1.7", features = ["server", "macros", "transport-io", "transport-streamable-http-server", "schemars"] }
 serialport = { version = "4.5", features = ["usbportinfo-interface"] }
 tokio = { version = "1.41", features = ["macros", "rt-multi-thread", "sync", "time", "io-util", "signal", "net"] }

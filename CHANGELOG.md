@@ -3,6 +3,7 @@
 | Version | Date | Highlights |
 |---|---|---|
 | [Unreleased](#unreleased) | — | — |
+| [0.6.1](#061) | 2026-06-24 | RX refactor: shared framing sink, SerialHandler builder, config FromStr, dedup; docs cleanup |
 | [0.6.0](#060) | 2026-06-20 | Frame decoding (4 modes + 3 parsers), regex/glob matching, auto-reconnect, event log, connection profiles, port identity, reconfigure, get_status, per-frame graceful degradation |
 | [0.5.1](#051) | 2026-06-14 | Software-only test migration: native_sim PTY replaces all hardware tests |
 | [0.5.0](#050) | 2026-06-06 | RX redesign (Plans 1-7): session pump, unified stop controller, match options, buffer budgets, silence timeout, context shaping |
@@ -17,6 +18,81 @@
 | [0.2.1](#021) | 2026-05-24 | MCP 2025-11-25, resource change notifications, port allowlist, stdio tests |
 | [0.2.0](#020) | 2026-05-23 | Project reset: rmcp 1.7 rewrite, 6 new tools, resources, prompts, HTTP transport |
 | [0.1.0](#010) | — | Initial release (5 tools, STM32 demo) |
+
+---
+
+## [0.6.1]
+
+Internal refactor release. No tool API changes; all tool behavior and
+error messages preserved byte-for-byte.
+
+**Changed — RX framing:**
+- New `src/tools/rx_consume.rs` module: `RxFrameSink` trait,
+  `consume_frames`, `disconnect_state`. `read` and `subscribe` now route
+  framed decoding through this shared driver instead of per-tool loops.
+- `read` keeps later frames decoded from the same chunk after the first
+  matching frame; `subscribe` stops on the matching frame and does not
+  emit later frames from that chunk. This asymmetry is intentional.
+- `subscribe` framing path loses ~100-line per-frame emit for-loop.
+- Both tools share `validate_rx_request` preamble: encoding,
+  connection, bounds, timeout, and matcher validation collapse into one
+  path. Budget reservation and `poll_interval_ms` stay in callers
+  (ordering sensitive).
+- `read_bytes_via_session` cleaned up via `finish!` macro: 14 repeated
+  `make_outcome` return tails collapsed; dead settle-phase decoder feed
+  and post-loop flush removed (unreachable); `debug_assert!` invariant
+  added at settle phase entry.
+
+**Changed — SerialHandler construction:**
+- `SerialHandler::builder()...build()` replaces 5 `with_manager*`
+  telescoping constructors. Inject `connections`, `streams`, `security`,
+  `budget` through the builder; `with_profiles()` stays as a post-build
+  setter. `new()` is a thin wrapper over the builder.
+- 3 call sites migrated (`main.rs` stdio/http, `tests/common`).
+
+**Changed — Serial config parsing:**
+- `FromStr` impls for `DataBits`, `StopBits`, `Parity`, `FlowControl` in
+  `src/serial.rs`. 4 `parse_*` helpers and 3 `parse_string_*` duplicates
+  deleted; all call sites (`open`, `reconfigure`, `set_flow_control`)
+  route through `.parse()`. `reconfigure` now accepts mixed-case
+  parity/flow_control (intended).
+
+**Changed — Frame JSON serialization:**
+- `ParsedFrameResult` twin enum deleted; `FrameResult.parsed` uses
+  `framing::ParsedFrame` directly. `convert_parsed_frame` mapper
+  deleted; `build_read_result` clones directly. Non-object JSON
+  normalized to `Raw` in `JsonLinesParser`. Two hand-built `parsed_json`
+  blocks in `stream_ops` replaced with `serde_json::to_value`.
+
+**Changed — Error/lookup dedup:**
+- `map_budget_err` helper extracted; used in `io_ops` and `stream_ops`.
+- 7 `port_ops` connection lookups routed through `lookup_connection`.
+- Dead mode block in `stream_ops.rs` removed.
+
+**Added — Tests:**
+- 11 `read_bytes_via_session` characterization tests (plain read,
+  lifecycle, matcher, framing).
+- 7 shared-validator unit tests.
+- 4 builder characterization tests.
+- 3 `consume_frames` unit tests + 1 characterization test.
+- 2 `pty_subscribe_framing_*` characterization tests.
+- Match-vs-`max_frames` priority tests (subscribe + read semantics).
+- Matcher window reset per-frame test.
+- Cross-chunk raw matcher test (pattern split across two `RxEvent::Data`
+  chunks).
+- Serialization shape regression tests.
+
+**Removed:**
+- `firmware/ZEPHYR_EMULATION_RESEARCH.md` — settled historical research
+  doc. The native_sim + `touch` command decision already landed in
+  `firmware/AGENTS.md` and the 0.5.1 changelog; the USB/IP CDC-ACM
+  approach it explored was rejected. No live references elsewhere.
+- `docs/SIMULATION_MATRIX.md`, `docs/TESTING.md`, top-level
+  `FEATURES.md` — redundant with AGENTS.md / CHANGELOG; remaining
+  feature backlog moved to `docs/development/FEATURES.md`.
+
+**Fixed:**
+- Wrong link (PR #23).
 
 ---
 
