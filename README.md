@@ -135,7 +135,6 @@ cargo test --test native_sim_connection_lifecycle -- --ignored --test-threads=1
 ## Documentation
 
 - [Agent Configuration](docs/agent-config.md)
-- [Simulation Matrix](docs/SIMULATION_MATRIX.md)
 - [CHANGELOG.md](CHANGELOG.md)
 - [AGENTS.md](AGENTS.md) — contributor guidelines
 
