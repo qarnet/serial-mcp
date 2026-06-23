@@ -293,7 +293,12 @@ impl RxFrameSink for SubscribeFrameSink<'_> {
         let emit = self.peer.notify_logging_message(param).await;
 
         if matched {
-            // Quirk: a failed emit of the matching frame still reports the match.
+            // Quirk: a failed emit of the matching frame still reports the match
+            // (logs + record_notification_drop only), distinct from the non-matching
+            // path below which returns PeerDisconnected. Intentional — see the
+            // matched-frame-emit-failure quirk note in docs/handoffs/finalizing-handoff.md.
+            // KNOWN GAP: not characterization-tested (requires a peer disconnect
+            // mid-emit on the matching frame); preserved by faithful translation.
             if let Err(e) = emit {
                 error!("RX frame stream peer disconnected: {e}");
                 self.conn.record_notification_drop();
@@ -381,6 +386,10 @@ async fn stream_rx_via_session(
     // Frame decoder state.
     let max_frames = framing.as_ref().and_then(|f| f.max_frames);
     let mut decoder = match framing.as_ref() {
+        // subscribe is a background task that already returned Ok(SubscribeResult);
+        // it cannot surface a sync error, so a bad framing config degrades to raw
+        // chunk mode rather than failing. (read propagates the error instead — see
+        // helpers.rs.)
         Some(cfg) => match crate::framing::FrameDecoder::new(cfg) {
             Ok(d) => Some(d),
             Err(e) => {
@@ -391,6 +400,7 @@ async fn stream_rx_via_session(
         None => None,
     };
     let mut frames_emitted: usize = 0;
+    let peer_owned = peer.clone();
 
     loop {
         // Pause timeouts while the connection is disconnected or reconnecting.
@@ -451,7 +461,7 @@ async fn stream_rx_via_session(
                 if let Some(ref mut dec) = decoder {
                     suppress_chunk_notification = true;
                     let mut sink = SubscribeFrameSink {
-                        peer: peer.clone(),
+                        peer: peer_owned.clone(),
                         conn: &conn,
                         logger: logger.as_str(),
                         conn_id: conn_id.as_str(),

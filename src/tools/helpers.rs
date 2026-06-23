@@ -321,6 +321,8 @@ pub async fn read_bytes_via_session(
     // Frame decoder state.
     let max_frames = framing.as_ref().and_then(|f| f.max_frames);
     let mut decoder: Option<crate::framing::FrameDecoder> = match framing.as_ref() {
+        // read is a synchronous request/response: propagate decoder-init errors
+        // to the caller. (subscribe degrades to raw mode instead — see stream_ops.rs.)
         Some(cfg) => Some(crate::framing::FrameDecoder::new(cfg)?),
         None => None,
     };
