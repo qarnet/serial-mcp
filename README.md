@@ -243,7 +243,7 @@ cargo test --test native_sim_connection_lifecycle -- --ignored --test-threads=1
 
 ## MCP Registry
 
-Available on the [MCP Registry](https://mcp.run) as:
+Available on the [MCP Registry](https://registry.modelcontextprotocol.io/) as:
 
 mcp-name: io.github.qarnet/serial-mcp
 
