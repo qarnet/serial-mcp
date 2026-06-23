@@ -11,8 +11,8 @@ use crate::serial::ConnectionManager;
 use crate::serial::FlushTarget;
 use crate::tools::helpers::{
     build_read_result, clamp_or_err, clamp_timeout_or_err, log_tool_err, lookup_connection,
-    parse_encoding, read_bytes_via_session, require_min_or_err, MAX_READ_BYTES, MAX_TIMEOUT_MS,
-    MAX_WRITE_BYTES, MIN_READ_BYTES,
+    map_budget_err, parse_encoding, read_bytes_via_session, require_min_or_err, MAX_READ_BYTES,
+    MAX_TIMEOUT_MS, MAX_WRITE_BYTES, MIN_READ_BYTES,
 };
 use crate::tools::types::{FlushArgs, FlushResult, ReadArgs, ReadResult, WriteArgs, WriteResult};
 
@@ -93,22 +93,9 @@ pub async fn read(
     };
 
     // Reserve budget before registering consumer.
-    let _reservation = budget.try_reserve(max_buffered_bytes).map_err(|e| {
-        match e {
-            crate::buffer_budget::BufferBudgetError::OverToolLimit { requested, tool_limit } => {
-                format!("read.max_buffered_bytes={requested} exceeds per-tool limit {tool_limit}")
-            }
-            crate::buffer_budget::BufferBudgetError::ZeroRequest => {
-                "read.max_buffered_bytes must be > 0".into()
-            }
-            crate::buffer_budget::BufferBudgetError::InsufficientProgramBudget {
-                requested,
-                available,
-            } => {
-                format!("insufficient program buffer budget: requested {requested}, available {available}")
-            }
-        }
-    })?;
+    let _reservation = budget
+        .try_reserve(max_buffered_bytes)
+        .map_err(|e| map_budget_err("read.max_buffered_bytes", e))?;
 
     let progress_token = meta.get_progress_token();
 

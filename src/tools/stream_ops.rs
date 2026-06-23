@@ -18,7 +18,7 @@ use crate::serial::ConnectionManager;
 use crate::stop_controller::{RxStopController, RxStopDecision};
 use crate::tools::helpers::{
     clamp_or_err, clamp_poll_interval_or_err, clamp_timeout_or_err, lookup_connection,
-    parse_encoding, require_min_or_err, MAX_STREAM_CHUNK_BYTES, MAX_TIMEOUT_MS,
+    map_budget_err, parse_encoding, require_min_or_err, MAX_STREAM_CHUNK_BYTES, MAX_TIMEOUT_MS,
     MIN_POLL_INTERVAL_MS, MIN_STREAM_CHUNK_BYTES,
 };
 use crate::tools::types::{SubscribeArgs, SubscribeResult, UnsubscribeArgs, UnsubscribeResult};
@@ -135,22 +135,9 @@ pub async fn subscribe(
     // Yield to allow the old task's reservation to start releasing.
     tokio::task::yield_now().await;
 
-    let _reservation = budget.try_reserve(max_buffered_bytes).map_err(|e| {
-        match e {
-            crate::buffer_budget::BufferBudgetError::OverToolLimit { requested, tool_limit } => {
-                format!("subscribe.max_buffered_bytes={requested} exceeds per-tool limit {tool_limit}")
-            }
-            crate::buffer_budget::BufferBudgetError::ZeroRequest => {
-                "subscribe.max_buffered_bytes must be > 0".into()
-            }
-            crate::buffer_budget::BufferBudgetError::InsufficientProgramBudget {
-                requested,
-                available,
-            } => {
-                format!("insufficient program buffer budget: requested {requested}, available {available}")
-            }
-        }
-    })?;
+    let _reservation = budget
+        .try_reserve(max_buffered_bytes)
+        .map_err(|e| map_budget_err("subscribe.max_buffered_bytes", e))?;
 
     let id = args.connection_id.clone();
     let name = connection.name().map(str::to_string);
@@ -702,18 +689,6 @@ async fn stream_rx_via_session(
     if truncated {
         conn.record_truncation();
         conn.log().truncated(bytes_observed, total_returned);
-    }
-    if outcome.matched {
-        if let Some(ref m) = matcher {
-            // Log the match pattern. For regex/glob, mode is known; for literal, needle len.
-            let mode = match &m {
-                crate::match_config::Matcher::Literal { .. } => "literal_substring".to_string(),
-                crate::match_config::Matcher::Regex { .. } => "regex".to_string(),
-                crate::match_config::Matcher::Glob { .. } => "glob".to_string(),
-            };
-            // pattern is not directly accessible — deferred
-            let _ = mode;
-        }
     }
     let stop_meta = RxStopMetadata {
         stop_reason: outcome.meta.stop_reason,

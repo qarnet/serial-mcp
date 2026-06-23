@@ -60,6 +60,30 @@ pub fn clamp_poll_interval_or_err(name: &str, value: u64, min: u64) -> Result<u6
 }
 
 // ------------------------------------------------------------------
+// Budget error mapping
+// ------------------------------------------------------------------
+
+/// Map a [`crate::buffer_budget::BufferBudgetError`] to a user-facing error
+/// string. `field` is the fully-qualified argument name
+/// (e.g. `"read.max_buffered_bytes"`) used to prefix the limit/zero messages.
+pub fn map_budget_err(field: &str, e: crate::buffer_budget::BufferBudgetError) -> String {
+    use crate::buffer_budget::BufferBudgetError;
+    match e {
+        BufferBudgetError::OverToolLimit {
+            requested,
+            tool_limit,
+        } => format!("{field}={requested} exceeds per-tool limit {tool_limit}"),
+        BufferBudgetError::ZeroRequest => format!("{field} must be > 0"),
+        BufferBudgetError::InsufficientProgramBudget {
+            requested,
+            available,
+        } => format!(
+            "insufficient program buffer budget: requested {requested}, available {available}"
+        ),
+    }
+}
+
+// ------------------------------------------------------------------
 // Connection lookup
 // ------------------------------------------------------------------
 

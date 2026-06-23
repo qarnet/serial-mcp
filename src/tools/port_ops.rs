@@ -6,6 +6,7 @@ use tracing::{debug, info};
 use crate::security::SecurityManager;
 use crate::serial::{ConnectionManager, PortInfo};
 use crate::tools::helpers::log_tool_err;
+use crate::tools::helpers::lookup_connection;
 use crate::tools::helpers::parse_open_args;
 use crate::tools::types::{
     ClearLogArgs, ClearLogResult, CloseArgs, CloseResult, DeleteProfileArgs, DeleteProfileResult,
@@ -114,10 +115,7 @@ pub async fn get_status(
     args: GetStatusArgs,
 ) -> Result<Json<GetStatusResult>, String> {
     debug!("Getting status for {}", args.connection_id);
-    let conn = connections
-        .get(&args.connection_id)
-        .await
-        .map_err(|_| format!("Connection ID {} not found", args.connection_id))?;
+    let conn = lookup_connection(connections, &args.connection_id).await?;
 
     let status = conn.status_snapshot();
     info!(
@@ -156,10 +154,7 @@ pub async fn reconfigure(
     let conn_id = &args.connection_id;
     debug!("Reconfiguring {}", conn_id);
 
-    let conn = connections
-        .get(conn_id)
-        .await
-        .map_err(|_| format!("Connection ID {conn_id} not found"))?;
+    let conn = lookup_connection(connections, conn_id).await?;
 
     let baud_rate = args.baud_rate;
     let data_bits = args
@@ -310,10 +305,7 @@ pub async fn save_profile(
     profiles_path: &std::path::PathBuf,
     args: SaveProfileArgs,
 ) -> Result<Json<SaveProfileResult>, String> {
-    let conn = connections
-        .get(&args.connection_id)
-        .await
-        .map_err(|_| format!("Connection ID {} not found", args.connection_id))?;
+    let conn = lookup_connection(connections, &args.connection_id).await?;
 
     let info = conn
         .port_info()
@@ -393,10 +385,7 @@ pub async fn reconnect(
     connections: &Arc<ConnectionManager>,
     args: ReconnectArgs,
 ) -> Result<Json<ReconnectResult>, String> {
-    let conn = connections
-        .get(&args.connection_id)
-        .await
-        .map_err(|_| format!("Connection ID {} not found", args.connection_id))?;
+    let conn = lookup_connection(connections, &args.connection_id).await?;
 
     conn.reconnect()
         .await
@@ -416,10 +405,7 @@ pub async fn get_log(
     connections: &Arc<ConnectionManager>,
     args: GetLogArgs,
 ) -> Result<Json<GetLogResult>, String> {
-    let conn = connections
-        .get(&args.connection_id)
-        .await
-        .map_err(|_| format!("Connection ID {} not found", args.connection_id))?;
+    let conn = lookup_connection(connections, &args.connection_id).await?;
 
     let log = conn.log();
     let all = log.snapshot();
@@ -450,10 +436,7 @@ pub async fn clear_log(
     connections: &Arc<ConnectionManager>,
     args: ClearLogArgs,
 ) -> Result<Json<ClearLogResult>, String> {
-    let conn = connections
-        .get(&args.connection_id)
-        .await
-        .map_err(|_| format!("Connection ID {} not found", args.connection_id))?;
+    let conn = lookup_connection(connections, &args.connection_id).await?;
     conn.log().clear();
     Ok(Json(ClearLogResult {
         connection_id: args.connection_id,
@@ -464,10 +447,7 @@ pub async fn export_log(
     connections: &Arc<ConnectionManager>,
     args: ExportLogArgs,
 ) -> Result<Json<ExportLogResult>, String> {
-    let conn = connections
-        .get(&args.connection_id)
-        .await
-        .map_err(|_| format!("Connection ID {} not found", args.connection_id))?;
+    let conn = lookup_connection(connections, &args.connection_id).await?;
 
     let events = conn.log().snapshot();
     let count = events.len();
