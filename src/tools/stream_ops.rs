@@ -399,48 +399,12 @@ async fn stream_rx_via_session(
                             "data": encoded,
                         });
                         if let Some(ref parsed) = frame.parsed {
-                            let parsed_json = match parsed {
-                                crate::framing::ParsedFrame::AtCommand {
-                                    response_type,
-                                    command,
-                                    status,
-                                    fields,
-                                } => {
-                                    let mut p = serde_json::json!({
-                                        "parser": "at_command",
-                                        "response_type": response_type,
-                                        "fields": fields,
-                                    });
-                                    if let Some(c) = command {
-                                        p["command"] = serde_json::json!(c);
-                                    }
-                                    if let Some(s) = status {
-                                        p["status"] = serde_json::json!(s);
-                                    }
-                                    p
+                            match serde_json::to_value(parsed) {
+                                Ok(v) => payload["parsed"] = v,
+                                Err(e) => {
+                                    warn!("RX frame parsed serialization error on {conn_id}: {e}")
                                 }
-                                crate::framing::ParsedFrame::Json(v) => {
-                                    let mut p = serde_json::json!({"parser": "json"});
-                                    if let Some(obj) = v.as_object() {
-                                        for (key, val) in obj {
-                                            p[key] = val.clone();
-                                        }
-                                    }
-                                    p
-                                }
-                                crate::framing::ParsedFrame::ShellPrompt {
-                                    prompt,
-                                    prompt_type,
-                                } => serde_json::json!({
-                                    "parser": "shell_prompt",
-                                    "prompt": prompt,
-                                    "prompt_type": prompt_type,
-                                }),
-                                crate::framing::ParsedFrame::Raw => serde_json::json!({
-                                    "parser": "raw",
-                                }),
-                            };
-                            payload["parsed"] = parsed_json;
+                            }
                         }
 
                         // Per-frame match on decoded frame data.
@@ -623,48 +587,12 @@ async fn stream_rx_via_session(
                     "partial": true,
                 });
                 if let Some(ref parsed) = partial.parsed {
-                    let parsed_json = match parsed {
-                        crate::framing::ParsedFrame::AtCommand {
-                            response_type,
-                            command,
-                            status,
-                            fields,
-                        } => {
-                            let mut p = serde_json::json!({
-                                "parser": "at_command",
-                                "response_type": response_type,
-                                "fields": fields,
-                            });
-                            if let Some(c) = command {
-                                p["command"] = serde_json::json!(c);
-                            }
-                            if let Some(s) = status {
-                                p["status"] = serde_json::json!(s);
-                            }
-                            p
+                    match serde_json::to_value(parsed) {
+                        Ok(v) => payload["parsed"] = v,
+                        Err(e) => {
+                            warn!("RX partial frame parsed serialization error on {conn_id}: {e}")
                         }
-                        crate::framing::ParsedFrame::Json(v) => {
-                            let mut p = serde_json::json!({"parser": "json"});
-                            if let Some(obj) = v.as_object() {
-                                for (key, val) in obj {
-                                    p[key] = val.clone();
-                                }
-                            }
-                            p
-                        }
-                        crate::framing::ParsedFrame::ShellPrompt {
-                            prompt,
-                            prompt_type,
-                        } => serde_json::json!({
-                            "parser": "shell_prompt",
-                            "prompt": prompt,
-                            "prompt_type": prompt_type,
-                        }),
-                        crate::framing::ParsedFrame::Raw => serde_json::json!({
-                            "parser": "raw",
-                        }),
-                    };
-                    payload["parsed"] = parsed_json;
+                    }
                 }
                 let param = LoggingMessageNotificationParam {
                     level: LoggingLevel::Info,
@@ -746,4 +674,48 @@ async fn stream_rx_via_session(
         "RX stream ended for {conn_id}: reason={} bytes={} elapsed={}ms",
         stop_meta.stop_reason, stop_meta.bytes_observed, elapsed_ms
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::framing::ParsedFrame;
+
+    #[test]
+    fn parsed_frame_serializes_with_inlined_object_shape() {
+        let at = ParsedFrame::AtCommand {
+            response_type: "data".into(),
+            command: Some("CGREG".into()),
+            status: Some("OK".into()),
+            fields: vec!["1".into(), "2".into()],
+        };
+        let v = serde_json::to_value(&at).unwrap();
+        assert_eq!(v["parser"], "at_command");
+        assert_eq!(v["response_type"], "data");
+        assert_eq!(v["command"], "CGREG");
+        assert_eq!(v["status"], "OK");
+        assert_eq!(v["fields"], serde_json::json!(["1", "2"]));
+
+        // command/status omitted when None.
+        let at_min = ParsedFrame::AtCommand {
+            response_type: "urc".into(),
+            command: None,
+            status: None,
+            fields: vec![],
+        };
+        let v = serde_json::to_value(&at_min).unwrap();
+        assert!(v.get("command").is_none());
+        assert!(v.get("status").is_none());
+
+        // JSON object fields are inlined alongside "parser".
+        let j = ParsedFrame::Json(serde_json::json!({"sensor": "temp", "value": 25.5}));
+        let v = serde_json::to_value(&j).unwrap();
+        assert_eq!(v["parser"], "json");
+        assert_eq!(v["sensor"], "temp");
+        assert_eq!(v["value"], 25.5);
+
+        assert_eq!(
+            serde_json::to_value(&ParsedFrame::Raw).unwrap()["parser"],
+            "raw"
+        );
+    }
 }

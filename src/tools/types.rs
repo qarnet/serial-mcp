@@ -243,27 +243,7 @@ pub struct FrameResult {
     pub frame_index: usize,
     pub frame_type: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub parsed: Option<ParsedFrameResult>,
-}
-
-/// Structured field interpretation of a decoded frame.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(tag = "parser", rename_all = "snake_case")]
-pub enum ParsedFrameResult {
-    AtCommand {
-        response_type: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        command: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        status: Option<String>,
-        fields: Vec<String>,
-    },
-    Json(serde_json::Value),
-    ShellPrompt {
-        prompt: String,
-        prompt_type: String,
-    },
-    Raw,
+    pub parsed: Option<crate::framing::ParsedFrame>,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]

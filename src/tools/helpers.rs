@@ -586,7 +586,7 @@ pub fn build_read_result(
                     encoding: encoding.to_string(),
                     frame_index: f.index,
                     frame_type: f.frame_type.clone(),
-                    parsed: f.parsed.as_ref().map(convert_parsed_frame),
+                    parsed: f.parsed.clone(),
                 }),
                 Err(e) => {
                     tracing::warn!("Frame {} encoding failed: {e}", f.index);
@@ -621,33 +621,6 @@ pub fn build_read_result(
         frames,
         frames_dropped,
     }))
-}
-
-/// Convert a `ParsedFrame` (from the framing module) to a `ParsedFrameResult`
-/// (the API type in tools/types). The two enums have identical variants.
-fn convert_parsed_frame(parsed: &crate::framing::ParsedFrame) -> ParsedFrameResult {
-    match parsed {
-        crate::framing::ParsedFrame::AtCommand {
-            response_type,
-            command,
-            status,
-            fields,
-        } => ParsedFrameResult::AtCommand {
-            response_type: response_type.clone(),
-            command: command.clone(),
-            status: status.clone(),
-            fields: fields.clone(),
-        },
-        crate::framing::ParsedFrame::Json(v) => ParsedFrameResult::Json(v.clone()),
-        crate::framing::ParsedFrame::ShellPrompt {
-            prompt,
-            prompt_type,
-        } => ParsedFrameResult::ShellPrompt {
-            prompt: prompt.clone(),
-            prompt_type: prompt_type.clone(),
-        },
-        crate::framing::ParsedFrame::Raw => ParsedFrameResult::Raw,
-    }
 }
 
 // ------------------------------------------------------------------
