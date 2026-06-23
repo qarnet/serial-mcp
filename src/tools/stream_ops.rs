@@ -12,13 +12,16 @@ use tracing::{debug, error, info, warn};
 use crate::buffer_budget::BufferBudget;
 use crate::codec;
 use crate::match_config::{shape_match_context, Matcher};
-use crate::rx_metadata::RxStopMetadata;
+use crate::rx_metadata::{RxStopMetadata, RxStopReason};
 use crate::rx_session::{RxEvent, RxSessionManager};
 use crate::serial::ConnectionManager;
 use crate::stop_controller::{RxStopController, RxStopDecision};
 use crate::tools::helpers::{
     clamp_poll_interval_or_err, map_budget_err, validate_rx_request, ResolvedRxArgs, RxLimits,
     MAX_STREAM_CHUNK_BYTES, MIN_POLL_INTERVAL_MS, MIN_STREAM_CHUNK_BYTES,
+};
+use crate::tools::rx_consume::{
+    consume_frames, disconnect_state, DisconnectState, FrameOutcome, RxFrameSink, SinkFlow,
 };
 use crate::tools::types::{SubscribeArgs, SubscribeResult, UnsubscribeArgs, UnsubscribeResult};
 
@@ -226,6 +229,94 @@ pub async fn unsubscribe(
     }))
 }
 
+/// `subscribe`'s frame sink: emits one notification per decoded frame, tracking
+/// cumulative returned bytes. Stops at the matching frame (preserving the legacy
+/// quirk that a failed emit of the *matching* frame still reports the match).
+struct SubscribeFrameSink<'a> {
+    peer: Peer<RoleServer>,
+    conn: &'a Arc<crate::serial::SerialConnection>,
+    logger: &'a str,
+    conn_id: &'a str,
+    encoding: crate::codec::Encoding,
+    total_returned: &'a mut usize,
+    match_offset: &'a mut Option<usize>,
+    match_frame_index: &'a mut Option<usize>,
+}
+
+#[async_trait::async_trait]
+impl RxFrameSink for SubscribeFrameSink<'_> {
+    async fn on_frame(
+        &mut self,
+        frame: crate::framing::Frame,
+        matched: bool,
+        match_index: Option<usize>,
+    ) -> SinkFlow {
+        let encoded = match codec::encode(self.encoding, &frame.data) {
+            Ok(s) => s,
+            Err(e) => {
+                warn!("RX frame encoding error on {}: {e}", self.conn_id);
+                self.conn.record_notification_drop();
+                self.conn
+                    .log()
+                    .notification_dropped(&format!("frame encoding error: {e}"));
+                return SinkFlow::Continue;
+            }
+        };
+
+        let mut payload = serde_json::json!({
+            "connection_id": self.conn_id,
+            "frame_index": frame.index,
+            "frame_type": frame.frame_type,
+            "encoding": self.encoding.to_string(),
+            "data": encoded,
+        });
+        if let Some(ref parsed) = frame.parsed {
+            match serde_json::to_value(parsed) {
+                Ok(v) => payload["parsed"] = v,
+                Err(e) => {
+                    warn!(
+                        "RX frame parsed serialization error on {}: {e}",
+                        self.conn_id
+                    )
+                }
+            }
+        }
+        if matched {
+            payload["matched"] = serde_json::json!(true);
+        }
+
+        let param = LoggingMessageNotificationParam {
+            level: LoggingLevel::Info,
+            logger: Some(self.logger.to_string()),
+            data: payload,
+        };
+        let emit = self.peer.notify_logging_message(param).await;
+
+        if matched {
+            // Quirk: a failed emit of the matching frame still reports the match.
+            if let Err(e) = emit {
+                error!("RX frame stream peer disconnected: {e}");
+                self.conn.record_notification_drop();
+            }
+            *self.total_returned += frame.data.len();
+            *self.match_offset = match_index;
+            *self.match_frame_index = Some(frame.index);
+            return SinkFlow::Stop(RxStopReason::MatchFound);
+        }
+
+        if let Err(e) = emit {
+            error!("RX frame stream peer disconnected: {e}");
+            self.conn.record_notification_drop();
+            self.conn
+                .log()
+                .notification_dropped(&format!("frame peer disconnected: {e}"));
+            return SinkFlow::Stop(RxStopReason::PeerDisconnected);
+        }
+        *self.total_returned += frame.data.len();
+        SinkFlow::Continue
+    }
+}
+
 /// Stream RX data sourced from an [`RxSession`] consumer channel.
 ///
 /// Replaces the old `stream_rx` helper that read directly from
@@ -274,6 +365,7 @@ async fn stream_rx_via_session(
     let deadline = ctrl.deadline();
     let mut stop_outcome: Option<crate::stop_controller::RxStopOutcome> = None;
     let mut match_frame_index: Option<usize> = None;
+    let mut match_offset: Option<usize> = None;
 
     // Track total bytes sent via per-chunk data notifications, so
     // bytes_returned in the stop payload reflects cumulative delivered
@@ -304,18 +396,16 @@ async fn stream_rx_via_session(
         // Pause timeouts while the connection is disconnected or reconnecting.
         // If reconnect is NOT enabled, exit the loop so flush_partial can run
         // and the client receives a stop notification with the partial frame.
-        let state = conn.state();
-        if state == crate::serial::ConnectionState::Disconnected
-            || state == crate::serial::ConnectionState::Reconnecting
-        {
-            let reconnect_enabled = conn.reconnect_policy.lock().expect("poisoned").enabled;
-            if !reconnect_enabled {
+        match disconnect_state(&conn, &mut ctrl) {
+            DisconnectState::Closed => {
                 stop_outcome = Some(ctrl.connection_closed());
                 break;
             }
-            ctrl.reset_silence_timer();
-            tokio::time::sleep(Duration::from_millis(50)).await;
-            continue;
+            DisconnectState::Reconnecting => {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                continue;
+            }
+            DisconnectState::Active => {}
         }
 
         if let RxStopDecision::Stop(outcome) = ctrl.check_timeout() {
@@ -360,106 +450,53 @@ async fn stream_rx_via_session(
                 let mut suppress_chunk_notification = false;
                 if let Some(ref mut dec) = decoder {
                     suppress_chunk_notification = true;
-                    let new_frames = dec.push(&chunk);
-                    for frame in new_frames {
-                        frames_emitted += 1;
-
-                        // Encode frame data for the notification.
-                        let encoded = match codec::encode(encoding, &frame.data) {
-                            Ok(s) => s,
-                            Err(e) => {
-                                warn!("RX frame encoding error on {conn_id}: {e}");
-                                conn.record_notification_drop();
-                                conn.log()
-                                    .notification_dropped(&format!("frame encoding error: {e}"));
-                                continue;
-                            }
-                        };
-
-                        // Build frame notification payload.
-                        let mut payload = serde_json::json!({
-                            "connection_id": conn_id,
-                            "frame_index": frame.index,
-                            "frame_type": frame.frame_type,
-                            "encoding": encoding.to_string(),
-                            "data": encoded,
-                        });
-                        if let Some(ref parsed) = frame.parsed {
-                            match serde_json::to_value(parsed) {
-                                Ok(v) => payload["parsed"] = v,
-                                Err(e) => {
-                                    warn!("RX frame parsed serialization error on {conn_id}: {e}")
-                                }
-                            }
-                        }
-
-                        // Per-frame match on decoded frame data.
-                        if let Some(ref mut m) = matcher {
-                            m.reset_window();
-                            if let crate::match_config::MatchResult::Found(idx) =
-                                m.push(&frame.data)
-                            {
-                                payload["matched"] = serde_json::json!(true);
-                                // Emit this frame before stopping.
-                                let param = LoggingMessageNotificationParam {
-                                    level: LoggingLevel::Info,
-                                    logger: Some(logger.clone()),
-                                    data: payload,
-                                };
-                                if let Err(e) = peer.notify_logging_message(param).await {
-                                    error!("RX frame stream peer disconnected: {e}");
-                                    conn.record_notification_drop();
-                                }
-                                total_returned += frame.data.len();
-                                stop_outcome = Some(crate::stop_controller::RxStopOutcome {
-                                    meta: RxStopMetadata::match_found(
-                                        ctrl.bytes_observed(),
-                                        total_returned,
-                                    ),
-                                    matched: true,
-                                    match_index: Some(idx),
-                                });
-                                match_frame_index = Some(frame.index);
-                                break;
-                            }
-                        }
-
-                        // Emit the frame notification.
-                        let param = LoggingMessageNotificationParam {
-                            level: LoggingLevel::Info,
-                            logger: Some(logger.clone()),
-                            data: payload,
-                        };
-                        if let Err(e) = peer.notify_logging_message(param).await {
-                            error!("RX frame stream peer disconnected: {e}");
-                            conn.record_notification_drop();
-                            conn.log()
-                                .notification_dropped(&format!("frame peer disconnected: {e}"));
-                            stop_outcome = Some(ctrl.peer_disconnected());
-                            break;
-                        }
-                        total_returned += frame.data.len();
-
-                        if stop_outcome.is_some() {
-                            break;
-                        }
-                    }
-
-                    // Check max_frames stop condition.
-                    if let Some(limit) = max_frames {
-                        if frames_emitted >= limit && stop_outcome.is_none() {
-                            let bytes_observed = ctrl.bytes_observed();
-                            let meta = RxStopMetadata::max_frames(bytes_observed, total_returned);
+                    let mut sink = SubscribeFrameSink {
+                        peer: peer.clone(),
+                        conn: &conn,
+                        logger: logger.as_str(),
+                        conn_id: conn_id.as_str(),
+                        encoding,
+                        total_returned: &mut total_returned,
+                        match_offset: &mut match_offset,
+                        match_frame_index: &mut match_frame_index,
+                    };
+                    let outcome = consume_frames(
+                        &chunk,
+                        dec,
+                        &mut matcher,
+                        max_frames,
+                        &mut frames_emitted,
+                        &mut sink,
+                    )
+                    .await;
+                    match outcome {
+                        FrameOutcome::SinkStop(RxStopReason::MatchFound) => {
                             stop_outcome = Some(crate::stop_controller::RxStopOutcome {
-                                meta,
+                                meta: RxStopMetadata::match_found(
+                                    ctrl.bytes_observed(),
+                                    total_returned,
+                                ),
+                                matched: true,
+                                match_index: match_offset,
+                            });
+                        }
+                        FrameOutcome::SinkStop(_) => {
+                            // peer disconnected while emitting a non-matching frame
+                            stop_outcome = Some(ctrl.peer_disconnected());
+                        }
+                        FrameOutcome::MaxFrames => {
+                            stop_outcome = Some(crate::stop_controller::RxStopOutcome {
+                                meta: RxStopMetadata::max_frames(
+                                    ctrl.bytes_observed(),
+                                    total_returned,
+                                ),
                                 matched: false,
                                 match_index: None,
                             });
-                            break;
                         }
+                        FrameOutcome::Continue => {}
                     }
                 }
-
                 if stop_outcome.is_some() {
                     break;
                 }

@@ -16,6 +16,9 @@ use crate::rx_metadata::RxStopMetadata;
 use crate::rx_session::RxEvent;
 use crate::serial::{ConnectionConfig, ConnectionManager, SerialConnection};
 use crate::stop_controller::{RxStopController, RxStopDecision};
+use crate::tools::rx_consume::{
+    consume_frames, disconnect_state, DisconnectState, FrameOutcome, RxFrameSink, SinkFlow,
+};
 use crate::tools::types::*;
 
 pub use crate::limits::{
@@ -248,6 +251,45 @@ pub struct ReadOutcome {
     pub frames: Vec<crate::framing::Frame>,
 }
 
+/// `read`'s frame sink: collects every frame and records the first match so the
+/// caller can return it. Always returns `Continue` — read includes frames
+/// decoded after the matching one (legacy behavior).
+struct ReadFrameSink<'a> {
+    collected: &'a mut Vec<crate::framing::Frame>,
+    match_data: Option<Vec<u8>>,
+    match_index: Option<usize>,
+    match_frame_index: Option<usize>,
+}
+
+impl<'a> ReadFrameSink<'a> {
+    fn new(collected: &'a mut Vec<crate::framing::Frame>) -> Self {
+        Self {
+            collected,
+            match_data: None,
+            match_index: None,
+            match_frame_index: None,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl RxFrameSink for ReadFrameSink<'_> {
+    async fn on_frame(
+        &mut self,
+        frame: crate::framing::Frame,
+        matched: bool,
+        match_index: Option<usize>,
+    ) -> SinkFlow {
+        if matched && self.match_data.is_none() {
+            self.match_data = Some(frame.data.clone());
+            self.match_index = match_index;
+            self.match_frame_index = Some(frame.index);
+        }
+        self.collected.push(frame);
+        SinkFlow::Continue
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn read_bytes_via_session(
     mut event_rx: mpsc::Receiver<RxEvent>,
@@ -283,6 +325,7 @@ pub async fn read_bytes_via_session(
         None => None,
     };
     let mut collected_frames: Vec<crate::framing::Frame> = Vec::new();
+    let mut frames_seen: usize = 0;
     let make_outcome = |frames: Vec<crate::framing::Frame>,
                         bytes: Vec<u8>,
                         elapsed_ms: u64,
@@ -357,12 +400,8 @@ pub async fn read_bytes_via_session(
         // If reconnect is NOT enabled, exit with connection_closed so the
         // caller receives partial data and any buffered frames.
         if let Some(ref conn) = conn {
-            let state = conn.state();
-            if state == crate::serial::ConnectionState::Disconnected
-                || state == crate::serial::ConnectionState::Reconnecting
-            {
-                let reconnect_enabled = conn.reconnect_policy.lock().expect("poisoned").enabled;
-                if !reconnect_enabled {
+            match disconnect_state(conn, &mut ctrl) {
+                DisconnectState::Closed => {
                     let outcome = ctrl.connection_closed();
                     finish!(
                         accumulated,
@@ -372,9 +411,11 @@ pub async fn read_bytes_via_session(
                         None
                     );
                 }
-                ctrl.reset_silence_timer();
-                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                continue;
+                DisconnectState::Reconnecting => {
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                    continue;
+                }
+                DisconnectState::Active => {}
             }
         }
 
@@ -442,39 +483,33 @@ pub async fn read_bytes_via_session(
                 let take = chunk.len().min(room);
                 accumulated.extend_from_slice(&chunk[..take]);
 
-                // Feed to frame decoder (full chunk, not just take portion).
+                // Feed to frame decoder via the shared consumer.
                 if let Some(ref mut dec) = decoder {
-                    let prev_frame_count = collected_frames.len();
-                    let new_frames = dec.push(&chunk);
-                    collected_frames.extend(new_frames);
-
-                    // Match on decoded frame data when framing is active.
-                    // Per-frame matching: reset matcher window for each new frame.
-                    let mut frame_match: Option<(Vec<u8>, usize, usize)> = None;
-                    if let Some(ref mut m) = matcher {
-                        for frame in collected_frames.iter().skip(prev_frame_count) {
-                            m.reset_window();
-                            if let crate::match_config::MatchResult::Found(idx) =
-                                m.push(&frame.data)
-                            {
-                                frame_match = Some((frame.data.clone(), idx, frame.index));
-                                break;
-                            }
-                        }
+                    let mut sink = ReadFrameSink::new(&mut collected_frames);
+                    let outcome = consume_frames(
+                        &chunk,
+                        dec,
+                        &mut matcher,
+                        max_frames,
+                        &mut frames_seen,
+                        &mut sink,
+                    )
+                    .await;
+                    let ReadFrameSink {
+                        match_data,
+                        match_index,
+                        match_frame_index,
+                        ..
+                    } = sink;
+                    if let Some(data) = match_data {
+                        let meta =
+                            RxStopMetadata::match_found(ctrl.bytes_observed(), accumulated.len());
+                        finish!(data, meta, true, match_index, match_frame_index);
                     }
-                    if let Some((matched_data, match_idx, frame_idx)) = frame_match {
-                        let bytes_observed = ctrl.bytes_observed();
-                        let meta = RxStopMetadata::match_found(bytes_observed, accumulated.len());
-                        finish!(matched_data, meta, true, Some(match_idx), Some(frame_idx));
-                    }
-
-                    if let Some(limit) = max_frames {
-                        if collected_frames.len() >= limit {
-                            let bytes_observed = ctrl.bytes_observed();
-                            let bytes_returned = accumulated.len();
-                            let meta = RxStopMetadata::max_frames(bytes_observed, bytes_returned);
-                            finish!(accumulated, meta, false, None, None);
-                        }
+                    if let FrameOutcome::MaxFrames = outcome {
+                        let meta =
+                            RxStopMetadata::max_frames(ctrl.bytes_observed(), accumulated.len());
+                        finish!(accumulated, meta, false, None, None);
                     }
                 }
 
@@ -1328,6 +1363,35 @@ mod tests {
         assert_eq!(out.match_index, Some(0));
         assert_eq!(out.match_frame_index, Some(1));
         assert_eq!(out.bytes, b"b");
+        drop(tx);
+    }
+
+    #[tokio::test]
+    async fn char_framing_match_includes_post_match_frames() {
+        let (tx, rx) = mpsc::channel(8);
+        tx.send(RxEvent::Data(b"hit\nafter\n".to_vec()))
+            .await
+            .unwrap();
+        let matcher = Matcher::new_literal(b"hit".to_vec());
+        let out = read_bytes_via_session(
+            rx,
+            256,
+            Some(1000),
+            &fresh_ct(),
+            None,
+            None,
+            matcher,
+            None,
+            None,
+            Some(line_framing(None)),
+        )
+        .await
+        .unwrap();
+        assert_eq!(out.meta.stop_reason, RxStopReason::MatchFound);
+        assert_eq!(out.match_frame_index, Some(0));
+        assert_eq!(out.bytes, b"hit");
+        // read includes the frame decoded AFTER the matching one in the same chunk.
+        assert_eq!(out.frames.len(), 2);
         drop(tx);
     }
 

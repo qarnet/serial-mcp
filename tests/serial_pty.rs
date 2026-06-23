@@ -530,3 +530,82 @@ async fn pty_subscribe_silence_timeout_stops() {
     assert_ne!(data.get("matched").and_then(|v| v.as_bool()), Some(true));
     client.cancel().await.ok();
 }
+
+#[tokio::test]
+async fn pty_subscribe_framing_emits_per_frame_notifications() {
+    let (_server, client, mut rx, mut pty, connection_id) = setup().await;
+
+    client
+        .peer()
+        .call_tool(tool_request(
+            "subscribe",
+            json!({
+                "connection_id": connection_id,
+                "poll_interval_ms": 50,
+                "framing": { "mode": { "type": "line" } },
+            }),
+        ))
+        .await
+        .unwrap();
+
+    pty.write_device(b"alpha\nbeta\n").await.unwrap();
+
+    // Collect frame notifications until we've seen "alpha" and "beta".
+    let mut seen: Vec<(u64, String)> = Vec::new();
+    while !(seen.iter().any(|(_, d)| d.contains("alpha"))
+        && seen.iter().any(|(_, d)| d.contains("beta")))
+    {
+        let n = next_notification(&mut rx, Duration::from_secs(2))
+            .await
+            .unwrap();
+        let obj = n.data.as_object().unwrap();
+        // Frame notifications carry frame_index; the stop notification does not.
+        if let Some(idx) = obj.get("frame_index").and_then(|v| v.as_u64()) {
+            assert_eq!(obj["frame_type"], json!("line"), "frame_type: {obj:?}");
+            seen.push((idx, obj["data"].as_str().unwrap().to_string()));
+        }
+    }
+
+    let alpha = seen.iter().find(|(_, d)| d.contains("alpha")).unwrap();
+    let beta = seen.iter().find(|(_, d)| d.contains("beta")).unwrap();
+    assert_eq!(alpha.0, 0, "alpha is frame 0");
+    assert_eq!(beta.0, 1, "beta is frame 1");
+    client.cancel().await.ok();
+}
+
+#[tokio::test]
+async fn pty_subscribe_framing_match_stops_at_frame() {
+    let (_server, client, mut rx, mut pty, connection_id) = setup().await;
+
+    client
+        .peer()
+        .call_tool(tool_request(
+            "subscribe",
+            json!({
+                "connection_id": connection_id,
+                "poll_interval_ms": 50,
+                "framing": { "mode": { "type": "line" } },
+                "match": { "pattern": "beta" },
+            }),
+        ))
+        .await
+        .unwrap();
+
+    pty.write_device(b"alpha\nbeta\ngamma\n").await.unwrap();
+
+    // Drain notifications until the final stop notification (no frame_index,
+    // carries stop_reason).
+    loop {
+        let n = next_notification(&mut rx, Duration::from_secs(2))
+            .await
+            .unwrap();
+        let obj = n.data.as_object().unwrap();
+        if let Some(reason) = obj.get("stop_reason").and_then(|v| v.as_str()) {
+            assert_eq!(reason, "match_found", "stop: {obj:?}");
+            assert_eq!(obj["matched"], json!(true));
+            assert_eq!(obj["match_frame_index"], json!(1), "beta is frame 1");
+            break;
+        }
+    }
+    client.cancel().await.ok();
+}
