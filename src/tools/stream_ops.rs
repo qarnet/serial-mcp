@@ -296,7 +296,7 @@ impl RxFrameSink for SubscribeFrameSink<'_> {
             // Quirk: a failed emit of the matching frame still reports the match
             // (logs + record_notification_drop only), distinct from the non-matching
             // path below which returns PeerDisconnected. Intentional — see the
-            // matched-frame-emit-failure quirk note in docs/handoffs/finalizing-handoff.md.
+            // read/subscribe framing invariants in AGENTS.md.
             // KNOWN GAP: not characterization-tested (requires a peer disconnect
             // mid-emit on the matching frame); preserved by faithful translation.
             if let Err(e) = emit {
