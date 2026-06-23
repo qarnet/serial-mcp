@@ -11,15 +11,14 @@ use tracing::{debug, error, info, warn};
 
 use crate::buffer_budget::BufferBudget;
 use crate::codec;
-use crate::match_config::{shape_match_context, validate_match_request, Matcher};
+use crate::match_config::{shape_match_context, Matcher};
 use crate::rx_metadata::RxStopMetadata;
 use crate::rx_session::{RxEvent, RxSessionManager};
 use crate::serial::ConnectionManager;
 use crate::stop_controller::{RxStopController, RxStopDecision};
 use crate::tools::helpers::{
-    clamp_or_err, clamp_poll_interval_or_err, clamp_timeout_or_err, lookup_connection,
-    map_budget_err, parse_encoding, require_min_or_err, MAX_STREAM_CHUNK_BYTES, MAX_TIMEOUT_MS,
-    MIN_POLL_INTERVAL_MS, MIN_STREAM_CHUNK_BYTES,
+    clamp_poll_interval_or_err, map_budget_err, validate_rx_request, ResolvedRxArgs, RxLimits,
+    MAX_STREAM_CHUNK_BYTES, MIN_POLL_INTERVAL_MS, MIN_STREAM_CHUNK_BYTES,
 };
 use crate::tools::types::{SubscribeArgs, SubscribeResult, UnsubscribeArgs, UnsubscribeResult};
 
@@ -80,40 +79,27 @@ pub async fn subscribe(
         args.no_new_rx_timeout_ms
     );
 
-    let encoding = parse_encoding(&args.encoding)?;
-    let connection = lookup_connection(connections, &args.connection_id).await?;
-
-    let max_buffered_bytes = require_min_or_err(
-        "subscribe.max_buffered_bytes",
-        args.max_buffered_bytes,
-        MIN_STREAM_CHUNK_BYTES,
-    )?;
-    let max_buffered_bytes = clamp_or_err(
-        "subscribe.max_buffered_bytes",
+    let ResolvedRxArgs {
+        encoding,
+        connection,
         max_buffered_bytes,
-        MAX_STREAM_CHUNK_BYTES,
-    )?;
+        matcher,
+    } = validate_rx_request(
+        connections,
+        &args,
+        RxLimits {
+            tool: "subscribe",
+            min_buffered: MIN_STREAM_CHUNK_BYTES,
+            max_buffered: MAX_STREAM_CHUNK_BYTES,
+        },
+    )
+    .await?;
+    // poll_interval_ms is subscribe-specific; validated after the shared preamble.
     let poll_ms = clamp_poll_interval_or_err(
         "subscribe.poll_interval_ms",
         args.poll_interval_ms,
         MIN_POLL_INTERVAL_MS,
     )?;
-
-    if let Some(timeout_ms) = args.timeout_ms {
-        clamp_timeout_or_err("subscribe.timeout_ms", timeout_ms, MAX_TIMEOUT_MS)?;
-    }
-    if let Some(silence_ms) = args.no_new_rx_timeout_ms {
-        if silence_ms == 0 {
-            return Err("subscribe.no_new_rx_timeout_ms must be > 0".into());
-        }
-        clamp_timeout_or_err("subscribe.no_new_rx_timeout_ms", silence_ms, MAX_TIMEOUT_MS)?;
-    }
-
-    // Resolve matcher if provided.
-    let matcher: Option<Matcher> = match &args.r#match {
-        Some(m) => Some(validate_match_request(m)?),
-        None => None,
-    };
 
     // Drop any existing subscription on this connection FIRST.
     // This aborts the old task and releases its budget reservation
