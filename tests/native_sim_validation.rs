@@ -1513,6 +1513,113 @@ async fn native_flush_during_arm_cmd_delay() {
     drop(fw);
 }
 
+// ── TX flush semantics: fully delivered / partially queued
+//
+// These tests partially close the TECHNICAL_DEBT.md item "Add better live
+// coverage for TX output flush semantics". The debt item names three cases:
+//   1. fully delivered TX  — covered below;
+//   2. partially queued TX — covered below;
+//   3. flushed-before-delivery TX — NOT covered, and not coverable on
+//      native_sim: a PTY delivers every `write()` byte into its kernel
+//      buffer immediately, so the host's `tcflush(TCOFLUSH)` (which is what
+//      `flush(target="output")` calls on Linux) cannot recall bytes that
+//      have already left serialport's output buffer. Simulating this case
+//      requires real hardware with flow control (deassert RTS so the device
+//      stops reading, then flush). That remains a hardware-only gap.
+
+/// Case 1: a fully-delivered command (ping → pong) is unaffected by a
+/// subsequent flush(output). Proves flush(output) does not retroactively
+/// disturb already-consumed bytes or later writes.
+#[tokio::test]
+#[ignore = "requires native_sim firmware binary"]
+async fn native_flush_output_after_full_delivery_is_safe() {
+    let fw = NativeSimFirmware::spawn().await.expect("spawn zephyr.exe");
+    let pty_path = fw.pty_path().to_string();
+
+    let server = TestServer::start().await;
+    let (client, _rx) = connect_client(&server).await.unwrap();
+
+    let id = open_pty(&client, &pty_path).await;
+    sync_boot(&client, &id).await;
+
+    // First ping fully delivered: write, then wait for pong so firmware has
+    // consumed the command and replied.
+    write_cmd(&client, &id, "ping").await;
+    let pong1 = read_until(&client, &id, "pong", 2000).await;
+    assert!(pong1, "first ping should produce pong");
+
+    // Now flush output. With the first command already consumed, this must
+    // not affect any already-delivered bytes.
+    let flush = client
+        .peer()
+        .call_tool(tool_request(
+            "flush",
+            json!({ "connection_id": id, "target": "output" }),
+        ))
+        .await
+        .expect("flush call");
+    assert_ne!(flush.is_error, Some(true), "flush output: {flush:?}");
+
+    // Second ping must still arrive — proves flush(output) did not break the
+    // stream or drop a later, independent write.
+    write_cmd(&client, &id, "ping").await;
+    let pong2 = read_until(&client, &id, "pong", 2000).await;
+    assert!(pong2, "second ping after flush should still produce pong");
+
+    close_connection(&client, &id).await;
+    client.cancel().await.ok();
+    drop(fw);
+}
+
+/// Case 2: a command written without a line terminator is held in firmware's
+/// partial-line cmd_buf and is NOT executed. Writing the remainder plus
+/// terminator then drives the assembled command to completion. Proves
+/// partially-queued TX state is observable in behavior (buffered → resumed),
+/// not just in a probe. A probe-via-`rxbuf status` is unusable here because
+/// the probe bytes themselves get appended to cmd_buf and corrupt the very
+/// partial line being observed, so we assert on behavior instead.
+#[tokio::test]
+#[ignore = "requires native_sim firmware binary"]
+async fn native_partial_line_buffered_then_completed() {
+    let fw = NativeSimFirmware::spawn().await.expect("spawn zephyr.exe");
+    let pty_path = fw.pty_path().to_string();
+
+    let server = TestServer::start().await;
+    let (client, _rx) = connect_client(&server).await.unwrap();
+
+    let id = open_pty(&client, &pty_path).await;
+    sync_boot(&client, &id).await;
+
+    // Write a partial command (no terminator). Firmware should buffer it in
+    // cmd_buf without executing — no pong yet.
+    write_raw(&client, &id, "pi").await;
+    // Settle so the bytes are scanned into cmd_buf, then drain any stray
+    // output so the next observation is clean.
+    tokio::time::sleep(Duration::from_millis(80)).await;
+    flush_both(&client, &id).await;
+
+    // Confirm the partial command did NOT execute: a short read should not
+    // contain pong. (Firmware only executes on a line terminator.)
+    let pre = read_str(&client, &id, 400).await;
+    assert!(
+        !pre.contains("pong"),
+        "partial command without terminator must not execute, got pong in: {pre}"
+    );
+
+    // Complete the line: "ng\r\n". Firmware assembles "pi" + "ng" → "ping"
+    // and executes it, emitting pong.
+    write_raw(&client, &id, "ng\r\n").await;
+    let pong = read_until(&client, &id, "pong", 2000).await;
+    assert!(
+        pong,
+        "completed partial line should assemble to ping and produce pong"
+    );
+
+    close_connection(&client, &id).await;
+    client.cancel().await.ok();
+    drop(fw);
+}
+
 // ── Test 23: regex match finds pong ────────────────────────────────────────
 
 #[tokio::test]
