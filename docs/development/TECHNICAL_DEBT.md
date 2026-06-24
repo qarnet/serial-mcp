@@ -1,38 +1,30 @@
 # Technical Debt
 
-## Testing
+No open items.
 
-### TX output flush semantics — remaining hardware-only gap
+## Resolved
 
-Current issue:
-- Two of the three TX flush cases named in the original debt item are now
-  covered by `tests/native_sim_validation.rs`:
-  - **fully delivered TX** — `native_flush_output_after_full_delivery_is_safe`
-    verifies a completed ping→pong exchange is unaffected by a later
-    `flush(target="output")`, and that a subsequent independent write still
-    lands.
-  - **partially queued TX** — `native_partial_line_buffered_then_completed`
-    verifies a command written without a line terminator is held in firmware's
-    `cmd_buf` (no execution), and that writing the remainder plus terminator
-    drives the assembled command to completion.
-- The third case, **flushed-before-delivery TX**, is not coverable on
-  `native_sim` and remains a hardware-only gap. A PTY delivers every
-  `write()` byte into its kernel buffer immediately, so the host's
-  `tcflush(TCOFLUSH)` (which is what `flush(target="output")` calls on Linux
-  via `serialport`) cannot recall bytes that have already left serialport's
-  output buffer. Simulating this case requires real hardware with flow
-  control (deassert RTS so the device stops reading, then flush).
+### TX output flush semantics — closed 2026-06-24
 
-Why it matters:
-- The `native_sim` PTY cannot reproduce the "undrained TX in the device-side
-  buffer" state that `flush(output)` is meant to discard.
-- A hardware-backed test or a mock `SerialIo` that models an OS TX queue
-  would be needed to close the gap.
+All three TX flush cases from the original debt item are now covered:
 
-Likely follow-up (out of scope for native_sim):
-- add a hardware-only test (gated by a real-port feature flag) that uses RTS
-  flow control to hold device RX, issues `flush(target="output")`, then
-  releases RTS and asserts the flushed command never executed; or
-- introduce a mock `SerialIo` backend with a configurable OS-output buffer
-  that `clear_os_buffers(Output)` actually drains, and unit-test the
-  flush-before-delivery path against that mock.
+- **fully delivered TX** —
+  `tests/native_sim_validation.rs::native_flush_output_after_full_delivery_is_safe`
+  verifies a completed ping→pong exchange is unaffected by a later
+  `flush(target="output")`, and that a subsequent independent write still
+  lands.
+- **partially queued TX** —
+  `tests/native_sim_validation.rs::native_partial_line_buffered_then_completed`
+  verifies a command written without a line terminator is held in firmware's
+  `cmd_buf` (no execution), and that writing the remainder plus terminator
+  drives the assembled command to completion.
+- **flushed-before-delivery TX** —
+  `src/tx_session.rs` unit tests `tx_flush_output_drops_undrained_queued_tx`,
+  `tx_flush_output_on_empty_queue_does_not_drop_later_write`, and
+  `tx_flush_output_after_drain_does_not_recall_delivered` cover this via a
+  new `QueuedTxIo` mock `SerialIo` backend in `src/serial.rs::test_support`.
+  The mock models an OS transmit queue: written bytes land in the queue, and
+  `clear_os_buffers(Output)` (the backend behind `flush(target=output)`)
+  discards bytes still queued before the device drains them. This is the
+  state a `native_sim` PTY cannot reproduce because a PTY delivers every
+  `write()` byte into its kernel buffer immediately.
