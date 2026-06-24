@@ -1,36 +1,6 @@
 # Technical Debt
 
-## RX / subscribe stop payload
-
-### Simplify subscribe final-stop payload fields
-
-Current issue:
-- Final subscribe stop payload includes overlapping counters such as `bytes_read`,
-  `bytes_observed`, and `bytes_returned`.
-
-Why it matters:
-- Redundant fields make agent behavior and docs harder to reason about.
-- Future plans may add more metadata and increase confusion.
-
-Likely follow-up:
-- decide canonical field set for subscribe stop notifications,
-- remove or deprecate overlapping counters once compatibility plan is clear.
-
 ## Testing
-
-### Reduce duplicated `tx_session` test coverage
-
-Current issue:
-- `src/tx_session.rs` unit tests and `tests/tx_session.rs` integration tests cover many same cases.
-- Coverage overlap includes write ordering, close behavior, idempotent session creation, and active RX pump coexistence.
-
-Why it matters:
-- Duplicate assertions increase maintenance cost when TX behavior changes.
-- Similar failures in two layers can add noise without adding much diagnostic value.
-
-Likely follow-up:
-- keep low-level behavior checks close to `src/tx_session.rs`,
-- keep only tool-surface or cross-module wiring coverage in `tests/tx_session.rs`.
 
 ### Add better live coverage for TX output flush semantics
 
