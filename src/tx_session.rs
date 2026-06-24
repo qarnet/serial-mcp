@@ -318,10 +318,11 @@ mod tests {
 
     // ── TX flush-before-delivery semantics ───────────────────────────────
     //
-    // These tests close the remaining hardware-only gap in the
-    // TECHNICAL_DEBT.md item "TX output flush semantics". They use
-    // `queued_tx_connection`, a mock `SerialIo` backend whose TX path models
-    // an OS transmit queue: written bytes land in the queue, and
+    // These tests cover the flushed-before-delivery TX case: bytes written
+    // via `TxSession::write` that are still queued in the OS transmit queue
+    // are discarded by `flush(target=output)` before the device drains them.
+    // They use `queued_tx_connection`, a mock `SerialIo` backend whose TX
+    // path models an OS transmit queue: written bytes land in the queue, and
     // `clear_os_buffers(Output)` (the backend behind `flush(target=output)`)
     // discards bytes still queued before the device has drained them. This
     // is the state a real PTY cannot reproduce because a PTY delivers every

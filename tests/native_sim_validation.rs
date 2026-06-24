@@ -1515,17 +1515,14 @@ async fn native_flush_during_arm_cmd_delay() {
 
 // ── TX flush semantics: fully delivered / partially queued
 //
-// These tests partially close the TECHNICAL_DEBT.md item "Add better live
-// coverage for TX output flush semantics". The debt item names three cases:
+// These tests cover two of the three TX flush cases:
 //   1. fully delivered TX  — covered below;
 //   2. partially queued TX — covered below;
-//   3. flushed-before-delivery TX — NOT covered, and not coverable on
-//      native_sim: a PTY delivers every `write()` byte into its kernel
-//      buffer immediately, so the host's `tcflush(TCOFLUSH)` (which is what
-//      `flush(target="output")` calls on Linux) cannot recall bytes that
-//      have already left serialport's output buffer. Simulating this case
-//      requires real hardware with flow control (deassert RTS so the device
-//      stops reading, then flush). That remains a hardware-only gap.
+//   3. flushed-before-delivery — covered in src/tx_session.rs unit tests via
+//      a QueuedTxIo mock SerialIo backend (a PTY cannot reproduce this case
+//      because it delivers every write() byte into its kernel buffer
+//      immediately, so the host's tcflush(TCOFLUSH) cannot recall bytes that
+//      have already left serialport's output buffer).
 
 /// Case 1: a fully-delivered command (ping → pong) is unaffected by a
 /// subsequent flush(output). Proves flush(output) does not retroactively
