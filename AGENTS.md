@@ -62,11 +62,16 @@ cargo test --test native_sim_connection_lifecycle -- --ignored --test-threads=1
 
 ## Test map
 
-- `cargo test --lib` covers core logic.
+- `cargo test --lib` covers core logic (incl. `serial::schema` uint-format regression tests).
 - `tests/http_integration.rs` exercises real MCP HTTP transport in-process.
 - `tests/serial_pty.rs` is real PTY serial I/O on Unix.
 - `tests/stdio_integration.rs` spawns binary over stdin/stdout.
 - `tests/protocol_emulator*.rs` are protocol hardening tests.
+- `tests/allowlist.rs` — port allowlist enforcement via the HTTP harness.
+- `tests/blob_resources.rs` — blob resources and resource templates.
+- `tests/resource_subscriptions.rs` — MCP resource subscribe/unsubscribe protocol.
+- `tests/tx_session.rs` — cross-module TxSession wiring.
+- `tests/proptest.rs` — property-based and boundary-value tests.
 - `tests/config_schema_validation.rs` validates generated schemas against vendored examples; ignored case fetches upstream schemas.
 - `tests/native_sim_validation.rs` — native_sim firmware over PTY. 37 tests, < 4s, pure software. Env: `SERIAL_MCP_NATIVE_SIM_BIN` (default `build/native_sim/firmware/zephyr/zephyr.exe`).
 - `tests/native_sim_connection_lifecycle.rs` — software-only lifecycle (6 tests): named connection, `set_flow_control`, close-while-read, reopen, touch-command bootloader entry. Run with `--test-threads=1`.

@@ -2001,8 +2001,11 @@ mod schema {
     use crate::profiles::{Profile, ProfileSelector};
     use crate::serial::{ConnectionStatus, PortInfo};
     use crate::tools::types::{
-        CloseResult, GetStatusResult, ListConnectionsResult, ListPortsResult, OpenResult,
-        ReadResult, SendBreakResult, SubscribeResult, UnsubscribeResult, WriteResult,
+        ClearLogResult, CloseResult, DeleteProfileResult, ExportLogResult, FlushResult,
+        GetLogResult, GetStatusResult, ListConnectionsResult, ListPortsResult, ListProfilesResult,
+        OpenResult, ReadResult, ReconfigureResult, ReconnectResult, SaveProfileResult,
+        SendBreakResult, SetDtrRtsResult, SetFlowControlResult, SubscribeResult, UnsubscribeResult,
+        WriteResult,
     };
 
     /// Walk a JSON Schema `Value` and collect every `"format"` whose value
@@ -2074,6 +2077,8 @@ mod schema {
     check_schema!(profile_selector_has_no_uint_formats, ProfileSelector);
 
     // Tool result types reachable by clients.
+    // Keep this list in sync with the `#[tool]` methods in `src/server.rs`
+    // and with `all_tool_attrs()` in `src/tools/mod.rs`.
     check_schema!(list_ports_result_has_no_uint_formats, ListPortsResult);
     check_schema!(
         list_connections_result_has_no_uint_formats,
@@ -2083,8 +2088,25 @@ mod schema {
     check_schema!(close_result_has_no_uint_formats, CloseResult);
     check_schema!(write_result_has_no_uint_formats, WriteResult);
     check_schema!(read_result_has_no_uint_formats, ReadResult);
+    check_schema!(flush_result_has_no_uint_formats, FlushResult);
+    check_schema!(set_dtr_rts_result_has_no_uint_formats, SetDtrRtsResult);
+    check_schema!(
+        set_flow_control_result_has_no_uint_formats,
+        SetFlowControlResult
+    );
+    check_schema!(send_break_result_has_no_uint_formats, SendBreakResult);
     check_schema!(subscribe_result_has_no_uint_formats, SubscribeResult);
     check_schema!(unsubscribe_result_has_no_uint_formats, UnsubscribeResult);
     check_schema!(get_status_result_has_no_uint_formats, GetStatusResult);
-    check_schema!(send_break_result_has_no_uint_formats, SendBreakResult);
+    check_schema!(reconfigure_result_has_no_uint_formats, ReconfigureResult);
+    check_schema!(list_profiles_result_has_no_uint_formats, ListProfilesResult);
+    check_schema!(save_profile_result_has_no_uint_formats, SaveProfileResult);
+    check_schema!(
+        delete_profile_result_has_no_uint_formats,
+        DeleteProfileResult
+    );
+    check_schema!(get_log_result_has_no_uint_formats, GetLogResult);
+    check_schema!(clear_log_result_has_no_uint_formats, ClearLogResult);
+    check_schema!(export_log_result_has_no_uint_formats, ExportLogResult);
+    check_schema!(reconnect_result_has_no_uint_formats, ReconnectResult);
 }

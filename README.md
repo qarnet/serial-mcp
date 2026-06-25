@@ -21,7 +21,7 @@ embedded devices, Arduino boards, STM32 microcontrollers, and any UART/USB-seria
 hardware — all through natural language.
 
 **22 tools** — list_ports, list_connections, open, close, read, write, flush, set_dtr_rts, set_flow_control, send_break, subscribe, unsubscribe, get_status, reconfigure, list_profiles, open_profile, save_profile, delete_profile, get_log, clear_log, export_log, reconnect  
-**4 resources** — `serial://ports`, `serial://connections`, `serial://connections/{id}`, `serial://connections/{id}/raw`, `serial://connections/{id}/log` (3 resource templates + 1 static)  
+**5 resources** — `serial://ports`, `serial://connections`, `serial://connections/{id}`, `serial://connections/{id}/raw`, `serial://connections/{id}/log` (3 resource templates + 2 static)  
 **2 prompt templates** — `diagnose_port`, `interactive_terminal`  
 
 ## Install
