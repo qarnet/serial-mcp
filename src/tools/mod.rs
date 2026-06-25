@@ -14,9 +14,23 @@ mod tests {
     use crate::server::SerialHandler;
     use crate::tools::types::OpenArgs;
 
-    #[test]
-    fn verify_all_tool_schemas() {
-        let tools = vec![
+    /// Regression guard: every MCP tool must carry `outputSchema` and `title`,
+    /// and every MCP tool `outputSchema` must be free of the non-standard
+    /// `uint*` format keywords that schemars 1.x emits for unsigned integer
+    /// fields.
+    ///
+    /// DO NOT DELETE — see the header of `serial::schema` (src/serial.rs) and
+    /// `src/schema_helpers.rs` for the full rationale. History: b12b09fd,
+    /// bc37a0b0, and the PortInfo regression this test originally missed
+    /// because it only checked `uint`/`uint32`/`uint64` and not `uint8`/
+    /// `uint16`. The `uint8`/`uint16` cases are now covered here, and the
+    /// per-type coverage lives in `serial::schema`.
+    ///
+    /// Keep this list in sync with the `#[tool]` methods in `src/server.rs`.
+    /// The list below is exhaustive (22 tools); a missing tool would skip its
+    /// `outputSchema`/`title` check and any uint-format scan.
+    fn all_tool_attrs() -> Vec<(&'static str, rmcp::model::Tool)> {
+        vec![
             ("list_ports", SerialHandler::list_ports_tool_attr()),
             (
                 "list_connections",
@@ -39,9 +53,18 @@ mod tests {
             ("reconfigure", SerialHandler::reconfigure_tool_attr()),
             ("list_profiles", SerialHandler::list_profiles_tool_attr()),
             ("open_profile", SerialHandler::open_profile_tool_attr()),
-        ];
+            ("save_profile", SerialHandler::save_profile_tool_attr()),
+            ("delete_profile", SerialHandler::delete_profile_tool_attr()),
+            ("get_log", SerialHandler::get_log_tool_attr()),
+            ("clear_log", SerialHandler::clear_log_tool_attr()),
+            ("export_log", SerialHandler::export_log_tool_attr()),
+            ("reconnect", SerialHandler::reconnect_tool_attr()),
+        ]
+    }
 
-        for (name, tool) in tools {
+    #[test]
+    fn verify_all_tool_schemas() {
+        for (name, tool) in all_tool_attrs() {
             assert!(
                 tool.output_schema.is_some(),
                 "{name} must have outputSchema"
@@ -52,42 +75,19 @@ mod tests {
 
     #[test]
     fn tool_schemas_have_no_nonstandard_uint_formats() {
-        let tools = vec![
-            SerialHandler::list_ports_tool_attr(),
-            SerialHandler::list_connections_tool_attr(),
-            SerialHandler::open_tool_attr(),
-            SerialHandler::close_tool_attr(),
-            SerialHandler::write_tool_attr(),
-            SerialHandler::read_tool_attr(),
-            SerialHandler::flush_tool_attr(),
-            SerialHandler::set_dtr_rts_tool_attr(),
-            SerialHandler::set_flow_control_tool_attr(),
-            SerialHandler::send_break_tool_attr(),
-            SerialHandler::subscribe_tool_attr(),
-            SerialHandler::unsubscribe_tool_attr(),
-            SerialHandler::get_status_tool_attr(),
-            SerialHandler::reconfigure_tool_attr(),
-            SerialHandler::list_profiles_tool_attr(),
-            SerialHandler::open_profile_tool_attr(),
-        ];
-
-        for tool in tools {
+        for tool in all_tool_attrs() {
             let schema_str = serde_json::to_string(&tool).unwrap();
-            assert!(
-                !schema_str.contains("\"format\":\"uint\""),
-                "schema for {} contains non-standard 'uint' format",
-                tool.name
-            );
-            assert!(
-                !schema_str.contains("\"format\":\"uint32\""),
-                "schema for {} contains non-standard 'uint32' format",
-                tool.name
-            );
-            assert!(
-                !schema_str.contains("\"format\":\"uint64\""),
-                "schema for {} contains non-standard 'uint64' format",
-                tool.name
-            );
+            for bad_format in ["uint", "uint8", "uint16", "uint32", "uint64"] {
+                assert!(
+                    !schema_str.contains(&format!("\"format\":\"{bad_format}\"")),
+                    "schema for {} contains non-standard '{bad_format}' format.\n\
+                     Fix: annotate each uN/Option<uN> field with \
+                     `#[schemars(schema_with = \"crate::schema_helpers::uint_schema\")]` \
+                     (or `option_uint_schema` for Option<uN>). \
+                     See src/schema_helpers.rs.",
+                    tool.0
+                );
+            }
         }
     }
 

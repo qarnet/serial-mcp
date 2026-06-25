@@ -41,7 +41,17 @@ cargo test --test native_sim_connection_lifecycle -- --ignored --test-threads=1
 
 - Tool failures should usually become MCP tool results with `is_error: Some(true)`, not protocol-level `McpError`. Keep malformed-request errors separate from operational errors.
 - All tool outputs need `output_schema` and `title`; `verify_all_tool_schemas` enforces this.
-- Do not emit non-standard schema `"format": "uint"`; use helpers in `src/schema_helpers.rs`.
+- Do not emit non-standard schema `"format": "uint"` / `"uint8"` / `"uint16"` /
+  `"uint32"` / `"uint64"`; schemars 1.x emits these for unsigned integer
+  fields and validators log a warning per call and drop the constraint.
+  Every `uN` / `Option<uN>` field on a struct that derives `JsonSchema` MUST
+  be annotated with
+  `#[schemars(schema_with = "crate::schema_helpers::uint_schema")]`
+  (or `option_uint_schema` for `Option<uN>`). Regression tests live in
+  `serial::schema` (`src/serial.rs`) — extend the `check_schema!` list when
+  adding a new `JsonSchema`-deriving struct with unsigned integer fields.
+  History: b12b09fd, bc37a0b0, and the PortInfo (vid/pid/interface) regression
+  that slipped through because the old guard only checked uint/uint32/uint64.
 - `open` must enforce allowlist checks before `ConnectionManager::open()`.
 - Open/close changes must notify resource subscribers via `notify_resource_list_changed()`.
 - `read` and `subscribe` share stop-reason vocabulary via `RxStopController`, but their RX loops are **not** interchangeable sink swaps. Raw-path semantics differ by design: `read` is bounded and only scans `chunk[..take]` up to `max_bytes`; `subscribe` scans full chunks across the whole subscription lifetime.
@@ -52,11 +62,16 @@ cargo test --test native_sim_connection_lifecycle -- --ignored --test-threads=1
 
 ## Test map
 
-- `cargo test --lib` covers core logic.
+- `cargo test --lib` covers core logic (incl. `serial::schema` uint-format regression tests).
 - `tests/http_integration.rs` exercises real MCP HTTP transport in-process.
 - `tests/serial_pty.rs` is real PTY serial I/O on Unix.
 - `tests/stdio_integration.rs` spawns binary over stdin/stdout.
 - `tests/protocol_emulator*.rs` are protocol hardening tests.
+- `tests/allowlist.rs` — port allowlist enforcement via the HTTP harness.
+- `tests/blob_resources.rs` — blob resources and resource templates.
+- `tests/resource_subscriptions.rs` — MCP resource subscribe/unsubscribe protocol.
+- `tests/tx_session.rs` — cross-module TxSession wiring.
+- `tests/proptest.rs` — property-based and boundary-value tests.
 - `tests/config_schema_validation.rs` validates generated schemas against vendored examples; ignored case fetches upstream schemas.
 - `tests/native_sim_validation.rs` — native_sim firmware over PTY. 37 tests, < 4s, pure software. Env: `SERIAL_MCP_NATIVE_SIM_BIN` (default `build/native_sim/firmware/zephyr/zephyr.exe`).
 - `tests/native_sim_connection_lifecycle.rs` — software-only lifecycle (6 tests): named connection, `set_flow_control`, close-while-read, reopen, touch-command bootloader entry. Run with `--test-threads=1`.

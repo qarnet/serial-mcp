@@ -344,10 +344,24 @@ pub struct PortInfo {
     /// Transport type — `usb`, `pci`, `bluetooth`, or `unknown`.
     pub transport: PortTransport,
     /// USB Vendor ID. `None` for non-USB ports.
+    ///
+    /// `#[schemars(schema_with = ...)]` overrides schemars so it emits
+    /// `{"type": ["integer", "null"], "minimum": 0}` instead of the
+    /// non-standard `"format": "uint16"` keyword. The `uint16` format is not
+    /// part of the JSON Schema spec and is silently dropped by most
+    /// validators (logging a warning per call). Every `Option<uN>`/`uN`
+    /// field that derives `JsonSchema` MUST carry this override — see
+    /// `src/schema_helpers.rs` and the regression test
+    /// `serial::schema::no_nonstandard_uint_formats_in_all_public_schemas`.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "crate::schema_helpers::option_uint_schema")]
     pub vid: Option<u16>,
     /// USB Product ID. `None` for non-USB ports.
+    ///
+    /// See `vid` for why the `#[schemars(schema_with = ...)]` override is
+    /// required on every unsigned-integer field that derives `JsonSchema`.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "crate::schema_helpers::option_uint_schema")]
     pub pid: Option<u16>,
     /// USB serial number string from the device descriptor.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -359,7 +373,11 @@ pub struct PortInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub product: Option<String>,
     /// USB interface index. `None` when not available or not a USB port.
+    ///
+    /// See `vid` for why the `#[schemars(schema_with = ...)]` override is
+    /// required on every unsigned-integer field that derives `JsonSchema`.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "crate::schema_helpers::option_uint_schema")]
     pub interface: Option<u8>,
 }
 
@@ -1932,4 +1950,163 @@ mod tests {
             .unwrap_err()
             .contains("expected none/software/hardware"));
     }
+}
+
+// =============================================================================
+// JSON Schema regression tests — DO NOT DELETE.
+//
+// These tests guard against the schemars "non-standard uint format" regression
+// that has bitten this crate repeatedly (commits b12b09fd, bc37a0b0, and the
+// regression fixed in this commit on `PortInfo`).
+//
+// Background
+// ----------
+// schemars (1.x) emits a `"format": "uintN"` keyword for unsigned integer
+// types: `uint8`, `uint16`, `uint32`, `uint64`, `uint`. None of these are part
+// of the JSON Schema spec. Validators (jsonschema, AJV, …) log a warning like
+//     unknown format "uint16" ignored in schema at path "#/properties/vid"
+// and then drop the constraint. Functionally harmless but noisy, and a sign
+// that a field was added without the required `#[schemars(schema_with = ...)]`
+// override.
+//
+// Every time a new struct with a `uN`/`Option<uN>` field is added and derives
+// `JsonSchema`, it MUST annotate that field with `crate::schema_helpers::uint_schema`
+// (for `uN`) or `crate::schema_helpers::option_uint_schema` (for `Option<uN>`).
+//
+// Why this keeps coming back
+// --------------------------
+// The previous guard (`tool_schemas_have_no_nonstandard_uint_formats` in
+// `src/tools/mod.rs`) only checked the tool `outputSchema` strings and only
+// asserted on `uint`/`uint32`/`uint64`. It missed:
+//   1. `u8`/`u16` formats (this regression's `PortInfo.vid`/`pid`/`interface`).
+//   2. Types that appear in resource/prompt schemas but are also reachable via
+//      tool outputs (e.g. `PortInfo` is in `ListPortsResult` AND
+//      `ConnectionStatus.port_info`).
+//
+// The tests below close both gaps:
+//   - They enumerate every known public `JsonSchema`-deriving struct and
+//     reject *any* `uint*` format keyword.
+//   - They also keep the tool-level string scan, now covering uint8/uint16
+//     (see `src/tools/mod.rs`).
+//
+// If you add a new public type that derives `JsonSchema` and has unsigned
+// integer fields, ADD IT to the `check_schema!` list below. The compile-time
+// cost is tiny; the cost of shipping noisy schemas to every MCP client is not.
+// =============================================================================
+#[cfg(test)]
+mod schema {
+    use schemars::schema_for;
+    use serde_json::{self, Value};
+
+    use crate::profiles::{Profile, ProfileSelector};
+    use crate::serial::{ConnectionStatus, PortInfo};
+    use crate::tools::types::{
+        ClearLogResult, CloseResult, DeleteProfileResult, ExportLogResult, FlushResult,
+        GetLogResult, GetStatusResult, ListConnectionsResult, ListPortsResult, ListProfilesResult,
+        OpenResult, ReadResult, ReconfigureResult, ReconnectResult, SaveProfileResult,
+        SendBreakResult, SetDtrRtsResult, SetFlowControlResult, SubscribeResult, UnsubscribeResult,
+        WriteResult,
+    };
+
+    /// Walk a JSON Schema `Value` and collect every `"format"` whose value
+    /// starts with `uint`. Returns the dotted path of each offending node so
+    /// failures point at the exact field.
+    fn collect_nonstandard_uint_formats(schema: &Value) -> Vec<String> {
+        let mut offenders = Vec::new();
+        let mut stack: Vec<(String, &Value)> = Vec::new();
+        stack.push((String::new(), schema));
+
+        while let Some((path, value)) = stack.pop() {
+            match value {
+                Value::Object(map) => {
+                    if let Some(Value::String(fmt)) = map.get("format") {
+                        if fmt.starts_with("uint") {
+                            offenders.push(format!("{path} (format={fmt})"));
+                        }
+                    }
+                    for (k, v) in map {
+                        let next = if path.is_empty() {
+                            k.clone()
+                        } else {
+                            format!("{path}.{k}")
+                        };
+                        stack.push((next, v));
+                    }
+                }
+                Value::Array(arr) => {
+                    for (i, v) in arr.iter().enumerate() {
+                        stack.push((format!("{path}[{i}]"), v));
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        offenders
+    }
+
+    /// Generate a focused test for one type that asserts its JSON Schema
+    /// contains no non-standard `uint*` format keywords.
+    macro_rules! check_schema {
+        ($name:ident, $ty:ty) => {
+            #[test]
+            fn $name() {
+                let schema = schema_for!($ty);
+                let json = serde_json::to_value(&schema).expect("schema serializes");
+                let offenders = collect_nonstandard_uint_formats(&json);
+                assert!(
+                    offenders.is_empty(),
+                    "{} schema emits non-standard JSON Schema uint formats: {offenders:?}.\n\
+                         Fix: annotate each uN/Option<uN> field on the type with\n\
+                         `#[schemars(schema_with = \"crate::schema_helpers::uint_schema\")]`\n\
+                         (or `option_uint_schema` for Option<uN>). See\n\
+                         src/schema_helpers.rs and the header comment of this test\n\
+                         module (serial::schema) for the full rationale.",
+                    stringify!($ty),
+                );
+            }
+        };
+    }
+
+    // Core identity + status types (the source of this regression).
+    check_schema!(port_info_has_no_uint_formats, PortInfo);
+    check_schema!(connection_status_has_no_uint_formats, ConnectionStatus);
+
+    // Profile types (already fixed in b12b09fd; guarded against regressions).
+    check_schema!(profile_has_no_uint_formats, Profile);
+    check_schema!(profile_selector_has_no_uint_formats, ProfileSelector);
+
+    // Tool result types reachable by clients.
+    // Keep this list in sync with the `#[tool]` methods in `src/server.rs`
+    // and with `all_tool_attrs()` in `src/tools/mod.rs`.
+    check_schema!(list_ports_result_has_no_uint_formats, ListPortsResult);
+    check_schema!(
+        list_connections_result_has_no_uint_formats,
+        ListConnectionsResult
+    );
+    check_schema!(open_result_has_no_uint_formats, OpenResult);
+    check_schema!(close_result_has_no_uint_formats, CloseResult);
+    check_schema!(write_result_has_no_uint_formats, WriteResult);
+    check_schema!(read_result_has_no_uint_formats, ReadResult);
+    check_schema!(flush_result_has_no_uint_formats, FlushResult);
+    check_schema!(set_dtr_rts_result_has_no_uint_formats, SetDtrRtsResult);
+    check_schema!(
+        set_flow_control_result_has_no_uint_formats,
+        SetFlowControlResult
+    );
+    check_schema!(send_break_result_has_no_uint_formats, SendBreakResult);
+    check_schema!(subscribe_result_has_no_uint_formats, SubscribeResult);
+    check_schema!(unsubscribe_result_has_no_uint_formats, UnsubscribeResult);
+    check_schema!(get_status_result_has_no_uint_formats, GetStatusResult);
+    check_schema!(reconfigure_result_has_no_uint_formats, ReconfigureResult);
+    check_schema!(list_profiles_result_has_no_uint_formats, ListProfilesResult);
+    check_schema!(save_profile_result_has_no_uint_formats, SaveProfileResult);
+    check_schema!(
+        delete_profile_result_has_no_uint_formats,
+        DeleteProfileResult
+    );
+    check_schema!(get_log_result_has_no_uint_formats, GetLogResult);
+    check_schema!(clear_log_result_has_no_uint_formats, ClearLogResult);
+    check_schema!(export_log_result_has_no_uint_formats, ExportLogResult);
+    check_schema!(reconnect_result_has_no_uint_formats, ReconnectResult);
 }

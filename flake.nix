@@ -305,29 +305,17 @@
         };
 
         # `nix flake check`
+        #
+        # Only the package build is checked here. fmt, clippy, and the test
+        # suite are all run by the build/test/clippy matrix in
+        # .github/workflows/ci.yml on 4 OSes (ubuntu-latest,
+        # ubuntu-24.04-arm, macos-14, windows-latest) plus the native-sim job.
+        # Re-running them via Nix duplicated that work (~10 min of redundant
+        # crate compilation + test execution) without adding coverage — the
+        # unique value of `nix flake check` is verifying the flake itself is
+        # valid and the nixpkgs derivation builds. Keep it to that.
         checks = {
           inherit serial-mcp;
-
-          clippy = craneLib.cargoClippy (
-            commonArgs
-            // {
-              inherit cargoArtifacts;
-              cargoClippyExtraArgs = "--all-targets -- --deny warnings";
-            }
-          );
-
-          fmt = craneLib.cargoFmt {
-            src = commonArgs.src;
-          };
-
-          nextest = craneLib.cargoNextest (
-            commonArgs
-            // {
-              inherit cargoArtifacts;
-              partitions = 1;
-              partitionType = "count";
-            }
-          );
         };
       }
     );
