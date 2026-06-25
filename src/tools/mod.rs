@@ -50,6 +50,16 @@ mod tests {
         }
     }
 
+    /// Regression guard: every MCP tool `outputSchema` must be free of the
+    /// non-standard `uint*` format keywords that schemars 1.x emits for
+    /// unsigned integer fields.
+    ///
+    /// DO NOT DELETE — see the header of `serial::schema` (src/serial.rs) and
+    /// `src/schema_helpers.rs` for the full rationale. History: b12b09fd,
+    /// bc37a0b0, and the PortInfo regression this test originally missed
+    /// because it only checked `uint`/`uint32`/`uint64` and not `uint8`/
+    /// `uint16`. The `uint8`/`uint16` cases are now covered here, and the
+    /// per-type coverage lives in `serial::schema`.
     #[test]
     fn tool_schemas_have_no_nonstandard_uint_formats() {
         let tools = vec![
@@ -73,21 +83,17 @@ mod tests {
 
         for tool in tools {
             let schema_str = serde_json::to_string(&tool).unwrap();
-            assert!(
-                !schema_str.contains("\"format\":\"uint\""),
-                "schema for {} contains non-standard 'uint' format",
-                tool.name
-            );
-            assert!(
-                !schema_str.contains("\"format\":\"uint32\""),
-                "schema for {} contains non-standard 'uint32' format",
-                tool.name
-            );
-            assert!(
-                !schema_str.contains("\"format\":\"uint64\""),
-                "schema for {} contains non-standard 'uint64' format",
-                tool.name
-            );
+            for bad_format in ["uint", "uint8", "uint16", "uint32", "uint64"] {
+                assert!(
+                    !schema_str.contains(&format!("\"format\":\"{bad_format}\"")),
+                    "schema for {} contains non-standard '{bad_format}' format.\n\
+                     Fix: annotate each uN/Option<uN> field with \
+                     `#[schemars(schema_with = \"crate::schema_helpers::uint_schema\")]` \
+                     (or `option_uint_schema` for Option<uN>). \
+                     See src/schema_helpers.rs.",
+                    tool.name
+                );
+            }
         }
     }
 

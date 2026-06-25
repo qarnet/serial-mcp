@@ -62,6 +62,12 @@ pub enum FramingMode {
     /// Split based on a length prefix field at the start of each frame.
     LengthPrefixed {
         /// Size of the length prefix field in bytes: 1, 2, or 4.
+        ///
+        /// `#[schemars(schema_with = ...)]` overrides schemars so it emits
+        /// `{"type": "integer", "minimum": 0}` instead of the non-standard
+        /// `"format": "uint8"` keyword. See `src/schema_helpers.rs` and the
+        /// `serial::schema` regression tests.
+        #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
         prefix_size: u8,
         /// Byte order of the length prefix.
         #[serde(default)]

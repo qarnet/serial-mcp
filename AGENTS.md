@@ -41,7 +41,17 @@ cargo test --test native_sim_connection_lifecycle -- --ignored --test-threads=1
 
 - Tool failures should usually become MCP tool results with `is_error: Some(true)`, not protocol-level `McpError`. Keep malformed-request errors separate from operational errors.
 - All tool outputs need `output_schema` and `title`; `verify_all_tool_schemas` enforces this.
-- Do not emit non-standard schema `"format": "uint"`; use helpers in `src/schema_helpers.rs`.
+- Do not emit non-standard schema `"format": "uint"` / `"uint8"` / `"uint16"` /
+  `"uint32"` / `"uint64"`; schemars 1.x emits these for unsigned integer
+  fields and validators log a warning per call and drop the constraint.
+  Every `uN` / `Option<uN>` field on a struct that derives `JsonSchema` MUST
+  be annotated with
+  `#[schemars(schema_with = "crate::schema_helpers::uint_schema")]`
+  (or `option_uint_schema` for `Option<uN>`). Regression tests live in
+  `serial::schema` (`src/serial.rs`) — extend the `check_schema!` list when
+  adding a new `JsonSchema`-deriving struct with unsigned integer fields.
+  History: b12b09fd, bc37a0b0, and the PortInfo (vid/pid/interface) regression
+  that slipped through because the old guard only checked uint/uint32/uint64.
 - `open` must enforce allowlist checks before `ConnectionManager::open()`.
 - Open/close changes must notify resource subscribers via `notify_resource_list_changed()`.
 - `read` and `subscribe` share stop-reason vocabulary via `RxStopController`, but their RX loops are **not** interchangeable sink swaps. Raw-path semantics differ by design: `read` is bounded and only scans `chunk[..take]` up to `max_bytes`; `subscribe` scans full chunks across the whole subscription lifetime.
