@@ -206,6 +206,43 @@ proptest! {
     }
 
     #[test]
+    fn write_args_with_tx_framing_roundtrip(
+        id in opaque_id(),
+        data in r"[A-Za-z0-9\r\n\t ]{0,4096}",
+        enc in valid_encoding(),
+    ) {
+        use serial_mcp::framing::{Endianness, TxFramingConfig, TxFramingMode, TxLineEnding};
+        use serial_mcp::match_config::PatternEncoding;
+        let modes = vec![
+            TxFramingMode::Line {
+                ending: TxLineEnding::Crlf,
+            },
+            TxFramingMode::Delimiter {
+                delimiter: "|".into(),
+                delimiter_encoding: PatternEncoding::Utf8,
+            },
+            TxFramingMode::LengthPrefixed {
+                prefix_size: 2,
+                endianness: Endianness::Big,
+            },
+            TxFramingMode::StartEnd {
+                start: "STX".into(),
+                end: "ETX".into(),
+                marker_encoding: PatternEncoding::Utf8,
+            },
+        ];
+        for mode in modes {
+            let args = WriteArgs {
+                connection_id: id.clone(),
+                data: data.clone(),
+                encoding: enc.clone(),
+                tx_framing: Some(TxFramingConfig { mode }),
+            };
+            assert_roundtrip!(args);
+        }
+    }
+
+    #[test]
     fn read_args_roundtrip(
         id in opaque_id(),
         timeout in optional_u64(),
