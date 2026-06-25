@@ -267,7 +267,7 @@ impl SerialHandler {
     }
 
     #[tool(
-        description = "Write data to a serial port connection",
+        description = "Write data to a serial port connection. Use tx_framing to apply frame boundaries (line terminator, delimiter, length prefix, or start/end markers) around the decoded payload. When tx_framing is used, decoded_bytes reports the payload length before framing, and bytes_written reports the total framed bytes sent.",
         title = "Write Serial Data",
         annotations(destructive_hint = true, open_world_hint = false)
     )]
@@ -279,7 +279,7 @@ impl SerialHandler {
     }
 
     #[tool(
-        description = "Read data from a serial port connection. Returns only future bytes — data received after the call starts, not previously buffered data. With no options, reads available bytes with timeout and burst-settle. With match, accumulates until a pattern is found. With framing, splits the byte stream into structured frames (line, delimiter, length-prefixed, start/end marker) and optionally parses content (AT commands, JSON lines, shell prompts). Match and framing can be combined. Set no_new_rx_timeout_ms to stop when no new bytes arrive within the specified silence window.",
+        description = "Read data from a serial port connection. Returns only future bytes — data received after the call starts, not previously buffered data. With no options, reads available bytes with timeout and burst-settle. With match, accumulates until a pattern is found. With rx_framing, splits the byte stream into structured frames (line, delimiter, length-prefixed, start/end marker) and optionally parses content (AT commands, JSON lines, shell prompts). Match and rx_framing can be combined. Set no_new_rx_timeout_ms to stop when no new bytes arrive within the specified silence window.",
         title = "Read Serial Data",
         annotations(read_only_hint = true, open_world_hint = false),
         execution(task_support = "optional")
@@ -364,7 +364,7 @@ impl SerialHandler {
     }
 
     #[tool(
-        description = "Subscribe to a connection: starts a background stream that forwards received bytes as MCP `notifications/message` events with logger=\"serial:<connection_id>\". When timeout_ms is set, the stream auto-stops after that duration. When omitted, the stream runs until unsubscribe, connection close, or error. Set no_new_rx_timeout_ms to stop after a period of silence. With match, detects the first byte pattern. With framing, emits per-frame notifications with structured data (line, delimiter, length-prefixed, start/end marker) and optional parsing (AT commands, JSON lines, shell prompts). Replaces any prior subscription on the same connection. A final notification with stop_reason, truncated, bytes_observed, bytes_returned, elapsed_ms is emitted when the stream ends.",
+        description = "Subscribe to a connection: starts a background stream that forwards received bytes as MCP `notifications/message` events with logger=\"serial:<connection_id>\". When timeout_ms is set, the stream auto-stops after that duration. When omitted, the stream runs until unsubscribe, connection close, or error. Set no_new_rx_timeout_ms to stop after a period of silence. With match, detects the first byte pattern. With rx_framing, emits per-frame notifications with structured data (line, delimiter, length-prefixed, start/end marker) and optional parsing (AT commands, JSON lines, shell prompts). Replaces any prior subscription on the same connection. A final notification with stop_reason, truncated, bytes_observed, bytes_returned, elapsed_ms is emitted when the stream ends.",
         title = "Subscribe to RX Stream",
         annotations(
             destructive_hint = false,

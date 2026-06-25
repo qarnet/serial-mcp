@@ -57,6 +57,11 @@ pub struct WriteArgs {
     pub data: String,
     #[serde(default = "default_encoding")]
     pub encoding: String,
+    /// Optional TX framing configuration. When present, the payload is framed
+    /// before being sent (e.g. line terminator appended, delimiter appended,
+    /// length prefix prepended, or start/end markers wrapped).
+    #[serde(default)]
+    pub tx_framing: Option<crate::framing::TxFramingConfig>,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -83,11 +88,11 @@ pub struct ReadArgs {
     /// result includes `matched` and `match_index` fields.
     #[serde(default)]
     pub r#match: Option<crate::match_config::MatchRequest>,
-    /// Optional frame decoder configuration. When present, the byte stream is
+    /// Optional RX frame decoder configuration. When present, the byte stream is
     /// split into structured frames. The result includes `frames` in addition
     /// to the raw `data` field. Can be combined with `match`.
     #[serde(default)]
-    pub framing: Option<crate::framing::FramingConfig>,
+    pub rx_framing: Option<crate::framing::RxFramingConfig>,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -144,11 +149,11 @@ pub struct SubscribeArgs {
     /// and `match_index`, then terminates.
     #[serde(default)]
     pub r#match: Option<crate::match_config::MatchRequest>,
-    /// Optional frame decoder configuration. When present, the stream emits
+    /// Optional RX frame decoder configuration. When present, the stream emits
     /// one notification per decoded frame (instead of per raw chunk). Can
     /// be combined with `match`.
     #[serde(default)]
-    pub framing: Option<crate::framing::FramingConfig>,
+    pub rx_framing: Option<crate::framing::RxFramingConfig>,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -231,6 +236,10 @@ pub struct WriteResult {
     pub name: Option<String>,
     #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
     pub bytes_written: usize,
+    /// Decoded payload length before framing (always ≤ `bytes_written`).
+    /// When `tx_framing` is not used, `decoded_bytes == bytes_written`.
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub decoded_bytes: usize,
     pub encoding: String,
 }
 
@@ -287,12 +296,12 @@ pub struct ReadResult {
     #[schemars(schema_with = "crate::schema_helpers::option_uint_schema")]
     pub match_index: Option<usize>,
     /// When framing is active and a match was found, the index of the frame
-    /// that contained the match. `null` when no match, or framing not used,
-    /// or match found in raw stream (no framing).
+    /// that contained the match. `null` when no match, or rx_framing not used,
+    /// or match found in raw stream (no rx_framing).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(schema_with = "crate::schema_helpers::option_uint_schema")]
     pub match_frame_index: Option<usize>,
-    /// Decoded frames, present when the `framing` option was used.
+    /// Decoded frames, present when the `rx_framing` option was used.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub frames: Option<Vec<FrameResult>>,
     /// Number of frames dropped due to encoding failures.

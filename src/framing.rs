@@ -1,24 +1,33 @@
-//! Frame boundary detection and protocol parsing for RX streams.
+//! Frame boundary detection and protocol parsing for RX and TX streams.
 //!
 //! Provides a [`FrameDecoder`] that splits a byte stream into structured
 //! frames using one of four boundary modes (line, delimiter, length-prefixed,
 //! start/end marker). Optional parsers interpret frame content (AT commands,
 //! JSON lines, shell prompts). Used as an option on `read` and `subscribe`.
+//!
+//! Also provides TX framing via [`TxFramingMode`] which encodes payloads
+//! with frame boundaries matching the RX modes. Used on `write`.
 
 use crate::codec;
 use crate::match_config::PatternEncoding;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-// ---- Framing configuration ------------------------------------------------
+// ---- RX framing configuration ----------------------------------------------
 
 /// Framing configuration for `read` and `subscribe`.
 /// Specifies how to split the byte stream into frames and optionally parse
 /// each frame's content.
+///
+/// The mode fields are flattened into the config struct so the JSON shape is:
+/// `{"type": "line", "ending": "auto", "parser": ...}` rather than
+/// `{"mode": {"type": "line"}, "parser": ...}`.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct FramingConfig {
-    /// Frame boundary detection mode.
-    pub mode: FramingMode,
+pub struct RxFramingConfig {
+    /// Frame boundary detection mode. Flattened: its `type` discriminator and
+    /// variant fields appear at the top level of the `rx_framing` object.
+    #[serde(flatten)]
+    pub mode: RxFramingMode,
     /// Optional parser configuration for interpreting frame content.
     #[serde(default)]
     pub parser: Option<ParserConfig>,
@@ -34,10 +43,12 @@ pub struct FramingConfig {
     pub include_terminators: bool,
 }
 
-impl Default for FramingConfig {
+impl Default for RxFramingConfig {
     fn default() -> Self {
         Self {
-            mode: FramingMode::Line,
+            mode: RxFramingMode::Line {
+                ending: LineEnding::Auto,
+            },
             parser: None,
             max_frames: None,
             include_terminators: false,
@@ -46,12 +57,20 @@ impl Default for FramingConfig {
 }
 
 /// How frame boundaries are detected in the byte stream.
+/// Flattened into [`RxFramingConfig`] via `#[serde(flatten)]`.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case", tag = "type")]
-pub enum FramingMode {
-    /// Split on `\n` (optionally preceded by `\r`). Default mode.
-    Line,
+pub enum RxFramingMode {
+    /// Split on line endings. Supports `auto` (LF or CRLF), `lf`, `cr`, `crlf`.
+    #[serde(rename_all = "snake_case")]
+    Line {
+        /// Line ending style. Default: `auto` (recognizes LF and CRLF, strips
+        /// preceding `\r` when splitting on `\n`).
+        #[serde(default)]
+        ending: LineEnding,
+    },
     /// Split on a user-supplied byte delimiter sequence.
+    #[serde(rename_all = "snake_case")]
     Delimiter {
         /// The delimiter as a string (decoded per `delimiter_encoding`).
         delimiter: String,
@@ -60,13 +79,9 @@ pub enum FramingMode {
         delimiter_encoding: PatternEncoding,
     },
     /// Split based on a length prefix field at the start of each frame.
+    #[serde(rename_all = "snake_case")]
     LengthPrefixed {
         /// Size of the length prefix field in bytes: 1, 2, or 4.
-        ///
-        /// `#[schemars(schema_with = ...)]` overrides schemars so it emits
-        /// `{"type": "integer", "minimum": 0}` instead of the non-standard
-        /// `"format": "uint8"` keyword. See `src/schema_helpers.rs` and the
-        /// `serial::schema` regression tests.
         #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
         prefix_size: u8,
         /// Byte order of the length prefix.
@@ -80,6 +95,7 @@ pub enum FramingMode {
         initial_offset: Option<usize>,
     },
     /// Split based on start and end marker byte sequences.
+    #[serde(rename_all = "snake_case")]
     StartEnd {
         /// Start marker (decoded per `marker_encoding`).
         start: String,
@@ -94,9 +110,189 @@ pub enum FramingMode {
     },
 }
 
+/// Line ending style for RX line framing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum LineEnding {
+    /// Recognize LF and CRLF. When splitting on `\n`, strip a preceding
+    /// `\r` from the frame. This is the original default behavior.
+    #[default]
+    Auto,
+    /// Split on `\n` only. Do NOT strip a preceding `\r`.
+    Lf,
+    /// Split on bare `\r` only.
+    Cr,
+    /// Split on exact `\r\n` only.
+    Crlf,
+}
+
 fn default_encoding() -> PatternEncoding {
     PatternEncoding::Utf8
 }
+
+// ---- TX framing configuration -----------------------------------------------
+
+/// TX framing configuration for `write`.
+/// Mirrors the RX modes but directionally appropriate.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct TxFramingConfig {
+    /// TX frame boundary mode. Flattened: its `type` discriminator and
+    /// variant fields appear at the top level of the `tx_framing` object.
+    #[serde(flatten)]
+    pub mode: TxFramingMode,
+}
+
+/// How TX frames are constructed around a payload.
+/// Flattened into [`TxFramingConfig`] via `#[serde(flatten)]`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case", tag = "type")]
+pub enum TxFramingMode {
+    /// Append a line terminator. No `auto` — agents must be explicit.
+    #[serde(rename_all = "snake_case")]
+    Line {
+        /// Line ending to append: `lf`, `cr`, or `crlf`.
+        ending: TxLineEnding,
+    },
+    /// Append a delimiter byte sequence after the payload.
+    #[serde(rename_all = "snake_case")]
+    Delimiter {
+        /// The delimiter as a string (decoded per `delimiter_encoding`).
+        delimiter: String,
+        /// How to decode the delimiter string into bytes.
+        #[serde(default = "default_encoding")]
+        delimiter_encoding: PatternEncoding,
+    },
+    /// Prepend a length prefix encoding the payload length, then the payload.
+    #[serde(rename_all = "snake_case")]
+    LengthPrefixed {
+        /// Size of the length prefix field in bytes: 1, 2, or 4.
+        #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+        prefix_size: u8,
+        /// Byte order of the length prefix.
+        #[serde(default)]
+        endianness: Endianness,
+    },
+    /// Write start marker, payload, end marker.
+    #[serde(rename_all = "snake_case")]
+    StartEnd {
+        /// Start marker (decoded per `marker_encoding`).
+        start: String,
+        /// End marker (decoded per `marker_encoding`).
+        end: String,
+        /// How to decode the marker strings into bytes.
+        #[serde(default = "default_encoding")]
+        marker_encoding: PatternEncoding,
+    },
+}
+
+/// Line ending for TX framing. No `auto` — agents must pick one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum TxLineEnding {
+    /// Append `\n` (LF).
+    Lf,
+    /// Append `\r` (CR).
+    Cr,
+    /// Append `\r\n` (CRLF).
+    Crlf,
+}
+
+impl TxFramingMode {
+    /// Encode a decoded payload by applying this TX framing mode.
+    /// Returns the framed bytes to send to the UART.
+    pub fn encode(&self, payload: &[u8]) -> Result<Vec<u8>, String> {
+        match self {
+            TxFramingMode::Line { ending } => {
+                let mut framed = payload.to_vec();
+                match ending {
+                    TxLineEnding::Lf => framed.push(b'\n'),
+                    TxLineEnding::Cr => framed.push(b'\r'),
+                    TxLineEnding::Crlf => framed.extend_from_slice(b"\r\n"),
+                }
+                Ok(framed)
+            }
+            TxFramingMode::Delimiter {
+                delimiter,
+                delimiter_encoding,
+            } => {
+                let delim_bytes = codec::decode((*delimiter_encoding).into(), delimiter)
+                    .map_err(|e| format!("Invalid TX delimiter encoding: {e}"))?;
+                if delim_bytes.is_empty() {
+                    return Err("TX delimiter must not be empty".into());
+                }
+                let mut framed = payload.to_vec();
+                framed.extend_from_slice(&delim_bytes);
+                Ok(framed)
+            }
+            TxFramingMode::LengthPrefixed {
+                prefix_size,
+                endianness,
+            } => {
+                if !matches!(prefix_size, 1 | 2 | 4) {
+                    return Err("TX prefix_size must be 1, 2, or 4".into());
+                }
+                let len = payload.len();
+                let mut framed = Vec::with_capacity(*prefix_size as usize + len);
+                match (prefix_size, endianness) {
+                    (1, _) => {
+                        if len > 255 {
+                            return Err(format!(
+                                "TX payload length {len} exceeds maximum 255 for prefix_size=1"
+                            ));
+                        }
+                        framed.push(len as u8);
+                    }
+                    (2, Endianness::Big) => {
+                        if len > 65535 {
+                            return Err(format!(
+                                "TX payload length {len} exceeds maximum 65535 for prefix_size=2"
+                            ));
+                        }
+                        framed.extend_from_slice(&(len as u16).to_be_bytes());
+                    }
+                    (2, Endianness::Little) => {
+                        if len > 65535 {
+                            return Err(format!(
+                                "TX payload length {len} exceeds maximum 65535 for prefix_size=2"
+                            ));
+                        }
+                        framed.extend_from_slice(&(len as u16).to_le_bytes());
+                    }
+                    (4, Endianness::Big) => {
+                        framed.extend_from_slice(&(len as u32).to_be_bytes());
+                    }
+                    (4, Endianness::Little) => {
+                        framed.extend_from_slice(&(len as u32).to_le_bytes());
+                    }
+                    _ => unreachable!("prefix_size validated above"),
+                }
+                framed.extend_from_slice(payload);
+                Ok(framed)
+            }
+            TxFramingMode::StartEnd {
+                start,
+                end,
+                marker_encoding,
+            } => {
+                let start_bytes = codec::decode((*marker_encoding).into(), start)
+                    .map_err(|e| format!("Invalid TX start marker encoding: {e}"))?;
+                let end_bytes = codec::decode((*marker_encoding).into(), end)
+                    .map_err(|e| format!("Invalid TX end marker encoding: {e}"))?;
+                if start_bytes.is_empty() || end_bytes.is_empty() {
+                    return Err("TX start and end markers must not be empty".into());
+                }
+                let mut framed =
+                    Vec::with_capacity(start_bytes.len() + payload.len() + end_bytes.len());
+                framed.extend_from_slice(&start_bytes);
+                framed.extend_from_slice(payload);
+                framed.extend_from_slice(&end_bytes);
+                Ok(framed)
+            }
+        }
+    }
+}
+
+// ---- Shared types -----------------------------------------------------------
 
 /// Byte order for length-prefixed framing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
@@ -195,7 +391,9 @@ pub struct FrameDecoder {
 }
 
 enum DecoderMode {
-    Line,
+    Line {
+        ending: LineEnding,
+    },
     Delimiter(Vec<u8>),
     LengthPrefixed {
         prefix_size: u8,
@@ -218,11 +416,11 @@ trait FrameParser: Send + Sync {
 // ---- Frame decoder implementation ------------------------------------------
 
 impl FrameDecoder {
-    /// Create a new frame decoder from a framing configuration.
-    pub fn new(config: &FramingConfig) -> Result<Self, String> {
+    /// Create a new frame decoder from an RX framing configuration.
+    pub fn new(config: &RxFramingConfig) -> Result<Self, String> {
         let (mode, offset) = match &config.mode {
-            FramingMode::Line => (DecoderMode::Line, None),
-            FramingMode::Delimiter {
+            RxFramingMode::Line { ending } => (DecoderMode::Line { ending: *ending }, None),
+            RxFramingMode::Delimiter {
                 delimiter,
                 delimiter_encoding,
             } => {
@@ -233,7 +431,7 @@ impl FrameDecoder {
                 }
                 (DecoderMode::Delimiter(bytes), None)
             }
-            FramingMode::LengthPrefixed {
+            RxFramingMode::LengthPrefixed {
                 prefix_size,
                 endianness,
                 initial_offset,
@@ -251,7 +449,7 @@ impl FrameDecoder {
                     *initial_offset,
                 )
             }
-            FramingMode::StartEnd {
+            RxFramingMode::StartEnd {
                 start,
                 end,
                 marker_encoding,
@@ -305,24 +503,12 @@ impl FrameDecoder {
         let mut frames = Vec::new();
         loop {
             let consumed = match &mut self.mode {
-                DecoderMode::Line => {
-                    let pos = self.buf.iter().position(|&b| b == b'\n');
-                    pos.map(|p| {
-                        let end = if !self.include_terminators && p > 0 && self.buf[p - 1] == b'\r'
-                        {
-                            p - 1
-                        } else {
-                            p
-                        };
-                        let fb = if self.include_terminators {
-                            self.buf[..p + 1].to_vec()
-                        } else {
-                            self.buf[..end].to_vec()
-                        };
-                        self.buf.drain(..p + 1);
-                        fb
-                    })
-                }
+                DecoderMode::Line { ending } => match ending {
+                    LineEnding::Auto => self.match_line_auto(),
+                    LineEnding::Lf => self.match_line_lf(),
+                    LineEnding::Cr => self.match_line_cr(),
+                    LineEnding::Crlf => self.match_line_crlf(),
+                },
                 DecoderMode::Delimiter(delim) => {
                     let d = delim.clone();
                     let pos = find_subsequence(&self.buf, &d);
@@ -359,14 +545,13 @@ impl FrameDecoder {
                     }
                     let payload_len = match *next_payload_len {
                         Some(len) => len,
-                        None => break, // not yet known, wait for more data
+                        None => break,
                     };
                     let header_len = *prefix_size as usize;
                     let total_needed = header_len + payload_len;
                     if self.buf.len() < total_needed {
                         break;
                     }
-                    // Extract frame (prefix + payload)
                     let frame_bytes = if self.include_terminators {
                         self.buf[..total_needed].to_vec()
                     } else {
@@ -386,7 +571,6 @@ impl FrameDecoder {
                     let end = end.clone();
                     let include = *include_markers;
                     if !*in_frame {
-                        // Search for start marker
                         if let Some(pos) = find_subsequence(&self.buf, &start) {
                             self.buf.drain(..pos);
                             if !include {
@@ -394,12 +578,11 @@ impl FrameDecoder {
                             }
                             *in_frame = true;
                         } else {
-                            // Keep tail that could partially match start
                             let keep = start.len().saturating_sub(1);
                             if self.buf.len() > keep {
                                 self.buf.drain(..(self.buf.len() - keep));
                             }
-                            break; // exit loop, need more data
+                            break;
                         }
                     }
                     if *in_frame {
@@ -416,7 +599,7 @@ impl FrameDecoder {
                             *in_frame = false;
                             Some(frame_bytes)
                         } else {
-                            break; // need more data for end marker
+                            break;
                         }
                     } else {
                         None
@@ -430,10 +613,6 @@ impl FrameDecoder {
                     self.frame_count += 1;
                     let parsed = self.parser.as_ref().map(|p| p.parse(&frame_bytes));
                     let frame_type = self.frame_type_str();
-                    // If delimiter and include_terminators, don't strip
-                    if matches!(self.mode, DecoderMode::Delimiter(_)) && !self.include_terminators {
-                        // Already stripped
-                    }
                     frames.push(Frame {
                         data: frame_bytes,
                         index: self.frame_count - 1,
@@ -446,9 +625,62 @@ impl FrameDecoder {
         frames
     }
 
+    /// Match a line with `auto` ending: split on `\n`, strip preceding `\r`.
+    fn match_line_auto(&mut self) -> Option<Vec<u8>> {
+        let pos = self.buf.iter().position(|&b| b == b'\n')?;
+        let end = if !self.include_terminators && pos > 0 && self.buf[pos - 1] == b'\r' {
+            pos - 1
+        } else {
+            pos
+        };
+        let fb = if self.include_terminators {
+            self.buf[..pos + 1].to_vec()
+        } else {
+            self.buf[..end].to_vec()
+        };
+        self.buf.drain(..pos + 1);
+        Some(fb)
+    }
+
+    /// Match a line with `lf` ending: split on `\n` only, do NOT strip `\r`.
+    fn match_line_lf(&mut self) -> Option<Vec<u8>> {
+        let pos = self.buf.iter().position(|&b| b == b'\n')?;
+        let fb = if self.include_terminators {
+            self.buf[..pos + 1].to_vec()
+        } else {
+            self.buf[..pos].to_vec()
+        };
+        self.buf.drain(..pos + 1);
+        Some(fb)
+    }
+
+    /// Match a line with `cr` ending: split on bare `\r`.
+    fn match_line_cr(&mut self) -> Option<Vec<u8>> {
+        let pos = self.buf.iter().position(|&b| b == b'\r')?;
+        let fb = if self.include_terminators {
+            self.buf[..pos + 1].to_vec()
+        } else {
+            self.buf[..pos].to_vec()
+        };
+        self.buf.drain(..pos + 1);
+        Some(fb)
+    }
+
+    /// Match a line with `crlf` ending: split on exact `\r\n`.
+    fn match_line_crlf(&mut self) -> Option<Vec<u8>> {
+        let pos = find_subsequence(&self.buf, b"\r\n")?;
+        let fb = if self.include_terminators {
+            self.buf[..pos + 2].to_vec()
+        } else {
+            self.buf[..pos].to_vec()
+        };
+        self.buf.drain(..pos + 2);
+        Some(fb)
+    }
+
     fn frame_type_str(&self) -> String {
         match &self.mode {
-            DecoderMode::Line => "line".into(),
+            DecoderMode::Line { .. } => "line".into(),
             DecoderMode::Delimiter(_) => "delimiter".into(),
             DecoderMode::LengthPrefixed { .. } => "length_prefixed".into(),
             DecoderMode::StartEnd { .. } => "start_end".into(),
@@ -513,7 +745,6 @@ impl FrameParser for AtCommandParser {
         if trimmed.is_empty() {
             return ParsedFrame::Raw;
         }
-        // AT command response lines start with + and then the command name
         if let Some(cmd) = trimmed.strip_prefix('+') {
             if let Some(colon) = cmd.find(':') {
                 let cmd_name = cmd[..colon].to_string();
@@ -529,10 +760,6 @@ impl FrameParser for AtCommandParser {
                 };
             }
         }
-        // Check for URC (unsolicited result code) — starts with + but no echo preceding
-        // Actually, AT URCs also start with + — same as responses. The difference
-        // is context (preceded by AT command vs unsolicited). For simplicity,
-        // treat all + lines as responses. Agent can distinguish via context.
         if trimmed == "OK" {
             return ParsedFrame::AtCommand {
                 response_type: "status".into(),
@@ -557,7 +784,6 @@ impl FrameParser for AtCommandParser {
                 fields: vec![],
             };
         }
-        // Data lines: not a command prefix, not a status.
         ParsedFrame::AtCommand {
             response_type: "data".into(),
             command: None,
@@ -574,9 +800,6 @@ struct JsonLinesParser;
 impl FrameParser for JsonLinesParser {
     fn parse(&self, data: &[u8]) -> ParsedFrame {
         match serde_json::from_slice::<serde_json::Value>(data) {
-            // `ParsedFrame::Json` is internally tagged (`parser` + the object's
-            // fields inlined), so only JSON *objects* can be represented.
-            // Non-object JSON (arrays, scalars) is treated as Raw.
             Ok(val) if val.is_object() => ParsedFrame::Json(val),
             _ => ParsedFrame::Raw,
         }
@@ -596,7 +819,6 @@ impl FrameParser for ShellPromptParser {
         if trimmed.is_empty() {
             return ParsedFrame::Raw;
         }
-        // Try custom pattern first
         if let Some(ref re) = self.custom {
             if re.is_match(data) {
                 return ParsedFrame::ShellPrompt {
@@ -605,7 +827,6 @@ impl FrameParser for ShellPromptParser {
                 };
             }
         }
-        // Standard patterns
         if trimmed.ends_with("$ ") || trimmed.ends_with("$") {
             return ParsedFrame::ShellPrompt {
                 prompt: trimmed.to_string(),
@@ -694,7 +915,6 @@ fn read_length_prefix(bytes: &[u8], prefix_size: u8, endianness: Endianness) -> 
         _ => {
             // Invalid prefix_size — should never happen because
             // FrameDecoder::new() rejects sizes other than 1/2/4.
-            // Return 0 as a safe fallback (zero-length frame).
             0
         }
     }
@@ -706,12 +926,14 @@ fn read_length_prefix(bytes: &[u8], prefix_size: u8, endianness: Endianness) -> 
 mod tests {
     use super::*;
 
-    // ── Line decoder ────────────────────────────────────────────────────
+    // ── Line decoder (auto — original behavior) ──────────────────────────
 
     #[test]
     fn line_decoder_single_line() {
-        let config = FramingConfig {
-            mode: FramingMode::Line,
+        let config = RxFramingConfig {
+            mode: RxFramingMode::Line {
+                ending: LineEnding::Auto,
+            },
             ..Default::default()
         };
         let mut dec = FrameDecoder::new(&config).unwrap();
@@ -724,8 +946,10 @@ mod tests {
 
     #[test]
     fn line_decoder_crlf() {
-        let config = FramingConfig {
-            mode: FramingMode::Line,
+        let config = RxFramingConfig {
+            mode: RxFramingMode::Line {
+                ending: LineEnding::Auto,
+            },
             ..Default::default()
         };
         let mut dec = FrameDecoder::new(&config).unwrap();
@@ -737,7 +961,7 @@ mod tests {
 
     #[test]
     fn line_decoder_partial_across_chunks() {
-        let config = FramingConfig::default();
+        let config = RxFramingConfig::default();
         let mut dec = FrameDecoder::new(&config).unwrap();
         let frames = dec.push(b"hel");
         assert!(frames.is_empty());
@@ -751,7 +975,7 @@ mod tests {
 
     #[test]
     fn line_decoder_empty_lines() {
-        let config = FramingConfig::default();
+        let config = RxFramingConfig::default();
         let mut dec = FrameDecoder::new(&config).unwrap();
         let frames = dec.push(b"\n\n\n");
         assert_eq!(frames.len(), 3);
@@ -762,8 +986,10 @@ mod tests {
 
     #[test]
     fn line_decoder_include_terminators() {
-        let config = FramingConfig {
-            mode: FramingMode::Line,
+        let config = RxFramingConfig {
+            mode: RxFramingMode::Line {
+                ending: LineEnding::Auto,
+            },
             include_terminators: true,
             ..Default::default()
         };
@@ -773,12 +999,119 @@ mod tests {
         assert_eq!(frames[0].data, b"hello\r\n");
     }
 
+    // ── Line decoder: new ending modes ────────────────────────────────────
+
+    #[test]
+    fn line_decoder_lf_preserves_cr() {
+        let config = RxFramingConfig {
+            mode: RxFramingMode::Line {
+                ending: LineEnding::Lf,
+            },
+            ..Default::default()
+        };
+        let mut dec = FrameDecoder::new(&config).unwrap();
+        let frames = dec.push(b"hello\r\n");
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].data, b"hello\r");
+        assert_eq!(frames[0].frame_type, "line");
+    }
+
+    #[test]
+    fn line_decoder_cr_splits_on_bare_cr() {
+        let config = RxFramingConfig {
+            mode: RxFramingMode::Line {
+                ending: LineEnding::Cr,
+            },
+            ..Default::default()
+        };
+        let mut dec = FrameDecoder::new(&config).unwrap();
+        let frames = dec.push(b"a\rb\r");
+        assert_eq!(frames.len(), 2);
+        assert_eq!(frames[0].data, b"a");
+        assert_eq!(frames[1].data, b"b");
+    }
+
+    #[test]
+    fn line_decoder_cr_with_include_terminators() {
+        let config = RxFramingConfig {
+            mode: RxFramingMode::Line {
+                ending: LineEnding::Cr,
+            },
+            include_terminators: true,
+            ..Default::default()
+        };
+        let mut dec = FrameDecoder::new(&config).unwrap();
+        let frames = dec.push(b"a\r");
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].data, b"a\r");
+    }
+
+    #[test]
+    fn line_decoder_crlf_exact_only() {
+        let config = RxFramingConfig {
+            mode: RxFramingMode::Line {
+                ending: LineEnding::Crlf,
+            },
+            ..Default::default()
+        };
+        let mut dec = FrameDecoder::new(&config).unwrap();
+        // CRLF split across chunks: "\r" in first, "\n" in second.
+        let frames = dec.push(b"a\r");
+        assert!(frames.is_empty());
+        let frames = dec.push(b"\nb");
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].data, b"a");
+    }
+
+    #[test]
+    fn line_decoder_crlf_no_split_on_bare_cr() {
+        let config = RxFramingConfig {
+            mode: RxFramingMode::Line {
+                ending: LineEnding::Crlf,
+            },
+            ..Default::default()
+        };
+        let mut dec = FrameDecoder::new(&config).unwrap();
+        let frames = dec.push(b"a\rb\n");
+        assert_eq!(frames.len(), 0, "bare \\r should not split in crlf mode");
+    }
+
+    #[test]
+    fn line_decoder_crlf_include_terminators() {
+        let config = RxFramingConfig {
+            mode: RxFramingMode::Line {
+                ending: LineEnding::Crlf,
+            },
+            include_terminators: true,
+            ..Default::default()
+        };
+        let mut dec = FrameDecoder::new(&config).unwrap();
+        let frames = dec.push(b"hello\r\n");
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].data, b"hello\r\n");
+    }
+
+    // ── Line ending default: `auto` when `ending` omitted ────────────────
+
+    #[test]
+    fn line_ending_default_is_auto() {
+        // When Line is constructed without `ending`, it should default to Auto.
+        let val = serde_json::json!({"type": "line"});
+        let mode: RxFramingMode = serde_json::from_value(val).unwrap();
+        assert!(matches!(
+            mode,
+            RxFramingMode::Line {
+                ending: LineEnding::Auto
+            }
+        ));
+    }
+
     // ── Delimiter decoder ───────────────────────────────────────────────
 
     #[test]
     fn delimiter_decoder_basic() {
-        let config = FramingConfig {
-            mode: FramingMode::Delimiter {
+        let config = RxFramingConfig {
+            mode: RxFramingMode::Delimiter {
                 delimiter: "|".into(),
                 delimiter_encoding: PatternEncoding::Utf8,
             },
@@ -794,8 +1127,8 @@ mod tests {
 
     #[test]
     fn delimiter_decoder_multi_byte() {
-        let config = FramingConfig {
-            mode: FramingMode::Delimiter {
+        let config = RxFramingConfig {
+            mode: RxFramingMode::Delimiter {
                 delimiter: "AA".into(),
                 delimiter_encoding: PatternEncoding::Utf8,
             },
@@ -806,13 +1139,12 @@ mod tests {
         assert_eq!(frames.len(), 2);
         assert_eq!(frames[0].data, b"x");
         assert_eq!(frames[1].data, b"y");
-        // "z" is incomplete (no trailing delimiter)
     }
 
     #[test]
     fn delimiter_decoder_partial_delimiter() {
-        let config = FramingConfig {
-            mode: FramingMode::Delimiter {
+        let config = RxFramingConfig {
+            mode: RxFramingMode::Delimiter {
                 delimiter: "AB".into(),
                 delimiter_encoding: PatternEncoding::Utf8,
             },
@@ -830,8 +1162,8 @@ mod tests {
 
     #[test]
     fn length_prefixed_basic() {
-        let config = FramingConfig {
-            mode: FramingMode::LengthPrefixed {
+        let config = RxFramingConfig {
+            mode: RxFramingMode::LengthPrefixed {
                 prefix_size: 1,
                 endianness: Endianness::Big,
                 initial_offset: None,
@@ -848,8 +1180,8 @@ mod tests {
 
     #[test]
     fn length_prefixed_u16_big_endian() {
-        let config = FramingConfig {
-            mode: FramingMode::LengthPrefixed {
+        let config = RxFramingConfig {
+            mode: RxFramingMode::LengthPrefixed {
                 prefix_size: 2,
                 endianness: Endianness::Big,
                 initial_offset: None,
@@ -868,8 +1200,8 @@ mod tests {
 
     #[test]
     fn start_end_basic() {
-        let config = FramingConfig {
-            mode: FramingMode::StartEnd {
+        let config = RxFramingConfig {
+            mode: RxFramingMode::StartEnd {
                 start: "STX".into(),
                 end: "ETX".into(),
                 marker_encoding: PatternEncoding::Utf8,
@@ -886,8 +1218,8 @@ mod tests {
 
     #[test]
     fn start_end_include_markers() {
-        let config = FramingConfig {
-            mode: FramingMode::StartEnd {
+        let config = RxFramingConfig {
+            mode: RxFramingMode::StartEnd {
                 start: "<".into(),
                 end: ">".into(),
                 marker_encoding: PatternEncoding::Utf8,
@@ -965,7 +1297,6 @@ mod tests {
         assert!(matches!(p.parse(b"[1,2,3]"), ParsedFrame::Raw));
         assert!(matches!(p.parse(b"42"), ParsedFrame::Raw));
         assert!(matches!(p.parse(b"\"hi\""), ParsedFrame::Raw));
-        // Objects still parse as Json.
         assert!(matches!(p.parse(b"{\"k\":1}"), ParsedFrame::Json(_)));
     }
 
@@ -998,8 +1329,10 @@ mod tests {
 
     #[test]
     fn combined_line_at_parser() {
-        let config = FramingConfig {
-            mode: FramingMode::Line,
+        let config = RxFramingConfig {
+            mode: RxFramingMode::Line {
+                ending: LineEnding::Auto,
+            },
             parser: Some(ParserConfig {
                 parser_type: ParserType::AtCommand,
                 custom_prompt: None,
@@ -1024,7 +1357,7 @@ mod tests {
 
     #[test]
     fn line_decoder_no_terminator_then_flush() {
-        let config = FramingConfig::default();
+        let config = RxFramingConfig::default();
         let mut dec = FrameDecoder::new(&config).unwrap();
         let frames = dec.push(b"hello");
         assert!(frames.is_empty());
@@ -1038,8 +1371,8 @@ mod tests {
 
     #[test]
     fn delimiter_decoder_empty_rejected() {
-        let config = FramingConfig {
-            mode: FramingMode::Delimiter {
+        let config = RxFramingConfig {
+            mode: RxFramingMode::Delimiter {
                 delimiter: "".into(),
                 delimiter_encoding: PatternEncoding::Utf8,
             },
@@ -1053,8 +1386,8 @@ mod tests {
 
     #[test]
     fn length_prefixed_zero_payload() {
-        let config = FramingConfig {
-            mode: FramingMode::LengthPrefixed {
+        let config = RxFramingConfig {
+            mode: RxFramingMode::LengthPrefixed {
                 prefix_size: 1,
                 endianness: Endianness::Big,
                 initial_offset: None,
@@ -1062,8 +1395,6 @@ mod tests {
             ..Default::default()
         };
         let mut dec = FrameDecoder::new(&config).unwrap();
-        // Prefix 0x00 means zero-length payload — should emit empty frame.
-        // The next byte \x05 starts a new length-prefixed frame.
         let frames = dec.push(b"\x00\x05hello");
         assert_eq!(frames.len(), 2);
         assert!(frames[0].data.is_empty());
@@ -1072,8 +1403,8 @@ mod tests {
 
     #[test]
     fn length_prefixed_incomplete_payload() {
-        let config = FramingConfig {
-            mode: FramingMode::LengthPrefixed {
+        let config = RxFramingConfig {
+            mode: RxFramingMode::LengthPrefixed {
                 prefix_size: 1,
                 endianness: Endianness::Big,
                 initial_offset: None,
@@ -1081,7 +1412,6 @@ mod tests {
             ..Default::default()
         };
         let mut dec = FrameDecoder::new(&config).unwrap();
-        // Prefix says 10 bytes, but only 3 arrive — no frame emitted.
         let frames = dec.push(b"\x0aABC");
         assert!(frames.is_empty());
         assert!(dec.pending_len() >= 3);
@@ -1089,8 +1419,8 @@ mod tests {
 
     #[test]
     fn length_prefixed_invalid_prefix_size() {
-        let config = FramingConfig {
-            mode: FramingMode::LengthPrefixed {
+        let config = RxFramingConfig {
+            mode: RxFramingMode::LengthPrefixed {
                 prefix_size: 3,
                 endianness: Endianness::Big,
                 initial_offset: None,
@@ -1105,8 +1435,8 @@ mod tests {
 
     #[test]
     fn length_prefixed_u32_big_endian() {
-        let config = FramingConfig {
-            mode: FramingMode::LengthPrefixed {
+        let config = RxFramingConfig {
+            mode: RxFramingMode::LengthPrefixed {
                 prefix_size: 4,
                 endianness: Endianness::Big,
                 initial_offset: None,
@@ -1123,8 +1453,8 @@ mod tests {
 
     #[test]
     fn length_prefixed_u32_little_endian() {
-        let config = FramingConfig {
-            mode: FramingMode::LengthPrefixed {
+        let config = RxFramingConfig {
+            mode: RxFramingMode::LengthPrefixed {
                 prefix_size: 4,
                 endianness: Endianness::Little,
                 initial_offset: None,
@@ -1141,8 +1471,8 @@ mod tests {
 
     #[test]
     fn start_end_no_start_marker() {
-        let config = FramingConfig {
-            mode: FramingMode::StartEnd {
+        let config = RxFramingConfig {
+            mode: RxFramingMode::StartEnd {
                 start: "STX".into(),
                 end: "ETX".into(),
                 marker_encoding: PatternEncoding::Utf8,
@@ -1153,14 +1483,13 @@ mod tests {
         let mut dec = FrameDecoder::new(&config).unwrap();
         let frames = dec.push(b"noise_without_markers");
         assert!(frames.is_empty());
-        // Buffer should be pruned to at most start.len() - 1 bytes.
-        assert!(dec.pending_len() <= 2); // "STX" has len 3, keep ≤ 2
+        assert!(dec.pending_len() <= 2);
     }
 
     #[test]
     fn start_end_start_no_end_then_flush() {
-        let config = FramingConfig {
-            mode: FramingMode::StartEnd {
+        let config = RxFramingConfig {
+            mode: RxFramingMode::StartEnd {
                 start: "<".into(),
                 end: ">".into(),
                 marker_encoding: PatternEncoding::Utf8,
@@ -1177,8 +1506,8 @@ mod tests {
 
     #[test]
     fn start_end_empty_markers_rejected() {
-        let config = FramingConfig {
-            mode: FramingMode::StartEnd {
+        let config = RxFramingConfig {
+            mode: RxFramingMode::StartEnd {
                 start: "".into(),
                 end: "X".into(),
                 marker_encoding: PatternEncoding::Utf8,
@@ -1197,8 +1526,8 @@ mod tests {
 
     #[test]
     fn start_end_start_split_across_chunks() {
-        let config = FramingConfig {
-            mode: FramingMode::StartEnd {
+        let config = RxFramingConfig {
+            mode: RxFramingMode::StartEnd {
                 start: "ABC".into(),
                 end: "X".into(),
                 marker_encoding: PatternEncoding::Utf8,
@@ -1207,10 +1536,8 @@ mod tests {
             ..Default::default()
         };
         let mut dec = FrameDecoder::new(&config).unwrap();
-        // First chunk: "AB" — partial start marker
         let frames = dec.push(b"AB");
         assert!(frames.is_empty());
-        // Second chunk: "CdX" — completes start, then data 'd', then end 'X'
         let frames = dec.push(b"CdX");
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].data, b"d");
@@ -1218,9 +1545,8 @@ mod tests {
 
     #[test]
     fn delimiter_invalid_encoding_rejected() {
-        let config = FramingConfig {
-            mode: FramingMode::Delimiter {
-                // "!!!" is not valid base64
+        let config = RxFramingConfig {
+            mode: RxFramingMode::Delimiter {
                 delimiter: "!!!".into(),
                 delimiter_encoding: crate::match_config::PatternEncoding::Base64,
             },
@@ -1234,8 +1560,8 @@ mod tests {
 
     #[test]
     fn start_end_invalid_encoding_rejected() {
-        let config = FramingConfig {
-            mode: FramingMode::StartEnd {
+        let config = RxFramingConfig {
+            mode: RxFramingMode::StartEnd {
                 start: "!!!".into(),
                 end: "X".into(),
                 marker_encoding: crate::match_config::PatternEncoding::Base64,
@@ -1259,9 +1585,6 @@ mod tests {
     #[test]
     fn at_parser_cme_error() {
         let p = AtCommandParser;
-        // +CME ERROR matches the + prefix + colon branch before the
-        // +CME ERROR starts_with check, so it returns response_type="response"
-        // with command="CME ERROR" (a parser limitation).
         let result = p.parse(b"+CME ERROR: 100");
         assert!(matches!(
             result,
@@ -1303,8 +1626,10 @@ mod tests {
 
     #[test]
     fn shell_prompt_custom_regex_invalid() {
-        let config = FramingConfig {
-            mode: FramingMode::Line,
+        let config = RxFramingConfig {
+            mode: RxFramingMode::Line {
+                ending: LineEnding::Auto,
+            },
             parser: Some(ParserConfig {
                 parser_type: ParserType::ShellPrompt,
                 custom_prompt: Some("[invalid".to_string()),
@@ -1337,15 +1662,14 @@ mod tests {
 
     #[test]
     fn max_frames_zero_edge() {
-        let config = FramingConfig {
-            mode: FramingMode::Line,
+        let config = RxFramingConfig {
+            mode: RxFramingMode::Line {
+                ending: LineEnding::Auto,
+            },
             max_frames: Some(0),
             ..Default::default()
         };
         let mut dec = FrameDecoder::new(&config).unwrap();
-        // Push one line — the decoder returns the frame regardless.
-        // max_frames is checked by the caller (read_bytes_via_session),
-        // not by the decoder itself. So decoder still emits the frame.
         let frames = dec.push(b"hello\n");
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].data, b"hello");
@@ -1353,8 +1677,8 @@ mod tests {
 
     #[test]
     fn length_prefixed_initial_offset() {
-        let config = FramingConfig {
-            mode: FramingMode::LengthPrefixed {
+        let config = RxFramingConfig {
+            mode: RxFramingMode::LengthPrefixed {
                 prefix_size: 1,
                 endianness: Endianness::Big,
                 initial_offset: Some(4),
@@ -1362,7 +1686,6 @@ mod tests {
             ..Default::default()
         };
         let mut dec = FrameDecoder::new(&config).unwrap();
-        // 4 skip bytes + 1 prefix (0x05) + 5 payload bytes.
         let frames = dec.push(b"XXXX\x05hello");
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].data, b"hello");
@@ -1370,8 +1693,8 @@ mod tests {
 
     #[test]
     fn delimiter_include_terminators() {
-        let config = FramingConfig {
-            mode: FramingMode::Delimiter {
+        let config = RxFramingConfig {
+            mode: RxFramingMode::Delimiter {
                 delimiter: "|".into(),
                 delimiter_encoding: PatternEncoding::Utf8,
             },
@@ -1381,21 +1704,23 @@ mod tests {
         let mut dec = FrameDecoder::new(&config).unwrap();
         let frames = dec.push(b"a|b|");
         assert_eq!(frames.len(), 2);
-        assert_eq!(frames[0].data, b"a|"); // terminator included
+        assert_eq!(frames[0].data, b"a|");
         assert_eq!(frames[1].data, b"b|");
     }
 
     #[test]
     fn flush_partial_empty_buffer() {
-        let config = FramingConfig::default();
+        let config = RxFramingConfig::default();
         let mut dec = FrameDecoder::new(&config).unwrap();
         assert!(dec.flush_partial().is_none(), "empty buf => no frame");
     }
 
     #[test]
     fn combined_line_json_parser() {
-        let config = FramingConfig {
-            mode: FramingMode::Line,
+        let config = RxFramingConfig {
+            mode: RxFramingMode::Line {
+                ending: LineEnding::Auto,
+            },
             parser: Some(ParserConfig {
                 parser_type: ParserType::JsonLines,
                 custom_prompt: None,
@@ -1413,21 +1738,19 @@ mod tests {
 
     #[test]
     fn delimiter_decoder_empty_segments() {
-        let config = FramingConfig {
-            mode: FramingMode::Delimiter {
+        let config = RxFramingConfig {
+            mode: RxFramingMode::Delimiter {
                 delimiter: "|".into(),
                 delimiter_encoding: PatternEncoding::Utf8,
             },
             ..Default::default()
         };
-        // "||" → two empty frames
         let mut dec = FrameDecoder::new(&config).unwrap();
         let frames = dec.push(b"||");
         assert_eq!(frames.len(), 2);
         assert!(frames[0].data.is_empty());
         assert!(frames[1].data.is_empty());
 
-        // "a||b|" → three frames: "a", "", "b"
         let mut dec = FrameDecoder::new(&config).unwrap();
         let frames = dec.push(b"a||b|");
         assert_eq!(frames.len(), 3);
@@ -1438,19 +1761,17 @@ mod tests {
 
     #[test]
     fn length_prefixed_prefix_split_across_chunks() {
-        let config = FramingConfig {
-            mode: FramingMode::LengthPrefixed {
+        let config = RxFramingConfig {
+            mode: RxFramingMode::LengthPrefixed {
                 prefix_size: 2,
                 endianness: Endianness::Big,
                 initial_offset: None,
             },
             ..Default::default()
         };
-        // Push half the u16 prefix first.
         let mut dec = FrameDecoder::new(&config).unwrap();
         let frames = dec.push(b"\x00");
         assert!(frames.is_empty());
-        // Push rest of prefix + payload.
         let frames = dec.push(b"\x05hello");
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].data, b"hello");
@@ -1458,8 +1779,8 @@ mod tests {
 
     #[test]
     fn start_end_end_marker_split_across_chunks() {
-        let config = FramingConfig {
-            mode: FramingMode::StartEnd {
+        let config = RxFramingConfig {
+            mode: RxFramingMode::StartEnd {
                 start: "STX".into(),
                 end: "ETX".into(),
                 marker_encoding: PatternEncoding::Utf8,
@@ -1468,12 +1789,335 @@ mod tests {
             ..Default::default()
         };
         let mut dec = FrameDecoder::new(&config).unwrap();
-        // Start + data + partial end "ET"
         let frames = dec.push(b"STXdataET");
         assert!(frames.is_empty(), "end marker ETX not yet complete");
-        // Complete the end marker: "X" → "ETX"
         let frames = dec.push(b"X");
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].data, b"data");
+    }
+
+    // ── TX framing unit tests ────────────────────────────────────────────
+
+    #[test]
+    fn tx_line_lf() {
+        let mode = TxFramingMode::Line {
+            ending: TxLineEnding::Lf,
+        };
+        let framed = mode.encode(b"AT+CGMI").unwrap();
+        assert_eq!(framed, b"AT+CGMI\n");
+    }
+
+    #[test]
+    fn tx_line_cr() {
+        let mode = TxFramingMode::Line {
+            ending: TxLineEnding::Cr,
+        };
+        let framed = mode.encode(b"AT+CGMI").unwrap();
+        assert_eq!(framed, b"AT+CGMI\r");
+    }
+
+    #[test]
+    fn tx_line_crlf() {
+        let mode = TxFramingMode::Line {
+            ending: TxLineEnding::Crlf,
+        };
+        let framed = mode.encode(b"AT+CGMI").unwrap();
+        assert_eq!(framed, b"AT+CGMI\r\n");
+    }
+
+    #[test]
+    fn tx_delimiter_utf8() {
+        let mode = TxFramingMode::Delimiter {
+            delimiter: "|".into(),
+            delimiter_encoding: PatternEncoding::Utf8,
+        };
+        let framed = mode.encode(b"data").unwrap();
+        assert_eq!(framed, b"data|");
+    }
+
+    #[test]
+    fn tx_delimiter_empty_rejected() {
+        let mode = TxFramingMode::Delimiter {
+            delimiter: "".into(),
+            delimiter_encoding: PatternEncoding::Utf8,
+        };
+        match mode.encode(b"data") {
+            Ok(_) => panic!("empty TX delimiter should be rejected"),
+            Err(err) => assert!(err.contains("TX delimiter must not be empty"), "got: {err}"),
+        }
+    }
+
+    #[test]
+    fn tx_length_prefixed_u8() {
+        let mode = TxFramingMode::LengthPrefixed {
+            prefix_size: 1,
+            endianness: Endianness::Big,
+        };
+        let framed = mode.encode(b"hello").unwrap();
+        assert_eq!(framed, b"\x05hello");
+    }
+
+    #[test]
+    fn tx_length_prefixed_u16_big() {
+        let mode = TxFramingMode::LengthPrefixed {
+            prefix_size: 2,
+            endianness: Endianness::Big,
+        };
+        let framed = mode.encode(b"hello").unwrap();
+        assert_eq!(&framed[..2], &[0x00, 0x05]);
+        assert_eq!(&framed[2..], b"hello");
+    }
+
+    #[test]
+    fn tx_length_prefixed_u16_little() {
+        let mode = TxFramingMode::LengthPrefixed {
+            prefix_size: 2,
+            endianness: Endianness::Little,
+        };
+        let framed = mode.encode(b"hello").unwrap();
+        assert_eq!(&framed[..2], &[0x05, 0x00]);
+        assert_eq!(&framed[2..], b"hello");
+    }
+
+    #[test]
+    fn tx_length_prefixed_u32() {
+        let mode = TxFramingMode::LengthPrefixed {
+            prefix_size: 4,
+            endianness: Endianness::Big,
+        };
+        let framed = mode.encode(b"hello").unwrap();
+        assert_eq!(&framed[..4], &[0x00, 0x00, 0x00, 0x05]);
+        assert_eq!(&framed[4..], b"hello");
+    }
+
+    #[test]
+    fn tx_length_prefixed_invalid_prefix_size() {
+        let mode = TxFramingMode::LengthPrefixed {
+            prefix_size: 3,
+            endianness: Endianness::Big,
+        };
+        match mode.encode(b"data") {
+            Ok(_) => panic!("prefix_size=3 should be rejected"),
+            Err(err) => assert!(
+                err.contains("TX prefix_size must be 1, 2, or 4"),
+                "got: {err}"
+            ),
+        }
+    }
+
+    #[test]
+    fn tx_length_prefixed_u8_overflow() {
+        let mode = TxFramingMode::LengthPrefixed {
+            prefix_size: 1,
+            endianness: Endianness::Big,
+        };
+        let payload = vec![0u8; 300];
+        match mode.encode(&payload) {
+            Ok(_) => panic!("payload too large for prefix_size=1 should be rejected"),
+            Err(err) => assert!(err.contains("exceeds maximum 255"), "got: {err}"),
+        }
+    }
+
+    #[test]
+    fn tx_start_end() {
+        let mode = TxFramingMode::StartEnd {
+            start: "<".into(),
+            end: ">".into(),
+            marker_encoding: PatternEncoding::Utf8,
+        };
+        let framed = mode.encode(b"data").unwrap();
+        assert_eq!(framed, b"<data>");
+    }
+
+    #[test]
+    fn tx_start_end_empty_markers_rejected() {
+        let mode = TxFramingMode::StartEnd {
+            start: "".into(),
+            end: ">".into(),
+            marker_encoding: PatternEncoding::Utf8,
+        };
+        match mode.encode(b"data") {
+            Ok(_) => panic!("empty markers should be rejected"),
+            Err(err) => assert!(
+                err.contains("TX start and end markers must not be empty"),
+                "got: {err}"
+            ),
+        }
+    }
+
+    // ── Round-trip tests (TX encode → RX decode) ──────────────────────
+
+    #[test]
+    fn roundtrip_line_lf() {
+        let tx = TxFramingMode::Line {
+            ending: TxLineEnding::Lf,
+        };
+        let rx_config = RxFramingConfig {
+            mode: RxFramingMode::Line {
+                ending: LineEnding::Lf,
+            },
+            ..Default::default()
+        };
+        let payload = b"hello world";
+        let framed = tx.encode(payload).unwrap();
+        let mut dec = FrameDecoder::new(&rx_config).unwrap();
+        let frames = dec.push(&framed);
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].data, payload);
+    }
+
+    #[test]
+    fn roundtrip_line_cr() {
+        let tx = TxFramingMode::Line {
+            ending: TxLineEnding::Cr,
+        };
+        let rx_config = RxFramingConfig {
+            mode: RxFramingMode::Line {
+                ending: LineEnding::Cr,
+            },
+            ..Default::default()
+        };
+        let payload = b"hello world";
+        let framed = tx.encode(payload).unwrap();
+        let mut dec = FrameDecoder::new(&rx_config).unwrap();
+        let frames = dec.push(&framed);
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].data, payload);
+    }
+
+    #[test]
+    fn roundtrip_line_crlf() {
+        let tx = TxFramingMode::Line {
+            ending: TxLineEnding::Crlf,
+        };
+        let rx_config = RxFramingConfig {
+            mode: RxFramingMode::Line {
+                ending: LineEnding::Crlf,
+            },
+            ..Default::default()
+        };
+        let payload = b"hello world";
+        let framed = tx.encode(payload).unwrap();
+        let mut dec = FrameDecoder::new(&rx_config).unwrap();
+        let frames = dec.push(&framed);
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].data, payload);
+    }
+
+    #[test]
+    fn roundtrip_delimiter() {
+        let tx = TxFramingMode::Delimiter {
+            delimiter: "|".into(),
+            delimiter_encoding: PatternEncoding::Utf8,
+        };
+        let rx_config = RxFramingConfig {
+            mode: RxFramingMode::Delimiter {
+                delimiter: "|".into(),
+                delimiter_encoding: PatternEncoding::Utf8,
+            },
+            ..Default::default()
+        };
+        let payload = b"data";
+        let framed = tx.encode(payload).unwrap();
+        let mut dec = FrameDecoder::new(&rx_config).unwrap();
+        let frames = dec.push(&framed);
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].data, payload);
+    }
+
+    #[test]
+    fn roundtrip_length_prefixed_u8() {
+        let tx = TxFramingMode::LengthPrefixed {
+            prefix_size: 1,
+            endianness: Endianness::Big,
+        };
+        let rx_config = RxFramingConfig {
+            mode: RxFramingMode::LengthPrefixed {
+                prefix_size: 1,
+                endianness: Endianness::Big,
+                initial_offset: None,
+            },
+            ..Default::default()
+        };
+        let payload = b"binary data";
+        let framed = tx.encode(payload).unwrap();
+        let mut dec = FrameDecoder::new(&rx_config).unwrap();
+        let frames = dec.push(&framed);
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].data, payload);
+    }
+
+    #[test]
+    fn roundtrip_length_prefixed_u16_be() {
+        let tx = TxFramingMode::LengthPrefixed {
+            prefix_size: 2,
+            endianness: Endianness::Big,
+        };
+        let rx_config = RxFramingConfig {
+            mode: RxFramingMode::LengthPrefixed {
+                prefix_size: 2,
+                endianness: Endianness::Big,
+                initial_offset: None,
+            },
+            ..Default::default()
+        };
+        let payload = b"binary data";
+        let framed = tx.encode(payload).unwrap();
+        let mut dec = FrameDecoder::new(&rx_config).unwrap();
+        let frames = dec.push(&framed);
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].data, payload);
+    }
+
+    #[test]
+    fn roundtrip_start_end() {
+        let tx = TxFramingMode::StartEnd {
+            start: "STX".into(),
+            end: "ETX".into(),
+            marker_encoding: PatternEncoding::Utf8,
+        };
+        let rx_config = RxFramingConfig {
+            mode: RxFramingMode::StartEnd {
+                start: "STX".into(),
+                end: "ETX".into(),
+                marker_encoding: PatternEncoding::Utf8,
+                include_markers: false,
+            },
+            ..Default::default()
+        };
+        let payload = b"data";
+        let framed = tx.encode(payload).unwrap();
+        let mut dec = FrameDecoder::new(&rx_config).unwrap();
+        let frames = dec.push(&framed);
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].data, payload);
+    }
+
+    // ── TX framing JSON deserialization ──────────────────────────────────
+
+    #[test]
+    fn tx_framing_line_crlf_deserialize() {
+        let json = serde_json::json!({
+            "type": "line",
+            "ending": "crlf"
+        });
+        let cfg: TxFramingConfig = serde_json::from_value(json).unwrap();
+        assert!(matches!(
+            cfg.mode,
+            TxFramingMode::Line {
+                ending: TxLineEnding::Crlf
+            }
+        ));
+    }
+
+    #[test]
+    fn tx_framing_delimiter_deserialize() {
+        let json = serde_json::json!({
+            "type": "delimiter",
+            "delimiter": "|",
+            "delimiter_encoding": "utf8"
+        });
+        let cfg: TxFramingConfig = serde_json::from_value(json).unwrap();
+        assert!(matches!(cfg.mode, TxFramingMode::Delimiter { .. }));
     }
 }

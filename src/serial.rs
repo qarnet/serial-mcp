@@ -1998,6 +1998,7 @@ mod schema {
     use schemars::schema_for;
     use serde_json::{self, Value};
 
+    use crate::framing::{TxFramingConfig, TxFramingMode};
     use crate::profiles::{Profile, ProfileSelector};
     use crate::serial::{ConnectionStatus, PortInfo};
     use crate::tools::types::{
@@ -2109,4 +2110,9 @@ mod schema {
     check_schema!(clear_log_result_has_no_uint_formats, ClearLogResult);
     check_schema!(export_log_result_has_no_uint_formats, ExportLogResult);
     check_schema!(reconnect_result_has_no_uint_formats, ReconnectResult);
+
+    // Framing config types (checked for uint format regressions on fields like
+    // prefix_size and max_frames).
+    check_schema!(tx_framing_config_has_no_uint_formats, TxFramingConfig);
+    check_schema!(tx_framing_mode_has_no_uint_formats, TxFramingMode);
 }

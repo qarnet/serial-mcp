@@ -158,7 +158,7 @@ pub async fn subscribe(
         no_new_rx_timeout_ms,
         reservation,
         matcher,
-        args.framing,
+        args.rx_framing,
     ));
 
     let mut streams = streams.lock().await;
@@ -357,7 +357,7 @@ async fn stream_rx_via_session(
     // Held for RAII: dropping releases the budget reservation.
     _reservation: Box<dyn crate::buffer_budget::BufferReservation>,
     mut matcher: Option<Matcher>,
-    framing: Option<crate::framing::FramingConfig>,
+    framing: Option<crate::framing::RxFramingConfig>,
 ) {
     let conn_id = session.connection_id().to_string();
     let logger = format!("serial:{conn_id}");

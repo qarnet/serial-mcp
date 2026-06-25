@@ -1837,7 +1837,7 @@ async fn native_read_line_framing_splits_lines() {
                     "timeout_ms": 3000,
                     "max_buffered_bytes": 512,
                     "encoding": "utf8",
-                    "framing": { "mode": { "type": "line" } }
+                    "rx_framing": { "type": "line" }
                 }),
             ))
             .await
@@ -1895,8 +1895,8 @@ async fn native_read_json_parser_decodes_jsonout() {
                     "timeout_ms": 3000,
                     "max_buffered_bytes": 1024,
                     "encoding": "utf8",
-                    "framing": {
-                        "mode": { "type": "line" },
+                    "rx_framing": {
+                        "type": "line",
                         "parser": { "type": "json_lines" }
                     }
                 }),
@@ -1968,8 +1968,8 @@ async fn native_read_at_parser_parses_pong() {
                     "timeout_ms": 3000,
                     "max_buffered_bytes": 512,
                     "encoding": "utf8",
-                    "framing": {
-                        "mode": { "type": "line" },
+                    "rx_framing": {
+                        "type": "line",
                         "parser": { "type": "at_command" }
                     }
                 }),
@@ -2032,8 +2032,8 @@ async fn native_subscribe_line_framing_emits_per_frame() {
                 "max_buffered_bytes": 8192,
                 "timeout_ms": 2000,
                 "encoding": "utf8",
-                "framing": {
-                    "mode": { "type": "line" }
+                "rx_framing": {
+                    "type": "line"
                 }
             }),
         ))
@@ -2111,8 +2111,8 @@ async fn native_read_framing_max_frames_stops() {
                     "timeout_ms": 3000,
                     "max_buffered_bytes": 512,
                     "encoding": "utf8",
-                    "framing": {
-                        "mode": { "type": "line" },
+                    "rx_framing": {
+                        "type": "line",
                         "max_frames": 2
                     }
                 }),
@@ -2173,7 +2173,7 @@ async fn native_read_framing_plus_match_combined() {
                     "timeout_ms": 3000,
                     "max_buffered_bytes": 512,
                     "encoding": "utf8",
-                    "framing": { "mode": { "type": "line" } },
+                    "rx_framing": { "type": "line" },
                     "match": {
                         "pattern": "pong",
                         "config": {
@@ -2240,8 +2240,8 @@ async fn native_subscribe_framing_max_frames_stops() {
                 "max_buffered_bytes": 8192,
                 "timeout_ms": 5000,
                 "encoding": "utf8",
-                "framing": {
-                    "mode": { "type": "line" },
+                "rx_framing": {
+                    "type": "line",
                     "max_frames": 2
                 }
             }),
@@ -2308,7 +2308,7 @@ async fn native_subscribe_framing_plus_match_combined() {
                 "poll_interval_ms": 50,
                 "max_buffered_bytes": 8192,
                 "encoding": "utf8",
-                "framing": { "mode": { "type": "line" } },
+                "rx_framing": { "type": "line" },
                 "match": {
                     "pattern": "pong",
                     "config": {
@@ -2384,7 +2384,7 @@ async fn native_subscribe_framing_partial_on_timeout() {
                 "max_buffered_bytes": 8192,
                 "timeout_ms": 1500,
                 "encoding": "utf8",
-                "framing": { "mode": { "type": "line" } }
+                "rx_framing": { "type": "line" }
             }),
         ))
         .await
@@ -2460,7 +2460,7 @@ async fn native_subscribe_framing_partial_on_close() {
                 "poll_interval_ms": 50,
                 "max_buffered_bytes": 8192,
                 "encoding": "utf8",
-                "framing": { "mode": { "type": "line" } }
+                "rx_framing": { "type": "line" }
             }),
         ))
         .await

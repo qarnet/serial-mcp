@@ -301,7 +301,7 @@ pub async fn read_bytes_via_session(
     mut matcher: Option<Matcher>,
     no_new_rx_timeout_ms: Option<u64>,
     conn: Option<Arc<crate::serial::SerialConnection>>,
-    framing: Option<crate::framing::FramingConfig>,
+    framing: Option<crate::framing::RxFramingConfig>,
 ) -> Result<ReadOutcome, String> {
     const SETTLE_MS: u64 = 50;
 
@@ -1041,8 +1041,8 @@ mod tests {
     async fn read_via_session_rejects_empty_delimiter() {
         let rx = make_closed_rx();
         let ct = tokio_util::sync::CancellationToken::new();
-        let framing = Some(crate::framing::FramingConfig {
-            mode: crate::framing::FramingMode::Delimiter {
+        let framing = Some(crate::framing::RxFramingConfig {
+            mode: crate::framing::RxFramingMode::Delimiter {
                 delimiter: "".into(),
                 delimiter_encoding: crate::match_config::PatternEncoding::Utf8,
             },
@@ -1060,8 +1060,8 @@ mod tests {
     async fn read_via_session_rejects_invalid_prefix_size() {
         let rx = make_closed_rx();
         let ct = tokio_util::sync::CancellationToken::new();
-        let framing = Some(crate::framing::FramingConfig {
-            mode: crate::framing::FramingMode::LengthPrefixed {
+        let framing = Some(crate::framing::RxFramingConfig {
+            mode: crate::framing::RxFramingMode::LengthPrefixed {
                 prefix_size: 3,
                 endianness: crate::framing::Endianness::Big,
                 initial_offset: None,
@@ -1080,8 +1080,8 @@ mod tests {
     async fn read_via_session_rejects_empty_markers() {
         let rx = make_closed_rx();
         let ct = tokio_util::sync::CancellationToken::new();
-        let framing = Some(crate::framing::FramingConfig {
-            mode: crate::framing::FramingMode::StartEnd {
+        let framing = Some(crate::framing::RxFramingConfig {
+            mode: crate::framing::RxFramingMode::StartEnd {
                 start: "".into(),
                 end: "X".into(),
                 marker_encoding: crate::match_config::PatternEncoding::Utf8,
@@ -1104,8 +1104,10 @@ mod tests {
     async fn read_via_session_rejects_invalid_regex() {
         let rx = make_closed_rx();
         let ct = tokio_util::sync::CancellationToken::new();
-        let framing = Some(crate::framing::FramingConfig {
-            mode: crate::framing::FramingMode::Line,
+        let framing = Some(crate::framing::RxFramingConfig {
+            mode: crate::framing::RxFramingMode::Line {
+                ending: crate::framing::LineEnding::Auto,
+            },
             parser: Some(crate::framing::ParserConfig {
                 parser_type: crate::framing::ParserType::ShellPrompt,
                 custom_prompt: Some("[invalid".to_string()),
@@ -1338,9 +1340,11 @@ mod tests {
 
     // ── Framing ────────────────────────────────────────────────────────────────
 
-    fn line_framing(max_frames: Option<usize>) -> crate::framing::FramingConfig {
-        crate::framing::FramingConfig {
-            mode: crate::framing::FramingMode::Line,
+    fn line_framing(max_frames: Option<usize>) -> crate::framing::RxFramingConfig {
+        crate::framing::RxFramingConfig {
+            mode: crate::framing::RxFramingMode::Line {
+                ending: crate::framing::LineEnding::Auto,
+            },
             max_frames,
             ..Default::default()
         }

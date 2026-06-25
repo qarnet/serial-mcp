@@ -25,11 +25,27 @@ pub async fn write(
 
     let encoding = parse_encoding(&args.encoding)?;
     let connection = lookup_connection(connections, &args.connection_id).await?;
-    let bytes =
+    let decoded_bytes_ref =
         codec::decode(encoding, &args.data).map_err(|e| format!("Data decoding failed - {e}"))?;
-    clamp_or_err("write.data.len()", bytes.len(), MAX_WRITE_BYTES)?;
+    let decoded_len = decoded_bytes_ref.len();
+    clamp_or_err("write.data.len()", decoded_len, MAX_WRITE_BYTES)?;
 
-    let data: Arc<[u8]> = Arc::from(bytes.as_slice());
+    // Apply TX framing if configured.
+    let bytes_to_send: Vec<u8> = if let Some(ref tx_cfg) = args.tx_framing {
+        let framed = tx_cfg.mode.encode(&decoded_bytes_ref).map_err(|e| {
+            log_tool_err(
+                "write",
+                &format!("TX framing failed on {}: {e}", args.connection_id),
+                e,
+            )
+        })?;
+        clamp_or_err("write.framed_len()", framed.len(), MAX_WRITE_BYTES)?;
+        framed
+    } else {
+        decoded_bytes_ref
+    };
+
+    let data: Arc<[u8]> = Arc::from(bytes_to_send.as_slice());
     let session = tx_sessions.get_or_create(Arc::clone(&connection)).await;
     let bytes_written = session.write(data).await.map_err(|e| {
         log_tool_err(
@@ -45,6 +61,7 @@ pub async fn write(
         connection_id: args.connection_id,
         name: connection.name().map(str::to_string),
         bytes_written,
+        decoded_bytes: decoded_len,
         encoding: encoding.to_string(),
     }))
 }
@@ -99,7 +116,7 @@ pub async fn read(
         matcher,
         args.no_new_rx_timeout_ms,
         Some(Arc::clone(&connection)),
-        args.framing,
+        args.rx_framing,
     )
     .await?;
 

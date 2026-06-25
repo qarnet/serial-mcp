@@ -113,7 +113,7 @@ pub fn disconnect_state(conn: &SerialConnection, ctrl: &mut RxStopController) ->
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::framing::{FramingConfig, FramingMode};
+    use crate::framing::{LineEnding, RxFramingConfig, RxFramingMode};
 
     struct CollectSink {
         frames: Vec<Frame>,
@@ -137,8 +137,10 @@ mod tests {
     }
 
     fn line_decoder() -> FrameDecoder {
-        FrameDecoder::new(&FramingConfig {
-            mode: FramingMode::Line,
+        FrameDecoder::new(&RxFramingConfig {
+            mode: RxFramingMode::Line {
+                ending: LineEnding::Auto,
+            },
             ..Default::default()
         })
         .unwrap()

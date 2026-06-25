@@ -107,4 +107,43 @@ mod tests {
         let json = serde_json::to_string(&schema).unwrap();
         assert!(!json.contains("\"format\":\"uint\""));
     }
+
+    /// Phase 1 regression guard: after renaming `framing` → `rx_framing` and
+    /// adding `tx_framing`, the write/read/subscribe input schemas must expose
+    /// `rx_framing` / `tx_framing` and NOT expose the old `framing` field.
+    #[test]
+    fn framing_fields_renamed_in_tool_schemas() {
+        let schema = schema_for!(crate::tools::types::WriteArgs);
+        let json = serde_json::to_string(&schema).unwrap();
+        assert!(
+            json.contains("\"tx_framing\""),
+            "WriteArgs schema must contain tx_framing"
+        );
+        assert!(
+            !json.contains("\"framing\""),
+            "WriteArgs schema must NOT contain bare 'framing'"
+        );
+
+        let schema = schema_for!(crate::tools::types::ReadArgs);
+        let json = serde_json::to_string(&schema).unwrap();
+        assert!(
+            json.contains("\"rx_framing\""),
+            "ReadArgs schema must contain rx_framing"
+        );
+        assert!(
+            !json.contains("\"framing\""),
+            "ReadArgs schema must NOT contain bare 'framing'"
+        );
+
+        let schema = schema_for!(crate::tools::types::SubscribeArgs);
+        let json = serde_json::to_string(&schema).unwrap();
+        assert!(
+            json.contains("\"rx_framing\""),
+            "SubscribeArgs schema must contain rx_framing"
+        );
+        assert!(
+            !json.contains("\"framing\""),
+            "SubscribeArgs schema must NOT contain bare 'framing'"
+        );
+    }
 }

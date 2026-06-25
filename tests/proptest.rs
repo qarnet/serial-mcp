@@ -201,7 +201,7 @@ proptest! {
         data in r"[A-Za-z0-9\r\n\t ]{0,4096}",
         enc in valid_encoding(),
     ) {
-        let args = WriteArgs { connection_id: id, data, encoding: enc };
+        let args = WriteArgs { connection_id: id, data, encoding: enc, tx_framing: None };
         assert_roundtrip!(args);
     }
 
@@ -212,7 +212,7 @@ proptest! {
         max_buffered_bytes in any_usize(),
         enc in valid_encoding(),
     ) {
-        let args = ReadArgs { connection_id: id, timeout_ms: timeout, max_buffered_bytes, encoding: enc, r#match: None, no_new_rx_timeout_ms: None, framing: None };
+        let args = ReadArgs { connection_id: id, timeout_ms: timeout, max_buffered_bytes, encoding: enc, r#match: None, no_new_rx_timeout_ms: None, rx_framing: None };
         assert_roundtrip!(args);
     }
 
@@ -250,7 +250,7 @@ proptest! {
             max_buffered_bytes,
             poll_interval_ms: poll,
             r#match: None,
-            framing: None,
+            rx_framing: None,
         };
         assert_roundtrip!(args);
     }
@@ -283,7 +283,7 @@ proptest! {
 
     #[test]
     fn write_result_schema_valid(id in opaque_id(), bw in any_usize(), enc in valid_encoding()) {
-        let r = WriteResult { connection_id: id, name: None, bytes_written: bw, encoding: enc };
+        let r = WriteResult { connection_id: id, name: None, bytes_written: bw, decoded_bytes: bw, encoding: enc };
         let v = serde_json::to_value(&r).unwrap();
         assert_schema_valid!(WriteResult, v);
     }
@@ -687,16 +687,18 @@ fn lifecycle_unsubscribe_noop_does_not_panic() {
     });
 }
 
-// ── FramingConfig roundtrip ──────────────────────────────────────────────
+// ── RxFramingConfig roundtrip ──────────────────────────────────────────────
 
 #[test]
-fn framing_config_roundtrip_all_modes() {
+fn rx_framing_config_roundtrip_all_modes() {
     use serial_mcp::framing::*;
     use serial_mcp::match_config::PatternEncoding;
 
-    // Line + AT parser
-    let c1 = FramingConfig {
-        mode: FramingMode::Line,
+    // Line + AT parser (default ending: auto)
+    let c1 = RxFramingConfig {
+        mode: RxFramingMode::Line {
+            ending: LineEnding::Auto,
+        },
         parser: Some(ParserConfig {
             parser_type: ParserType::AtCommand,
             custom_prompt: None,
@@ -705,15 +707,15 @@ fn framing_config_roundtrip_all_modes() {
         include_terminators: true,
     };
     let json = serde_json::to_value(&c1).unwrap();
-    let c2: FramingConfig = serde_json::from_value(json).unwrap();
-    assert!(matches!(c2.mode, FramingMode::Line));
+    let c2: RxFramingConfig = serde_json::from_value(json).unwrap();
+    assert!(matches!(c2.mode, RxFramingMode::Line { .. }));
     assert!(c2.parser.is_some());
     assert_eq!(c2.max_frames, Some(10));
     assert!(c2.include_terminators);
 
     // Delimiter
-    let c3 = FramingConfig {
-        mode: FramingMode::Delimiter {
+    let c3 = RxFramingConfig {
+        mode: RxFramingMode::Delimiter {
             delimiter: "|".into(),
             delimiter_encoding: PatternEncoding::Utf8,
         },
@@ -722,13 +724,13 @@ fn framing_config_roundtrip_all_modes() {
         include_terminators: false,
     };
     let json = serde_json::to_value(&c3).unwrap();
-    let c4: FramingConfig = serde_json::from_value(json).unwrap();
-    assert!(matches!(c4.mode, FramingMode::Delimiter { .. }));
+    let c4: RxFramingConfig = serde_json::from_value(json).unwrap();
+    assert!(matches!(c4.mode, RxFramingMode::Delimiter { .. }));
     assert!(c4.parser.is_none());
 
     // Length-prefixed + JSON parser
-    let c5 = FramingConfig {
-        mode: FramingMode::LengthPrefixed {
+    let c5 = RxFramingConfig {
+        mode: RxFramingMode::LengthPrefixed {
             prefix_size: 2,
             endianness: Endianness::Little,
             initial_offset: Some(4),
@@ -741,14 +743,14 @@ fn framing_config_roundtrip_all_modes() {
         include_terminators: false,
     };
     let json = serde_json::to_value(&c5).unwrap();
-    let c6: FramingConfig = serde_json::from_value(json).unwrap();
-    assert!(matches!(c6.mode, FramingMode::LengthPrefixed { .. }));
+    let c6: RxFramingConfig = serde_json::from_value(json).unwrap();
+    assert!(matches!(c6.mode, RxFramingMode::LengthPrefixed { .. }));
     assert!(c6.parser.is_some());
     assert_eq!(c6.max_frames, Some(0));
 
     // Start/end + shell prompt parser
-    let c7 = FramingConfig {
-        mode: FramingMode::StartEnd {
+    let c7 = RxFramingConfig {
+        mode: RxFramingMode::StartEnd {
             start: "STX".into(),
             end: "ETX".into(),
             marker_encoding: PatternEncoding::Base64,
@@ -762,8 +764,8 @@ fn framing_config_roundtrip_all_modes() {
         include_terminators: false,
     };
     let json = serde_json::to_value(&c7).unwrap();
-    let c8: FramingConfig = serde_json::from_value(json).unwrap();
-    assert!(matches!(c8.mode, FramingMode::StartEnd { .. }));
+    let c8: RxFramingConfig = serde_json::from_value(json).unwrap();
+    assert!(matches!(c8.mode, RxFramingMode::StartEnd { .. }));
     assert!(c8.parser.is_some());
     assert!(c8.max_frames.is_none());
 }

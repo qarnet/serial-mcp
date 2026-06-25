@@ -542,7 +542,7 @@ async fn pty_subscribe_framing_emits_per_frame_notifications() {
             json!({
                 "connection_id": connection_id,
                 "poll_interval_ms": 50,
-                "framing": { "mode": { "type": "line" } },
+                "rx_framing": { "type": "line" },
             }),
         ))
         .await
@@ -584,7 +584,7 @@ async fn pty_subscribe_framing_match_stops_at_frame() {
             json!({
                 "connection_id": connection_id,
                 "poll_interval_ms": 50,
-                "framing": { "mode": { "type": "line" } },
+                "rx_framing": { "type": "line" },
                 "match": { "pattern": "beta" },
             }),
         ))
