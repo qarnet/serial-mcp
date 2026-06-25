@@ -3,6 +3,7 @@
 | Version | Date | Highlights |
 |---|---|---|
 | [Unreleased](#unreleased) | — | — |
+| [0.6.2](#062) | 2026-06-25 | Schema fix: suppress non-standard `uint8`/`uint16` formats; expanded schema regression guards + AGENTS.md truth |
 | [0.6.1](#061) | 2026-06-24 | RX refactor: shared framing sink, SerialHandler builder, config FromStr, dedup; docs cleanup |
 | [0.6.0](#060) | 2026-06-20 | Frame decoding (4 modes + 3 parsers), regex/glob matching, auto-reconnect, event log, connection profiles, port identity, reconfigure, get_status, per-frame graceful degradation |
 | [0.5.1](#051) | 2026-06-14 | Software-only test migration: native_sim PTY replaces all hardware tests |
@@ -18,6 +19,48 @@
 | [0.2.1](#021) | 2026-05-24 | MCP 2025-11-25, resource change notifications, port allowlist, stdio tests |
 | [0.2.0](#020) | 2026-05-23 | Project reset: rmcp 1.7 rewrite, 6 new tools, resources, prompts, HTTP transport |
 | [0.1.0](#010) | — | Initial release (5 tools, STM32 demo) |
+
+---
+
+## [0.6.2]
+
+Patch release. Fixes the third recurrence of the schemars non-standard
+`uint*` format regression and closes the test-coverage gaps that let it
+slip through. No tool API or runtime behavior changes.
+
+**Fixed — JSON Schema:**
+- `PortInfo` (`vid`/`pid`/`interface`) and `FramingMode::LengthPrefixed::prefix_size`
+  now carry `#[schemars(schema_with = ...)]` overrides. schemars 1.x was
+  emitting non-standard `"format": "uint16"`/`"uint8"` keywords for these
+  `u16`/`u8` fields, which validators (jsonschema, AJV, …) log as warnings
+  and silently drop.
+- History: `b12b09fd` and `bc37a0b0` fixed `u32`/`u64`/`usize` fields; this
+  release covers `u8`/`u16`.
+
+**Changed — regression guards (do not delete):**
+- `serial::schema` module (src/serial.rs): 25 per-type tests via
+  `check_schema!` macro scan every public `JsonSchema`-deriving struct for
+  any `uint*` format keyword. Previously 14 types; now includes all 22 tool
+  result types + `PortInfo`/`ConnectionStatus`/`Profile`/`ProfileSelector`.
+- `verify_all_tool_schemas` and `tool_schemas_have_no_nonstandard_uint_formats`
+  (src/tools/mod.rs): now cover all 22 `#[tool]` methods via a shared
+  `all_tool_attrs()` list (previously 16). The uint-format scan now also
+  covers `uint8`/`uint16` (previously only `uint`/`uint32`/`uint64`).
+
+**Docs:**
+- `src/schema_helpers.rs`: module-level doc explaining the rule, validator
+  behavior, and full regression history with pointers to the regression tests.
+- `AGENTS.md`: "Invariants easy to break" expanded to name `uint8`/`uint16`/
+  `uint32`/`uint64`, state the required annotation, and point at the
+  `serial::schema` tests. Test map now lists every test file (previously
+  missing `allowlist`, `blob_resources`, `resource_subscriptions`,
+  `tx_session`, `proptest`).
+- `README.md`: corrected resource count from "4 (3 templates + 1 static)"
+  to "5 (3 templates + 2 static)".
+
+**Internal — TX flush tests:**
+- Added `QueuedTxIo` mock backend coverage for fully-delivered,
+  partially-queued, and flushed-before-delivery TX flush semantics.
 
 ---
 
