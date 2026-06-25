@@ -315,4 +315,116 @@ mod tests {
 
         rx_mgr.remove(conn.id()).await;
     }
+
+    // ── TX flush-before-delivery semantics ───────────────────────────────
+    //
+    // These tests cover the flushed-before-delivery TX case: bytes written
+    // via `TxSession::write` that are still queued in the OS transmit queue
+    // are discarded by `flush(target=output)` before the device drains them.
+    // They use `queued_tx_connection`, a mock `SerialIo` backend whose TX
+    // path models an OS transmit queue: written bytes land in the queue, and
+    // `clear_os_buffers(Output)` (the backend behind `flush(target=output)`)
+    // discards bytes still queued before the device has drained them. This
+    // is the state a real PTY cannot reproduce because a PTY delivers every
+    // `write()` byte into its kernel buffer immediately.
+
+    /// Bytes written via `TxSession::write` land in the OS TX queue. A
+    /// subsequent `flush_output` discards them before the device drains,
+    /// so the device never sees them. Proves flushed-before-delivery.
+    #[tokio::test]
+    async fn tx_flush_output_drops_undrained_queued_tx() {
+        use crate::serial::test_support::queued_tx_connection;
+
+        let (conn, handle) = queued_tx_connection("test-flush-before-delivery");
+        let conn = Arc::new(conn);
+        let session = TxSession::new(Arc::clone(&conn));
+
+        // Write a command. Bytes land in the OS TX queue; the device has not
+        // drained them yet.
+        let data: Arc<[u8]> = Arc::from(b"ping\r\n".as_slice());
+        let n = session.write(data).await.unwrap();
+        assert_eq!(n, 6, "write should report all bytes accepted");
+        assert_eq!(
+            handle.tx_queue_len(),
+            6,
+            "bytes should be queued, not yet delivered to device"
+        );
+
+        // Flush output before the device drains. This must discard the
+        // queued bytes.
+        session.flush_output().await.unwrap();
+        assert_eq!(
+            handle.tx_queue_len(),
+            0,
+            "flush(output) must discard undrained TX queue"
+        );
+
+        // The device now drains its RX: there must be nothing to drain.
+        let drained = handle.drain_tx(64);
+        assert!(
+            drained.is_empty(),
+            "device must receive nothing after flush-before-delivery, got {drained:?}"
+        );
+
+        // Sanity: a later write still lands in the queue and is drainable,
+        // proving the flush did not break the TX path.
+        let data2: Arc<[u8]> = Arc::from(b"pong\r\n".as_slice());
+        session.write(data2).await.unwrap();
+        assert_eq!(handle.tx_queue_len(), 6, "second write should queue");
+        let drained2 = handle.drain_tx(64);
+        assert_eq!(drained2, b"pong\r\n", "device should drain second write");
+    }
+
+    /// A flush(output) issued when the TX queue is already empty is a no-op
+    /// and does not affect later writes. Guards against a flush that
+    /// accidentally discards bytes written after it.
+    #[tokio::test]
+    async fn tx_flush_output_on_empty_queue_does_not_drop_later_write() {
+        use crate::serial::test_support::queued_tx_connection;
+
+        let (conn, handle) = queued_tx_connection("test-flush-empty-queue");
+        let conn = Arc::new(conn);
+        let session = TxSession::new(Arc::clone(&conn));
+
+        // Flush with an empty queue — must succeed and change nothing.
+        session.flush_output().await.unwrap();
+        assert_eq!(handle.tx_queue_len(), 0);
+
+        // A write after the flush must still be drainable by the device.
+        let data: Arc<[u8]> = Arc::from(b"after\r\n".as_slice());
+        session.write(data).await.unwrap();
+        assert_eq!(handle.tx_queue_len(), 7);
+        let drained = handle.drain_tx(64);
+        assert_eq!(
+            drained, b"after\r\n",
+            "write after empty flush must survive"
+        );
+    }
+
+    /// Flushing output after the device has already drained the queue does
+    /// not retroactively affect the delivered bytes. Proves flush(output)
+    /// is a no-op on already-delivered TX.
+    #[tokio::test]
+    async fn tx_flush_output_after_drain_does_not_recall_delivered() {
+        use crate::serial::test_support::queued_tx_connection;
+
+        let (conn, handle) = queued_tx_connection("test-flush-after-drain");
+        let conn = Arc::new(conn);
+        let session = TxSession::new(Arc::clone(&conn));
+
+        // Write, then drain (device consumes) before flushing.
+        let data: Arc<[u8]> = Arc::from(b"delivered\r\n".as_slice());
+        session.write(data).await.unwrap();
+        let drained = handle.drain_tx(64);
+        assert_eq!(drained, b"delivered\r\n", "device drains first");
+        assert_eq!(handle.tx_queue_len(), 0, "queue empty after drain");
+
+        // Flush output now — must succeed and must not "un-deliver" anything.
+        session.flush_output().await.unwrap();
+        assert_eq!(handle.tx_queue_len(), 0);
+
+        // Device has already received the bytes; a second drain yields nothing.
+        let redrained = handle.drain_tx(64);
+        assert!(redrained.is_empty(), "no double-delivery after flush");
+    }
 }

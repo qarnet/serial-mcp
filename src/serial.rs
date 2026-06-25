@@ -1535,6 +1535,177 @@ pub mod test_support {
         let conn = SerialConnection::from_io_with_config(config, Box::new(LoopbackIo(a)));
         (conn, b)
     }
+
+    // ── QueuedTxIo ───────────────────────────────────────────────────────
+    //
+    // A `SerialIo` backend that models an OS transmit queue the way a real
+    // serialport does on Linux: `write()` lands bytes in a TX queue, and
+    // `clear_os_buffers(Output)` (the backend behind `flush(target=output)`)
+    // discards bytes still in that queue before the device has drained them.
+    //
+    // Unlike `LoopbackIo` (which is backed by `tokio::io::duplex` and so
+    // delivers every written byte to the peer immediately), `QueuedTxIo`
+    // keeps written bytes in an internal queue until the test explicitly
+    // drains them via the `QueuedTxHandle`. This lets unit tests exercise
+    // the "flushed-before-delivery" path: write, flush(output), then assert
+    // the device received nothing because the queued bytes were discarded
+    // before the device drained them.
+    //
+    // RX direction (device -> host) is fed by `QueuedTxHandle::inject_rx`,
+    // which pushes bytes the host can then `read`.
+
+    /// Shared state between [`QueuedTxIo`] and its [`QueuedTxHandle`].
+    struct QueuedTxState {
+        /// Bytes written by the host, awaiting delivery to the device.
+        /// `clear_os_buffers(Output)` discards these.
+        tx_queue: std::collections::VecDeque<u8>,
+        /// Bytes the device injected for the host to read.
+        /// `clear_os_buffers(Input)` discards these.
+        rx_queue: std::collections::VecDeque<u8>,
+        /// Waker for the host-side `poll_read`, notified when rx_queue grows.
+        rx_waker: Option<std::task::Waker>,
+    }
+
+    impl QueuedTxState {
+        fn new() -> Self {
+            Self {
+                tx_queue: std::collections::VecDeque::new(),
+                rx_queue: std::collections::VecDeque::new(),
+                rx_waker: None,
+            }
+        }
+    }
+
+    /// A `SerialIo` backend whose TX path models an OS transmit queue.
+    pub struct QueuedTxIo {
+        state: std::sync::Arc<std::sync::Mutex<QueuedTxState>>,
+    }
+
+    /// Test handle that can drain the TX queue (simulate the device reading),
+    /// inject RX bytes (simulate the device writing), and inspect queue state.
+    pub struct QueuedTxHandle {
+        state: std::sync::Arc<std::sync::Mutex<QueuedTxState>>,
+    }
+
+    /// Build a [`SerialConnection`] backed by [`QueuedTxIo`] plus the
+    /// [`QueuedTxHandle`] for driving the simulated device side.
+    pub fn queued_tx_connection(port: &str) -> (SerialConnection, QueuedTxHandle) {
+        let state = std::sync::Arc::new(std::sync::Mutex::new(QueuedTxState::new()));
+        let conn = SerialConnection::from_io(
+            port.to_string(),
+            Box::new(QueuedTxIo {
+                state: state.clone(),
+            }),
+        );
+        (conn, QueuedTxHandle { state })
+    }
+
+    impl QueuedTxHandle {
+        /// Number of bytes currently queued in the OS TX queue (written by
+        /// the host, not yet drained by the device, not yet flushed).
+        pub fn tx_queue_len(&self) -> usize {
+            self.state.lock().expect("tx state poisoned").tx_queue.len()
+        }
+
+        /// Drain up to `max` bytes from the OS TX queue, simulating the
+        /// device reading its RX. Returns the drained bytes in order.
+        pub fn drain_tx(&self, max: usize) -> Vec<u8> {
+            let mut state = self.state.lock().expect("tx state poisoned");
+            let take = max.min(state.tx_queue.len());
+            let mut out = Vec::with_capacity(take);
+            for _ in 0..take {
+                out.push(state.tx_queue.pop_front().expect("len checked"));
+            }
+            out
+        }
+
+        /// Inject bytes for the host to read (simulates the device writing).
+        pub fn inject_rx(&self, bytes: &[u8]) {
+            let mut state = self.state.lock().expect("tx state poisoned");
+            state.rx_queue.extend(bytes);
+            if let Some(w) = state.rx_waker.take() {
+                w.wake();
+            }
+        }
+
+        /// Number of bytes currently buffered for the host to read.
+        pub fn rx_queue_len(&self) -> usize {
+            self.state.lock().expect("tx state poisoned").rx_queue.len()
+        }
+    }
+
+    impl AsyncRead for QueuedTxIo {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            let mut state = self.state.lock().expect("tx state poisoned");
+            let n = buf.initialize_unfilled().len().min(state.rx_queue.len());
+            if n == 0 {
+                // Remember the waker so a later inject_rx can wake us.
+                state.rx_waker = Some(_cx.waker().clone());
+                return Poll::Pending;
+            }
+            let filled = buf.initialize_unfilled();
+            for slot in filled.iter_mut().take(n) {
+                *slot = state.rx_queue.pop_front().expect("len checked");
+            }
+            buf.advance(n);
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    impl AsyncWrite for QueuedTxIo {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            let mut state = self.state.lock().expect("tx state poisoned");
+            state.tx_queue.extend(buf);
+            Poll::Ready(Ok(buf.len()))
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            // No-op: bytes stay in tx_queue until drain_tx or
+            // clear_os_buffers(Output). This models a real OS TX queue where
+            // a successful write does not imply the device has consumed.
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    impl SerialIo for QueuedTxIo {
+        fn clear_os_buffers(&self, target: FlushTarget) -> std::io::Result<()> {
+            let mut state = self.state.lock().expect("tx state poisoned");
+            match target {
+                FlushTarget::Input => {
+                    state.rx_queue.clear();
+                }
+                FlushTarget::Output => {
+                    state.tx_queue.clear();
+                }
+                FlushTarget::Both => {
+                    state.tx_queue.clear();
+                    state.rx_queue.clear();
+                }
+            }
+            Ok(())
+        }
+        fn set_dtr_rts(&mut self, _dtr: bool, _rts: bool) -> std::io::Result<()> {
+            Ok(())
+        }
+        fn set_flow_control(&mut self, _flow_control: FlowControl) -> std::io::Result<()> {
+            Ok(())
+        }
+        fn set_break_state(&self, _asserted: bool) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
 }
 
 #[cfg(test)]
