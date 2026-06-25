@@ -1590,4 +1590,66 @@ mod tests {
         assert!(err.contains("read.timeout_ms"), "got: {err}");
         assert!(err.contains("exceeds maximum"), "got: {err}");
     }
+
+    // ── Auto-promotion integration: read loop ──────────────────────────────
+
+    /// Test that auto promotes to CrMode when the read loop receives a bare
+    /// `\r` followed by a non-`\n` byte across events.
+    #[tokio::test]
+    async fn char_framing_auto_promotes_on_bare_cr() {
+        let (tx, rx) = mpsc::channel(8);
+        tx.send(RxEvent::Data(b"line1\r".to_vec())).await.unwrap();
+        tx.send(RxEvent::Data(b"x".to_vec())).await.unwrap();
+        // After promotion, "more\r" splits on \r in CrMode.
+        tx.send(RxEvent::Data(b"more\r".to_vec())).await.unwrap();
+        drop(tx);
+
+        let out = read_bytes_via_session(
+            rx,
+            256,
+            Some(1000),
+            &fresh_ct(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(line_framing(None)),
+        )
+        .await
+        .unwrap();
+
+        // First frame from promotion: "line1"
+        // Second frame: "xmore" (x stayed buffered + more, split on \r)
+        assert_eq!(out.frames.len(), 2);
+        assert_eq!(out.frames[0].data, b"line1");
+        assert_eq!(out.frames[1].data, b"xmore");
+    }
+
+    /// Test that flush_partial on timeout emits a pending \r as a frame.
+    #[tokio::test]
+    async fn char_framing_auto_flush_partial_on_timeout_emits_pending_cr() {
+        let (tx, rx) = mpsc::channel(8);
+        tx.send(RxEvent::Data(b"tail\r".to_vec())).await.unwrap();
+        // No more data — read times out.
+
+        let out = read_bytes_via_session(
+            rx,
+            256,
+            Some(80),
+            &fresh_ct(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(line_framing(None)),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(out.frames.len(), 1);
+        assert_eq!(out.frames[0].data, b"tail\r");
+        assert_eq!(out.meta.stop_reason, RxStopReason::Timeout);
+    }
 }

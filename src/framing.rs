@@ -114,8 +114,14 @@ pub enum RxFramingMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum LineEnding {
-    /// Recognize LF and CRLF. When splitting on `\n`, strip a preceding
-    /// `\r` from the frame. This is the original default behavior.
+    /// Adaptive: starts as LF/CRLF (splits on `\n`, strips preceding `\r`).
+    /// When a bare `\r` is detected (no `\n` follows in the same chunk), the
+    /// decoder enters a pending state. If the next received byte is `\n`, the
+    /// `\r\n` is treated as CRLF and decoding continues in LF/CRLF mode. If
+    /// the next byte is anything else (including end-of-stream), the `\r` is
+    /// confirmed as a bare CR line ending, the pending line is emitted, and
+    /// the decoder promotes to CR-split mode for the remainder of the call.
+    /// Promotion is per-call (resets on next read/subscribe).
     #[default]
     Auto,
     /// Split on `\n` only. Do NOT strip a preceding `\r`.
@@ -391,9 +397,7 @@ pub struct FrameDecoder {
 }
 
 enum DecoderMode {
-    Line {
-        ending: LineEnding,
-    },
+    Line(LineState),
     Delimiter(Vec<u8>),
     LengthPrefixed {
         prefix_size: u8,
@@ -409,6 +413,25 @@ enum DecoderMode {
     },
 }
 
+/// Internal line-decoder state.
+///
+/// `Lf`, `Cr`, `Crlf` are terminal (no promotion). `AutoLf` is the starting
+/// state for `ending: auto`; it can transition to `PendingCr` when a bare `\r`
+/// is detected, and from there to `CrMode` when the `\r` is confirmed not to
+/// be part of a CRLF sequence.
+enum LineState {
+    Lf,
+    Cr,
+    Crlf,
+    /// `auto` initial state: split on `\n`, strip preceding `\r` (CRLF-aware).
+    AutoLf,
+    /// Saw a `\r` at end of buffer with no trailing `\n` yet. Waiting for next
+    /// byte to decide if it's CRLF or bare CR.
+    PendingCr,
+    /// Promoted: split on bare `\r` only, ignore `\n` for the rest of the call.
+    CrMode,
+}
+
 trait FrameParser: Send + Sync {
     fn parse(&self, data: &[u8]) -> ParsedFrame;
 }
@@ -419,7 +442,15 @@ impl FrameDecoder {
     /// Create a new frame decoder from an RX framing configuration.
     pub fn new(config: &RxFramingConfig) -> Result<Self, String> {
         let (mode, offset) = match &config.mode {
-            RxFramingMode::Line { ending } => (DecoderMode::Line { ending: *ending }, None),
+            RxFramingMode::Line { ending } => {
+                let state = match ending {
+                    LineEnding::Auto => LineState::AutoLf,
+                    LineEnding::Lf => LineState::Lf,
+                    LineEnding::Cr => LineState::Cr,
+                    LineEnding::Crlf => LineState::Crlf,
+                };
+                (DecoderMode::Line(state), None)
+            }
             RxFramingMode::Delimiter {
                 delimiter,
                 delimiter_encoding,
@@ -503,11 +534,13 @@ impl FrameDecoder {
         let mut frames = Vec::new();
         loop {
             let consumed = match &mut self.mode {
-                DecoderMode::Line { ending } => match ending {
-                    LineEnding::Auto => self.match_line_auto(),
-                    LineEnding::Lf => self.match_line_lf(),
-                    LineEnding::Cr => self.match_line_cr(),
-                    LineEnding::Crlf => self.match_line_crlf(),
+                DecoderMode::Line(state) => match state {
+                    LineState::Lf => self.match_line_lf(),
+                    LineState::Cr => self.match_line_cr(),
+                    LineState::Crlf => self.match_line_crlf(),
+                    LineState::AutoLf => self.match_auto_lf(),
+                    LineState::PendingCr => self.match_pending_cr(),
+                    LineState::CrMode => self.match_line_cr(),
                 },
                 DecoderMode::Delimiter(delim) => {
                     let d = delim.clone();
@@ -625,20 +658,127 @@ impl FrameDecoder {
         frames
     }
 
-    /// Match a line with `auto` ending: split on `\n`, strip preceding `\r`.
-    fn match_line_auto(&mut self) -> Option<Vec<u8>> {
-        let pos = self.buf.iter().position(|&b| b == b'\n')?;
-        let end = if !self.include_terminators && pos > 0 && self.buf[pos - 1] == b'\r' {
-            pos - 1
-        } else {
-            pos
+    /// `auto` initial state: scan for `\n` (CRLF-aware), detect bare `\r`.
+    ///
+    /// If a `\r` is found at the end of the buffer with no `\n` following it in
+    /// the same chunk, transitions to [`LineState::PendingCr`] and returns
+    /// `None` to wait for more data. If a `\r` is immediately followed by a
+    /// non-`\n` byte (bare CR confirmed in same chunk), transitions directly to
+    /// [`LineState::CrMode`] and returns the frame before the `\r`.
+    fn match_auto_lf(&mut self) -> Option<Vec<u8>> {
+        // Scan for \n first — preserves existing eager-LF behavior.
+        if let Some(lf_pos) = self.buf.iter().position(|&b| b == b'\n') {
+            // Check if there's a bare \r before this \n that hasn't been
+            // consumed yet. If no \r precedes this \n, or only the \r
+            // immediately before \n, handle normally.
+            // Walk backwards from lf_pos to check for any earlier \r that
+            // isn't part of a CRLF.
+            let end = if !self.include_terminators && lf_pos > 0 && self.buf[lf_pos - 1] == b'\r' {
+                lf_pos - 1
+            } else {
+                lf_pos
+            };
+            let fb = if self.include_terminators {
+                self.buf[..lf_pos + 1].to_vec()
+            } else {
+                self.buf[..end].to_vec()
+            };
+            self.buf.drain(..lf_pos + 1);
+            return Some(fb);
+        }
+
+        // No \n found. Look for a bare \r.
+        if let Some(cr_pos) = self.buf.iter().position(|&b| b == b'\r') {
+            let next_is_lf = self.buf.get(cr_pos + 1) == Some(&b'\n');
+            if next_is_lf {
+                // CRLF: \n is in the buffer right after \r. This means \n was
+                // found above. Unreachable in practice, but safe.
+                let fb = if self.include_terminators {
+                    self.buf[..cr_pos + 2].to_vec()
+                } else {
+                    self.buf[..cr_pos].to_vec()
+                };
+                self.buf.drain(..cr_pos + 2);
+                return Some(fb);
+            }
+            // \r found, no \n follows in the buffer.
+            if cr_pos + 1 < self.buf.len() {
+                // Bytes after \r exist in this chunk → bare CR confirmed immediately.
+                // Emit the line before \r, drain through \r, transition to CrMode.
+                let fb = if self.include_terminators {
+                    self.buf[..cr_pos + 1].to_vec()
+                } else {
+                    self.buf[..cr_pos].to_vec()
+                };
+                self.buf.drain(..cr_pos + 1);
+                if let DecoderMode::Line(ref mut state) = self.mode {
+                    *state = LineState::CrMode;
+                }
+                return Some(fb);
+            }
+            // \r is the last byte in buffer → transition to PendingCr.
+            if let DecoderMode::Line(ref mut state) = self.mode {
+                *state = LineState::PendingCr;
+            }
+            return None;
+        }
+
+        // No \n, no \r. Wait for more data.
+        None
+    }
+
+    /// `PendingCr` state: buffer ends with a `\r`. The next byte decides.
+    ///
+    /// On next non-`\n` byte → bare CR confirmed, emit frame before `\r`,
+    /// drain, promote to [`LineState::CrMode`].
+    /// On `\n` → CRLF, emit frame before `\r\n`, drain, return to
+    /// [`LineState::AutoLf`].
+    fn match_pending_cr(&mut self) -> Option<Vec<u8>> {
+        // self.buf starts with the data up to and including the pending \r.
+        // The pending \r is at the end of the previously buffered data.
+        // We need to find where that \r is.
+        let cr_pos = match self.buf.iter().rposition(|&b| b == b'\r') {
+            Some(p) => p,
+            None => {
+                // \r disappeared (shouldn't happen). Reset to AutoLf.
+                if let DecoderMode::Line(ref mut state) = self.mode {
+                    *state = LineState::AutoLf;
+                }
+                return None;
+            }
         };
+
+        if cr_pos + 1 >= self.buf.len() {
+            // \r is still the last byte. Wait for more data.
+            return None;
+        }
+
+        let next_byte = self.buf[cr_pos + 1];
+        if next_byte == b'\n' {
+            // CRLF confirmed. Emit frame (strip \r\n unless include_terminators).
+            let fb = if self.include_terminators {
+                self.buf[..cr_pos + 2].to_vec()
+            } else {
+                self.buf[..cr_pos].to_vec()
+            };
+            self.buf.drain(..cr_pos + 2);
+            if let DecoderMode::Line(ref mut state) = self.mode {
+                *state = LineState::AutoLf;
+            }
+            return Some(fb);
+        }
+
+        // Non-\n byte after \r → bare CR confirmed.
+        // Emit frame before \r, drain through \r, promote to CrMode.
         let fb = if self.include_terminators {
-            self.buf[..pos + 1].to_vec()
+            self.buf[..cr_pos + 1].to_vec()
         } else {
-            self.buf[..end].to_vec()
+            self.buf[..cr_pos].to_vec()
         };
-        self.buf.drain(..pos + 1);
+        self.buf.drain(..cr_pos + 1);
+        if let DecoderMode::Line(ref mut state) = self.mode {
+            *state = LineState::CrMode;
+        }
         Some(fb)
     }
 
@@ -680,7 +820,7 @@ impl FrameDecoder {
 
     fn frame_type_str(&self) -> String {
         match &self.mode {
-            DecoderMode::Line { .. } => "line".into(),
+            DecoderMode::Line(_) => "line".into(),
             DecoderMode::Delimiter(_) => "delimiter".into(),
             DecoderMode::LengthPrefixed { .. } => "length_prefixed".into(),
             DecoderMode::StartEnd { .. } => "start_end".into(),
@@ -1104,6 +1244,146 @@ mod tests {
                 ending: LineEnding::Auto
             }
         ));
+    }
+
+    // ── Line decoder: auto promotion (bare-CR detection) ──────────────────
+
+    fn auto_config() -> RxFramingConfig {
+        RxFramingConfig {
+            mode: RxFramingMode::Line {
+                ending: LineEnding::Auto,
+            },
+            ..Default::default()
+        }
+    }
+
+    fn auto_config_include_terms() -> RxFramingConfig {
+        RxFramingConfig {
+            mode: RxFramingMode::Line {
+                ending: LineEnding::Auto,
+            },
+            include_terminators: true,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn auto_does_not_promote_on_crlf() {
+        let mut dec = FrameDecoder::new(&auto_config()).unwrap();
+        let frames = dec.push(b"a\r\nb\r\n");
+        assert_eq!(frames.len(), 2);
+        assert_eq!(frames[0].data, b"a");
+        assert_eq!(frames[1].data, b"b");
+        // After CRLF, decoder stays in AutoLf — next bare \r still triggers promotion.
+        let frames = dec.push(b"c\r");
+        assert!(frames.is_empty(), "pending CR after CRLF");
+        // Push "d" — confirmation byte stays buffered as start of next line.
+        let frames = dec.push(b"d");
+        assert_eq!(frames.len(), 1, "bare CR confirmed on next non-\\n byte");
+        assert_eq!(frames[0].data, b"c");
+        // Now in CrMode. Buffer has "d". Push "e\r" → "de\r" → frame "de".
+        let frames = dec.push(b"e\r");
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].data, b"de");
+    }
+
+    #[test]
+    fn auto_does_not_promote_on_lf() {
+        let mut dec = FrameDecoder::new(&auto_config()).unwrap();
+        let frames = dec.push(b"a\nb\n");
+        assert_eq!(frames.len(), 2);
+        assert_eq!(frames[0].data, b"a");
+        assert_eq!(frames[1].data, b"b");
+    }
+
+    #[test]
+    fn auto_promotes_on_next_non_lf_byte() {
+        let mut dec = FrameDecoder::new(&auto_config()).unwrap();
+        // Push "line1\r" → \r at end, no frame emitted, enters PendingCr.
+        let frames = dec.push(b"line1\r");
+        assert!(frames.is_empty());
+        // Push "x" → non-\n byte confirms bare CR. Emit "line1", enter CrMode.
+        // The "x" stays buffered as the start of the next line.
+        let frames = dec.push(b"x");
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].data, b"line1");
+        // In CrMode: push "more\r" → split on \r. Buffer had "x" + "more\r".
+        let frames = dec.push(b"more\r");
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].data, b"xmore");
+    }
+
+    #[test]
+    fn auto_crlf_after_pending_cr_cancels_promotion() {
+        let mut dec = FrameDecoder::new(&auto_config()).unwrap();
+        // Push "a\r" → pending CR.
+        let frames = dec.push(b"a\r");
+        assert!(frames.is_empty());
+        // Push "\nb" → \n arrives, CRLF recognized. "b" stays buffered.
+        let frames = dec.push(b"\nb");
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].data, b"a");
+        // Back to AutoLf. Buffer has "b". Push "c\n" → "bc\n" → frame "bc".
+        let frames = dec.push(b"c\n");
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].data, b"bc");
+    }
+
+    #[test]
+    fn auto_flush_partial_emits_pending_cr() {
+        let mut dec = FrameDecoder::new(&auto_config()).unwrap();
+        let frames = dec.push(b"tail\r");
+        assert!(frames.is_empty());
+        let partial = dec.flush_partial().expect("partial frame");
+        assert_eq!(partial.data, b"tail\r");
+        assert_eq!(partial.frame_type, "line");
+    }
+
+    #[test]
+    fn auto_flush_partial_emits_pending_cr_include_terminators() {
+        let mut dec = FrameDecoder::new(&auto_config_include_terms()).unwrap();
+        let frames = dec.push(b"tail\r");
+        assert!(frames.is_empty());
+        let partial = dec.flush_partial().expect("partial frame");
+        // include_terminators=true → the \r is included (already in buffer).
+        assert_eq!(partial.data, b"tail\r");
+    }
+
+    #[test]
+    fn auto_promotes_and_stays_in_cr_mode() {
+        let mut dec = FrameDecoder::new(&auto_config()).unwrap();
+        // Promote to CrMode.
+        dec.push(b"a\r");
+        dec.push(b"b");
+        // In CrMode: \n is NOT a terminator, \r is.
+        // Buffer has "b" from confirmation, then "x\ny\r" → "bx\ny\r" → split on \r.
+        let frames = dec.push(b"x\ny\r");
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].data, b"bx\ny");
+    }
+
+    #[test]
+    fn auto_promotion_include_terminators() {
+        let mut dec = FrameDecoder::new(&auto_config_include_terms()).unwrap();
+        let frames = dec.push(b"line1\r");
+        assert!(frames.is_empty());
+        let frames = dec.push(b"x");
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].data, b"line1\r");
+    }
+
+    #[test]
+    fn auto_pending_cr_then_flush_keeps_frame_index_monotonic() {
+        let mut dec = FrameDecoder::new(&auto_config()).unwrap();
+        // Two LF lines.
+        let frames = dec.push(b"a\nb\n");
+        assert_eq!(frames.len(), 2);
+        assert_eq!(frames[0].index, 0);
+        assert_eq!(frames[1].index, 1);
+        // Pending CR, then flush.
+        dec.push(b"c\r");
+        let partial = dec.flush_partial().expect("partial frame");
+        assert_eq!(partial.index, 2);
     }
 
     // ── Delimiter decoder ───────────────────────────────────────────────
