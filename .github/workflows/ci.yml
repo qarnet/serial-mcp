@@ -91,6 +91,23 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # GitHub-hosted ubuntu-latest runners ship ~14 GB free disk. The NCS
+      # SDK + toolchain cache alone is ~4.6 GB, cargo cache ~1-2 GB, and the
+      # runner image preinstalls ~7 GB of toolchains we never use (dotnet,
+      # android, ghc, CodeQL, docker images). Without reclaiming that headroom
+      # the native-sim job intermittently hits ENOSPC — the runner can't even
+      # write its own _diag log (System.IO.IOException: No space left on
+      # device). This step reclaims ~7 GB. DO NOT remove without measuring
+      # free disk with the df -h steps below. See firmware/AGENTS.md
+      # "CI disk pressure" for the full rationale.
+      - name: Free disk space
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo docker image prune --all --force || true
+          sudo docker builder prune -a --force || true
+          df -h /
+
       - name: Install system dependencies
         run: |
           sudo apt-get update
@@ -130,6 +147,9 @@ jobs:
         if: steps.cache-ncs.outputs.cache-hit != 'true'
         run: nrfutil sdk-manager install "$NCS_VERSION"
 
+      - name: Report disk usage after NCS restore/install
+        run: df -h /
+
       - name: Build native_sim firmware
         run: |
           eval "$(nrfutil sdk-manager toolchain env --ncs-version "$NCS_VERSION" --as-script sh)"
@@ -137,12 +157,24 @@ jobs:
           west build -b native_sim firmware/ -d build/native_sim --pristine -- \
             -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
 
+      - name: Report disk usage after firmware build
+        run: df -h /
+
       - name: Run native_sim tests
         env:
           SERIAL_MCP_NATIVE_SIM_BIN: build/native_sim/firmware/zephyr/zephyr.exe
         run: |
           cargo test --test native_sim_validation -- --ignored --test-threads=1
           cargo test --test native_sim_connection_lifecycle -- --ignored --test-threads=1
+
+      # Remove the firmware build tree after tests so the post-step cache
+      # upload (and any later steps) don't walk a stale build dir. The NCS
+      # cache at /home/runner/ncs is intentionally kept — actions/cache@v4
+      # saves it post-job and a cache miss + skipped install would break the
+      # next run. DO NOT rm -rf /home/runner/ncs.
+      - name: Clean firmware build tree
+        if: always()
+        run: rm -rf build/native_sim
 
       - name: Run HTTP integration tests (spawned binary)
         run: cargo test --test http_integration --locked -- --test-threads=1

@@ -80,6 +80,36 @@ fw-build-native
 - Do **not** reintroduce a `xiao_ble` target. The test firmware is
   `native_sim` only.
 
+## CI disk pressure (native-sim job)
+
+The `native-sim` job in `.github/workflows/ci.yml` runs on
+`ubuntu-latest`, which ships ~14 GB free disk. The NCS v3.3.0 SDK +
+toolchain cache (`/home/runner/ncs`) is **~4.6 GB**, cargo cache ~1-2 GB,
+and the firmware build tree ~16 MB. That sits near the ceiling and has
+caused intermittent `System.IO.IOException: No space left on device`
+failures (the runner can't even write its own `_diag` log).
+
+The workflow reclaims ~7 GB by deleting preinstalled toolchains we never
+use (dotnet, android SDK, ghc, CodeQL, docker images) in a `Free disk
+space` step, and reports disk state with `df -h /` before/after NCS and
+after the firmware build. Rules for anyone editing this job:
+
+- **Do not remove the `Free disk space` step** without first measuring
+  free disk via the `df -h /` steps. The reclaim is what keeps the job
+  off the ENOSPC cliff.
+- **Do not `rm -rf /home/runner/ncs`** to "save space". `actions/cache@v4`
+  saves that path post-job; deleting it caches an empty dir, the next run
+  reports `cache-hit: true`, skips the install step, and builds with no
+  toolchain. Keep the NCS cache intact.
+- The `Clean firmware build tree` step (`rm -rf build/native_sim`) runs
+  `if: always()` after tests so a stale build dir doesn't linger for the
+  cache post-step or later steps. This is safe — the firmware is rebuilt
+  `--pristine` every run anyway.
+- If ENOSPC returns, check the `df -h /` step outputs in the failed run
+  first — they show exactly where the space went. The fix is almost
+  always more reclaim, not a cache-key bump (bumping the key forces a
+  full 4.6 GB NCS re-download and makes the pressure worse on miss runs).
+
 ## Config Files That Matter
 
 ### `prj.conf`
