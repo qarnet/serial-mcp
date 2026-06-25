@@ -27,10 +27,20 @@ jobs:
         with:
           primary-key: nix-${{ runner.os }}-${{ hashFiles('**/flake.lock', '**/Cargo.lock') }}
           restore-prefixes-first-match: nix-${{ runner.os }}-
-          gc-max-store-size-linux: 2G
+          # The build produces ~4-5 GB of store paths (593 cargo deps + the
+          # serial-mcp crate + toolchain + system libs). The previous 2G cap
+          # evicted the deps/crate artifacts between runs, forcing a full
+          # ~14 min rebuild every run even on cache hits. 8G lets the cache
+          # retain the build outputs so subsequent runs substitute instead
+          # of recompiling. Trade-off: larger GitHub Actions cache storage
+          # (billed against the repo's 10 GB per-repo cache quota).
+          gc-max-store-size-linux: 8G
 
+      # --print-build-logs (-L) streams cargo/compiler output so the build
+      # phase is visible in the job log instead of a silent multi-minute
+      # gap. Essential for debugging flake/build failures.
       - name: nix flake check
-        run: nix flake check --accept-flake-config
+        run: nix flake check --accept-flake-config --print-build-logs
 
   build-test:
     name: build / test / clippy (${{ matrix.os }})
