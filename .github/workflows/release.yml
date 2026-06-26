@@ -171,17 +171,16 @@ jobs:
       - name: Rename binary
         shell: bash
         run: |
-          VERSION=${{ needs.prepare.outputs.version }}
           EXT="${{ matrix.artifact == 'serial-mcp.exe' && '.exe' || '' }}"
           cp "target/${{ matrix.target }}/release/${{ matrix.artifact }}" \
-             "serial-mcp-${VERSION}-${{ matrix.artifact_name_suffix }}${EXT}"
+             "serial-mcp-${{ matrix.artifact_name_suffix }}${EXT}"
 
       - name: Upload dry-run artifacts
         if: needs.prepare.outputs.mode == 'dry-run'
         uses: actions/upload-artifact@v4
         with:
           name: serial-mcp-${{ matrix.artifact_name_suffix }}
-          path: serial-mcp-${{ needs.prepare.outputs.version }}-${{ matrix.artifact_name_suffix }}*
+          path: serial-mcp-${{ matrix.artifact_name_suffix }}*
 
       - name: Upload release artifact
         if: needs.prepare.outputs.mode == 'release'
@@ -189,10 +188,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
-          VERSION=${{ needs.prepare.outputs.version }}
           EXT="${{ matrix.artifact == 'serial-mcp.exe' && '.exe' || '' }}"
           gh release upload "${{ needs.prepare.outputs.tag }}" \
-            "serial-mcp-${VERSION}-${{ matrix.artifact_name_suffix }}${EXT}" \
+            "serial-mcp-${{ matrix.artifact_name_suffix }}${EXT}" \
             --clobber
 
   publish-crate:
