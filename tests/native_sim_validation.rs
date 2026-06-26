@@ -3172,3 +3172,331 @@ async fn native_subscribe_line_framing_with_at_parser_emits_parsed_frames() {
     client.cancel().await.ok();
     drop(fw);
 }
+
+// ── Remaining framing e2e coverage ──────────────────────────────────────────
+
+fn extract_trace_bytes(data: &str) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    for cap in data.lines() {
+        if let Some(idx) = cap.find("=0x") {
+            let hex_part = &cap[idx + 3..].trim_end();
+            if hex_part.len() >= 2 {
+                if let Ok(b) = u8::from_str_radix(&hex_part[..2], 16) {
+                    bytes.push(b);
+                }
+            }
+        }
+    }
+    bytes
+}
+
+/// Prove start_end RX framing over the real serial path.
+#[tokio::test]
+#[ignore = "requires native_sim firmware binary"]
+#[cfg(unix)]
+async fn native_read_start_end_framing_decodes() {
+    let fw = NativeSimFirmware::spawn().await.expect("spawn zephyr.exe");
+    let pty_path = fw.pty_path().to_string();
+
+    let server = TestServer::start().await;
+    let (client, _rx) = connect_client(&server).await.unwrap();
+    let id = open_pty(&client, &pty_path).await;
+    sync_boot(&client, &id).await;
+    flush_both(&client, &id).await;
+
+    let read_handle = {
+        let peer = client.peer().clone();
+        let id2 = id.clone();
+        tokio::spawn(async move {
+            peer.call_tool(tool_request(
+                "read",
+                json!({
+                    "connection_id": id2,
+                    "timeout_ms": 3000,
+                    "max_buffered_bytes": 512,
+                    "encoding": "utf8",
+                    "rx_framing": {
+                        "type": "start_end",
+                        "start": "<<",
+                        "end": ">>",
+                        "marker_encoding": "utf8"
+                    }
+                }),
+            ))
+            .await
+        })
+    };
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    write_cmd(&client, &id, "sendraw hex 3C3C706F6E673E3E").await;
+
+    let result = read_handle.await.unwrap().expect("read task");
+    assert_ne!(result.is_error, Some(true), "{result:?}");
+    let s = result.structured_content.expect("structured");
+    let frames = s["frames"].as_array().expect("frames array");
+    assert!(!frames.is_empty(), "expected at least one frame");
+    assert_eq!(frames[0]["data"], json!("pong"));
+    assert_eq!(frames[0]["frame_type"], json!("start_end"));
+
+    close_connection(&client, &id).await;
+    client.cancel().await.ok();
+    drop(fw);
+}
+
+/// Prove TX framing via firmware's trace on (observes exact received bytes).
+#[tokio::test]
+#[ignore = "requires native_sim firmware binary"]
+#[cfg(unix)]
+async fn native_write_tx_framing_modes_observed_via_trace() {
+    let fw = NativeSimFirmware::spawn().await.expect("spawn zephyr.exe");
+    let pty_path = fw.pty_path().to_string();
+
+    let server = TestServer::start().await;
+    let (client, _rx) = connect_client(&server).await.unwrap();
+    let id = open_pty(&client, &pty_path).await;
+    sync_boot(&client, &id).await;
+    flush_both(&client, &id).await;
+
+    write_cmd(&client, &id, "trace on").await;
+    flush_both(&client, &id).await;
+
+    let modes: &[(&str, serde_json::Value, &[u8])] = &[
+        (
+            "delimiter",
+            json!({"type":"delimiter","delimiter":"|","delimiter_encoding":"utf8"}),
+            b"ping|",
+        ),
+        (
+            "length_prefixed",
+            json!({"type":"length_prefixed","prefix_size":1,"endianness":"big"}),
+            &[0x04, b'p', b'i', b'n', b'g'],
+        ),
+        (
+            "start_end",
+            json!({"type":"start_end","start":"<<","end":">>","marker_encoding":"utf8"}),
+            b"<<ping>>",
+        ),
+        (
+            "slip",
+            json!({"type":"slip"}),
+            &[0xC0, b'p', b'i', b'n', b'g', 0xC0],
+        ),
+    ];
+
+    for (_name, tx_framing, expected) in modes {
+        let read_handle = {
+            let peer = client.peer().clone();
+            let id2 = id.clone();
+            tokio::spawn(async move {
+                peer.call_tool(tool_request(
+                    "read",
+                    json!({
+                        "connection_id": id2,
+                        "timeout_ms": 3000,
+                        "max_buffered_bytes": 4096,
+                        "encoding": "utf8",
+                        "match": { "pattern": "pong" }
+                    }),
+                ))
+                .await
+            })
+        };
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        client
+            .peer()
+            .call_tool(tool_request(
+                "write",
+                json!({
+                    "connection_id": id, "data": "ping", "tx_framing": tx_framing
+                }),
+            ))
+            .await
+            .expect("write");
+        let result = read_handle.await.unwrap().expect("read task");
+        assert_ne!(result.is_error, Some(true), "read error: {result:?}");
+        let s = result.structured_content.expect("structured");
+        let data = s["data"].as_str().expect("data string");
+        let trace_bytes = extract_trace_bytes(data);
+        let found = trace_bytes.windows(expected.len()).any(|w| w == *expected);
+        assert!(
+            found,
+            "trace should contain {expected:02x?}, got: {trace_bytes:02x?}",
+        );
+    }
+
+    write_cmd(&client, &id, "trace off").await;
+    close_connection(&client, &id).await;
+    client.cancel().await.ok();
+    drop(fw);
+}
+
+/// Prove explicit line endings via sendraw hex payloads.
+#[tokio::test]
+#[ignore = "requires native_sim firmware binary"]
+#[cfg(unix)]
+async fn native_read_explicit_line_endings_split_correctly() {
+    let fw = NativeSimFirmware::spawn().await.expect("spawn zephyr.exe");
+    let pty_path = fw.pty_path().to_string();
+
+    let server = TestServer::start().await;
+    let (client, _rx) = connect_client(&server).await.unwrap();
+    let id = open_pty(&client, &pty_path).await;
+    sync_boot(&client, &id).await;
+    flush_both(&client, &id).await;
+
+    // lf: retains CR.
+    {
+        let ending = "lf";
+        let read_handle = {
+            let peer = client.peer().clone();
+            let id2 = id.clone();
+            tokio::spawn(async move {
+                peer.call_tool(tool_request(
+                    "read",
+                    json!({
+                        "connection_id": id2, "timeout_ms": 3000, "max_buffered_bytes": 512,
+                        "encoding": "utf8", "rx_framing": {"type":"line","ending":ending}
+                    }),
+                ))
+                .await
+            })
+        };
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        write_cmd(&client, &id, "sendraw hex 616C7068610D0A626574610A").await;
+        let result = read_handle.await.unwrap().expect("read task");
+        assert_ne!(result.is_error, Some(true), "{result:?}");
+        let s = result.structured_content.expect("structured");
+        let frames = s["frames"].as_array().expect("frames array");
+        assert_eq!(frames.len(), 2, "lf: 2 frames");
+        assert_eq!(frames[0]["data"], json!("alpha\r"), "lf retains CR");
+        assert_eq!(frames[1]["data"], json!("beta"));
+    }
+
+    // cr.
+    {
+        let ending = "cr";
+        let read_handle = {
+            let peer = client.peer().clone();
+            let id2 = id.clone();
+            tokio::spawn(async move {
+                peer.call_tool(tool_request(
+                    "read",
+                    json!({
+                        "connection_id": id2, "timeout_ms": 3000, "max_buffered_bytes": 512,
+                        "encoding": "utf8", "rx_framing": {"type":"line","ending":ending}
+                    }),
+                ))
+                .await
+            })
+        };
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        write_cmd(&client, &id, "sendraw hex 616C7068610D626574610D").await;
+        let result = read_handle.await.unwrap().expect("read task");
+        assert_ne!(result.is_error, Some(true), "{result:?}");
+        let s = result.structured_content.expect("structured");
+        let frames = s["frames"].as_array().expect("frames array");
+        assert_eq!(frames.len(), 2, "cr: 2 frames");
+        assert_eq!(frames[0]["data"], json!("alpha"));
+        assert_eq!(frames[1]["data"], json!("beta"));
+    }
+
+    // crlf.
+    {
+        let ending = "crlf";
+        let read_handle = {
+            let peer = client.peer().clone();
+            let id2 = id.clone();
+            tokio::spawn(async move {
+                peer.call_tool(tool_request(
+                    "read",
+                    json!({
+                        "connection_id": id2, "timeout_ms": 3000, "max_buffered_bytes": 512,
+                        "encoding": "utf8", "rx_framing": {"type":"line","ending":ending}
+                    }),
+                ))
+                .await
+            })
+        };
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        write_cmd(&client, &id, "sendraw hex 616C7068610D0A626574610D0A").await;
+        let result = read_handle.await.unwrap().expect("read task");
+        assert_ne!(result.is_error, Some(true), "{result:?}");
+        let s = result.structured_content.expect("structured");
+        let frames = s["frames"].as_array().expect("frames array");
+        assert_eq!(frames.len(), 2, "crlf: 2 frames");
+        assert_eq!(frames[0]["data"], json!("alpha"));
+        assert_eq!(frames[1]["data"], json!("beta"));
+    }
+
+    close_connection(&client, &id).await;
+    client.cancel().await.ok();
+    drop(fw);
+}
+
+/// Prove connection usable after SLIP decode error (per-call decoder reset).
+#[tokio::test]
+#[ignore = "requires native_sim firmware binary"]
+#[cfg(unix)]
+async fn native_read_slip_recovers_after_error_on_next_call() {
+    let fw = NativeSimFirmware::spawn().await.expect("spawn zephyr.exe");
+    let pty_path = fw.pty_path().to_string();
+
+    let server = TestServer::start().await;
+    let (client, _rx) = connect_client(&server).await.unwrap();
+    let id = open_pty(&client, &pty_path).await;
+    sync_boot(&client, &id).await;
+    flush_both(&client, &id).await;
+
+    // Read #1: malformed SLIP → error.
+    {
+        let read_handle = {
+            let peer = client.peer().clone();
+            let id2 = id.clone();
+            tokio::spawn(async move {
+                peer.call_tool(tool_request(
+                    "read",
+                    json!({
+                        "connection_id": id2, "timeout_ms": 2000, "max_buffered_bytes": 512,
+                        "encoding": "utf8", "rx_framing": {"type":"slip"}
+                    }),
+                ))
+                .await
+            })
+        };
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        write_cmd(&client, &id, "sendraw hex C0DB41C0").await;
+        let result = read_handle.await.unwrap().expect("read task");
+        assert_eq!(result.is_error, Some(true), "read #1 must error");
+    }
+
+    // Read #2: valid SLIP → success.
+    {
+        let read_handle = {
+            let peer = client.peer().clone();
+            let id2 = id.clone();
+            tokio::spawn(async move {
+                peer.call_tool(tool_request(
+                    "read",
+                    json!({
+                        "connection_id": id2, "timeout_ms": 2000, "max_buffered_bytes": 512,
+                        "encoding": "hex", "rx_framing": {"type":"slip"}
+                    }),
+                ))
+                .await
+            })
+        };
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        write_cmd(&client, &id, "sendraw hex C0706F6E67C0").await;
+        let result = read_handle.await.unwrap().expect("read task");
+        assert_ne!(result.is_error, Some(true), "read #2 must succeed");
+        let s = result.structured_content.expect("structured");
+        let frames = s["frames"].as_array().expect("frames array");
+        assert!(!frames.is_empty());
+        assert_eq!(frames[0]["data"], json!("70 6f 6e 67"));
+        assert_eq!(frames[0]["frame_type"], json!("slip"));
+    }
+
+    close_connection(&client, &id).await;
+    client.cancel().await.ok();
+    drop(fw);
+}
