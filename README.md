@@ -23,40 +23,45 @@ flash, reset, and talk to a board on their own.
 
 ## Install
 
-### Linux
-
-```bash
-VERSION=$(curl -s https://api.github.com/repos/qarnet/serial-mcp/releases/latest | grep -oP '"tag_name": "\K[^"]+')
-curl -L "https://github.com/qarnet/serial-mcp/releases/download/${VERSION}/serial-mcp-${VERSION#v}-x86_64-linux" \
-  -o serial-mcp && chmod +x serial-mcp && sudo mv serial-mcp /usr/local/bin/
-```
-
-Add user to `dialout` group for port access: `sudo usermod -aG dialout $USER`
-
-### macOS
-
-```bash
-VERSION=$(curl -s https://api.github.com/repos/qarnet/serial-mcp/releases/latest | grep -oP '"tag_name": "\K[^"]+')
-ARCH=aarch64-macos
-curl -L "https://github.com/qarnet/serial-mcp/releases/download/${VERSION}/serial-mcp-${VERSION#v}-${ARCH}" \
-  -o serial-mcp && chmod +x serial-mcp && sudo mv serial-mcp /usr/local/bin/
-```
-
-### Windows
-
-Download `serial-mcp-{VERSION}-x86_64-windows.exe` from the [latest release](https://github.com/qarnet/serial-mcp/releases/latest) and place it on your `PATH`.
-
-### Via cargo (all platforms)
+### Cargo (all platforms)
 
 ```bash
 cargo install serial-mcp
 ```
 
-### Via Nix
+### Nix
 
 ```bash
 nix profile install github:qarnet/serial-mcp
 ```
+
+### Prebuilt binary
+
+No toolchain required. Every release publishes one binary per platform, and the `latest/download` URLs below always resolve to the newest release.
+
+**Linux (x86_64):**
+
+```bash
+curl -L https://github.com/qarnet/serial-mcp/releases/latest/download/serial-mcp-x86_64-linux -o serial-mcp
+sudo install -m 755 serial-mcp /usr/local/bin/
+```
+
+For ARM64, use the `serial-mcp-aarch64-linux` asset instead. Then add your user to the `dialout` group for port access:
+
+```bash
+sudo usermod -aG dialout $USER
+```
+
+**macOS (Apple Silicon):**
+
+```bash
+curl -L https://github.com/qarnet/serial-mcp/releases/latest/download/serial-mcp-aarch64-macos -o serial-mcp
+sudo install -m 755 serial-mcp /usr/local/bin/
+```
+
+**Windows (x86_64):**
+
+Download [`serial-mcp-x86_64-windows.exe`](https://github.com/qarnet/serial-mcp/releases/latest/download/serial-mcp-x86_64-windows.exe) and place it on your `PATH`.
 
 ## Wire Up Your Agent
 
