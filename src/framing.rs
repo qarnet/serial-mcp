@@ -511,6 +511,13 @@ fn slip_decode(
                             *escaped = false;
                         }
                         _ => {
+                            // Malformed escape: clear in-progress frame,
+                            // reset escaped flag, discard remaining buffer,
+                            // and resync on next END.
+                            buf.clear();
+                            *escaped = false;
+                            *state = SlipState::BeforeFirstEnd;
+                            buf_outer.clear();
                             return Err(FrameDecodeError::SlipInvalidEscape(b));
                         }
                     }
@@ -1657,6 +1664,30 @@ mod tests {
             Ok(_) => panic!("expected decode error"),
             Err(FrameDecodeError::SlipInvalidEscape(b)) => assert_eq!(b, 0x41),
         }
+    }
+
+    #[test]
+    fn rx_slip_resyncs_after_malformed_escape() {
+        let mut dec = FrameDecoder::new(&slip_rx_config()).unwrap();
+        // Malformed escape.
+        let result = dec.push(b"\xC0\xDB\x41\xC0");
+        assert!(result.is_err());
+        // After resync, decoder is in BeforeFirstEnd. Push a valid frame.
+        let frames = dec.push(b"\xC0ok\xC0").unwrap();
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].data, b"ok");
+    }
+
+    #[test]
+    fn rx_slip_resync_clears_stale_in_progress_buf() {
+        let mut dec = FrameDecoder::new(&slip_rx_config()).unwrap();
+        // Partial frame "hello", then malformed escape.
+        let result = dec.push(b"\xC0hello\xDB\x41");
+        assert!(result.is_err());
+        // After resync, "hello" must be cleared. Push a new frame.
+        let frames = dec.push(b"\xC0world\xC0").unwrap();
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].data, b"world");
     }
 
     #[test]
