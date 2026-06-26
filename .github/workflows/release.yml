@@ -52,13 +52,20 @@ jobs:
           echo "value=$VER" >> "$GITHUB_OUTPUT"
           echo "tag=v$VER" >> "$GITHUB_OUTPUT"
 
-      - name: Check if tag exists on origin
+      - name: Check for a published release
         id: tag
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          if git ls-remote --tags origin "refs/tags/${{ steps.version.outputs.tag }}" | grep -q .; then
-            echo "exists=true" >> "$GITHUB_OUTPUT"
+          # Only a *published* (non-draft) release counts as "already released".
+          # A leftover draft from a failed run must be retryable, not skipped —
+          # with immutable releases, assets are attached to the draft and only
+          # sealed when it is published, so an unpublished tag/draft is unfinished.
+          if [ "$(gh release view "${{ steps.version.outputs.tag }}" \
+                    --json isDraft -q .isDraft 2>/dev/null)" = "false" ]; then
+            echo "published=true" >> "$GITHUB_OUTPUT"
           else
-            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "published=false" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Decide mode
@@ -66,24 +73,35 @@ jobs:
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             echo "mode=dry-run" >> "$GITHUB_OUTPUT"
-          elif [ "${{ steps.tag.outputs.exists }}" = "true" ]; then
+          elif [ "${{ steps.tag.outputs.published }}" = "true" ]; then
             echo "mode=skip" >> "$GITHUB_OUTPUT"
           else
             echo "mode=release" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Create tag and release shell
+      - name: Create tag and draft release
         if: steps.mode.outputs.mode == 'release'
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+          SHA: ${{ steps.meta.outputs.sha }}
         run: |
           git config user.name github-actions
           git config user.email github-actions@github.com
-          git tag "${{ steps.version.outputs.tag }}" "${{ steps.meta.outputs.sha }}"
-          git push origin "${{ steps.version.outputs.tag }}"
-          gh release create "${{ steps.version.outputs.tag }}" \
-            --title "${{ steps.version.outputs.tag }}" \
-            --generate-notes
+          # Idempotent: a re-run after a partial failure reuses the existing tag.
+          if ! git ls-remote --tags origin "refs/tags/$TAG" | grep -q .; then
+            git tag "$TAG" "$SHA"
+            git push origin "$TAG"
+          fi
+          # Create the release as a DRAFT. Immutable releases seal a release the
+          # moment it is published, so assets must be attached while it is still a
+          # draft; the publish-release job flips it to published once builds pass.
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" \
+              --draft \
+              --title "$TAG" \
+              --generate-notes
+          fi
 
   build:
     name: Build ${{ matrix.target }}
@@ -192,6 +210,23 @@ jobs:
           gh release upload "${{ needs.prepare.outputs.tag }}" \
             "serial-mcp-${{ matrix.artifact_name_suffix }}${EXT}" \
             --clobber
+
+  publish-release:
+    name: Publish GitHub release
+    needs: [prepare, build]
+    if: needs.prepare.outputs.mode == 'release'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Mark draft as published
+        # Flipping the draft to published is what seals the release under
+        # immutable releases — by now every platform's binary is attached.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh release edit "${{ needs.prepare.outputs.tag }}" \
+            --draft=false \
+            --latest
 
   publish-crate:
     name: Publish to crates.io
