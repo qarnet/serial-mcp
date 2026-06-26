@@ -141,6 +141,7 @@ async fn open_pty(
         .to_string()
 }
 
+#[cfg(unix)]
 async fn open_with(
     client: &rmcp::service::RunningService<
         rmcp::service::RoleClient,
@@ -212,6 +213,7 @@ async fn write_raw(
     assert_ne!(result.is_error, Some(true), "write failed: {result:?}");
 }
 
+#[cfg(unix)]
 async fn write_preset(
     client: &rmcp::service::RunningService<
         rmcp::service::RoleClient,
@@ -3175,6 +3177,7 @@ async fn native_subscribe_line_framing_with_at_parser_emits_parsed_frames() {
 
 // ── Remaining framing e2e coverage ──────────────────────────────────────────
 
+#[cfg(unix)]
 fn extract_trace_bytes(data: &str) -> Vec<u8> {
     let mut bytes = Vec::new();
     for cap in data.lines() {
