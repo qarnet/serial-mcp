@@ -2886,3 +2886,289 @@ async fn native_explicit_rx_framing_beats_connection_default() {
 // The save_profile wiring (port_ops.rs) copies the four defaults from the
 // connection; the struct-level snapshot is exercised by the
 // ProfileDefaults roundtrip test in src/profiles.rs tests.
+
+// ── Framing-mode e2e coverage tests ──────────────────────────────────────────
+
+/// Prove SLIP RX decode over the real software-serial path.
+#[tokio::test]
+#[ignore = "requires native_sim firmware binary"]
+#[cfg(unix)]
+async fn native_read_slip_decodes_frame() {
+    let fw = NativeSimFirmware::spawn().await.expect("spawn zephyr.exe");
+    let pty_path = fw.pty_path().to_string();
+
+    let server = TestServer::start().await;
+    let (client, _rx) = connect_client(&server).await.unwrap();
+    let id = open_pty(&client, &pty_path).await;
+    sync_boot(&client, &id).await;
+    flush_both(&client, &id).await;
+
+    let read_handle = {
+        let peer = client.peer().clone();
+        let id2 = id.clone();
+        tokio::spawn(async move {
+            peer.call_tool(tool_request(
+                "read",
+                json!({
+                    "connection_id": id2,
+                    "timeout_ms": 3000,
+                    "max_buffered_bytes": 512,
+                    "encoding": "hex",
+                    "rx_framing": { "type": "slip" }
+                }),
+            ))
+            .await
+        })
+    };
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    // Firmware emits raw bytes: END + "pong" + END
+    write_cmd(&client, &id, "sendraw hex C0706F6E67C0").await;
+
+    let result = read_handle.await.unwrap().expect("read task");
+    assert_ne!(result.is_error, Some(true), "{result:?}");
+    let s = result.structured_content.expect("structured");
+    let frames = s["frames"].as_array().expect("frames array");
+    assert!(!frames.is_empty(), "expected at least one frame");
+    assert_eq!(frames[0]["data"], json!("70 6f 6e 67"));
+    assert_eq!(frames[0]["frame_type"], json!("slip"));
+
+    close_connection(&client, &id).await;
+    client.cancel().await.ok();
+    drop(fw);
+}
+
+/// Prove SLIP malformed escape surfaces as is_error on read path.
+#[tokio::test]
+#[ignore = "requires native_sim firmware binary"]
+#[cfg(unix)]
+async fn native_read_slip_malformed_escape_surfaces_framing_error() {
+    let fw = NativeSimFirmware::spawn().await.expect("spawn zephyr.exe");
+    let pty_path = fw.pty_path().to_string();
+
+    let server = TestServer::start().await;
+    let (client, _rx) = connect_client(&server).await.unwrap();
+    let id = open_pty(&client, &pty_path).await;
+    sync_boot(&client, &id).await;
+    flush_both(&client, &id).await;
+
+    let read_handle = {
+        let peer = client.peer().clone();
+        let id2 = id.clone();
+        tokio::spawn(async move {
+            peer.call_tool(tool_request(
+                "read",
+                json!({
+                    "connection_id": id2,
+                    "timeout_ms": 3000,
+                    "max_buffered_bytes": 512,
+                    "encoding": "utf8",
+                    "rx_framing": { "type": "slip" }
+                }),
+            ))
+            .await
+        })
+    };
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    // Firmware emits: END, ESC, invalid byte 0x41, END
+    write_cmd(&client, &id, "sendraw hex C0DB41C0").await;
+
+    let result = read_handle.await.unwrap().expect("read task");
+    assert_eq!(result.is_error, Some(true), "must surface as tool error");
+    // rmcp surfaces is_error messages in content[0].text.
+    let text: &str = result
+        .content
+        .first()
+        .and_then(|c| c.as_text())
+        .map(|rtc| rtc.text.as_str())
+        .unwrap_or("");
+    assert!(
+        text.contains("SLIP framing error"),
+        "error should mention SLIP: {text}"
+    );
+    assert!(text.contains("0x41"), "error should name byte: {text}");
+
+    close_connection(&client, &id).await;
+    client.cancel().await.ok();
+    drop(fw);
+}
+
+/// Prove delimiter RX framing over the real serial path.
+#[tokio::test]
+#[ignore = "requires native_sim firmware binary"]
+#[cfg(unix)]
+async fn native_read_delimiter_framing_decodes() {
+    let fw = NativeSimFirmware::spawn().await.expect("spawn zephyr.exe");
+    let pty_path = fw.pty_path().to_string();
+
+    let server = TestServer::start().await;
+    let (client, _rx) = connect_client(&server).await.unwrap();
+    let id = open_pty(&client, &pty_path).await;
+    sync_boot(&client, &id).await;
+    flush_both(&client, &id).await;
+
+    let read_handle = {
+        let peer = client.peer().clone();
+        let id2 = id.clone();
+        tokio::spawn(async move {
+            peer.call_tool(tool_request(
+                "read",
+                json!({
+                    "connection_id": id2,
+                    "timeout_ms": 3000,
+                    "max_buffered_bytes": 512,
+                    "encoding": "hex",
+                    "rx_framing": {
+                        "type": "delimiter",
+                        "delimiter": "|",
+                        "delimiter_encoding": "utf8"
+                    }
+                }),
+            ))
+            .await
+        })
+    };
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    // Firmware emits raw bytes: |pong| (delimited by pipe chars)
+    write_cmd(&client, &id, "sendraw hex 7C706F6E677C").await;
+
+    let result = read_handle.await.unwrap().expect("read task");
+    assert_ne!(result.is_error, Some(true), "{result:?}");
+    let s = result.structured_content.expect("structured");
+    let frames = s["frames"].as_array().expect("frames array");
+    assert!(!frames.is_empty(), "expected at least one frame");
+    // First byte is "|" → empty frame[0], then "pong|" → frame[1] = "pong"
+    assert!(
+        frames.len() >= 2,
+        "expected at least 2 frames, got {}",
+        frames.len()
+    );
+    assert_eq!(frames[1]["data"], json!("70 6f 6e 67"));
+    assert_eq!(frames[1]["frame_type"], json!("delimiter"));
+
+    close_connection(&client, &id).await;
+    client.cancel().await.ok();
+    drop(fw);
+}
+
+/// Prove length-prefixed RX framing over the real serial path.
+#[tokio::test]
+#[ignore = "requires native_sim firmware binary"]
+#[cfg(unix)]
+async fn native_read_length_prefixed_framing_decodes() {
+    let fw = NativeSimFirmware::spawn().await.expect("spawn zephyr.exe");
+    let pty_path = fw.pty_path().to_string();
+
+    let server = TestServer::start().await;
+    let (client, _rx) = connect_client(&server).await.unwrap();
+    let id = open_pty(&client, &pty_path).await;
+    sync_boot(&client, &id).await;
+    flush_both(&client, &id).await;
+
+    let read_handle = {
+        let peer = client.peer().clone();
+        let id2 = id.clone();
+        tokio::spawn(async move {
+            peer.call_tool(tool_request(
+                "read",
+                json!({
+                    "connection_id": id2,
+                    "timeout_ms": 3000,
+                    "max_buffered_bytes": 512,
+                    "encoding": "utf8",
+                    "rx_framing": {
+                        "type": "length_prefixed",
+                        "prefix_size": 1,
+                        "endianness": "big"
+                    }
+                }),
+            ))
+            .await
+        })
+    };
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    // Firmware emits raw bytes: 1-byte length prefix 4, then "pong"
+    write_cmd(&client, &id, "sendraw hex 04706F6E67").await;
+
+    let result = read_handle.await.unwrap().expect("read task");
+    assert_ne!(result.is_error, Some(true), "{result:?}");
+    let s = result.structured_content.expect("structured");
+    let frames = s["frames"].as_array().expect("frames array");
+    assert!(!frames.is_empty(), "expected at least one frame");
+    assert_eq!(frames[0]["data"], json!("pong"));
+    assert_eq!(frames[0]["frame_type"], json!("length_prefixed"));
+
+    close_connection(&client, &id).await;
+    client.cancel().await.ok();
+    drop(fw);
+}
+
+/// Prove subscribe emits per-frame notifications with parsed content
+/// when rx_parser is configured.
+#[tokio::test]
+#[ignore = "requires native_sim firmware binary"]
+#[cfg(unix)]
+async fn native_subscribe_line_framing_with_at_parser_emits_parsed_frames() {
+    let fw = NativeSimFirmware::spawn().await.expect("spawn zephyr.exe");
+    let pty_path = fw.pty_path().to_string();
+
+    let server = TestServer::start().await;
+    let (client, mut rx) = connect_client(&server).await.unwrap();
+    let id = open_pty(&client, &pty_path).await;
+    sync_boot(&client, &id).await;
+    flush_both(&client, &id).await;
+
+    client
+        .peer()
+        .call_tool(tool_request(
+            "subscribe",
+            json!({
+                "connection_id": id,
+                "poll_interval_ms": 50,
+                "timeout_ms": 2000,
+                "encoding": "utf8",
+                "max_buffered_bytes": 8192,
+                "rx_framing": { "type": "line" },
+                "rx_parser": { "type": "at_command" }
+            }),
+        ))
+        .await
+        .unwrap();
+
+    write_cmd(&client, &id, "ping").await;
+
+    let mut saw_parsed = false;
+    loop {
+        let n = match next_notification(&mut rx, Duration::from_secs(3)).await {
+            Ok(n) => n,
+            Err(_) => break,
+        };
+        let obj = n.data.as_object().unwrap();
+        if let Some(reason) = obj.get("stop_reason").and_then(|v| v.as_str()) {
+            assert_eq!(reason, "timeout", "stop: {obj:?}");
+            break;
+        }
+        if obj.get("frame_index").is_some() {
+            if let Some(parsed) = obj.get("parsed") {
+                assert_eq!(parsed["parser"], json!("at_command"), "parsed: {parsed:?}");
+                assert_eq!(
+                    parsed["response_type"],
+                    json!("data"),
+                    "response_type: {parsed:?}"
+                );
+                saw_parsed = true;
+            }
+        }
+    }
+    assert!(
+        saw_parsed,
+        "should see at least one parsed frame notification"
+    );
+
+    close_connection(&client, &id).await;
+    client.cancel().await.ok();
+    drop(fw);
+}
