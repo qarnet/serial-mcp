@@ -143,12 +143,15 @@ mod tests {
     }
 
     fn line_decoder() -> FrameDecoder {
-        FrameDecoder::new(&RxFramingConfig {
-            mode: RxFramingMode::Line {
-                ending: LineEnding::Auto,
+        FrameDecoder::new(
+            &RxFramingConfig {
+                mode: RxFramingMode::Line {
+                    ending: LineEnding::Auto,
+                },
+                ..Default::default()
             },
-            ..Default::default()
-        })
+            None,
+        )
         .unwrap()
     }
 

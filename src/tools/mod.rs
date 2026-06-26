@@ -146,4 +146,34 @@ mod tests {
             "SubscribeArgs schema must NOT contain bare 'framing'"
         );
     }
+
+    /// Phase 4a: after relocating `parser` from `rx_framing` to sibling
+    /// `rx_parser`, verify `rx_parser` appears in ReadArgs and SubscribeArgs
+    /// schemas.
+    #[test]
+    fn rx_parser_present_in_schemas() {
+        let schema = schema_for!(crate::tools::types::ReadArgs);
+        let json = serde_json::to_string(&schema).unwrap();
+        assert!(
+            json.contains("\"rx_parser\""),
+            "ReadArgs must contain rx_parser"
+        );
+
+        let schema = schema_for!(crate::tools::types::SubscribeArgs);
+        let json = serde_json::to_string(&schema).unwrap();
+        assert!(
+            json.contains("\"rx_parser\""),
+            "SubscribeArgs must contain rx_parser"
+        );
+
+        // Verify rx_framing sub-schema no longer exposes a "parser" property.
+        // The `rx_framing` field value is a ref, so check the RxFramingConfig
+        // schema directly.
+        let schema = schema_for!(crate::framing::RxFramingConfig);
+        let json = serde_json::to_string(&schema).unwrap();
+        assert!(
+            !json.contains("\"parser\""),
+            "RxFramingConfig must NOT contain parser property"
+        );
+    }
 }

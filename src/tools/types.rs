@@ -93,6 +93,11 @@ pub struct ReadArgs {
     /// to the raw `data` field. Can be combined with `match`.
     #[serde(default)]
     pub rx_framing: Option<crate::framing::RxFramingConfig>,
+    /// Optional RX parser configuration. When present, each decoded frame's
+    /// content is interpreted (AT commands, JSON lines, shell prompts). Sibling
+    /// to `rx_framing`; the parser operates on frames produced by `rx_framing`.
+    #[serde(default)]
+    pub rx_parser: Option<crate::framing::ParserConfig>,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -154,6 +159,11 @@ pub struct SubscribeArgs {
     /// be combined with `match`.
     #[serde(default)]
     pub rx_framing: Option<crate::framing::RxFramingConfig>,
+    /// Optional RX parser configuration. When present, each decoded frame's
+    /// content is interpreted (AT commands, JSON lines, shell prompts). Sibling
+    /// to `rx_framing`; the parser operates on frames produced by `rx_framing`.
+    #[serde(default)]
+    pub rx_parser: Option<crate::framing::ParserConfig>,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]

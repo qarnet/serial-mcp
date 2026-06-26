@@ -1896,9 +1896,9 @@ async fn native_read_json_parser_decodes_jsonout() {
                     "max_buffered_bytes": 1024,
                     "encoding": "utf8",
                     "rx_framing": {
-                        "type": "line",
-                        "parser": { "type": "json_lines" }
-                    }
+                        "type": "line"
+                    },
+                    "rx_parser": { "type": "json_lines" }
                 }),
             ))
             .await
@@ -1969,9 +1969,9 @@ async fn native_read_at_parser_parses_pong() {
                     "max_buffered_bytes": 512,
                     "encoding": "utf8",
                     "rx_framing": {
-                        "type": "line",
-                        "parser": { "type": "at_command" }
-                    }
+                        "type": "line"
+                    },
+                    "rx_parser": { "type": "at_command" }
                 }),
             ))
             .await

@@ -159,6 +159,7 @@ pub async fn subscribe(
         reservation,
         matcher,
         args.rx_framing,
+        args.rx_parser,
     ));
 
     let mut streams = streams.lock().await;
@@ -358,6 +359,7 @@ async fn stream_rx_via_session(
     _reservation: Box<dyn crate::buffer_budget::BufferReservation>,
     mut matcher: Option<Matcher>,
     framing: Option<crate::framing::RxFramingConfig>,
+    parser: Option<crate::framing::ParserConfig>,
 ) {
     let conn_id = session.connection_id().to_string();
     let logger = format!("serial:{conn_id}");
@@ -391,7 +393,7 @@ async fn stream_rx_via_session(
         // it cannot surface a sync error, so a bad framing config degrades to raw
         // chunk mode rather than failing. (read propagates the error instead — see
         // helpers.rs.)
-        Some(cfg) => match crate::framing::FrameDecoder::new(cfg) {
+        Some(cfg) => match crate::framing::FrameDecoder::new(cfg, parser.as_ref()) {
             Ok(d) => Some(d),
             Err(e) => {
                 warn!("RX subscribe framing init error on {conn_id}: {e}");

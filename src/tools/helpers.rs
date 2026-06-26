@@ -302,6 +302,7 @@ pub async fn read_bytes_via_session(
     no_new_rx_timeout_ms: Option<u64>,
     conn: Option<Arc<crate::serial::SerialConnection>>,
     framing: Option<crate::framing::RxFramingConfig>,
+    parser: Option<crate::framing::ParserConfig>,
 ) -> Result<ReadOutcome, String> {
     const SETTLE_MS: u64 = 50;
 
@@ -323,7 +324,7 @@ pub async fn read_bytes_via_session(
     let mut decoder: Option<crate::framing::FrameDecoder> = match framing.as_ref() {
         // read is a synchronous request/response: propagate decoder-init errors
         // to the caller. (subscribe degrades to raw mode instead — see stream_ops.rs.)
-        Some(cfg) => Some(crate::framing::FrameDecoder::new(cfg)?),
+        Some(cfg) => Some(crate::framing::FrameDecoder::new(cfg, parser.as_ref())?),
         None => None,
     };
     let mut collected_frames: Vec<crate::framing::Frame> = Vec::new();
@@ -1051,8 +1052,10 @@ mod tests {
             },
             ..Default::default()
         });
-        let result =
-            read_bytes_via_session(rx, 128, None, &ct, None, None, None, None, None, framing).await;
+        let result = read_bytes_via_session(
+            rx, 128, None, &ct, None, None, None, None, None, framing, None,
+        )
+        .await;
         match result {
             Ok(_) => panic!("empty delimiter should be rejected"),
             Err(err) => assert!(err.contains("Delimiter must not be empty"), "got: {err}"),
@@ -1071,8 +1074,10 @@ mod tests {
             },
             ..Default::default()
         });
-        let result =
-            read_bytes_via_session(rx, 128, None, &ct, None, None, None, None, None, framing).await;
+        let result = read_bytes_via_session(
+            rx, 128, None, &ct, None, None, None, None, None, framing, None,
+        )
+        .await;
         match result {
             Ok(_) => panic!("prefix_size=3 should be rejected"),
             Err(err) => assert!(err.contains("prefix_size must be 1, 2, or 4"), "got: {err}"),
@@ -1092,8 +1097,10 @@ mod tests {
             },
             ..Default::default()
         });
-        let result =
-            read_bytes_via_session(rx, 128, None, &ct, None, None, None, None, None, framing).await;
+        let result = read_bytes_via_session(
+            rx, 128, None, &ct, None, None, None, None, None, framing, None,
+        )
+        .await;
         match result {
             Ok(_) => panic!("empty markers should be rejected"),
             Err(err) => assert!(
@@ -1111,14 +1118,16 @@ mod tests {
             mode: crate::framing::RxFramingMode::Line {
                 ending: crate::framing::LineEnding::Auto,
             },
-            parser: Some(crate::framing::ParserConfig {
-                parser_type: crate::framing::ParserType::ShellPrompt,
-                custom_prompt: Some("[invalid".to_string()),
-            }),
             ..Default::default()
         });
-        let result =
-            read_bytes_via_session(rx, 128, None, &ct, None, None, None, None, None, framing).await;
+        let parser = Some(crate::framing::ParserConfig {
+            parser_type: crate::framing::ParserType::ShellPrompt,
+            custom_prompt: Some("[invalid".to_string()),
+        });
+        let result = read_bytes_via_session(
+            rx, 128, None, &ct, None, None, None, None, None, framing, parser,
+        )
+        .await;
         match result {
             Ok(_) => panic!("invalid regex should be rejected"),
             Err(err) => assert!(err.contains("Invalid prompt regex"), "got: {err}"),
@@ -1141,6 +1150,7 @@ mod tests {
             256,
             Some(1000),
             &fresh_ct(),
+            None,
             None,
             None,
             None,
@@ -1170,6 +1180,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -1188,6 +1199,7 @@ mod tests {
             4,
             Some(1000),
             &fresh_ct(),
+            None,
             None,
             None,
             None,
@@ -1221,6 +1233,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -1242,6 +1255,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -1253,10 +1267,21 @@ mod tests {
         let ct = fresh_ct();
         ct.cancel();
         let (_tx, rx) = mpsc::channel(8);
-        let out =
-            read_bytes_via_session(rx, 256, Some(1000), &ct, None, None, None, None, None, None)
-                .await
-                .unwrap();
+        let out = read_bytes_via_session(
+            rx,
+            256,
+            Some(1000),
+            &ct,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(out.meta.stop_reason, RxStopReason::Cancelled);
     }
 
@@ -1275,6 +1300,7 @@ mod tests {
             None,
             None,
             matcher,
+            None,
             None,
             None,
             None,
@@ -1305,6 +1331,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -1331,6 +1358,7 @@ mod tests {
             None,
             matcher,
             Some(60),
+            None,
             None,
             None,
         )
@@ -1368,6 +1396,7 @@ mod tests {
             None,
             None,
             Some(line_framing(Some(2))),
+            None,
         )
         .await
         .unwrap();
@@ -1392,6 +1421,7 @@ mod tests {
             None,
             None,
             Some(line_framing(None)),
+            None,
         )
         .await
         .unwrap();
@@ -1421,6 +1451,7 @@ mod tests {
             None,
             None,
             Some(line_framing(None)),
+            None,
         )
         .await
         .unwrap();
@@ -1448,6 +1479,7 @@ mod tests {
             None,
             None,
             Some(line_framing(None)),
+            None,
         )
         .await
         .unwrap();
@@ -1618,6 +1650,7 @@ mod tests {
             None,
             None,
             Some(line_framing(None)),
+            None,
         )
         .await
         .unwrap();
@@ -1647,6 +1680,7 @@ mod tests {
             None,
             None,
             Some(line_framing(None)),
+            None,
         )
         .await
         .unwrap();
@@ -1683,6 +1717,7 @@ mod tests {
             None,
             None,
             Some(slip_framing()),
+            None,
         )
         .await
         .unwrap();
@@ -1712,6 +1747,7 @@ mod tests {
             None,
             None,
             Some(slip_framing()),
+            None,
         )
         .await;
 
