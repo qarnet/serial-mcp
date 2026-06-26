@@ -653,3 +653,46 @@ async fn pty_subscribe_line_auto_promotes_on_bare_cr_and_flushes_pending() {
     assert_eq!(line2.0, 1, "line2 is frame 1");
     client.cancel().await.ok();
 }
+
+#[tokio::test]
+async fn pty_subscribe_slip_malformed_escape_emits_framing_error() {
+    let (_server, client, mut rx, mut pty, connection_id) = setup().await;
+
+    client
+        .peer()
+        .call_tool(tool_request(
+            "subscribe",
+            json!({
+                "connection_id": connection_id,
+                "poll_interval_ms": 50,
+                "rx_framing": { "type": "slip" },
+            }),
+        ))
+        .await
+        .unwrap();
+
+    // END, ESC, invalid byte 0x41, END → malformed escape.
+    pty.write_device(b"\xC0\xDB\x41\xC0").await.unwrap();
+
+    // Collect notifications until the stop notification appears.
+    let mut stop: Option<serde_json::Value> = None;
+    for _ in 0..16 {
+        let n = next_notification(&mut rx, Duration::from_secs(2))
+            .await
+            .unwrap();
+        let obj = n.data.as_object().unwrap();
+        if obj.get("stop_reason").is_some() {
+            stop = Some(n.data.clone());
+            break;
+        }
+    }
+    let stop = stop.expect("received framing_error stop notification");
+    assert_eq!(stop["stop_reason"], json!("framing_error"));
+    let err = stop["error"].as_str().expect("error field present");
+    assert!(err.contains("SLIP framing error"), "error msg: {err}");
+    assert!(
+        err.contains("0x41"),
+        "error msg names violating byte: {err}"
+    );
+    client.cancel().await.ok();
+}
