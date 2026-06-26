@@ -673,14 +673,9 @@ pub async fn read_bytes_via_session(
     );
 }
 
-pub(crate) fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    if needle.is_empty() || haystack.len() < needle.len() {
-        return None;
-    }
-    haystack
-        .windows(needle.len())
-        .position(|window| window == needle)
-}
+/// Re-export of the shared [`crate::util::find_subsequence`] under the
+/// legacy `find_subslice` name to keep existing import paths stable.
+pub(crate) use crate::util::find_subsequence as find_subslice;
 
 // ------------------------------------------------------------------
 // Result builders
@@ -964,29 +959,6 @@ mod tests {
         assert!(result.matched);
         assert_eq!(result.match_index, Some(6));
         assert_eq!(result.stop_reason, "match_found");
-    }
-
-    #[test]
-    fn find_subslice_locates_pattern() {
-        assert_eq!(find_subslice(b"hello OK> world", b"OK>"), Some(6));
-        assert_eq!(find_subslice(b"OK>at-start", b"OK>"), Some(0));
-        assert_eq!(find_subslice(b"trailing OK>", b"OK>"), Some(9));
-    }
-
-    #[test]
-    fn find_subslice_missing_returns_none() {
-        assert_eq!(find_subslice(b"hello world", b"OK>"), None);
-        assert_eq!(find_subslice(b"", b"x"), None);
-    }
-
-    #[test]
-    fn find_subslice_empty_needle_returns_none() {
-        assert_eq!(find_subslice(b"hello", b""), None);
-    }
-
-    #[test]
-    fn find_subslice_needle_longer_than_haystack() {
-        assert_eq!(find_subslice(b"hi", b"hello"), None);
     }
 
     #[test]

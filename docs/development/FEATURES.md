@@ -10,35 +10,6 @@
 
 ## Near-term
 
-### SLIP decoder performance — drop O(n²) byte draining
-- **Problem.** `slip_decode` (`src/framing.rs`) consumes its input with
-  `buf_outer.remove(0)` one byte at a time. `Vec::remove(0)` shifts every
-  remaining element, so decoding an `n`-byte buffer is `O(n²)`. The RX pump
-  delivers chunks up to `PUMP_READ_SIZE` (4096 bytes, `src/rx_session.rs`), so
-  a single large SLIP frame already pays ~8M element-moves worst case, and a
-  cross-chunk frame re-pays it on every push. Every other decoder mode
-  (line/delimiter/length_prefixed/start_end) is already linear because it uses
-  range `drain`/`position` instead of per-byte removal.
-- **Goal.** Make SLIP decode `O(n)` in the number of bytes processed, matching
-  the other modes.
-- **Solution options (ranked):**
-  1. **Cursor + single drain (smallest change).** Iterate `buf_outer` by index
-     with a local `read_pos` cursor, pushing decoded bytes into the frame
-     buffer, and `drain(..read_pos)` exactly once before returning. No
-     `remove(0)`. Keeps the existing `SlipState` resync logic intact. `O(n)`
-     time, `O(1)` extra moves.
-  2. **`VecDeque<u8>` for `buf_outer`.** `pop_front` is amortized `O(1)`, so the
-     existing per-byte loop becomes `O(n)` with minimal structural change. Costs
-     a type change on the decoder's buffer and loses cheap slice access that the
-     other modes rely on — only attractive if SLIP keeps a separate buffer.
-  3. **Slice-scan like the other modes.** Find the next `END` with
-     `position`, decode the span between markers in one pass (un-stuffing into
-     the frame buffer), then `drain` through the marker. Most consistent with
-     the rest of the file; slightly more code to handle the cross-chunk escape
-     carry (`escaped` at a chunk boundary).
-- **Recommendation:** option 1 — it is the least invasive, preserves the
-  state-machine and its tests verbatim, and gets the full `O(n)` win.
-
 ### Version command / flag
 - restore a dedicated `--version` flag (and/or a `version` subcommand) so the
   binary reports its own version directly

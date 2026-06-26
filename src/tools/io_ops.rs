@@ -30,18 +30,14 @@ pub async fn write(
     let decoded_len = decoded_bytes_ref.len();
     clamp_or_err("write.data.len()", decoded_len, MAX_WRITE_BYTES)?;
 
-    // Resolve tx_framing: explicit > call protocol > connection default > connection protocol.
-    let tx_framing = if let Some(explicit) = args.tx_framing {
-        Some(explicit)
-    } else if let Some(p) = args.protocol {
-        Some(crate::framing::preset_tx_framing(p))
-    } else if let Some(def) = connection.tx_framing_default() {
-        Some(def.clone())
-    } else {
-        connection
-            .protocol_default()
-            .map(crate::framing::preset_tx_framing)
-    };
+    // Resolve tx_framing via the shared 4-layer precedence helper.
+    let tx_framing = crate::precedence::resolve_field(
+        args.tx_framing,
+        args.protocol,
+        crate::framing::preset_tx_framing,
+        connection.tx_framing_default(),
+        connection.protocol_default(),
+    );
 
     // Apply TX framing if configured.
     let bytes_to_send: Vec<u8> = if let Some(ref tx_cfg) = tx_framing {
@@ -119,29 +115,21 @@ pub async fn read(
     let session = rx_sessions.get_or_create(Arc::clone(&connection)).await;
     let event_rx = session.register_blocking();
 
-    // Resolve rx_framing + rx_parser: 4-layer precedence.
-    let rx_framing = if let Some(explicit) = args.rx_framing {
-        Some(explicit)
-    } else if let Some(p) = args.protocol {
-        Some(crate::framing::preset_rx_framing(p))
-    } else if let Some(def) = connection.rx_framing_default() {
-        Some(def.clone())
-    } else {
-        connection
-            .protocol_default()
-            .map(crate::framing::preset_rx_framing)
-    };
-    let rx_parser = if let Some(explicit) = args.rx_parser {
-        Some(explicit)
-    } else if let Some(p) = args.protocol {
-        Some(crate::framing::preset_rx_parser(p))
-    } else if let Some(def) = connection.rx_parser_default() {
-        Some(def.clone())
-    } else {
-        connection
-            .protocol_default()
-            .map(crate::framing::preset_rx_parser)
-    };
+    // Resolve rx_framing + rx_parser via the shared 4-layer precedence helper.
+    let rx_framing = crate::precedence::resolve_field(
+        args.rx_framing,
+        args.protocol,
+        crate::framing::preset_rx_framing,
+        connection.rx_framing_default(),
+        connection.protocol_default(),
+    );
+    let rx_parser = crate::precedence::resolve_field(
+        args.rx_parser,
+        args.protocol,
+        crate::framing::preset_rx_parser,
+        connection.rx_parser_default(),
+        connection.protocol_default(),
+    );
 
     let outcome = read_bytes_via_session(
         event_rx,

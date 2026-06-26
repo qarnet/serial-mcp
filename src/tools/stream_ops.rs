@@ -133,29 +133,21 @@ pub async fn subscribe(
     let timeout_ms = args.timeout_ms;
     let no_new_rx_timeout_ms = args.no_new_rx_timeout_ms;
 
-    // Resolve rx_framing + rx_parser: 4-layer precedence.
-    let rx_framing = if let Some(explicit) = args.rx_framing {
-        Some(explicit)
-    } else if let Some(p) = args.protocol {
-        Some(crate::framing::preset_rx_framing(p))
-    } else if let Some(def) = connection.rx_framing_default() {
-        Some(def.clone())
-    } else {
-        connection
-            .protocol_default()
-            .map(crate::framing::preset_rx_framing)
-    };
-    let rx_parser = if let Some(explicit) = args.rx_parser {
-        Some(explicit)
-    } else if let Some(p) = args.protocol {
-        Some(crate::framing::preset_rx_parser(p))
-    } else if let Some(def) = connection.rx_parser_default() {
-        Some(def.clone())
-    } else {
-        connection
-            .protocol_default()
-            .map(crate::framing::preset_rx_parser)
-    };
+    // Resolve rx_framing + rx_parser via the shared 4-layer precedence helper.
+    let rx_framing = crate::precedence::resolve_field(
+        args.rx_framing,
+        args.protocol,
+        crate::framing::preset_rx_framing,
+        connection.rx_framing_default(),
+        connection.protocol_default(),
+    );
+    let rx_parser = crate::precedence::resolve_field(
+        args.rx_parser,
+        args.protocol,
+        crate::framing::preset_rx_parser,
+        connection.rx_parser_default(),
+        connection.protocol_default(),
+    );
 
     // Get or create the RX session for this connection, then register a
     // streaming consumer. The pump in the session is the *only* code that

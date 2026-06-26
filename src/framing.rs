@@ -10,6 +10,7 @@
 
 use crate::codec;
 use crate::match_config::PatternEncoding;
+use crate::util::find_subsequence;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -22,7 +23,7 @@ use serde::{Deserialize, Serialize};
 /// The mode fields are flattened into the config struct so the JSON shape is:
 /// `{"type": "line", "ending": "auto"}` rather than
 /// `{"mode": {"type": "line"}}`.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct RxFramingConfig {
     /// Frame boundary detection mode. Flattened: its `type` discriminator and
     /// variant fields appear at the top level of the `rx_framing` object.
@@ -54,7 +55,7 @@ impl Default for RxFramingConfig {
 
 /// How frame boundaries are detected in the byte stream.
 /// Flattened into [`RxFramingConfig`] via `#[serde(flatten)]`.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case", tag = "type")]
 pub enum RxFramingMode {
     /// Split on line endings. Supports `auto` (LF or CRLF), `lf`, `cr`, `crlf`.
@@ -186,7 +187,7 @@ pub fn preset_rx_parser(p: ProtocolPreset) -> ParserConfig {
 
 /// TX framing configuration for `write`.
 /// Mirrors the RX modes but directionally appropriate.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct TxFramingConfig {
     /// TX frame boundary mode. Flattened: its `type` discriminator and
     /// variant fields appear at the top level of the `tx_framing` object.
@@ -196,7 +197,7 @@ pub struct TxFramingConfig {
 
 /// How TX frames are constructed around a payload.
 /// Flattened into [`TxFramingConfig`] via `#[serde(flatten)]`.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case", tag = "type")]
 pub enum TxFramingMode {
     /// Append a line terminator. No `auto` — agents must be explicit.
@@ -365,7 +366,7 @@ pub enum Endianness {
 }
 
 /// Parser configuration — what to do with each frame's content.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct ParserConfig {
     /// Which parser to use.
     #[serde(rename = "type")]
@@ -538,53 +539,63 @@ fn slip_decode(
                 ref mut buf,
                 ref mut escaped,
             } => {
-                if buf_outer.is_empty() {
-                    return Ok(frames);
-                }
-                let b = buf_outer.remove(0);
+                let mut read_pos: usize = 0;
+                while read_pos < buf_outer.len() {
+                    let b = buf_outer[read_pos];
+                    read_pos += 1;
 
-                if *escaped {
-                    match b {
-                        SLIP_ESC_END => {
-                            buf.push(SLIP_END);
-                            *escaped = false;
+                    if *escaped {
+                        match b {
+                            SLIP_ESC_END => {
+                                buf.push(SLIP_END);
+                                *escaped = false;
+                            }
+                            SLIP_ESC_ESC => {
+                                buf.push(SLIP_ESC);
+                                *escaped = false;
+                            }
+                            _ => {
+                                // Malformed escape: clear in-progress frame,
+                                // reset escaped flag, and resync on next END.
+                                // Drain only the consumed bytes (up to and
+                                // including the malformed byte via read_pos);
+                                // leave the remainder of buf_outer intact so
+                                // BeforeFirstEnd can scan/discard it on the
+                                // next push.
+                                buf_outer.drain(..read_pos);
+                                buf.clear();
+                                *escaped = false;
+                                *state = SlipState::BeforeFirstEnd;
+                                return Err(FrameDecodeError::SlipInvalidEscape(b));
+                            }
                         }
-                        SLIP_ESC_ESC => {
-                            buf.push(SLIP_ESC);
-                            *escaped = false;
-                        }
-                        _ => {
-                            // Malformed escape: clear in-progress frame,
-                            // reset escaped flag, and resync on next END.
-                            // Remaining bytes in buf_outer stay for
-                            // BeforeFirstEnd to discard/scan on the next push.
-                            buf.clear();
-                            *escaped = false;
-                            *state = SlipState::BeforeFirstEnd;
-                            return Err(FrameDecodeError::SlipInvalidEscape(b));
-                        }
-                    }
-                } else {
-                    match b {
-                        SLIP_END => {
-                            let data = std::mem::take(buf);
-                            *frame_count += 1;
-                            let parsed = parser.as_ref().map(|p| p.parse(&data));
-                            frames.push(Frame {
-                                data,
-                                index: *frame_count - 1,
-                                frame_type: "slip".into(),
-                                parsed,
-                            });
-                        }
-                        SLIP_ESC => {
-                            *escaped = true;
-                        }
-                        _ => {
-                            buf.push(b);
+                    } else {
+                        match b {
+                            SLIP_END => {
+                                let data = std::mem::take(buf);
+                                *frame_count += 1;
+                                let parsed = parser.as_ref().map(|p| p.parse(&data));
+                                frames.push(Frame {
+                                    data,
+                                    index: *frame_count - 1,
+                                    frame_type: "slip".into(),
+                                    parsed,
+                                });
+                            }
+                            SLIP_ESC => {
+                                *escaped = true;
+                            }
+                            _ => {
+                                buf.push(b);
+                            }
                         }
                     }
                 }
+                // Consumed the whole buffer without hitting a terminal
+                // return: drain everything read and fall through to the
+                // outer loop.
+                buf_outer.drain(..read_pos);
+                return Ok(frames);
             }
         }
     }
@@ -599,7 +610,7 @@ impl FrameDecoder {
         config: &RxFramingConfig,
         parser_config: Option<&ParserConfig>,
     ) -> Result<Self, String> {
-        let (mode, offset) = match &config.mode {
+        let mode = match &config.mode {
             RxFramingMode::Line { ending } => {
                 let state = match ending {
                     LineEnding::Auto => LineState::AutoLf,
@@ -607,7 +618,7 @@ impl FrameDecoder {
                     LineEnding::Cr => LineState::Cr,
                     LineEnding::Crlf => LineState::Crlf,
                 };
-                (DecoderMode::Line(state), None)
+                DecoderMode::Line(state)
             }
             RxFramingMode::Delimiter {
                 delimiter,
@@ -618,7 +629,7 @@ impl FrameDecoder {
                 if bytes.is_empty() {
                     return Err("Delimiter must not be empty".into());
                 }
-                (DecoderMode::Delimiter(bytes), None)
+                DecoderMode::Delimiter(bytes)
             }
             RxFramingMode::LengthPrefixed {
                 prefix_size,
@@ -628,15 +639,12 @@ impl FrameDecoder {
                 if !matches!(prefix_size, 1 | 2 | 4) {
                     return Err("prefix_size must be 1, 2, or 4".into());
                 }
-                (
-                    DecoderMode::LengthPrefixed {
-                        prefix_size: *prefix_size,
-                        endianness: *endianness,
-                        remaining_offset: initial_offset.unwrap_or(0),
-                        next_payload_len: None,
-                    },
-                    *initial_offset,
-                )
+                DecoderMode::LengthPrefixed {
+                    prefix_size: *prefix_size,
+                    endianness: *endianness,
+                    remaining_offset: initial_offset.unwrap_or(0),
+                    next_payload_len: None,
+                }
             }
             RxFramingMode::StartEnd {
                 start,
@@ -651,22 +659,16 @@ impl FrameDecoder {
                 if start_bytes.is_empty() || end_bytes.is_empty() {
                     return Err("Start and end markers must not be empty".into());
                 }
-                (
-                    DecoderMode::StartEnd {
-                        start: start_bytes,
-                        end: end_bytes,
-                        include_markers: *include_markers,
-                        in_frame: false,
-                    },
-                    None,
-                )
+                DecoderMode::StartEnd {
+                    start: start_bytes,
+                    end: end_bytes,
+                    include_markers: *include_markers,
+                    in_frame: false,
+                }
             }
-            RxFramingMode::Slip => (
-                DecoderMode::Slip {
-                    state: SlipState::BeforeFirstEnd,
-                },
-                None,
-            ),
+            RxFramingMode::Slip => DecoderMode::Slip {
+                state: SlipState::BeforeFirstEnd,
+            },
         };
 
         let parser: Option<Box<dyn FrameParser>> = match parser_config {
@@ -674,12 +676,7 @@ impl FrameDecoder {
             None => None,
         };
 
-        let mut buf = Vec::new();
-        if let Some(skip) = offset {
-            if skip > 0 {
-                buf.reserve(skip);
-            }
-        }
+        let buf = Vec::new();
 
         Ok(Self {
             buf,
@@ -1003,12 +1000,6 @@ impl FrameDecoder {
         }
     }
 
-    /// Drain consumed bytes from the internal buffer.
-    pub fn drain_consumed(&mut self, _consumed: usize) {
-        // Buffer is drained in push() as frames are extracted.
-        // This method is a no-op for API compatibility.
-    }
-
     /// Bytes pending in the incomplete frame buffer.
     pub fn pending_len(&self) -> usize {
         self.buf.len()
@@ -1263,16 +1254,6 @@ fn slip_stuff(payload: &[u8]) -> Vec<u8> {
     out
 }
 
-/// Find a subsequence in a slice. Returns the index of the first match.
-fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    if needle.is_empty() || haystack.len() < needle.len() {
-        return None;
-    }
-    haystack
-        .windows(needle.len())
-        .position(|window| window == needle)
-}
-
 /// Read a length prefix from the given bytes.
 /// `prefix_size` must be 1, 2, or 4 (validated at construction).
 /// Returns 0 for invalid sizes as a safe fallback.
@@ -1280,18 +1261,14 @@ fn read_length_prefix(bytes: &[u8], prefix_size: u8, endianness: Endianness) -> 
     match prefix_size {
         1 => bytes[0] as usize,
         2 => {
-            let arr: [u8; 2] = bytes[..2]
-                .try_into()
-                .expect("prefix_size=2 but buffer too short");
+            let arr: [u8; 2] = bytes[..2].try_into().unwrap_or([0; 2]);
             match endianness {
                 Endianness::Big => u16::from_be_bytes(arr) as usize,
                 Endianness::Little => u16::from_le_bytes(arr) as usize,
             }
         }
         4 => {
-            let arr: [u8; 4] = bytes[..4]
-                .try_into()
-                .expect("prefix_size=4 but buffer too short");
+            let arr: [u8; 4] = bytes[..4].try_into().unwrap_or([0; 4]);
             match endianness {
                 Endianness::Big => u32::from_be_bytes(arr) as usize,
                 Endianness::Little => u32::from_le_bytes(arr) as usize,
@@ -1843,6 +1820,28 @@ mod tests {
         let frames = dec.push(&framed).unwrap();
         assert_eq!(frames.len(), 1);
         assert!(frames[0].data.is_empty());
+    }
+
+    #[test]
+    fn rx_slip_decodes_large_payload_preserves_bytes() {
+        // Push a 4096-byte SLIP frame with a known repeating pattern
+        // (0x00..=0xFF cycling) stuffed via slip_stuff, wrapped in END
+        // markers. Assert exactly one decoded frame whose payload matches
+        // the original byte-for-byte, and frame_type == "slip".
+        let payload: Vec<u8> = (0..4096).map(|i| (i % 256) as u8).collect();
+        let stuffed = slip_stuff(&payload);
+        let mut framed = vec![SLIP_END];
+        framed.extend_from_slice(&stuffed);
+        framed.push(SLIP_END);
+
+        let mut dec = FrameDecoder::new(&slip_rx_config(), None).unwrap();
+        let frames = dec.push(&framed).unwrap();
+        assert_eq!(frames.len(), 1, "expected exactly one frame");
+        assert_eq!(
+            frames[0].data, payload,
+            "decoded payload must match original"
+        );
+        assert_eq!(frames[0].frame_type, "slip");
     }
 
     // ── Delimiter decoder ───────────────────────────────────────────────
@@ -2654,6 +2653,19 @@ mod tests {
         match mode.encode(&payload) {
             Ok(_) => panic!("payload too large for prefix_size=1 should be rejected"),
             Err(err) => assert!(err.contains("exceeds maximum 255"), "got: {err}"),
+        }
+    }
+
+    #[test]
+    fn tx_length_prefixed_u16_overflow() {
+        let mode = TxFramingMode::LengthPrefixed {
+            prefix_size: 2,
+            endianness: Endianness::Big,
+        };
+        let payload = vec![0u8; 65536];
+        match mode.encode(&payload) {
+            Ok(_) => panic!("payload too large for prefix_size=2 should be rejected"),
+            Err(err) => assert!(err.contains("exceeds maximum 65535"), "got: {err}"),
         }
     }
 
