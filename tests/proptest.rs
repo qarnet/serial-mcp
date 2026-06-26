@@ -201,7 +201,7 @@ proptest! {
         data in r"[A-Za-z0-9\r\n\t ]{0,4096}",
         enc in valid_encoding(),
     ) {
-        let args = WriteArgs { connection_id: id, data, encoding: enc, tx_framing: None };
+        let args = WriteArgs { connection_id: id, data, encoding: enc, tx_framing: None, protocol: None };
         assert_roundtrip!(args);
     }
 
@@ -238,6 +238,7 @@ proptest! {
                 data: data.clone(),
                 encoding: enc.clone(),
                 tx_framing: Some(TxFramingConfig { mode }),
+                protocol: None,
             };
             assert_roundtrip!(args);
         }
@@ -250,7 +251,7 @@ proptest! {
         max_buffered_bytes in any_usize(),
         enc in valid_encoding(),
     ) {
-        let args = ReadArgs { connection_id: id, timeout_ms: timeout, max_buffered_bytes, encoding: enc, r#match: None, no_new_rx_timeout_ms: None, rx_framing: None, rx_parser: None };
+        let args = ReadArgs { connection_id: id, timeout_ms: timeout, max_buffered_bytes, encoding: enc, r#match: None, no_new_rx_timeout_ms: None, rx_framing: None, rx_parser: None, protocol: None };
         assert_roundtrip!(args);
     }
 
@@ -290,6 +291,7 @@ proptest! {
             r#match: None,
             rx_framing: None,
             rx_parser: None,
+            protocol: None,
         };
         assert_roundtrip!(args);
     }

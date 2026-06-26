@@ -135,6 +135,53 @@ fn default_encoding() -> PatternEncoding {
     PatternEncoding::Utf8
 }
 
+// ---- Protocol presets --------------------------------------------------------
+
+/// Built-in protocol preset. A named bundle of framing/parser primitives
+/// that a single `protocol` field expands into on `write`, `read`, and
+/// `subscribe`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ProtocolPreset {
+    /// AT-command modem protocol. TX appends `\r`, RX splits on line
+    /// endings (auto), RX frames are parsed as AT command responses/URCs.
+    AtCommand,
+}
+
+/// The TX framing implied by a protocol preset.
+pub fn preset_tx_framing(p: ProtocolPreset) -> TxFramingConfig {
+    match p {
+        ProtocolPreset::AtCommand => TxFramingConfig {
+            mode: TxFramingMode::Line {
+                ending: TxLineEnding::Cr,
+            },
+        },
+    }
+}
+
+/// The RX framing implied by a protocol preset.
+pub fn preset_rx_framing(p: ProtocolPreset) -> RxFramingConfig {
+    match p {
+        ProtocolPreset::AtCommand => RxFramingConfig {
+            mode: RxFramingMode::Line {
+                ending: LineEnding::Auto,
+            },
+            max_frames: None,
+            include_terminators: false,
+        },
+    }
+}
+
+/// The RX parser implied by a protocol preset.
+pub fn preset_rx_parser(p: ProtocolPreset) -> ParserConfig {
+    match p {
+        ProtocolPreset::AtCommand => ParserConfig {
+            parser_type: ParserType::AtCommand,
+            custom_prompt: None,
+        },
+    }
+}
+
 // ---- TX framing configuration -----------------------------------------------
 
 /// TX framing configuration for `write`.
@@ -1582,6 +1629,36 @@ mod tests {
         dec.push(b"c\r").unwrap();
         let partial = dec.flush_partial().expect("partial frame");
         assert_eq!(partial.index, 2);
+    }
+
+    // ── Protocol preset tests ──────────────────────────────────────────────
+
+    #[test]
+    fn preset_tx_framing_returns_line_cr() {
+        let cfg = preset_tx_framing(ProtocolPreset::AtCommand);
+        assert!(matches!(
+            cfg.mode,
+            TxFramingMode::Line {
+                ending: TxLineEnding::Cr
+            }
+        ));
+    }
+
+    #[test]
+    fn preset_rx_framing_returns_line_auto() {
+        let cfg = preset_rx_framing(ProtocolPreset::AtCommand);
+        assert!(matches!(
+            cfg.mode,
+            RxFramingMode::Line {
+                ending: LineEnding::Auto
+            }
+        ));
+    }
+
+    #[test]
+    fn preset_rx_parser_returns_at_command() {
+        let cfg = preset_rx_parser(ProtocolPreset::AtCommand);
+        assert_eq!(cfg.parser_type, ParserType::AtCommand);
     }
 
     // ── SLIP (RFC 1055) tests ─────────────────────────────────────────────

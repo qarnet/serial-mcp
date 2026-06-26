@@ -146,6 +146,22 @@ pub async fn subscribe(
     // entire streaming lifetime and is released when the task finishes.
     let reservation = _reservation;
 
+    // Resolve protocol preset for rx_framing and rx_parser.
+    let rx_framing = match args.protocol {
+        Some(p) => match args.rx_framing {
+            Some(explicit) => Some(explicit),
+            None => Some(crate::framing::preset_rx_framing(p)),
+        },
+        None => args.rx_framing,
+    };
+    let rx_parser = match args.protocol {
+        Some(p) => match args.rx_parser {
+            Some(explicit) => Some(explicit),
+            None => Some(crate::framing::preset_rx_parser(p)),
+        },
+        None => args.rx_parser,
+    };
+
     let join = tokio::spawn(stream_rx_via_session(
         peer,
         conn,
@@ -158,8 +174,8 @@ pub async fn subscribe(
         no_new_rx_timeout_ms,
         reservation,
         matcher,
-        args.rx_framing,
-        args.rx_parser,
+        rx_framing,
+        rx_parser,
     ));
 
     let mut streams = streams.lock().await;

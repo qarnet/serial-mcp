@@ -267,7 +267,7 @@ impl SerialHandler {
     }
 
     #[tool(
-        description = "Write data to a serial port connection. Use tx_framing to apply frame boundaries (line terminator, delimiter, length prefix, SLIP, or start/end markers) around the decoded payload. When tx_framing is used, decoded_bytes reports the payload length before framing, and bytes_written reports the total framed bytes sent.",
+        description = "Write data to a serial port connection. Use tx_framing to apply frame boundaries (line terminator, delimiter, length prefix, SLIP, or start/end markers) around the decoded payload. Use protocol to select a built-in preset (at_command) that fills in framing defaults. Explicit tx_framing wins over the preset. When tx_framing is used, decoded_bytes reports the payload length before framing, and bytes_written reports the total framed bytes sent.",
         title = "Write Serial Data",
         annotations(destructive_hint = true, open_world_hint = false)
     )]
@@ -279,7 +279,7 @@ impl SerialHandler {
     }
 
     #[tool(
-        description = "Read data from a serial port connection. Returns only future bytes — data received after the call starts, not previously buffered data. With no options, reads available bytes with timeout and burst-settle. With match, accumulates until a pattern is found. With rx_framing, splits the byte stream into structured frames (line, delimiter, length-prefixed, SLIP, start/end marker). With rx_parser, interprets frame content (AT commands, JSON lines, shell prompts). rx_parser is a sibling to rx_framing. Match and rx_framing can be combined. A malformed SLIP escape sequence surfaces as a framing_error. Set no_new_rx_timeout_ms to stop when no new bytes arrive within the specified silence window.",
+        description = "Read data from a serial port connection. Returns only future bytes — data received after the call starts, not previously buffered data. With no options, reads available bytes with timeout and burst-settle. With match, accumulates until a pattern is found. With rx_framing, splits the byte stream into structured frames (line, delimiter, length-prefixed, SLIP, start/end marker). With rx_parser, interprets frame content (AT commands, JSON lines, shell prompts). rx_parser is a sibling to rx_framing. Use protocol to select a built-in preset (at_command) that fills in rx_framing and rx_parser defaults; explicit fields win. Match and rx_framing can be combined. A malformed SLIP escape sequence surfaces as a framing_error. Set no_new_rx_timeout_ms to stop when no new bytes arrive within the specified silence window.",
         title = "Read Serial Data",
         annotations(read_only_hint = true, open_world_hint = false),
         execution(task_support = "optional")

@@ -62,6 +62,11 @@ pub struct WriteArgs {
     /// length prefix prepended, or start/end markers wrapped).
     #[serde(default)]
     pub tx_framing: Option<crate::framing::TxFramingConfig>,
+    /// Optional protocol preset. When set, fills in default `tx_framing`
+    /// for the named protocol. Explicit `tx_framing` overrides the
+    /// preset's component.
+    #[serde(default)]
+    pub protocol: Option<crate::framing::ProtocolPreset>,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -98,6 +103,11 @@ pub struct ReadArgs {
     /// to `rx_framing`; the parser operates on frames produced by `rx_framing`.
     #[serde(default)]
     pub rx_parser: Option<crate::framing::ParserConfig>,
+    /// Optional protocol preset. When set, fills in default `rx_framing`
+    /// and `rx_parser` for the named protocol. Explicit fields override
+    /// the preset's corresponding component.
+    #[serde(default)]
+    pub protocol: Option<crate::framing::ProtocolPreset>,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -164,6 +174,11 @@ pub struct SubscribeArgs {
     /// to `rx_framing`; the parser operates on frames produced by `rx_framing`.
     #[serde(default)]
     pub rx_parser: Option<crate::framing::ParserConfig>,
+    /// Optional protocol preset. When set, fills in default `rx_framing`
+    /// and `rx_parser` for the named protocol. Explicit fields override
+    /// the preset's corresponding component.
+    #[serde(default)]
+    pub protocol: Option<crate::framing::ProtocolPreset>,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]

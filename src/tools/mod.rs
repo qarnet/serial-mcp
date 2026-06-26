@@ -176,4 +176,30 @@ mod tests {
             "RxFramingConfig must NOT contain parser property"
         );
     }
+
+    /// Phase 4b: after adding the `protocol` field, verify it appears in
+    /// WriteArgs, ReadArgs, and SubscribeArgs schemas.
+    #[test]
+    fn protocol_field_present_in_schemas() {
+        let schema = schema_for!(crate::tools::types::WriteArgs);
+        let json = serde_json::to_string(&schema).unwrap();
+        assert!(
+            json.contains("\"protocol\""),
+            "WriteArgs must contain protocol"
+        );
+
+        let schema = schema_for!(crate::tools::types::ReadArgs);
+        let json = serde_json::to_string(&schema).unwrap();
+        assert!(
+            json.contains("\"protocol\""),
+            "ReadArgs must contain protocol"
+        );
+
+        let schema = schema_for!(crate::tools::types::SubscribeArgs);
+        let json = serde_json::to_string(&schema).unwrap();
+        assert!(
+            json.contains("\"protocol\""),
+            "SubscribeArgs must contain protocol"
+        );
+    }
 }
