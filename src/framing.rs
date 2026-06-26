@@ -141,7 +141,7 @@ fn default_encoding() -> PatternEncoding {
 /// that a single `protocol` field expands into on `write`, `read`, and
 /// `subscribe`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", tag = "type")]
 pub enum ProtocolPreset {
     /// AT-command modem protocol. TX appends `\r`, RX splits on line
     /// endings (auto), RX frames are parsed as AT command responses/URCs.
@@ -1659,6 +1659,20 @@ mod tests {
     fn preset_rx_parser_returns_at_command() {
         let cfg = preset_rx_parser(ProtocolPreset::AtCommand);
         assert_eq!(cfg.parser_type, ParserType::AtCommand);
+    }
+
+    #[test]
+    fn protocol_preset_tagged_object_roundtrip() {
+        let json = serde_json::json!({ "type": "at_command" });
+        let p: ProtocolPreset = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(p, ProtocolPreset::AtCommand);
+        let back = serde_json::to_value(p).unwrap();
+        assert_eq!(back, json, "must round-trip as tagged object");
+        // Bare string form must be rejected.
+        assert!(
+            serde_json::from_value::<ProtocolPreset>(serde_json::json!("at_command")).is_err(),
+            "bare string form must be rejected after adding tag"
+        );
     }
 
     // ── SLIP (RFC 1055) tests ─────────────────────────────────────────────
