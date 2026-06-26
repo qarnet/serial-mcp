@@ -34,6 +34,18 @@ pub struct OpenArgs {
     /// Reconnect policy for this connection. Default: disabled.
     #[serde(default)]
     pub reconnect_policy: crate::serial::ReconnectPolicy,
+    /// Default TX framing applied when subsequent `write` calls omit `tx_framing`.
+    #[serde(default)]
+    pub tx_framing: Option<crate::framing::TxFramingConfig>,
+    /// Default RX framing applied when subsequent `read`/`subscribe` omit `rx_framing`.
+    #[serde(default)]
+    pub rx_framing: Option<crate::framing::RxFramingConfig>,
+    /// Default RX parser applied when subsequent `read`/`subscribe` omit `rx_parser`.
+    #[serde(default)]
+    pub rx_parser: Option<crate::framing::ParserConfig>,
+    /// Default protocol preset. Expands to fill framing/parser gaps.
+    #[serde(default)]
+    pub protocol: Option<crate::framing::ProtocolPreset>,
 }
 
 fn default_log_capacity() -> usize {
@@ -57,6 +69,16 @@ pub struct WriteArgs {
     pub data: String,
     #[serde(default = "default_encoding")]
     pub encoding: String,
+    /// Optional TX framing configuration. When present, the payload is framed
+    /// before being sent (e.g. line terminator appended, delimiter appended,
+    /// length prefix prepended, or start/end markers wrapped).
+    #[serde(default)]
+    pub tx_framing: Option<crate::framing::TxFramingConfig>,
+    /// Optional protocol preset. When set, fills in default `tx_framing`
+    /// for the named protocol. Explicit `tx_framing` overrides the
+    /// preset's component.
+    #[serde(default)]
+    pub protocol: Option<crate::framing::ProtocolPreset>,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -83,11 +105,21 @@ pub struct ReadArgs {
     /// result includes `matched` and `match_index` fields.
     #[serde(default)]
     pub r#match: Option<crate::match_config::MatchRequest>,
-    /// Optional frame decoder configuration. When present, the byte stream is
+    /// Optional RX frame decoder configuration. When present, the byte stream is
     /// split into structured frames. The result includes `frames` in addition
     /// to the raw `data` field. Can be combined with `match`.
     #[serde(default)]
-    pub framing: Option<crate::framing::FramingConfig>,
+    pub rx_framing: Option<crate::framing::RxFramingConfig>,
+    /// Optional RX parser configuration. When present, each decoded frame's
+    /// content is interpreted (AT commands, JSON lines, shell prompts). Sibling
+    /// to `rx_framing`; the parser operates on frames produced by `rx_framing`.
+    #[serde(default)]
+    pub rx_parser: Option<crate::framing::ParserConfig>,
+    /// Optional protocol preset. When set, fills in default `rx_framing`
+    /// and `rx_parser` for the named protocol. Explicit fields override
+    /// the preset's corresponding component.
+    #[serde(default)]
+    pub protocol: Option<crate::framing::ProtocolPreset>,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -144,11 +176,21 @@ pub struct SubscribeArgs {
     /// and `match_index`, then terminates.
     #[serde(default)]
     pub r#match: Option<crate::match_config::MatchRequest>,
-    /// Optional frame decoder configuration. When present, the stream emits
+    /// Optional RX frame decoder configuration. When present, the stream emits
     /// one notification per decoded frame (instead of per raw chunk). Can
     /// be combined with `match`.
     #[serde(default)]
-    pub framing: Option<crate::framing::FramingConfig>,
+    pub rx_framing: Option<crate::framing::RxFramingConfig>,
+    /// Optional RX parser configuration. When present, each decoded frame's
+    /// content is interpreted (AT commands, JSON lines, shell prompts). Sibling
+    /// to `rx_framing`; the parser operates on frames produced by `rx_framing`.
+    #[serde(default)]
+    pub rx_parser: Option<crate::framing::ParserConfig>,
+    /// Optional protocol preset. When set, fills in default `rx_framing`
+    /// and `rx_parser` for the named protocol. Explicit fields override
+    /// the preset's corresponding component.
+    #[serde(default)]
+    pub protocol: Option<crate::framing::ProtocolPreset>,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -231,6 +273,10 @@ pub struct WriteResult {
     pub name: Option<String>,
     #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
     pub bytes_written: usize,
+    /// Decoded payload length before framing (always ≤ `bytes_written`).
+    /// When `tx_framing` is not used, `decoded_bytes == bytes_written`.
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub decoded_bytes: usize,
     pub encoding: String,
 }
 
@@ -264,7 +310,7 @@ pub struct ReadResult {
     /// Why the operation stopped. One of: `data_complete`, `timeout`,
     /// `match_found`, `max_buffered_bytes`, `no_new_rx_timeout`,
     /// `connection_closed`, `cancelled`, `read_error`, `channel_closed`,
-    /// `peer_disconnected`, `budget_exhausted`.
+    /// `peer_disconnected`, `budget_exhausted`, `max_frames`, `framing_error`.
     pub stop_reason: String,
     /// `true` when `bytes_returned < bytes_observed` because the result
     /// data was capped (e.g. `max_buffered_bytes` limit exceeded observed
@@ -287,12 +333,12 @@ pub struct ReadResult {
     #[schemars(schema_with = "crate::schema_helpers::option_uint_schema")]
     pub match_index: Option<usize>,
     /// When framing is active and a match was found, the index of the frame
-    /// that contained the match. `null` when no match, or framing not used,
-    /// or match found in raw stream (no framing).
+    /// that contained the match. `null` when no match, or rx_framing not used,
+    /// or match found in raw stream (no rx_framing).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(schema_with = "crate::schema_helpers::option_uint_schema")]
     pub match_frame_index: Option<usize>,
-    /// Decoded frames, present when the `framing` option was used.
+    /// Decoded frames, present when the `rx_framing` option was used.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub frames: Option<Vec<FrameResult>>,
     /// Number of frames dropped due to encoding failures.

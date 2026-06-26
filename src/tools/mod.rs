@@ -107,4 +107,99 @@ mod tests {
         let json = serde_json::to_string(&schema).unwrap();
         assert!(!json.contains("\"format\":\"uint\""));
     }
+
+    /// Phase 1 regression guard: after renaming `framing` → `rx_framing` and
+    /// adding `tx_framing`, the write/read/subscribe input schemas must expose
+    /// `rx_framing` / `tx_framing` and NOT expose the old `framing` field.
+    #[test]
+    fn framing_fields_renamed_in_tool_schemas() {
+        let schema = schema_for!(crate::tools::types::WriteArgs);
+        let json = serde_json::to_string(&schema).unwrap();
+        assert!(
+            json.contains("\"tx_framing\""),
+            "WriteArgs schema must contain tx_framing"
+        );
+        assert!(
+            !json.contains("\"framing\""),
+            "WriteArgs schema must NOT contain bare 'framing'"
+        );
+
+        let schema = schema_for!(crate::tools::types::ReadArgs);
+        let json = serde_json::to_string(&schema).unwrap();
+        assert!(
+            json.contains("\"rx_framing\""),
+            "ReadArgs schema must contain rx_framing"
+        );
+        assert!(
+            !json.contains("\"framing\""),
+            "ReadArgs schema must NOT contain bare 'framing'"
+        );
+
+        let schema = schema_for!(crate::tools::types::SubscribeArgs);
+        let json = serde_json::to_string(&schema).unwrap();
+        assert!(
+            json.contains("\"rx_framing\""),
+            "SubscribeArgs schema must contain rx_framing"
+        );
+        assert!(
+            !json.contains("\"framing\""),
+            "SubscribeArgs schema must NOT contain bare 'framing'"
+        );
+    }
+
+    /// Phase 4a: after relocating `parser` from `rx_framing` to sibling
+    /// `rx_parser`, verify `rx_parser` appears in ReadArgs and SubscribeArgs
+    /// schemas.
+    #[test]
+    fn rx_parser_present_in_schemas() {
+        let schema = schema_for!(crate::tools::types::ReadArgs);
+        let json = serde_json::to_string(&schema).unwrap();
+        assert!(
+            json.contains("\"rx_parser\""),
+            "ReadArgs must contain rx_parser"
+        );
+
+        let schema = schema_for!(crate::tools::types::SubscribeArgs);
+        let json = serde_json::to_string(&schema).unwrap();
+        assert!(
+            json.contains("\"rx_parser\""),
+            "SubscribeArgs must contain rx_parser"
+        );
+
+        // Verify rx_framing sub-schema no longer exposes a "parser" property.
+        // The `rx_framing` field value is a ref, so check the RxFramingConfig
+        // schema directly.
+        let schema = schema_for!(crate::framing::RxFramingConfig);
+        let json = serde_json::to_string(&schema).unwrap();
+        assert!(
+            !json.contains("\"parser\""),
+            "RxFramingConfig must NOT contain parser property"
+        );
+    }
+
+    /// Phase 4b: after adding the `protocol` field, verify it appears in
+    /// WriteArgs, ReadArgs, and SubscribeArgs schemas.
+    #[test]
+    fn protocol_field_present_in_schemas() {
+        let schema = schema_for!(crate::tools::types::WriteArgs);
+        let json = serde_json::to_string(&schema).unwrap();
+        assert!(
+            json.contains("\"protocol\""),
+            "WriteArgs must contain protocol"
+        );
+
+        let schema = schema_for!(crate::tools::types::ReadArgs);
+        let json = serde_json::to_string(&schema).unwrap();
+        assert!(
+            json.contains("\"protocol\""),
+            "ReadArgs must contain protocol"
+        );
+
+        let schema = schema_for!(crate::tools::types::SubscribeArgs);
+        let json = serde_json::to_string(&schema).unwrap();
+        assert!(
+            json.contains("\"protocol\""),
+            "SubscribeArgs must contain protocol"
+        );
+    }
 }

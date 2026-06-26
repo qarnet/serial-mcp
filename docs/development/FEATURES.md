@@ -10,9 +10,12 @@
 
 ## Near-term
 
-### Better newline / terminal semantics
-- configurable newline mode
-- terminal-oriented output normalization
+### Version command / flag
+- restore a dedicated `--version` flag (and/or a `version` subcommand) so the
+  binary reports its own version directly
+- the version is currently only visible via `--help`; release artifacts no
+  longer carry the version in their filenames, so a first-class version readout
+  is the reliable way to identify an installed binary
 
 ### Config import/export
 - likely pairs with profiles (already shipped)

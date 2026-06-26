@@ -39,6 +39,9 @@ pub enum RxStopReason {
     /// The read collected the configured maximum number of frames
     /// (`max_frames` in framing configuration).
     MaxFrames,
+    /// A runtime frame decode error occurred (e.g. SLIP malformed escape
+    /// sequence).
+    FramingError,
 }
 
 impl fmt::Display for RxStopReason {
@@ -174,6 +177,15 @@ impl RxStopMetadata {
             truncated: false,
             bytes_observed,
             bytes_returned,
+        }
+    }
+
+    pub fn framing_error(bytes_observed: usize) -> Self {
+        Self {
+            stop_reason: RxStopReason::FramingError,
+            truncated: false,
+            bytes_observed,
+            bytes_returned: 0,
         }
     }
 

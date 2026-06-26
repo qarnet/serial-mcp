@@ -219,7 +219,7 @@ cargo test --test native_sim_validation -- --ignored
 cargo test --test native_sim_connection_lifecycle -- --ignored --test-threads=1
 ```
 
-37 + 6 software-only tests, no hardware required. `--test-threads=1` is
+51 + 6 software-only tests, no hardware required. `--test-threads=1` is
 required for the lifecycle suite because the firmware process is killed
 on `Drop` and parallel close can race with the OS layer.
 The bootloader touch flow is exercised via the `touch` command in the

@@ -14,3 +14,4 @@ STATUS.md
 .envrc
 mutants.out/
 mutants.out.old/
+logs

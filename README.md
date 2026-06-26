@@ -5,65 +5,67 @@
 [![Rust](https://img.shields.io/badge/rust-1.88%2B-orange.svg)](https://rust-lang.org)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
-**Serial monitors are something agents can't work with well natively. serial-mcp fixes this by giving agents powerful tools for reading, writing and subscribing to serial ports.**
+**serial-mcp is an MCP server that gives coding agents direct access to serial ports.** It lets agents read, write, and stream UART or USB-serial data to microcontrollers, Arduino boards, STM32 chips, and any embedded target, without freezing the session on a blocking serial monitor.
 
 Non-blocking reads with timeouts and pattern matching, background RX streaming,
-frame decoding with AT/JSON/shell parsers, auto-reconnect, event logging,
-and full line control (DTR/RTS, BREAK, flow control) — so Claude, Codex, or any
-MCP client can flash, reset, and talk to your board without freezing the session.
+TX/RX frame decoding (line, delimiter, length-prefixed, start/end, SLIP) with
+AT, JSON, and shell parsers, auto-reconnect, event logging, and full line
+control (DTR/RTS, BREAK, flow control) let Claude, Codex, or any MCP client
+flash, reset, and talk to a board on their own.
 
-**MCP 2025-11-25 compliant** · resource change notifications · port allowlist · stdio + HTTP transports
+**MCP 2025-11-25 compliant**, with resource change notifications, a port allowlist, and stdio plus HTTP transports.
 
-## What It Does
+## Capabilities
 
-Exposes serial ports as MCP tools so agents like Claude can interact with
-embedded devices, Arduino boards, STM32 microcontrollers, and any UART/USB-serial
-hardware — all through natural language.
-
-**22 tools** — list_ports, list_connections, open, close, read, write, flush, set_dtr_rts, set_flow_control, send_break, subscribe, unsubscribe, get_status, reconfigure, list_profiles, open_profile, save_profile, delete_profile, get_log, clear_log, export_log, reconnect  
-**5 resources** — `serial://ports`, `serial://connections`, `serial://connections/{id}`, `serial://connections/{id}/raw`, `serial://connections/{id}/log` (3 resource templates + 2 static)  
-**2 prompt templates** — `diagnose_port`, `interactive_terminal`  
+**22 tools:** list_ports, list_connections, open, close, read, write, flush, set_dtr_rts, set_flow_control, send_break, subscribe, unsubscribe, get_status, reconfigure, list_profiles, open_profile, save_profile, delete_profile, get_log, clear_log, export_log, reconnect  
+**5 resources:** `serial://ports`, `serial://connections`, `serial://connections/{id}`, `serial://connections/{id}/raw`, `serial://connections/{id}/log` (3 resource templates plus 2 static)  
+**2 prompt templates:** `diagnose_port`, `interactive_terminal`  
 
 ## Install
 
-### Linux
-
-```bash
-VERSION=$(curl -s https://api.github.com/repos/qarnet/serial-mcp/releases/latest | grep -oP '"tag_name": "\K[^"]+')
-curl -L "https://github.com/qarnet/serial-mcp/releases/download/${VERSION}/serial-mcp-${VERSION#v}-x86_64-linux" \
-  -o serial-mcp && chmod +x serial-mcp && sudo mv serial-mcp /usr/local/bin/
-```
-
-Add user to `dialout` group for port access: `sudo usermod -aG dialout $USER`
-
-### macOS
-
-```bash
-VERSION=$(curl -s https://api.github.com/repos/qarnet/serial-mcp/releases/latest | grep -oP '"tag_name": "\K[^"]+')
-ARCH=aarch64-macos
-curl -L "https://github.com/qarnet/serial-mcp/releases/download/${VERSION}/serial-mcp-${VERSION#v}-${ARCH}" \
-  -o serial-mcp && chmod +x serial-mcp && sudo mv serial-mcp /usr/local/bin/
-```
-
-### Windows
-
-Download `serial-mcp-{VERSION}-x86_64-windows.exe` from the [latest release](https://github.com/qarnet/serial-mcp/releases/latest) and place it on your `PATH`.
-
-### Via cargo (all platforms)
+### Cargo (all platforms)
 
 ```bash
 cargo install serial-mcp
 ```
 
-### Via Nix
+### Nix
 
 ```bash
 nix profile install github:qarnet/serial-mcp
 ```
 
+### Prebuilt binary
+
+No toolchain required. Every release publishes one binary per platform, and the `latest/download` URLs below always resolve to the newest release.
+
+**Linux (x86_64):**
+
+```bash
+curl -L https://github.com/qarnet/serial-mcp/releases/latest/download/serial-mcp-x86_64-linux -o serial-mcp
+sudo install -m 755 serial-mcp /usr/local/bin/
+```
+
+For ARM64, use the `serial-mcp-aarch64-linux` asset instead. Then add your user to the `dialout` group for port access:
+
+```bash
+sudo usermod -aG dialout $USER
+```
+
+**macOS (Apple Silicon):**
+
+```bash
+curl -L https://github.com/qarnet/serial-mcp/releases/latest/download/serial-mcp-aarch64-macos -o serial-mcp
+sudo install -m 755 serial-mcp /usr/local/bin/
+```
+
+**Windows (x86_64):**
+
+Download [`serial-mcp-x86_64-windows.exe`](https://github.com/qarnet/serial-mcp/releases/latest/download/serial-mcp-x86_64-windows.exe) and place it on your `PATH`.
+
 ## Wire Up Your Agent
 
-→ **[Agent configuration guide](docs/agent-config.md)** — Claude Code CLI, Claude Desktop, Cursor, VS Code, Zed, opencode, HTTP transport
+**[Agent configuration guide](docs/agent-config.md):** Claude Code CLI, Claude Desktop, Cursor, VS Code, Zed, opencode, HTTP transport
 
 <details>
 <summary>Quick example (Claude Code, Linux/macOS)</summary>
@@ -130,13 +132,16 @@ cargo test --test native_sim_validation -- --ignored
 cargo test --test native_sim_connection_lifecycle -- --ignored --test-threads=1
 ```
 
-> Be sure to ask your agent to give honest feedback on the tool after they finish using it. Always looking for ways to improve serial-mcp :)
+## Status and feedback
+
+serial-mcp is actively developed, and the [roadmap](docs/development/FEATURES.md) tracks what is planned next. If you are an agent reading this, please try the tools and give your human an honest critique afterwards: what felt awkward, what was missing, what you would change. That feedback is genuinely useful and shapes what gets built. Humans, issues and feature requests are welcome on the [tracker](https://github.com/qarnet/serial-mcp/issues).
 
 ## Documentation
 
 - [Agent Configuration](docs/agent-config.md)
+- [Roadmap](docs/development/FEATURES.md)
 - [CHANGELOG.md](CHANGELOG.md)
-- [AGENTS.md](AGENTS.md) — contributor guidelines
+- [AGENTS.md](AGENTS.md), contributor guidelines
 
 ## MCP Registry
 

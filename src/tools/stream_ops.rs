@@ -133,6 +133,22 @@ pub async fn subscribe(
     let timeout_ms = args.timeout_ms;
     let no_new_rx_timeout_ms = args.no_new_rx_timeout_ms;
 
+    // Resolve rx_framing + rx_parser via the shared 4-layer precedence helper.
+    let rx_framing = crate::precedence::resolve_field(
+        args.rx_framing,
+        args.protocol,
+        crate::framing::preset_rx_framing,
+        connection.rx_framing_default(),
+        connection.protocol_default(),
+    );
+    let rx_parser = crate::precedence::resolve_field(
+        args.rx_parser,
+        args.protocol,
+        crate::framing::preset_rx_parser,
+        connection.rx_parser_default(),
+        connection.protocol_default(),
+    );
+
     // Get or create the RX session for this connection, then register a
     // streaming consumer. The pump in the session is the *only* code that
     // reads from the serial port. This subscribe worker consumes from the
@@ -158,7 +174,8 @@ pub async fn subscribe(
         no_new_rx_timeout_ms,
         reservation,
         matcher,
-        args.framing,
+        rx_framing,
+        rx_parser,
     ));
 
     let mut streams = streams.lock().await;
@@ -357,7 +374,8 @@ async fn stream_rx_via_session(
     // Held for RAII: dropping releases the budget reservation.
     _reservation: Box<dyn crate::buffer_budget::BufferReservation>,
     mut matcher: Option<Matcher>,
-    framing: Option<crate::framing::FramingConfig>,
+    framing: Option<crate::framing::RxFramingConfig>,
+    parser: Option<crate::framing::ParserConfig>,
 ) {
     let conn_id = session.connection_id().to_string();
     let logger = format!("serial:{conn_id}");
@@ -371,6 +389,7 @@ async fn stream_rx_via_session(
     let mut stop_outcome: Option<crate::stop_controller::RxStopOutcome> = None;
     let mut match_frame_index: Option<usize> = None;
     let mut match_offset: Option<usize> = None;
+    let mut frame_error_msg: Option<String> = None;
 
     // Track total bytes sent via per-chunk data notifications, so
     // bytes_returned in the stop payload reflects cumulative delivered
@@ -390,7 +409,7 @@ async fn stream_rx_via_session(
         // it cannot surface a sync error, so a bad framing config degrades to raw
         // chunk mode rather than failing. (read propagates the error instead — see
         // helpers.rs.)
-        Some(cfg) => match crate::framing::FrameDecoder::new(cfg) {
+        Some(cfg) => match crate::framing::FrameDecoder::new(cfg, parser.as_ref()) {
             Ok(d) => Some(d),
             Err(e) => {
                 warn!("RX subscribe framing init error on {conn_id}: {e}");
@@ -514,6 +533,11 @@ async fn stream_rx_via_session(
                             });
                         }
                         FrameOutcome::Continue => {}
+                        FrameOutcome::DecodeError(e) => {
+                            error!("RX framing decode error on {conn_id}: {e}");
+                            frame_error_msg = Some(e.to_string());
+                            stop_outcome = Some(ctrl.framing_error(e));
+                        }
                     }
                 }
                 if stop_outcome.is_some() {
@@ -678,6 +702,9 @@ async fn stream_rx_via_session(
         "no_new_rx_timeout_ms": no_new_rx_timeout_ms,
         "frames_emitted": frames_emitted,
     });
+    if let Some(ref e) = frame_error_msg {
+        stop_payload["error"] = serde_json::json!(e);
+    }
     if outcome.matched {
         stop_payload["matched"] = serde_json::json!(true);
         stop_payload["match_frame_index"] = serde_json::json!(match_frame_index);

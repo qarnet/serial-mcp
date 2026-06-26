@@ -25,11 +25,36 @@ pub async fn write(
 
     let encoding = parse_encoding(&args.encoding)?;
     let connection = lookup_connection(connections, &args.connection_id).await?;
-    let bytes =
+    let decoded_bytes_ref =
         codec::decode(encoding, &args.data).map_err(|e| format!("Data decoding failed - {e}"))?;
-    clamp_or_err("write.data.len()", bytes.len(), MAX_WRITE_BYTES)?;
+    let decoded_len = decoded_bytes_ref.len();
+    clamp_or_err("write.data.len()", decoded_len, MAX_WRITE_BYTES)?;
 
-    let data: Arc<[u8]> = Arc::from(bytes.as_slice());
+    // Resolve tx_framing via the shared 4-layer precedence helper.
+    let tx_framing = crate::precedence::resolve_field(
+        args.tx_framing,
+        args.protocol,
+        crate::framing::preset_tx_framing,
+        connection.tx_framing_default(),
+        connection.protocol_default(),
+    );
+
+    // Apply TX framing if configured.
+    let bytes_to_send: Vec<u8> = if let Some(ref tx_cfg) = tx_framing {
+        let framed = tx_cfg.mode.encode(&decoded_bytes_ref).map_err(|e| {
+            log_tool_err(
+                "write",
+                &format!("TX framing failed on {}: {e}", args.connection_id),
+                e,
+            )
+        })?;
+        clamp_or_err("write.framed_len()", framed.len(), MAX_WRITE_BYTES)?;
+        framed
+    } else {
+        decoded_bytes_ref
+    };
+
+    let data: Arc<[u8]> = Arc::from(bytes_to_send.as_slice());
     let session = tx_sessions.get_or_create(Arc::clone(&connection)).await;
     let bytes_written = session.write(data).await.map_err(|e| {
         log_tool_err(
@@ -45,6 +70,7 @@ pub async fn write(
         connection_id: args.connection_id,
         name: connection.name().map(str::to_string),
         bytes_written,
+        decoded_bytes: decoded_len,
         encoding: encoding.to_string(),
     }))
 }
@@ -89,6 +115,22 @@ pub async fn read(
     let session = rx_sessions.get_or_create(Arc::clone(&connection)).await;
     let event_rx = session.register_blocking();
 
+    // Resolve rx_framing + rx_parser via the shared 4-layer precedence helper.
+    let rx_framing = crate::precedence::resolve_field(
+        args.rx_framing,
+        args.protocol,
+        crate::framing::preset_rx_framing,
+        connection.rx_framing_default(),
+        connection.protocol_default(),
+    );
+    let rx_parser = crate::precedence::resolve_field(
+        args.rx_parser,
+        args.protocol,
+        crate::framing::preset_rx_parser,
+        connection.rx_parser_default(),
+        connection.protocol_default(),
+    );
+
     let outcome = read_bytes_via_session(
         event_rx,
         max_buffered_bytes,
@@ -99,7 +141,8 @@ pub async fn read(
         matcher,
         args.no_new_rx_timeout_ms,
         Some(Arc::clone(&connection)),
-        args.framing,
+        rx_framing,
+        rx_parser,
     )
     .await?;
 

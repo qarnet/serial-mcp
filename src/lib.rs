@@ -5,6 +5,7 @@ pub mod framing;
 pub mod limits;
 pub mod log_buffer;
 pub mod match_config;
+pub(crate) mod precedence;
 pub mod profiles;
 pub mod prompts;
 pub mod resources;
@@ -17,6 +18,7 @@ pub mod server;
 pub mod stop_controller;
 pub mod tools;
 pub mod tx_session;
+pub(crate) mod util;
 
 pub use error::{Result, SerialError};
 pub use server::SerialHandler;

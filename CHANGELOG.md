@@ -3,6 +3,7 @@
 | Version | Date | Highlights |
 |---|---|---|
 | [Unreleased](#unreleased) | — | — |
+| [0.7.0](#070) | 2026-06-26 | Frame pipeline: TX framing, SLIP, protocol presets, profile defaults, parser relocation |
 | [0.6.2](#062) | 2026-06-25 | Schema fix: suppress non-standard `uint8`/`uint16` formats; expanded schema regression guards + AGENTS.md truth |
 | [0.6.1](#061) | 2026-06-24 | RX refactor: shared framing sink, SerialHandler builder, config FromStr, dedup; docs cleanup |
 | [0.6.0](#060) | 2026-06-20 | Frame decoding (4 modes + 3 parsers), regex/glob matching, auto-reconnect, event log, connection profiles, port identity, reconfigure, get_status, per-frame graceful degradation |
@@ -19,6 +20,61 @@
 | [0.2.1](#021) | 2026-05-24 | MCP 2025-11-25, resource change notifications, port allowlist, stdio tests |
 | [0.2.0](#020) | 2026-05-23 | Project reset: rmcp 1.7 rewrite, 6 new tools, resources, prompts, HTTP transport |
 | [0.1.0](#010) | — | Initial release (5 tools, STM32 demo) |
+
+---
+
+## [0.7.0]
+
+Minor release adding symmetric TX/RX framing, a SLIP framing mode, protocol
+presets, and profile/connection framing defaults. All new fields are optional
+— existing callers see no behavior change unless they opt in.
+
+**Added — TX framing (`write`):**
+- New `tx_framing` option on `write`. Modes: `line` (with `ending`:
+  `lf`/`cr`/`crlf`), `delimiter`, `length_prefixed`, `start_end`, `slip`.
+- `WriteResult` gains `decoded_bytes` (payload length before framing)
+  alongside `bytes_written` (framed bytes sent). When `tx_framing` is
+  absent, `decoded_bytes == bytes_written`.
+
+**Changed — RX framing rename + flatten:**
+- `read`/`subscribe` field renamed `framing` → `rx_framing` and flattened:
+  the `mode` wrapper is gone; `type` and variant fields live at the top
+  level (`{"type":"line","ending":"auto"}`).
+- `line` mode gains `ending`: `auto` (default, LF/CRLF-aware), `lf` (no CR
+  strip), `cr` (bare CR), `crlf` (exact `\r\n`). `auto` now promotes to
+  CR-split mode mid-stream when a bare `\r` is confirmed.
+- New `slip` RX mode (RFC 1055): byte-stuffed frames between END markers.
+- Parser config relocated from inside `rx_framing` to a sibling `rx_parser`
+  field on `read`/`subscribe`.
+
+**Added — protocol presets:**
+- New `protocol` option on `write`/`read`/`subscribe`. Ships `at_command`
+  preset: expands to TX line CR, RX line auto, RX AT-command parser.
+- Explicit call fields win over preset components (preset fills gaps).
+
+**Added — profile/connection defaults:**
+- `ProfileDefaults` gains `tx_framing`, `rx_framing`, `rx_parser`,
+  `protocol`. `open`/`open_profile` store them on the connection.
+- `read`/`write`/`subscribe` apply connection defaults when call fields are
+  omitted. Four-layer precedence per field: explicit call > call protocol >
+  connection default > connection protocol preset.
+
+**Added — error surfacing:**
+- `FrameDecoder::push()` returns `Result<Vec<Frame>, FrameDecodeError>`.
+  Only SLIP can error (malformed escape); other decoders always return `Ok`.
+- New `RxStopReason::FramingError` stop reason. `read` surfaces decode
+  errors as tool `is_error: true` results; `subscribe` emits a final
+  notification with `stop_reason: "framing_error"` + `error` field.
+- Both read and subscribe STOP on the first runtime decode error (no
+  resume-on-error). Construction errors (bad config) keep the existing
+  read-propagates / subscribe-degrades asymmetry.
+
+**Tests:**
+- native_sim e2e coverage expanded 37 → 51 tests, covering all framing
+  modes over the real software-serial path (line/delimiter/length_prefixed/
+  start_end/SLIP), TX modes via firmware `trace on`, explicit line endings,
+  SLIP malformed + recovery, protocol presets + override precedence,
+  connection defaults, and subscribe parsed-frame notifications.
 
 ---
 

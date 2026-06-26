@@ -272,6 +272,16 @@ impl RxStopController {
         }
     }
 
+    /// Produce the stop outcome for a runtime frame decode error
+    /// (e.g. SLIP malformed escape sequence).
+    pub fn framing_error(&self, _error: crate::framing::FrameDecodeError) -> RxStopOutcome {
+        RxStopOutcome {
+            meta: RxStopMetadata::framing_error(self.bytes_observed),
+            matched: false,
+            match_index: None,
+        }
+    }
+
     /// Build a `DataComplete` outcome for the settle phase of a non-matcher read.
     ///
     /// This is only called by the read path when no matcher is active and the
@@ -451,6 +461,16 @@ mod tests {
         let outcome = ctrl.read_error();
         assert_eq!(outcome.meta.stop_reason, RxStopReason::ReadError);
         assert!(!outcome.matched);
+    }
+
+    #[test]
+    fn framing_error_outcome_not_normal_stop() {
+        let start = Instant::now();
+        let ctrl = RxStopController::new(start, None, 1024, None);
+        let outcome = ctrl.framing_error(crate::framing::FrameDecodeError::SlipInvalidEscape(0x41));
+        assert_eq!(outcome.meta.stop_reason, RxStopReason::FramingError);
+        assert!(!outcome.matched);
+        assert!(!is_normal_stop(RxStopReason::FramingError));
     }
 
     #[test]

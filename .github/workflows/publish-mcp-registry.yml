@@ -74,10 +74,10 @@ jobs:
           BASE="https://github.com/qarnet/serial-mcp/releases/download/v${VERSION}"
 
           declare -A ASSETS=(
-            ["x86_64-linux"]="serial-mcp-${VERSION}-x86_64-linux"
-            ["aarch64-linux"]="serial-mcp-${VERSION}-aarch64-linux"
-            ["aarch64-macos"]="serial-mcp-${VERSION}-aarch64-macos"
-            ["x86_64-windows"]="serial-mcp-${VERSION}-x86_64-windows.exe"
+            ["x86_64-linux"]="serial-mcp-x86_64-linux"
+            ["aarch64-linux"]="serial-mcp-aarch64-linux"
+            ["aarch64-macos"]="serial-mcp-aarch64-macos"
+            ["x86_64-windows"]="serial-mcp-x86_64-windows.exe"
           )
 
           PACKAGES="[]"

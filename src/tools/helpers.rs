@@ -301,7 +301,8 @@ pub async fn read_bytes_via_session(
     mut matcher: Option<Matcher>,
     no_new_rx_timeout_ms: Option<u64>,
     conn: Option<Arc<crate::serial::SerialConnection>>,
-    framing: Option<crate::framing::FramingConfig>,
+    framing: Option<crate::framing::RxFramingConfig>,
+    parser: Option<crate::framing::ParserConfig>,
 ) -> Result<ReadOutcome, String> {
     const SETTLE_MS: u64 = 50;
 
@@ -323,7 +324,7 @@ pub async fn read_bytes_via_session(
     let mut decoder: Option<crate::framing::FrameDecoder> = match framing.as_ref() {
         // read is a synchronous request/response: propagate decoder-init errors
         // to the caller. (subscribe degrades to raw mode instead — see stream_ops.rs.)
-        Some(cfg) => Some(crate::framing::FrameDecoder::new(cfg)?),
+        Some(cfg) => Some(crate::framing::FrameDecoder::new(cfg, parser.as_ref())?),
         None => None,
     };
     let mut collected_frames: Vec<crate::framing::Frame> = Vec::new();
@@ -513,6 +514,9 @@ pub async fn read_bytes_via_session(
                             RxStopMetadata::max_frames(ctrl.bytes_observed(), accumulated.len());
                         finish!(accumulated, meta, false, None, None);
                     }
+                    if let FrameOutcome::DecodeError(e) = outcome {
+                        return Err(format!("{e}"));
+                    }
                 }
 
                 // When framing is NOT active, match on raw chunk bytes.
@@ -669,14 +673,9 @@ pub async fn read_bytes_via_session(
     );
 }
 
-pub(crate) fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    if needle.is_empty() || haystack.len() < needle.len() {
-        return None;
-    }
-    haystack
-        .windows(needle.len())
-        .position(|window| window == needle)
-}
+/// Re-export of the shared [`crate::util::find_subsequence`] under the
+/// legacy `find_subslice` name to keep existing import paths stable.
+pub(crate) use crate::util::find_subsequence as find_subslice;
 
 // ------------------------------------------------------------------
 // Result builders
@@ -767,6 +766,10 @@ pub fn parse_open_args(args: OpenArgs) -> Result<ConnectionConfig, String> {
         port_info: None,
         log_capacity: args.log_capacity,
         log_enabled: args.log_enabled,
+        tx_framing: args.tx_framing,
+        rx_framing: args.rx_framing,
+        rx_parser: args.rx_parser,
+        protocol: args.protocol,
     })
 }
 
@@ -799,6 +802,10 @@ mod tests {
             log_capacity: 1024,
             log_enabled: true,
             reconnect_policy: Default::default(),
+            tx_framing: None,
+            rx_framing: None,
+            rx_parser: None,
+            protocol: None,
         };
         let config = parse_open_args(args).unwrap();
         assert_eq!(config.port, "/dev/ttyUSB0");
@@ -819,6 +826,10 @@ mod tests {
             log_capacity: 1024,
             log_enabled: true,
             reconnect_policy: Default::default(),
+            tx_framing: None,
+            rx_framing: None,
+            rx_parser: None,
+            protocol: None,
         };
         let err = parse_open_args(args).unwrap_err();
         assert!(err.contains("data_bits"));
@@ -951,29 +962,6 @@ mod tests {
     }
 
     #[test]
-    fn find_subslice_locates_pattern() {
-        assert_eq!(find_subslice(b"hello OK> world", b"OK>"), Some(6));
-        assert_eq!(find_subslice(b"OK>at-start", b"OK>"), Some(0));
-        assert_eq!(find_subslice(b"trailing OK>", b"OK>"), Some(9));
-    }
-
-    #[test]
-    fn find_subslice_missing_returns_none() {
-        assert_eq!(find_subslice(b"hello world", b"OK>"), None);
-        assert_eq!(find_subslice(b"", b"x"), None);
-    }
-
-    #[test]
-    fn find_subslice_empty_needle_returns_none() {
-        assert_eq!(find_subslice(b"hello", b""), None);
-    }
-
-    #[test]
-    fn find_subslice_needle_longer_than_haystack() {
-        assert_eq!(find_subslice(b"hi", b"hello"), None);
-    }
-
-    #[test]
     fn clamp_or_err_rejects_oversized_values() {
         assert!(clamp_or_err("test.max_bytes", 1024 * 1024, MAX_READ_BYTES).is_ok());
         assert!(clamp_or_err("test.max_bytes", 1024 * 1024 + 1, MAX_READ_BYTES).is_err());
@@ -1041,15 +1029,17 @@ mod tests {
     async fn read_via_session_rejects_empty_delimiter() {
         let rx = make_closed_rx();
         let ct = tokio_util::sync::CancellationToken::new();
-        let framing = Some(crate::framing::FramingConfig {
-            mode: crate::framing::FramingMode::Delimiter {
+        let framing = Some(crate::framing::RxFramingConfig {
+            mode: crate::framing::RxFramingMode::Delimiter {
                 delimiter: "".into(),
                 delimiter_encoding: crate::match_config::PatternEncoding::Utf8,
             },
             ..Default::default()
         });
-        let result =
-            read_bytes_via_session(rx, 128, None, &ct, None, None, None, None, None, framing).await;
+        let result = read_bytes_via_session(
+            rx, 128, None, &ct, None, None, None, None, None, framing, None,
+        )
+        .await;
         match result {
             Ok(_) => panic!("empty delimiter should be rejected"),
             Err(err) => assert!(err.contains("Delimiter must not be empty"), "got: {err}"),
@@ -1060,16 +1050,18 @@ mod tests {
     async fn read_via_session_rejects_invalid_prefix_size() {
         let rx = make_closed_rx();
         let ct = tokio_util::sync::CancellationToken::new();
-        let framing = Some(crate::framing::FramingConfig {
-            mode: crate::framing::FramingMode::LengthPrefixed {
+        let framing = Some(crate::framing::RxFramingConfig {
+            mode: crate::framing::RxFramingMode::LengthPrefixed {
                 prefix_size: 3,
                 endianness: crate::framing::Endianness::Big,
                 initial_offset: None,
             },
             ..Default::default()
         });
-        let result =
-            read_bytes_via_session(rx, 128, None, &ct, None, None, None, None, None, framing).await;
+        let result = read_bytes_via_session(
+            rx, 128, None, &ct, None, None, None, None, None, framing, None,
+        )
+        .await;
         match result {
             Ok(_) => panic!("prefix_size=3 should be rejected"),
             Err(err) => assert!(err.contains("prefix_size must be 1, 2, or 4"), "got: {err}"),
@@ -1080,8 +1072,8 @@ mod tests {
     async fn read_via_session_rejects_empty_markers() {
         let rx = make_closed_rx();
         let ct = tokio_util::sync::CancellationToken::new();
-        let framing = Some(crate::framing::FramingConfig {
-            mode: crate::framing::FramingMode::StartEnd {
+        let framing = Some(crate::framing::RxFramingConfig {
+            mode: crate::framing::RxFramingMode::StartEnd {
                 start: "".into(),
                 end: "X".into(),
                 marker_encoding: crate::match_config::PatternEncoding::Utf8,
@@ -1089,8 +1081,10 @@ mod tests {
             },
             ..Default::default()
         });
-        let result =
-            read_bytes_via_session(rx, 128, None, &ct, None, None, None, None, None, framing).await;
+        let result = read_bytes_via_session(
+            rx, 128, None, &ct, None, None, None, None, None, framing, None,
+        )
+        .await;
         match result {
             Ok(_) => panic!("empty markers should be rejected"),
             Err(err) => assert!(
@@ -1104,16 +1098,20 @@ mod tests {
     async fn read_via_session_rejects_invalid_regex() {
         let rx = make_closed_rx();
         let ct = tokio_util::sync::CancellationToken::new();
-        let framing = Some(crate::framing::FramingConfig {
-            mode: crate::framing::FramingMode::Line,
-            parser: Some(crate::framing::ParserConfig {
-                parser_type: crate::framing::ParserType::ShellPrompt,
-                custom_prompt: Some("[invalid".to_string()),
-            }),
+        let framing = Some(crate::framing::RxFramingConfig {
+            mode: crate::framing::RxFramingMode::Line {
+                ending: crate::framing::LineEnding::Auto,
+            },
             ..Default::default()
         });
-        let result =
-            read_bytes_via_session(rx, 128, None, &ct, None, None, None, None, None, framing).await;
+        let parser = Some(crate::framing::ParserConfig {
+            parser_type: crate::framing::ParserType::ShellPrompt,
+            custom_prompt: Some("[invalid".to_string()),
+        });
+        let result = read_bytes_via_session(
+            rx, 128, None, &ct, None, None, None, None, None, framing, parser,
+        )
+        .await;
         match result {
             Ok(_) => panic!("invalid regex should be rejected"),
             Err(err) => assert!(err.contains("Invalid prompt regex"), "got: {err}"),
@@ -1136,6 +1134,7 @@ mod tests {
             256,
             Some(1000),
             &fresh_ct(),
+            None,
             None,
             None,
             None,
@@ -1165,6 +1164,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -1183,6 +1183,7 @@ mod tests {
             4,
             Some(1000),
             &fresh_ct(),
+            None,
             None,
             None,
             None,
@@ -1216,6 +1217,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -1237,6 +1239,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -1248,10 +1251,21 @@ mod tests {
         let ct = fresh_ct();
         ct.cancel();
         let (_tx, rx) = mpsc::channel(8);
-        let out =
-            read_bytes_via_session(rx, 256, Some(1000), &ct, None, None, None, None, None, None)
-                .await
-                .unwrap();
+        let out = read_bytes_via_session(
+            rx,
+            256,
+            Some(1000),
+            &ct,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(out.meta.stop_reason, RxStopReason::Cancelled);
     }
 
@@ -1270,6 +1284,7 @@ mod tests {
             None,
             None,
             matcher,
+            None,
             None,
             None,
             None,
@@ -1297,6 +1312,7 @@ mod tests {
             None,
             None,
             matcher,
+            None,
             None,
             None,
             None,
@@ -1328,6 +1344,7 @@ mod tests {
             Some(60),
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -1338,9 +1355,11 @@ mod tests {
 
     // ── Framing ────────────────────────────────────────────────────────────────
 
-    fn line_framing(max_frames: Option<usize>) -> crate::framing::FramingConfig {
-        crate::framing::FramingConfig {
-            mode: crate::framing::FramingMode::Line,
+    fn line_framing(max_frames: Option<usize>) -> crate::framing::RxFramingConfig {
+        crate::framing::RxFramingConfig {
+            mode: crate::framing::RxFramingMode::Line {
+                ending: crate::framing::LineEnding::Auto,
+            },
             max_frames,
             ..Default::default()
         }
@@ -1361,6 +1380,7 @@ mod tests {
             None,
             None,
             Some(line_framing(Some(2))),
+            None,
         )
         .await
         .unwrap();
@@ -1385,6 +1405,7 @@ mod tests {
             None,
             None,
             Some(line_framing(None)),
+            None,
         )
         .await
         .unwrap();
@@ -1414,6 +1435,7 @@ mod tests {
             None,
             None,
             Some(line_framing(None)),
+            None,
         )
         .await
         .unwrap();
@@ -1441,6 +1463,7 @@ mod tests {
             None,
             None,
             Some(line_framing(None)),
+            None,
         )
         .await
         .unwrap();
@@ -1585,5 +1608,139 @@ mod tests {
             .unwrap_err();
         assert!(err.contains("read.timeout_ms"), "got: {err}");
         assert!(err.contains("exceeds maximum"), "got: {err}");
+    }
+
+    // ── Auto-promotion integration: read loop ──────────────────────────────
+
+    /// Test that auto promotes to CrMode when the read loop receives a bare
+    /// `\r` followed by a non-`\n` byte across events.
+    #[tokio::test]
+    async fn char_framing_auto_promotes_on_bare_cr() {
+        let (tx, rx) = mpsc::channel(8);
+        tx.send(RxEvent::Data(b"line1\r".to_vec())).await.unwrap();
+        tx.send(RxEvent::Data(b"x".to_vec())).await.unwrap();
+        // After promotion, "more\r" splits on \r in CrMode.
+        tx.send(RxEvent::Data(b"more\r".to_vec())).await.unwrap();
+        drop(tx);
+
+        let out = read_bytes_via_session(
+            rx,
+            256,
+            Some(1000),
+            &fresh_ct(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(line_framing(None)),
+            None,
+        )
+        .await
+        .unwrap();
+
+        // First frame from promotion: "line1"
+        // Second frame: "xmore" (x stayed buffered + more, split on \r)
+        assert_eq!(out.frames.len(), 2);
+        assert_eq!(out.frames[0].data, b"line1");
+        assert_eq!(out.frames[1].data, b"xmore");
+    }
+
+    /// Test that flush_partial on timeout emits a pending \r as a frame.
+    #[tokio::test]
+    async fn char_framing_auto_flush_partial_on_timeout_emits_pending_cr() {
+        let (tx, rx) = mpsc::channel(8);
+        tx.send(RxEvent::Data(b"tail\r".to_vec())).await.unwrap();
+        // No more data — read times out.
+
+        let out = read_bytes_via_session(
+            rx,
+            256,
+            Some(80),
+            &fresh_ct(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(line_framing(None)),
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(out.frames.len(), 1);
+        assert_eq!(out.frames[0].data, b"tail\r");
+        assert_eq!(out.meta.stop_reason, RxStopReason::Timeout);
+    }
+
+    fn slip_framing() -> crate::framing::RxFramingConfig {
+        crate::framing::RxFramingConfig {
+            mode: crate::framing::RxFramingMode::Slip,
+            ..Default::default()
+        }
+    }
+
+    /// Read integration: SLIP decodes a frame from the event stream.
+    #[tokio::test]
+    async fn char_framing_slip_decode_success() {
+        let (tx, rx) = mpsc::channel(8);
+        tx.send(RxEvent::Data(vec![0xC0, b'h', b'i', 0xC0]))
+            .await
+            .unwrap();
+        drop(tx);
+
+        let out = read_bytes_via_session(
+            rx,
+            256,
+            Some(1000),
+            &fresh_ct(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(slip_framing()),
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(out.frames.len(), 1);
+        assert_eq!(out.frames[0].data, b"hi");
+        assert_eq!(out.frames[0].frame_type, "slip");
+    }
+
+    /// Read integration: SLIP malformed escape surfaces as Err.
+    #[tokio::test]
+    async fn char_framing_slip_malformed_surfaces_error() {
+        let (tx, rx) = mpsc::channel(8);
+        tx.send(RxEvent::Data(vec![0xC0, 0xDB, 0x41, 0xC0]))
+            .await
+            .unwrap();
+        drop(tx);
+
+        let result = read_bytes_via_session(
+            rx,
+            256,
+            Some(1000),
+            &fresh_ct(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(slip_framing()),
+            None,
+        )
+        .await;
+
+        match result {
+            Ok(_) => panic!("expected error for malformed SLIP"),
+            Err(msg) => assert!(
+                msg.contains("SLIP framing error"),
+                "error message should contain 'SLIP framing error': {msg}"
+            ),
+        }
     }
 }
