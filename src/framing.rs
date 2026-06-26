@@ -512,12 +512,12 @@ fn slip_decode(
                         }
                         _ => {
                             // Malformed escape: clear in-progress frame,
-                            // reset escaped flag, discard remaining buffer,
-                            // and resync on next END.
+                            // reset escaped flag, and resync on next END.
+                            // Remaining bytes in buf_outer stay for
+                            // BeforeFirstEnd to discard/scan on the next push.
                             buf.clear();
                             *escaped = false;
                             *state = SlipState::BeforeFirstEnd;
-                            buf_outer.clear();
                             return Err(FrameDecodeError::SlipInvalidEscape(b));
                         }
                     }
@@ -1672,10 +1672,13 @@ mod tests {
         // Malformed escape.
         let result = dec.push(b"\xC0\xDB\x41\xC0");
         assert!(result.is_err());
-        // After resync, decoder is in BeforeFirstEnd. Push a valid frame.
+        // After resync, decoder is in BeforeFirstEnd. The trailing END from
+        // the malformed chunk remains in buf_outer. Push a valid frame —
+        // two consecutive ENDs produce one empty frame then "ok".
         let frames = dec.push(b"\xC0ok\xC0").unwrap();
-        assert_eq!(frames.len(), 1);
-        assert_eq!(frames[0].data, b"ok");
+        assert_eq!(frames.len(), 2);
+        assert!(frames[0].data.is_empty());
+        assert_eq!(frames[1].data, b"ok");
     }
 
     #[test]
