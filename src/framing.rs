@@ -425,9 +425,10 @@ enum LineState {
     Crlf,
     /// `auto` initial state: split on `\n`, strip preceding `\r` (CRLF-aware).
     AutoLf,
-    /// Saw a `\r` at end of buffer with no trailing `\n` yet. Waiting for next
-    /// byte to decide if it's CRLF or bare CR.
-    PendingCr,
+    /// Saw a `\r` at end of buffer with no trailing `\n` yet. Stores the index
+    /// of the pending `\r` in `self.buf` at the moment of transition. Waiting
+    /// for next byte to decide if it's CRLF or bare CR.
+    PendingCr(usize),
     /// Promoted: split on bare `\r` only, ignore `\n` for the rest of the call.
     CrMode,
 }
@@ -539,7 +540,7 @@ impl FrameDecoder {
                     LineState::Cr => self.match_line_cr(),
                     LineState::Crlf => self.match_line_crlf(),
                     LineState::AutoLf => self.match_auto_lf(),
-                    LineState::PendingCr => self.match_pending_cr(),
+                    LineState::PendingCr(_) => self.match_pending_cr(),
                     LineState::CrMode => self.match_line_cr(),
                 },
                 DecoderMode::Delimiter(delim) => {
@@ -718,7 +719,7 @@ impl FrameDecoder {
             }
             // \r is the last byte in buffer → transition to PendingCr.
             if let DecoderMode::Line(ref mut state) = self.mode {
-                *state = LineState::PendingCr;
+                *state = LineState::PendingCr(cr_pos);
             }
             return None;
         }
@@ -727,20 +728,18 @@ impl FrameDecoder {
         None
     }
 
-    /// `PendingCr` state: buffer ends with a `\r`. The next byte decides.
+    /// `PendingCr` state: buffer has a `\r` at a known position. The next byte
+    /// after that `\r` decides.
     ///
     /// On next non-`\n` byte → bare CR confirmed, emit frame before `\r`,
-    /// drain, promote to [`LineState::CrMode`].
-    /// On `\n` → CRLF, emit frame before `\r\n`, drain, return to
-    /// [`LineState::AutoLf`].
+    /// drain through `\r`, promote to [`LineState::CrMode`].
+    /// On `\n` → CRLF, emit frame before `\r\n`, drain through `\r\n`, return
+    /// to [`LineState::AutoLf`].
     fn match_pending_cr(&mut self) -> Option<Vec<u8>> {
-        // self.buf starts with the data up to and including the pending \r.
-        // The pending \r is at the end of the previously buffered data.
-        // We need to find where that \r is.
-        let cr_pos = match self.buf.iter().rposition(|&b| b == b'\r') {
-            Some(p) => p,
-            None => {
-                // \r disappeared (shouldn't happen). Reset to AutoLf.
+        let cr_pos = match self.mode {
+            DecoderMode::Line(LineState::PendingCr(pos)) => pos,
+            _ => {
+                // Shouldn't happen. Reset to AutoLf.
                 if let DecoderMode::Line(ref mut state) = self.mode {
                     *state = LineState::AutoLf;
                 }

@@ -609,3 +609,47 @@ async fn pty_subscribe_framing_match_stops_at_frame() {
     }
     client.cancel().await.ok();
 }
+
+#[tokio::test]
+async fn pty_subscribe_line_auto_promotes_on_bare_cr_and_flushes_pending() {
+    let (_server, client, mut rx, mut pty, connection_id) = setup().await;
+
+    client
+        .peer()
+        .call_tool(tool_request(
+            "subscribe",
+            json!({
+                "connection_id": connection_id,
+                "poll_interval_ms": 50,
+                "rx_framing": { "type": "line" },
+            }),
+        ))
+        .await
+        .unwrap();
+
+    // Pending CR, no frame yet.
+    pty.write_device(b"line1\r").await.unwrap();
+    // Second byte 'l' (non-\n) confirms bare CR → emit "line1", promote to
+    // CrMode, then "line2\r" splits on \r → emit "line2".
+    pty.write_device(b"line2\r").await.unwrap();
+
+    let mut seen: Vec<(u64, String)> = Vec::new();
+    while !(seen.iter().any(|(_, d)| d == "line1") && seen.iter().any(|(_, d)| d == "line2")) {
+        let n = next_notification(&mut rx, Duration::from_secs(2))
+            .await
+            .unwrap();
+        let obj = n.data.as_object().unwrap();
+        if let Some(idx) = obj.get("frame_index").and_then(|v| v.as_u64()) {
+            assert_eq!(obj["frame_type"], json!("line"), "frame_type: {obj:?}");
+            let data = obj["data"].as_str().unwrap().to_string();
+            assert!(!data.contains('\r'), "terminator stripped: {data:?}");
+            seen.push((idx, data));
+        }
+    }
+
+    let line1 = seen.iter().find(|(_, d)| d == "line1").unwrap();
+    let line2 = seen.iter().find(|(_, d)| d == "line2").unwrap();
+    assert_eq!(line1.0, 0, "line1 is frame 0");
+    assert_eq!(line2.0, 1, "line2 is frame 1");
+    client.cancel().await.ok();
+}
