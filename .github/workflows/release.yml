@@ -79,25 +79,21 @@ jobs:
             echo "mode=release" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Create tag and draft release
+      - name: Create draft release
         if: steps.mode.outputs.mode == 'release'
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.version.outputs.tag }}
           SHA: ${{ steps.meta.outputs.sha }}
         run: |
-          git config user.name github-actions
-          git config user.email github-actions@github.com
-          # Idempotent: a re-run after a partial failure reuses the existing tag.
-          if ! git ls-remote --tags origin "refs/tags/$TAG" | grep -q .; then
-            git tag "$TAG" "$SHA"
-            git push origin "$TAG"
-          fi
-          # Create the release as a DRAFT. Immutable releases seal a release the
-          # moment it is published, so assets must be attached while it is still a
-          # draft; the publish-release job flips it to published once builds pass.
+          # Under immutable releases the tag cannot be created by `git push` (a
+          # ruleset restricts tag creation); GitHub creates it when the release
+          # is published. A draft does not create the tag yet, so we point it at
+          # the release commit, attach assets, then publish-release seals it.
+          # Idempotent: a re-run after a partial failure reuses the existing draft.
           if ! gh release view "$TAG" >/dev/null 2>&1; then
             gh release create "$TAG" \
+              --target "$SHA" \
               --draft \
               --title "$TAG" \
               --generate-notes
