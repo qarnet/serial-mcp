@@ -30,13 +30,17 @@ pub async fn write(
     let decoded_len = decoded_bytes_ref.len();
     clamp_or_err("write.data.len()", decoded_len, MAX_WRITE_BYTES)?;
 
-    // Resolve protocol preset: explicit tx_framing wins over preset.
-    let tx_framing = match args.protocol {
-        Some(p) => match args.tx_framing {
-            Some(explicit) => Some(explicit),
-            None => Some(crate::framing::preset_tx_framing(p)),
-        },
-        None => args.tx_framing,
+    // Resolve tx_framing: explicit > call protocol > connection default > connection protocol.
+    let tx_framing = if let Some(explicit) = args.tx_framing {
+        Some(explicit)
+    } else if let Some(p) = args.protocol {
+        Some(crate::framing::preset_tx_framing(p))
+    } else if let Some(def) = connection.tx_framing_default() {
+        Some(def.clone())
+    } else {
+        connection
+            .protocol_default()
+            .map(crate::framing::preset_tx_framing)
     };
 
     // Apply TX framing if configured.
@@ -115,20 +119,28 @@ pub async fn read(
     let session = rx_sessions.get_or_create(Arc::clone(&connection)).await;
     let event_rx = session.register_blocking();
 
-    // Resolve protocol preset for rx_framing and rx_parser.
-    let rx_framing = match args.protocol {
-        Some(p) => match args.rx_framing {
-            Some(explicit) => Some(explicit),
-            None => Some(crate::framing::preset_rx_framing(p)),
-        },
-        None => args.rx_framing,
+    // Resolve rx_framing + rx_parser: 4-layer precedence.
+    let rx_framing = if let Some(explicit) = args.rx_framing {
+        Some(explicit)
+    } else if let Some(p) = args.protocol {
+        Some(crate::framing::preset_rx_framing(p))
+    } else if let Some(def) = connection.rx_framing_default() {
+        Some(def.clone())
+    } else {
+        connection
+            .protocol_default()
+            .map(crate::framing::preset_rx_framing)
     };
-    let rx_parser = match args.protocol {
-        Some(p) => match args.rx_parser {
-            Some(explicit) => Some(explicit),
-            None => Some(crate::framing::preset_rx_parser(p)),
-        },
-        None => args.rx_parser,
+    let rx_parser = if let Some(explicit) = args.rx_parser {
+        Some(explicit)
+    } else if let Some(p) = args.protocol {
+        Some(crate::framing::preset_rx_parser(p))
+    } else if let Some(def) = connection.rx_parser_default() {
+        Some(def.clone())
+    } else {
+        connection
+            .protocol_default()
+            .map(crate::framing::preset_rx_parser)
     };
 
     let outcome = read_bytes_via_session(

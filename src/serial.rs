@@ -212,6 +212,18 @@ pub struct ConnectionConfig {
     /// Whether logging is enabled. Default: true when capacity > 0.
     #[serde(default = "default_true")]
     pub log_enabled: bool,
+    /// Default TX framing applied when `write` omits `tx_framing`.
+    #[serde(default)]
+    pub tx_framing: Option<crate::framing::TxFramingConfig>,
+    /// Default RX framing applied when `read`/`subscribe` omit `rx_framing`.
+    #[serde(default)]
+    pub rx_framing: Option<crate::framing::RxFramingConfig>,
+    /// Default RX parser applied when `read`/`subscribe` omit `rx_parser`.
+    #[serde(default)]
+    pub rx_parser: Option<crate::framing::ParserConfig>,
+    /// Default protocol preset. Expands to fill framing/parser gaps.
+    #[serde(default)]
+    pub protocol: Option<crate::framing::ProtocolPreset>,
 }
 
 fn default_log_capacity() -> usize {
@@ -609,6 +621,14 @@ pub struct SerialConnection {
     reconnect_attempts: AtomicU64,
     /// Last fatal I/O error message and timestamp.
     last_error: StdMutex<Option<(std::time::SystemTime, String)>>,
+    /// Default TX framing from profile/open call.
+    tx_framing_default: Option<crate::framing::TxFramingConfig>,
+    /// Default RX framing from profile/open call.
+    rx_framing_default: Option<crate::framing::RxFramingConfig>,
+    /// Default RX parser from profile/open call.
+    rx_parser_default: Option<crate::framing::ParserConfig>,
+    /// Default protocol preset from profile/open call.
+    protocol_default: Option<crate::framing::ProtocolPreset>,
 }
 
 impl fmt::Debug for SerialConnection {
@@ -644,6 +664,10 @@ impl SerialConnection {
                 port_info: None,
                 log_capacity: 1024,
                 log_enabled: true,
+                tx_framing: None,
+                rx_framing: None,
+                rx_parser: None,
+                protocol: None,
             },
             io,
         )
@@ -677,6 +701,10 @@ impl SerialConnection {
             reconnect_policy: StdMutex::new(ReconnectPolicy::default()),
             reconnect_attempts: AtomicU64::new(0),
             last_error: StdMutex::new(None),
+            tx_framing_default: config.tx_framing,
+            rx_framing_default: config.rx_framing,
+            rx_parser_default: config.rx_parser,
+            protocol_default: config.protocol,
         }
     }
 
@@ -723,6 +751,26 @@ impl SerialConnection {
     /// Return the per-connection event log buffer.
     pub fn log(&self) -> &Arc<crate::log_buffer::LogBuffer> {
         &self.log
+    }
+
+    /// Default TX framing stored on the connection (from profile or `open`).
+    pub fn tx_framing_default(&self) -> Option<&crate::framing::TxFramingConfig> {
+        self.tx_framing_default.as_ref()
+    }
+
+    /// Default RX framing stored on the connection.
+    pub fn rx_framing_default(&self) -> Option<&crate::framing::RxFramingConfig> {
+        self.rx_framing_default.as_ref()
+    }
+
+    /// Default RX parser stored on the connection.
+    pub fn rx_parser_default(&self) -> Option<&crate::framing::ParserConfig> {
+        self.rx_parser_default.as_ref()
+    }
+
+    /// Default protocol preset stored on the connection. `Copy`, so returned by value.
+    pub fn protocol_default(&self) -> Option<crate::framing::ProtocolPreset> {
+        self.protocol_default
     }
 
     /// Return the current connection health state.
@@ -831,6 +879,10 @@ impl SerialConnection {
             port_info: self.port_info.clone(),
             log_capacity: 1024, // preserve log config
             log_enabled: self.log.is_enabled(),
+            tx_framing: self.tx_framing_default().cloned(),
+            rx_framing: self.rx_framing_default().cloned(),
+            rx_parser: self.rx_parser_default().cloned(),
+            protocol: self.protocol_default(),
         }
     }
 
@@ -1815,6 +1867,10 @@ mod tests {
             port_info: None,
             log_capacity: 1024,
             log_enabled: true,
+            tx_framing: None,
+            rx_framing: None,
+            rx_parser: None,
+            protocol: None,
         });
         let owner_id = mgr.insert(c1).await.unwrap();
 
@@ -2115,4 +2171,10 @@ mod schema {
     // prefix_size and max_frames).
     check_schema!(tx_framing_config_has_no_uint_formats, TxFramingConfig);
     check_schema!(tx_framing_mode_has_no_uint_formats, TxFramingMode);
+
+    // Profile defaults (Phase 5 framing fields — no unsigned fields, but guard).
+    check_schema!(
+        profile_defaults_has_no_uint_formats,
+        crate::profiles::ProfileDefaults
+    );
 }

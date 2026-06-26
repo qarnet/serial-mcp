@@ -74,6 +74,19 @@ pub struct ProfileDefaults {
     /// Reserved for future safety policy hints. Not yet enforced.
     #[serde(default)]
     pub safety_policy: Option<String>,
+    /// Default TX framing applied when `write` omits `tx_framing`.
+    #[serde(default)]
+    pub tx_framing: Option<crate::framing::TxFramingConfig>,
+    /// Default RX framing applied when `read`/`subscribe` omit `rx_framing`.
+    #[serde(default)]
+    pub rx_framing: Option<crate::framing::RxFramingConfig>,
+    /// Default RX parser applied when `read`/`subscribe` omit `rx_parser`.
+    #[serde(default)]
+    pub rx_parser: Option<crate::framing::ParserConfig>,
+    /// Default protocol preset. When set, expands to fill any of the above
+    /// framing/parser fields that are themselves `None`.
+    #[serde(default)]
+    pub protocol: Option<crate::framing::ProtocolPreset>,
 }
 
 fn default_baud() -> u32 {
@@ -104,6 +117,10 @@ impl Default for ProfileDefaults {
             reconnect_policy: None,
             decoder: None,
             safety_policy: None,
+            tx_framing: None,
+            rx_framing: None,
+            rx_parser: None,
+            protocol: None,
         }
     }
 }

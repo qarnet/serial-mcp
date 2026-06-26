@@ -265,6 +265,10 @@ pub async fn open_profile(
             log_capacity: args.log_capacity,
             log_enabled: args.log_enabled,
             reconnect_policy: crate::serial::ReconnectPolicy::default(),
+            tx_framing: profile.defaults.tx_framing.clone(),
+            rx_framing: profile.defaults.rx_framing.clone(),
+            rx_parser: profile.defaults.rx_parser.clone(),
+            protocol: profile.defaults.protocol,
         },
     )
     .await
@@ -294,6 +298,10 @@ pub async fn save_profile(
         reconnect_policy: None,
         decoder: None,
         safety_policy: None,
+        tx_framing: conn.tx_framing_default().cloned(),
+        rx_framing: conn.rx_framing_default().cloned(),
+        rx_parser: conn.rx_parser_default().cloned(),
+        protocol: conn.protocol_default(),
     };
 
     let selector = crate::profiles::ProfileSelector {

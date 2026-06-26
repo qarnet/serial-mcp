@@ -34,6 +34,18 @@ pub struct OpenArgs {
     /// Reconnect policy for this connection. Default: disabled.
     #[serde(default)]
     pub reconnect_policy: crate::serial::ReconnectPolicy,
+    /// Default TX framing applied when subsequent `write` calls omit `tx_framing`.
+    #[serde(default)]
+    pub tx_framing: Option<crate::framing::TxFramingConfig>,
+    /// Default RX framing applied when subsequent `read`/`subscribe` omit `rx_framing`.
+    #[serde(default)]
+    pub rx_framing: Option<crate::framing::RxFramingConfig>,
+    /// Default RX parser applied when subsequent `read`/`subscribe` omit `rx_parser`.
+    #[serde(default)]
+    pub rx_parser: Option<crate::framing::ParserConfig>,
+    /// Default protocol preset. Expands to fill framing/parser gaps.
+    #[serde(default)]
+    pub protocol: Option<crate::framing::ProtocolPreset>,
 }
 
 fn default_log_capacity() -> usize {

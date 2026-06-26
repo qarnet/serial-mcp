@@ -176,6 +176,10 @@ proptest! {
             log_capacity: 1024,
             log_enabled: true,
             reconnect_policy: Default::default(),
+            tx_framing: None,
+            rx_framing: None,
+            rx_parser: None,
+            protocol: None,
         };
         assert_roundtrip!(args);
 
@@ -552,6 +556,10 @@ proptest! {
             log_capacity: 1024,
             log_enabled: true,
             reconnect_policy: Default::default(),
+            tx_framing: None,
+            rx_framing: None,
+            rx_parser: None,
+            protocol: None,
         };
         assert_roundtrip!(args);
     }

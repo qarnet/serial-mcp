@@ -133,6 +133,30 @@ pub async fn subscribe(
     let timeout_ms = args.timeout_ms;
     let no_new_rx_timeout_ms = args.no_new_rx_timeout_ms;
 
+    // Resolve rx_framing + rx_parser: 4-layer precedence.
+    let rx_framing = if let Some(explicit) = args.rx_framing {
+        Some(explicit)
+    } else if let Some(p) = args.protocol {
+        Some(crate::framing::preset_rx_framing(p))
+    } else if let Some(def) = connection.rx_framing_default() {
+        Some(def.clone())
+    } else {
+        connection
+            .protocol_default()
+            .map(crate::framing::preset_rx_framing)
+    };
+    let rx_parser = if let Some(explicit) = args.rx_parser {
+        Some(explicit)
+    } else if let Some(p) = args.protocol {
+        Some(crate::framing::preset_rx_parser(p))
+    } else if let Some(def) = connection.rx_parser_default() {
+        Some(def.clone())
+    } else {
+        connection
+            .protocol_default()
+            .map(crate::framing::preset_rx_parser)
+    };
+
     // Get or create the RX session for this connection, then register a
     // streaming consumer. The pump in the session is the *only* code that
     // reads from the serial port. This subscribe worker consumes from the
@@ -145,22 +169,6 @@ pub async fn subscribe(
     // Hold the reservation inside the spawned task so it lives for the
     // entire streaming lifetime and is released when the task finishes.
     let reservation = _reservation;
-
-    // Resolve protocol preset for rx_framing and rx_parser.
-    let rx_framing = match args.protocol {
-        Some(p) => match args.rx_framing {
-            Some(explicit) => Some(explicit),
-            None => Some(crate::framing::preset_rx_framing(p)),
-        },
-        None => args.rx_framing,
-    };
-    let rx_parser = match args.protocol {
-        Some(p) => match args.rx_parser {
-            Some(explicit) => Some(explicit),
-            None => Some(crate::framing::preset_rx_parser(p)),
-        },
-        None => args.rx_parser,
-    };
 
     let join = tokio::spawn(stream_rx_via_session(
         peer,

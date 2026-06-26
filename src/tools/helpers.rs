@@ -771,6 +771,10 @@ pub fn parse_open_args(args: OpenArgs) -> Result<ConnectionConfig, String> {
         port_info: None,
         log_capacity: args.log_capacity,
         log_enabled: args.log_enabled,
+        tx_framing: args.tx_framing,
+        rx_framing: args.rx_framing,
+        rx_parser: args.rx_parser,
+        protocol: args.protocol,
     })
 }
 
@@ -803,6 +807,10 @@ mod tests {
             log_capacity: 1024,
             log_enabled: true,
             reconnect_policy: Default::default(),
+            tx_framing: None,
+            rx_framing: None,
+            rx_parser: None,
+            protocol: None,
         };
         let config = parse_open_args(args).unwrap();
         assert_eq!(config.port, "/dev/ttyUSB0");
@@ -823,6 +831,10 @@ mod tests {
             log_capacity: 1024,
             log_enabled: true,
             reconnect_policy: Default::default(),
+            tx_framing: None,
+            rx_framing: None,
+            rx_parser: None,
+            protocol: None,
         };
         let err = parse_open_args(args).unwrap_err();
         assert!(err.contains("data_bits"));
