@@ -60,6 +60,43 @@ cargo test --test native_sim_connection_lifecycle -- --ignored --test-threads=1
 - Match metadata differs too: `read` match meta uses `accumulated.len()` for `bytes_returned`; `subscribe` uses cumulative emitted bytes (`total_returned`). Preserve these differences unless intentionally redesigning the API.
 - Production code convention here: no `unwrap`/`expect`, no `println!`, no committed `todo!()` / `unimplemented!()`.
 
+## Frame pipeline (TX + RX framing, parsers, presets, profile defaults)
+
+- `src/framing.rs` owns both RX and TX framing. RX: `RxFramingConfig` +
+  `RxFramingMode` (line/delimiter/length_prefixed/start_end/slip), `FrameDecoder`
+  (stateful, byte-driven), `FrameDecodeError`, `ParserConfig`/`ParserType`/
+  `ParsedFrame`. TX: `TxFramingConfig` + `TxFramingMode` (mirrors RX minus
+  `parser`/`max_frames`/`include_terminators`; SLIP; no `auto` line ending).
+- `FrameDecoder::new(&RxFramingConfig, Option<&ParserConfig>)` — 2-arg; parser
+  is a sibling, NOT nested in `RxFramingConfig`. `ReadArgs`/`SubscribeArgs` carry
+  `rx_framing` + `rx_parser` + `protocol` as siblings. `WriteArgs` carries
+  `tx_framing` + `protocol` (no parser).
+- `FrameDecoder::push()` returns `Result<Vec<Frame>, FrameDecodeError>`. Only
+  SLIP can return `Err` (malformed escape). All other decoders always return
+  `Ok`. Runtime decode errors (not construction errors) STOP both read and
+  subscribe — there is NO resume-on-error in the loop (resync state in the
+  decoder is defensive only; the loops stop on first error). This is a
+  deliberate asymmetry exception vs the construction-error asymmetry below.
+- `LineEnding::Auto` promotes to CR-split mode mid-stream when a bare `\r` is
+  confirmed (next non-`\n` byte or stop flush). Per-call state — resets on the
+  next read/subscribe. Confirmation timer reuses `no_new_rx_timeout_ms`; the
+  decoder is byte-driven (no timer callback).
+- `ProtocolPreset` (currently `AtCommand` only) is a `#[serde(tag = "type")]`
+  enum — JSON shape `{"type": "at_command"}`, NOT a bare string. Expands via
+  `preset_tx_framing`/`preset_rx_framing`/`preset_rx_parser`.
+- Framing/parser/protocol field precedence is FOUR layers per field: explicit
+  call field > call-time `protocol` preset > connection default (from
+  profile/open) > connection `protocol` preset. Resolution lives in
+  `io_ops::write`/`read` + `stream_ops::subscribe`. `ConnectionConfig` +
+  `SerialConnection` store the defaults; accessors `*_default()`.
+- `RxStopReason::FramingError` is a runtime decode-error stop reason (SLIP
+  malformed escape). NOT a normal stop (`is_normal_stop` excludes it). read
+  surfaces it as a tool `is_error: true` result; subscribe as a final
+  notification with `stop_reason: "framing_error"` + `error` field.
+- `subscribe` degrades bad framing configs (construction errors) to raw mode
+  with `warn!`; `read` propagates construction errors. This asymmetry is for
+  CONSTRUCTION errors (agent config). RUNTIME decode errors stop both.
+
 ## Test map
 
 - `cargo test --lib` covers core logic (incl. `serial::schema` uint-format regression tests).
@@ -73,7 +110,7 @@ cargo test --test native_sim_connection_lifecycle -- --ignored --test-threads=1
 - `tests/tx_session.rs` — cross-module TxSession wiring.
 - `tests/proptest.rs` — property-based and boundary-value tests.
 - `tests/config_schema_validation.rs` validates generated schemas against vendored examples; ignored case fetches upstream schemas.
-- `tests/native_sim_validation.rs` — native_sim firmware over PTY. 37 tests, < 4s, pure software. Env: `SERIAL_MCP_NATIVE_SIM_BIN` (default `build/native_sim/firmware/zephyr/zephyr.exe`).
+- `tests/native_sim_validation.rs` — native_sim firmware over PTY. 51 tests, < 13s, pure software. Env: `SERIAL_MCP_NATIVE_SIM_BIN` (default `build/native_sim/firmware/zephyr/zephyr.exe`).
 - `tests/native_sim_connection_lifecycle.rs` — software-only lifecycle (6 tests): named connection, `set_flow_control`, close-while-read, reopen, touch-command bootloader entry. Run with `--test-threads=1`.
 - There are no hardware-required tests in this repo. All test coverage is runnable on a normal Linux host.
 

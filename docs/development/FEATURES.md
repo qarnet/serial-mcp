@@ -10,10 +10,6 @@
 
 ## Near-term
 
-### Better newline / terminal semantics
-- configurable newline mode
-- terminal-oriented output normalization
-
 ### Config import/export
 - likely pairs with profiles (already shipped)
 
