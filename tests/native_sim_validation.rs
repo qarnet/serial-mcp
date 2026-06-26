@@ -141,6 +141,39 @@ async fn open_pty(
         .to_string()
 }
 
+async fn open_with(
+    client: &rmcp::service::RunningService<
+        rmcp::service::RoleClient,
+        common::NotificationCollector,
+    >,
+    pty_path: &str,
+    extra_fields: serde_json::Value,
+) -> String {
+    let mut body = json!({
+        "port": pty_path,
+        "name": NAME,
+        "baud_rate": BAUD_RATE,
+    });
+    if let serde_json::Value::Object(ref mut map) = body {
+        if let serde_json::Value::Object(extra) = extra_fields {
+            for (k, v) in extra {
+                map.insert(k, v);
+            }
+        }
+    }
+    let result = client
+        .peer()
+        .call_tool(tool_request("open", body))
+        .await
+        .expect("open call");
+    assert_ne!(result.is_error, Some(true), "open failed: {result:?}");
+    let s = result.structured_content.expect("structured open");
+    s["connection_id"]
+        .as_str()
+        .expect("connection_id")
+        .to_string()
+}
+
 async fn write_cmd(
     client: &rmcp::service::RunningService<
         rmcp::service::RoleClient,
@@ -2716,3 +2749,140 @@ async fn native_read_explicit_rx_framing_overrides_protocol() {
     client.cancel().await.ok();
     drop(fw);
 }
+
+// ── Connection-default e2e tests (Phase 5 layer 3-4) ────────────────────────
+
+#[tokio::test]
+#[ignore = "requires native_sim firmware binary"]
+#[cfg(unix)]
+async fn native_open_protocol_default_drives_write_and_read() {
+    let fw = NativeSimFirmware::spawn().await.expect("spawn zephyr.exe");
+    let pty_path = fw.pty_path().to_string();
+
+    let server = TestServer::start().await;
+    let (client, _rx) = connect_client(&server).await.unwrap();
+
+    let id = open_with(
+        &client,
+        &pty_path,
+        json!({ "protocol": { "type": "at_command" } }),
+    )
+    .await;
+    sync_boot(&client, &id).await;
+    flush_both(&client, &id).await;
+
+    let read_handle = {
+        let peer = client.peer().clone();
+        let id2 = id.clone();
+        tokio::spawn(async move {
+            peer.call_tool(tool_request(
+                "read",
+                json!({
+                    "connection_id": id2,
+                    "timeout_ms": 3000,
+                    "max_buffered_bytes": 512,
+                    "encoding": "utf8"
+                }),
+            ))
+            .await
+        })
+    };
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    client
+        .peer()
+        .call_tool(tool_request(
+            "write",
+            json!({ "connection_id": id, "data": "ping" }),
+        ))
+        .await
+        .expect("write");
+
+    let result = read_handle.await.unwrap().expect("read task");
+    assert_ne!(result.is_error, Some(true), "{result:?}");
+    let s = result.structured_content.expect("structured");
+    let frames = s["frames"].as_array().expect("frames array");
+    assert!(!frames.is_empty(), "expected at least one frame");
+    let f0 = &frames[0];
+    let parsed = f0["parsed"].as_object().expect("parsed object");
+    assert_eq!(parsed["parser"], json!("at_command"), "parser: {parsed:?}");
+    assert_eq!(parsed["response_type"], json!("data"));
+    let fields = parsed["fields"].as_array().expect("fields array");
+    assert!(
+        fields.iter().any(|f| f.as_str().unwrap().contains("pong")),
+        "fields should contain pong: {fields:?}"
+    );
+
+    close_connection(&client, &id).await;
+    client.cancel().await.ok();
+    drop(fw);
+}
+
+#[tokio::test]
+#[ignore = "requires native_sim firmware binary"]
+#[cfg(unix)]
+async fn native_explicit_rx_framing_beats_connection_default() {
+    let fw = NativeSimFirmware::spawn().await.expect("spawn zephyr.exe");
+    let pty_path = fw.pty_path().to_string();
+
+    let server = TestServer::start().await;
+    let (client, _rx) = connect_client(&server).await.unwrap();
+
+    let id = open_with(
+        &client,
+        &pty_path,
+        json!({
+            "protocol": { "type": "at_command" },
+            "rx_framing": { "type": "line", "ending": "lf" }
+        }),
+    )
+    .await;
+    sync_boot(&client, &id).await;
+    flush_both(&client, &id).await;
+
+    let read_handle = {
+        let peer = client.peer().clone();
+        let id2 = id.clone();
+        tokio::spawn(async move {
+            peer.call_tool(tool_request(
+                "read",
+                json!({
+                    "connection_id": id2,
+                    "timeout_ms": 3000,
+                    "max_buffered_bytes": 512,
+                    "encoding": "utf8"
+                }),
+            ))
+            .await
+        })
+    };
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    write_cmd(&client, &id, "ping").await;
+
+    let result = read_handle.await.unwrap().expect("read task");
+    assert_ne!(result.is_error, Some(true), "{result:?}");
+    let s = result.structured_content.expect("structured");
+    let frames = s["frames"].as_array().expect("frames array");
+    assert!(!frames.is_empty(), "expected at least one frame");
+    let f0 = &frames[0];
+
+    let parsed = f0["parsed"].as_object().expect("parsed object");
+    assert_eq!(parsed["parser"], json!("at_command"), "parser: {parsed:?}");
+
+    let data = f0["data"].as_str().expect("frame data");
+    assert!(
+        data.ends_with('\r'),
+        "connection lf default should retain \\r: {data:?}"
+    );
+
+    close_connection(&client, &id).await;
+    client.cancel().await.ok();
+    drop(fw);
+}
+
+// save_profile snapshots not tested on native_sim — save_profile requires
+// port_info (USB identity) which the software PTY does not provide.
+// The save_profile wiring (port_ops.rs) copies the four defaults from the
+// connection; the struct-level snapshot is exercised by the
+// ProfileDefaults roundtrip test in src/profiles.rs tests.
