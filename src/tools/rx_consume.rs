@@ -6,7 +6,7 @@
 //! drives it. The raw (no-framing) path is intentionally NOT shared — read and
 //! subscribe differ there semantically (scan extent).
 
-use crate::framing::{Frame, FrameDecoder};
+use crate::framing::{Frame, FrameDecodeError, FrameDecoder};
 use crate::match_config::{MatchResult, Matcher};
 use crate::rx_metadata::RxStopReason;
 use crate::serial::{ConnectionState, SerialConnection};
@@ -29,6 +29,8 @@ pub enum FrameOutcome {
     MaxFrames,
     /// The sink returned [`SinkFlow::Stop`].
     SinkStop(RxStopReason),
+    /// A runtime decode error occurred (e.g. SLIP malformed escape).
+    DecodeError(FrameDecodeError),
 }
 
 /// Per-frame output action. `read` collects frames; `subscribe` emits
@@ -56,7 +58,11 @@ pub async fn consume_frames<S: RxFrameSink>(
     frames_seen: &mut usize,
     sink: &mut S,
 ) -> FrameOutcome {
-    for frame in decoder.push(chunk) {
+    let frames = match decoder.push(chunk) {
+        Ok(f) => f,
+        Err(e) => return FrameOutcome::DecodeError(e),
+    };
+    for frame in frames {
         *frames_seen += 1;
         let match_index = match matcher.as_mut() {
             Some(m) => {

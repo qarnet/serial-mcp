@@ -230,6 +230,7 @@ proptest! {
                 end: "ETX".into(),
                 marker_encoding: PatternEncoding::Utf8,
             },
+            TxFramingMode::Slip,
         ];
         for mode in modes {
             let args = WriteArgs {
@@ -805,4 +806,13 @@ fn rx_framing_config_roundtrip_all_modes() {
     assert!(matches!(c8.mode, RxFramingMode::StartEnd { .. }));
     assert!(c8.parser.is_some());
     assert!(c8.max_frames.is_none());
+
+    // SLIP (parameterless)
+    let c9 = RxFramingConfig {
+        mode: RxFramingMode::Slip,
+        ..Default::default()
+    };
+    let json = serde_json::to_value(&c9).unwrap();
+    let c10: RxFramingConfig = serde_json::from_value(json).unwrap();
+    assert!(matches!(c10.mode, RxFramingMode::Slip));
 }

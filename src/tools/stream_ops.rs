@@ -371,6 +371,7 @@ async fn stream_rx_via_session(
     let mut stop_outcome: Option<crate::stop_controller::RxStopOutcome> = None;
     let mut match_frame_index: Option<usize> = None;
     let mut match_offset: Option<usize> = None;
+    let mut frame_error_msg: Option<String> = None;
 
     // Track total bytes sent via per-chunk data notifications, so
     // bytes_returned in the stop payload reflects cumulative delivered
@@ -514,6 +515,11 @@ async fn stream_rx_via_session(
                             });
                         }
                         FrameOutcome::Continue => {}
+                        FrameOutcome::DecodeError(e) => {
+                            error!("RX framing decode error on {conn_id}: {e}");
+                            frame_error_msg = Some(e.to_string());
+                            stop_outcome = Some(ctrl.framing_error(e));
+                        }
                     }
                 }
                 if stop_outcome.is_some() {
@@ -678,6 +684,9 @@ async fn stream_rx_via_session(
         "no_new_rx_timeout_ms": no_new_rx_timeout_ms,
         "frames_emitted": frames_emitted,
     });
+    if let Some(ref e) = frame_error_msg {
+        stop_payload["error"] = serde_json::json!(e);
+    }
     if outcome.matched {
         stop_payload["matched"] = serde_json::json!(true);
         stop_payload["match_frame_index"] = serde_json::json!(match_frame_index);

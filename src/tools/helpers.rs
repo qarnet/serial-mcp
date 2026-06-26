@@ -513,6 +513,9 @@ pub async fn read_bytes_via_session(
                             RxStopMetadata::max_frames(ctrl.bytes_observed(), accumulated.len());
                         finish!(accumulated, meta, false, None, None);
                     }
+                    if let FrameOutcome::DecodeError(e) = outcome {
+                        return Err(format!("{e}"));
+                    }
                 }
 
                 // When framing is NOT active, match on raw chunk bytes.
@@ -1651,5 +1654,73 @@ mod tests {
         assert_eq!(out.frames.len(), 1);
         assert_eq!(out.frames[0].data, b"tail\r");
         assert_eq!(out.meta.stop_reason, RxStopReason::Timeout);
+    }
+
+    fn slip_framing() -> crate::framing::RxFramingConfig {
+        crate::framing::RxFramingConfig {
+            mode: crate::framing::RxFramingMode::Slip,
+            ..Default::default()
+        }
+    }
+
+    /// Read integration: SLIP decodes a frame from the event stream.
+    #[tokio::test]
+    async fn char_framing_slip_decode_success() {
+        let (tx, rx) = mpsc::channel(8);
+        tx.send(RxEvent::Data(vec![0xC0, b'h', b'i', 0xC0]))
+            .await
+            .unwrap();
+        drop(tx);
+
+        let out = read_bytes_via_session(
+            rx,
+            256,
+            Some(1000),
+            &fresh_ct(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(slip_framing()),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(out.frames.len(), 1);
+        assert_eq!(out.frames[0].data, b"hi");
+        assert_eq!(out.frames[0].frame_type, "slip");
+    }
+
+    /// Read integration: SLIP malformed escape surfaces as Err.
+    #[tokio::test]
+    async fn char_framing_slip_malformed_surfaces_error() {
+        let (tx, rx) = mpsc::channel(8);
+        tx.send(RxEvent::Data(vec![0xC0, 0xDB, 0x41, 0xC0]))
+            .await
+            .unwrap();
+        drop(tx);
+
+        let result = read_bytes_via_session(
+            rx,
+            256,
+            Some(1000),
+            &fresh_ct(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(slip_framing()),
+        )
+        .await;
+
+        match result {
+            Ok(_) => panic!("expected error for malformed SLIP"),
+            Err(msg) => assert!(
+                msg.contains("SLIP framing error"),
+                "error message should contain 'SLIP framing error': {msg}"
+            ),
+        }
     }
 }

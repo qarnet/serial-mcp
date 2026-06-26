@@ -273,7 +273,7 @@ pub struct ReadResult {
     /// Why the operation stopped. One of: `data_complete`, `timeout`,
     /// `match_found`, `max_buffered_bytes`, `no_new_rx_timeout`,
     /// `connection_closed`, `cancelled`, `read_error`, `channel_closed`,
-    /// `peer_disconnected`, `budget_exhausted`.
+    /// `peer_disconnected`, `budget_exhausted`, `max_frames`, `framing_error`.
     pub stop_reason: String,
     /// `true` when `bytes_returned < bytes_observed` because the result
     /// data was capped (e.g. `max_buffered_bytes` limit exceeded observed

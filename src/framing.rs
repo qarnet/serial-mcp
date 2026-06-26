@@ -108,6 +108,9 @@ pub enum RxFramingMode {
         #[serde(default)]
         include_markers: bool,
     },
+    /// SLIP (RFC 1055) framing. Byte-stuffed payloads between END (0xC0) markers.
+    #[serde(rename_all = "snake_case")]
+    Slip,
 }
 
 /// Line ending style for RX line framing.
@@ -189,6 +192,9 @@ pub enum TxFramingMode {
         #[serde(default = "default_encoding")]
         marker_encoding: PatternEncoding,
     },
+    /// SLIP (RFC 1055) framing. Encodes as `END [stuffed payload] END`.
+    #[serde(rename_all = "snake_case")]
+    Slip,
 }
 
 /// Line ending for TX framing. No `auto` — agents must pick one.
@@ -292,6 +298,12 @@ impl TxFramingMode {
                 framed.extend_from_slice(&start_bytes);
                 framed.extend_from_slice(payload);
                 framed.extend_from_slice(&end_bytes);
+                Ok(framed)
+            }
+            TxFramingMode::Slip => {
+                let mut framed = vec![SLIP_END];
+                framed.extend_from_slice(&slip_stuff(payload));
+                framed.push(SLIP_END);
                 Ok(framed)
             }
         }
@@ -411,6 +423,9 @@ enum DecoderMode {
         include_markers: bool,
         in_frame: bool,
     },
+    Slip {
+        state: SlipState,
+    },
 }
 
 /// Internal line-decoder state.
@@ -433,8 +448,96 @@ enum LineState {
     CrMode,
 }
 
+/// SLIP decoder state.
+#[derive(Debug, Clone)]
+enum SlipState {
+    /// Discard bytes until the first END marker is seen.
+    BeforeFirstEnd,
+    /// Inside a frame. `buf` accumulates decoded payload bytes. `escaped` is
+    /// true after an `ESC` byte — the next byte is the escape code.
+    InFrame { buf: Vec<u8>, escaped: bool },
+}
+
 trait FrameParser: Send + Sync {
     fn parse(&self, data: &[u8]) -> ParsedFrame;
+}
+
+/// SLIP decoder: consume `buf_outer` byte-by-byte according to current
+/// [`SlipState`] in `mode`. Returns decoded frames, or `Err` for a
+/// malformed escape sequence. Updates `mode` state in-place.
+fn slip_decode(
+    buf_outer: &mut Vec<u8>,
+    frame_count: &mut usize,
+    parser: &Option<Box<dyn FrameParser>>,
+    mode: &mut DecoderMode,
+) -> Result<Vec<Frame>, FrameDecodeError> {
+    let mut frames = Vec::new();
+    let state = match mode {
+        DecoderMode::Slip { ref mut state } => state,
+        _ => return Ok(frames),
+    };
+
+    loop {
+        match state {
+            SlipState::BeforeFirstEnd => {
+                if let Some(pos) = buf_outer.iter().position(|&b| b == SLIP_END) {
+                    buf_outer.drain(..=pos);
+                    *state = SlipState::InFrame {
+                        buf: Vec::new(),
+                        escaped: false,
+                    };
+                    continue;
+                }
+                buf_outer.clear();
+                return Ok(frames);
+            }
+            SlipState::InFrame {
+                ref mut buf,
+                ref mut escaped,
+            } => {
+                if buf_outer.is_empty() {
+                    return Ok(frames);
+                }
+                let b = buf_outer.remove(0);
+
+                if *escaped {
+                    match b {
+                        SLIP_ESC_END => {
+                            buf.push(SLIP_END);
+                            *escaped = false;
+                        }
+                        SLIP_ESC_ESC => {
+                            buf.push(SLIP_ESC);
+                            *escaped = false;
+                        }
+                        _ => {
+                            return Err(FrameDecodeError::SlipInvalidEscape(b));
+                        }
+                    }
+                } else {
+                    match b {
+                        SLIP_END => {
+                            let data = std::mem::take(buf);
+                            *frame_count += 1;
+                            let parsed = parser.as_ref().map(|p| p.parse(&data));
+                            frames.push(Frame {
+                                data,
+                                index: *frame_count - 1,
+                                frame_type: "slip".into(),
+                                parsed,
+                            });
+                        }
+                        SLIP_ESC => {
+                            *escaped = true;
+                        }
+                        _ => {
+                            buf.push(b);
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 // ---- Frame decoder implementation ------------------------------------------
@@ -504,6 +607,12 @@ impl FrameDecoder {
                     None,
                 )
             }
+            RxFramingMode::Slip => (
+                DecoderMode::Slip {
+                    state: SlipState::BeforeFirstEnd,
+                },
+                None,
+            ),
         };
 
         let parser: Option<Box<dyn FrameParser>> = match &config.parser {
@@ -527,11 +636,23 @@ impl FrameDecoder {
         })
     }
 
-    /// Feed a chunk of bytes. Returns any complete frames found.
-    /// The caller is responsible for draining consumed bytes from
-    /// their accumulation buffer.
-    pub fn push(&mut self, chunk: &[u8]) -> Vec<Frame> {
+    /// Feed a chunk of bytes. Returns any complete frames found, or a
+    /// [`FrameDecodeError`] for protocol violations (SLIP malformed escape).
+    /// The caller is responsible for draining consumed bytes from their
+    /// accumulation buffer.
+    pub fn push(&mut self, chunk: &[u8]) -> Result<Vec<Frame>, FrameDecodeError> {
         self.buf.extend_from_slice(chunk);
+        // SLIP is handled separately via a free function to avoid borrow
+        // conflicts between the mutable mode borrow and self.
+        if matches!(self.mode, DecoderMode::Slip { .. }) {
+            let frames = slip_decode(
+                &mut self.buf,
+                &mut self.frame_count,
+                &self.parser,
+                &mut self.mode,
+            )?;
+            return Ok(frames);
+        }
         let mut frames = Vec::new();
         loop {
             let consumed = match &mut self.mode {
@@ -639,6 +760,7 @@ impl FrameDecoder {
                         None
                     }
                 }
+                DecoderMode::Slip { .. } => unreachable!("SLIP handled before match"),
             };
 
             match consumed {
@@ -656,7 +778,7 @@ impl FrameDecoder {
                 }
             }
         }
-        frames
+        Ok(frames)
     }
 
     /// `auto` initial state: scan for `\n` (CRLF-aware), detect bare `\r`.
@@ -823,6 +945,7 @@ impl FrameDecoder {
             DecoderMode::Delimiter(_) => "delimiter".into(),
             DecoderMode::LengthPrefixed { .. } => "length_prefixed".into(),
             DecoderMode::StartEnd { .. } => "start_end".into(),
+            DecoderMode::Slip { .. } => "slip".into(),
         }
     }
 
@@ -837,8 +960,26 @@ impl FrameDecoder {
         self.buf.len()
     }
 
-    /// Flush any remaining bytes as a partial frame.
+    /// Flush any remaining bytes as a partial frame. For SLIP, this drains
+    /// the in-frame buffer; pending escaped state is emitted as raw bytes.
     pub fn flush_partial(&mut self) -> Option<Frame> {
+        // SLIP: drain the in-frame buffer instead of self.buf.
+        if let DecoderMode::Slip {
+            state: SlipState::InFrame { ref mut buf, .. },
+        } = self.mode
+        {
+            if buf.is_empty() {
+                return None;
+            }
+            let data = std::mem::take(buf);
+            self.frame_count += 1;
+            return Some(Frame {
+                data,
+                index: self.frame_count - 1,
+                frame_type: "slip".into(),
+                parsed: None,
+            });
+        }
         if self.buf.is_empty() {
             return None;
         }
@@ -1017,6 +1158,57 @@ impl FrameParser for RawParser {
 
 // ---- Utility ---------------------------------------------------------------
 
+/// SLIP framing error: a malformed escape sequence was encountered during
+/// RX decode. Construction errors (e.g. invalid delimiter) are synchronous
+/// and configurable by the agent; runtime decode errors like this indicate
+/// stream corruption and are not recoverable by retrying the same bytes.
+#[derive(Debug, Clone)]
+pub enum FrameDecodeError {
+    /// SLIP `ESC` (0xDB) followed by an invalid byte (not `ESC_END` 0xDC
+    /// or `ESC_ESC` 0xDD).
+    SlipInvalidEscape(u8),
+}
+
+impl std::fmt::Display for FrameDecodeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FrameDecodeError::SlipInvalidEscape(b) => {
+                write!(f, "SLIP framing error: invalid escape byte 0x{b:02X}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for FrameDecodeError {}
+
+// ---- SLIP (RFC 1055) constants and codec ------------------------------------
+
+const SLIP_END: u8 = 0xC0;
+const SLIP_ESC: u8 = 0xDB;
+const SLIP_ESC_END: u8 = 0xDC;
+const SLIP_ESC_ESC: u8 = 0xDD;
+
+/// Byte-stuff a payload for SLIP TX framing. Replaces `END` (0xC0) with
+/// `ESC ESC_END` and `ESC` (0xDB) with `ESC ESC_ESC`. All other bytes pass
+/// through unchanged. The caller wraps the result in `END` markers.
+fn slip_stuff(payload: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(payload.len() + payload.len() / 10);
+    for &b in payload {
+        match b {
+            SLIP_END => {
+                out.push(SLIP_ESC);
+                out.push(SLIP_ESC_END);
+            }
+            SLIP_ESC => {
+                out.push(SLIP_ESC);
+                out.push(SLIP_ESC_ESC);
+            }
+            _ => out.push(b),
+        }
+    }
+    out
+}
+
 /// Find a subsequence in a slice. Returns the index of the first match.
 fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     if needle.is_empty() || haystack.len() < needle.len() {
@@ -1076,7 +1268,7 @@ mod tests {
             ..Default::default()
         };
         let mut dec = FrameDecoder::new(&config).unwrap();
-        let frames = dec.push(b"hello\n");
+        let frames = dec.push(b"hello\n").unwrap();
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].data, b"hello");
         assert_eq!(frames[0].index, 0);
@@ -1092,7 +1284,7 @@ mod tests {
             ..Default::default()
         };
         let mut dec = FrameDecoder::new(&config).unwrap();
-        let frames = dec.push(b"hello\r\nworld\n");
+        let frames = dec.push(b"hello\r\nworld\n").unwrap();
         assert_eq!(frames.len(), 2);
         assert_eq!(frames[0].data, b"hello");
         assert_eq!(frames[1].data, b"world");
@@ -1102,12 +1294,12 @@ mod tests {
     fn line_decoder_partial_across_chunks() {
         let config = RxFramingConfig::default();
         let mut dec = FrameDecoder::new(&config).unwrap();
-        let frames = dec.push(b"hel");
+        let frames = dec.push(b"hel").unwrap();
         assert!(frames.is_empty());
-        let frames = dec.push(b"lo\nwor");
+        let frames = dec.push(b"lo\nwor").unwrap();
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].data, b"hello");
-        let frames = dec.push(b"ld\n");
+        let frames = dec.push(b"ld\n").unwrap();
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].data, b"world");
     }
@@ -1116,7 +1308,7 @@ mod tests {
     fn line_decoder_empty_lines() {
         let config = RxFramingConfig::default();
         let mut dec = FrameDecoder::new(&config).unwrap();
-        let frames = dec.push(b"\n\n\n");
+        let frames = dec.push(b"\n\n\n").unwrap();
         assert_eq!(frames.len(), 3);
         for f in &frames {
             assert!(f.data.is_empty());
@@ -1133,7 +1325,7 @@ mod tests {
             ..Default::default()
         };
         let mut dec = FrameDecoder::new(&config).unwrap();
-        let frames = dec.push(b"hello\r\n");
+        let frames = dec.push(b"hello\r\n").unwrap();
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].data, b"hello\r\n");
     }
@@ -1149,7 +1341,7 @@ mod tests {
             ..Default::default()
         };
         let mut dec = FrameDecoder::new(&config).unwrap();
-        let frames = dec.push(b"hello\r\n");
+        let frames = dec.push(b"hello\r\n").unwrap();
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].data, b"hello\r");
         assert_eq!(frames[0].frame_type, "line");
@@ -1164,7 +1356,7 @@ mod tests {
             ..Default::default()
         };
         let mut dec = FrameDecoder::new(&config).unwrap();
-        let frames = dec.push(b"a\rb\r");
+        let frames = dec.push(b"a\rb\r").unwrap();
         assert_eq!(frames.len(), 2);
         assert_eq!(frames[0].data, b"a");
         assert_eq!(frames[1].data, b"b");
@@ -1180,7 +1372,7 @@ mod tests {
             ..Default::default()
         };
         let mut dec = FrameDecoder::new(&config).unwrap();
-        let frames = dec.push(b"a\r");
+        let frames = dec.push(b"a\r").unwrap();
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].data, b"a\r");
     }
@@ -1195,9 +1387,9 @@ mod tests {
         };
         let mut dec = FrameDecoder::new(&config).unwrap();
         // CRLF split across chunks: "\r" in first, "\n" in second.
-        let frames = dec.push(b"a\r");
+        let frames = dec.push(b"a\r").unwrap();
         assert!(frames.is_empty());
-        let frames = dec.push(b"\nb");
+        let frames = dec.push(b"\nb").unwrap();
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].data, b"a");
     }
@@ -1211,7 +1403,7 @@ mod tests {
             ..Default::default()
         };
         let mut dec = FrameDecoder::new(&config).unwrap();
-        let frames = dec.push(b"a\rb\n");
+        let frames = dec.push(b"a\rb\n").unwrap();
         assert_eq!(frames.len(), 0, "bare \\r should not split in crlf mode");
     }
 
@@ -1225,7 +1417,7 @@ mod tests {
             ..Default::default()
         };
         let mut dec = FrameDecoder::new(&config).unwrap();
-        let frames = dec.push(b"hello\r\n");
+        let frames = dec.push(b"hello\r\n").unwrap();
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].data, b"hello\r\n");
     }
@@ -1269,19 +1461,19 @@ mod tests {
     #[test]
     fn auto_does_not_promote_on_crlf() {
         let mut dec = FrameDecoder::new(&auto_config()).unwrap();
-        let frames = dec.push(b"a\r\nb\r\n");
+        let frames = dec.push(b"a\r\nb\r\n").unwrap();
         assert_eq!(frames.len(), 2);
         assert_eq!(frames[0].data, b"a");
         assert_eq!(frames[1].data, b"b");
         // After CRLF, decoder stays in AutoLf — next bare \r still triggers promotion.
-        let frames = dec.push(b"c\r");
+        let frames = dec.push(b"c\r").unwrap();
         assert!(frames.is_empty(), "pending CR after CRLF");
         // Push "d" — confirmation byte stays buffered as start of next line.
-        let frames = dec.push(b"d");
+        let frames = dec.push(b"d").unwrap();
         assert_eq!(frames.len(), 1, "bare CR confirmed on next non-\\n byte");
         assert_eq!(frames[0].data, b"c");
         // Now in CrMode. Buffer has "d". Push "e\r" → "de\r" → frame "de".
-        let frames = dec.push(b"e\r");
+        let frames = dec.push(b"e\r").unwrap();
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].data, b"de");
     }
@@ -1289,7 +1481,7 @@ mod tests {
     #[test]
     fn auto_does_not_promote_on_lf() {
         let mut dec = FrameDecoder::new(&auto_config()).unwrap();
-        let frames = dec.push(b"a\nb\n");
+        let frames = dec.push(b"a\nb\n").unwrap();
         assert_eq!(frames.len(), 2);
         assert_eq!(frames[0].data, b"a");
         assert_eq!(frames[1].data, b"b");
@@ -1299,15 +1491,15 @@ mod tests {
     fn auto_promotes_on_next_non_lf_byte() {
         let mut dec = FrameDecoder::new(&auto_config()).unwrap();
         // Push "line1\r" → \r at end, no frame emitted, enters PendingCr.
-        let frames = dec.push(b"line1\r");
+        let frames = dec.push(b"line1\r").unwrap();
         assert!(frames.is_empty());
         // Push "x" → non-\n byte confirms bare CR. Emit "line1", enter CrMode.
         // The "x" stays buffered as the start of the next line.
-        let frames = dec.push(b"x");
+        let frames = dec.push(b"x").unwrap();
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].data, b"line1");
         // In CrMode: push "more\r" → split on \r. Buffer had "x" + "more\r".
-        let frames = dec.push(b"more\r");
+        let frames = dec.push(b"more\r").unwrap();
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].data, b"xmore");
     }
@@ -1316,14 +1508,14 @@ mod tests {
     fn auto_crlf_after_pending_cr_cancels_promotion() {
         let mut dec = FrameDecoder::new(&auto_config()).unwrap();
         // Push "a\r" → pending CR.
-        let frames = dec.push(b"a\r");
+        let frames = dec.push(b"a\r").unwrap();
         assert!(frames.is_empty());
         // Push "\nb" → \n arrives, CRLF recognized. "b" stays buffered.
-        let frames = dec.push(b"\nb");
+        let frames = dec.push(b"\nb").unwrap();
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].data, b"a");
         // Back to AutoLf. Buffer has "b". Push "c\n" → "bc\n" → frame "bc".
-        let frames = dec.push(b"c\n");
+        let frames = dec.push(b"c\n").unwrap();
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].data, b"bc");
     }
@@ -1331,7 +1523,7 @@ mod tests {
     #[test]
     fn auto_flush_partial_emits_pending_cr() {
         let mut dec = FrameDecoder::new(&auto_config()).unwrap();
-        let frames = dec.push(b"tail\r");
+        let frames = dec.push(b"tail\r").unwrap();
         assert!(frames.is_empty());
         let partial = dec.flush_partial().expect("partial frame");
         assert_eq!(partial.data, b"tail\r");
@@ -1341,7 +1533,7 @@ mod tests {
     #[test]
     fn auto_flush_partial_emits_pending_cr_include_terminators() {
         let mut dec = FrameDecoder::new(&auto_config_include_terms()).unwrap();
-        let frames = dec.push(b"tail\r");
+        let frames = dec.push(b"tail\r").unwrap();
         assert!(frames.is_empty());
         let partial = dec.flush_partial().expect("partial frame");
         // include_terminators=true → the \r is included (already in buffer).
@@ -1352,11 +1544,11 @@ mod tests {
     fn auto_promotes_and_stays_in_cr_mode() {
         let mut dec = FrameDecoder::new(&auto_config()).unwrap();
         // Promote to CrMode.
-        dec.push(b"a\r");
-        dec.push(b"b");
+        dec.push(b"a\r").unwrap();
+        dec.push(b"b").unwrap();
         // In CrMode: \n is NOT a terminator, \r is.
         // Buffer has "b" from confirmation, then "x\ny\r" → "bx\ny\r" → split on \r.
-        let frames = dec.push(b"x\ny\r");
+        let frames = dec.push(b"x\ny\r").unwrap();
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].data, b"bx\ny");
     }
@@ -1364,9 +1556,9 @@ mod tests {
     #[test]
     fn auto_promotion_include_terminators() {
         let mut dec = FrameDecoder::new(&auto_config_include_terms()).unwrap();
-        let frames = dec.push(b"line1\r");
+        let frames = dec.push(b"line1\r").unwrap();
         assert!(frames.is_empty());
-        let frames = dec.push(b"x");
+        let frames = dec.push(b"x").unwrap();
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].data, b"line1\r");
     }
@@ -1375,14 +1567,157 @@ mod tests {
     fn auto_pending_cr_then_flush_keeps_frame_index_monotonic() {
         let mut dec = FrameDecoder::new(&auto_config()).unwrap();
         // Two LF lines.
-        let frames = dec.push(b"a\nb\n");
+        let frames = dec.push(b"a\nb\n").unwrap();
         assert_eq!(frames.len(), 2);
         assert_eq!(frames[0].index, 0);
         assert_eq!(frames[1].index, 1);
         // Pending CR, then flush.
-        dec.push(b"c\r");
+        dec.push(b"c\r").unwrap();
         let partial = dec.flush_partial().expect("partial frame");
         assert_eq!(partial.index, 2);
+    }
+
+    // ── SLIP (RFC 1055) tests ─────────────────────────────────────────────
+
+    #[test]
+    fn slip_stuff_replaces_end_and_esc() {
+        let payload = &[SLIP_END, SLIP_ESC, 0x41];
+        let stuffed = slip_stuff(payload);
+        assert_eq!(
+            stuffed,
+            &[SLIP_ESC, SLIP_ESC_END, SLIP_ESC, SLIP_ESC_ESC, 0x41]
+        );
+    }
+
+    #[test]
+    fn tx_slip_encodes_end_end() {
+        let mode = TxFramingMode::Slip;
+        let framed = mode.encode(b"hi").unwrap();
+        assert_eq!(framed, &[SLIP_END, b'h', b'i', SLIP_END]);
+    }
+
+    #[test]
+    fn tx_slip_stuffs_payload_with_end() {
+        let mode = TxFramingMode::Slip;
+        let framed = mode.encode(&[SLIP_END]).unwrap();
+        assert_eq!(framed, &[SLIP_END, SLIP_ESC, SLIP_ESC_END, SLIP_END]);
+    }
+
+    #[test]
+    fn tx_slip_stuffs_payload_with_esc() {
+        let mode = TxFramingMode::Slip;
+        let framed = mode.encode(&[SLIP_ESC]).unwrap();
+        assert_eq!(framed, &[SLIP_END, SLIP_ESC, SLIP_ESC_ESC, SLIP_END]);
+    }
+
+    fn slip_rx_config() -> RxFramingConfig {
+        RxFramingConfig {
+            mode: RxFramingMode::Slip,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn rx_slip_skips_to_first_end() {
+        let mut dec = FrameDecoder::new(&slip_rx_config()).unwrap();
+        let frames = dec.push(b"junk\xC0hi\xC0").unwrap();
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].data, b"hi");
+    }
+
+    #[test]
+    fn rx_slip_decodes_basic_frame() {
+        let mut dec = FrameDecoder::new(&slip_rx_config()).unwrap();
+        let frames = dec.push(b"\xC0hello\xC0").unwrap();
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].data, b"hello");
+    }
+
+    #[test]
+    fn rx_slip_decodes_esc_end() {
+        let mut dec = FrameDecoder::new(&slip_rx_config()).unwrap();
+        let frames = dec.push(b"\xC0\xDB\xDC\xC0").unwrap();
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].data, b"\xC0");
+    }
+
+    #[test]
+    fn rx_slip_decodes_esc_esc() {
+        let mut dec = FrameDecoder::new(&slip_rx_config()).unwrap();
+        let frames = dec.push(b"\xC0\xDB\xDD\xC0").unwrap();
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].data, b"\xDB");
+    }
+
+    #[test]
+    fn rx_slip_malformed_escape_returns_err() {
+        let mut dec = FrameDecoder::new(&slip_rx_config()).unwrap();
+        let result = dec.push(b"\xC0\xDB\x41\xC0");
+        match result {
+            Ok(_) => panic!("expected decode error"),
+            Err(FrameDecodeError::SlipInvalidEscape(b)) => assert_eq!(b, 0x41),
+        }
+    }
+
+    #[test]
+    fn rx_slip_two_frames_in_one_chunk() {
+        let mut dec = FrameDecoder::new(&slip_rx_config()).unwrap();
+        let frames = dec.push(b"\xC0aa\xC0bb\xC0").unwrap();
+        assert_eq!(frames.len(), 2);
+        assert_eq!(frames[0].data, b"aa");
+        assert_eq!(frames[1].data, b"bb");
+    }
+
+    #[test]
+    fn rx_slip_cross_chunk_frame() {
+        let mut dec = FrameDecoder::new(&slip_rx_config()).unwrap();
+        let frames = dec.push(b"\xC0hel").unwrap();
+        assert!(frames.is_empty());
+        let frames = dec.push(b"lo\xC0").unwrap();
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].data, b"hello");
+    }
+
+    #[test]
+    fn rx_slip_truncated_escape_holds_pending() {
+        let mut dec = FrameDecoder::new(&slip_rx_config()).unwrap();
+        let frames = dec.push(b"\xC0\xDB").unwrap();
+        assert!(frames.is_empty());
+        let frames = dec.push(b"\xDC\xC0").unwrap();
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].data, b"\xC0");
+    }
+
+    #[test]
+    fn rx_slip_flush_partial_emits_pending() {
+        let mut dec = FrameDecoder::new(&slip_rx_config()).unwrap();
+        let frames = dec.push(b"\xC0hel").unwrap();
+        assert!(frames.is_empty());
+        let partial = dec.flush_partial().expect("partial frame");
+        assert_eq!(partial.data, b"hel");
+        assert_eq!(partial.frame_type, "slip");
+    }
+
+    #[test]
+    fn roundtrip_slip_arbitrary_binary() {
+        let payload: &[u8] = &[SLIP_END, SLIP_ESC, 0x41, SLIP_ESC, SLIP_ESC_END, SLIP_END];
+        let mode = TxFramingMode::Slip;
+        let framed = mode.encode(payload).unwrap();
+        let mut dec = FrameDecoder::new(&slip_rx_config()).unwrap();
+        let frames = dec.push(&framed).unwrap();
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].data, payload);
+    }
+
+    #[test]
+    fn roundtrip_slip_empty_payload() {
+        let mode = TxFramingMode::Slip;
+        let framed = mode.encode(b"").unwrap();
+        assert_eq!(framed, &[SLIP_END, SLIP_END]);
+        let mut dec = FrameDecoder::new(&slip_rx_config()).unwrap();
+        let frames = dec.push(&framed).unwrap();
+        assert_eq!(frames.len(), 1);
+        assert!(frames[0].data.is_empty());
     }
 
     // ── Delimiter decoder ───────────────────────────────────────────────
@@ -1397,7 +1732,7 @@ mod tests {
             ..Default::default()
         };
         let mut dec = FrameDecoder::new(&config).unwrap();
-        let frames = dec.push(b"a|b|c|");
+        let frames = dec.push(b"a|b|c|").unwrap();
         assert_eq!(frames.len(), 3);
         assert_eq!(frames[0].data, b"a");
         assert_eq!(frames[1].data, b"b");
@@ -1414,7 +1749,7 @@ mod tests {
             ..Default::default()
         };
         let mut dec = FrameDecoder::new(&config).unwrap();
-        let frames = dec.push(b"xAAyAAz");
+        let frames = dec.push(b"xAAyAAz").unwrap();
         assert_eq!(frames.len(), 2);
         assert_eq!(frames[0].data, b"x");
         assert_eq!(frames[1].data, b"y");
@@ -1430,9 +1765,9 @@ mod tests {
             ..Default::default()
         };
         let mut dec = FrameDecoder::new(&config).unwrap();
-        let frames = dec.push(b"xA");
+        let frames = dec.push(b"xA").unwrap();
         assert!(frames.is_empty());
-        let frames = dec.push(b"By");
+        let frames = dec.push(b"By").unwrap();
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].data, b"x");
     }
@@ -1450,7 +1785,7 @@ mod tests {
             ..Default::default()
         };
         let mut dec = FrameDecoder::new(&config).unwrap();
-        let frames = dec.push(b"\x05hello\x02wo\x02rb");
+        let frames = dec.push(b"\x05hello\x02wo\x02rb").unwrap();
         assert_eq!(frames.len(), 3);
         assert_eq!(frames[0].data, b"hello");
         assert_eq!(frames[1].data, b"wo");
@@ -1470,7 +1805,7 @@ mod tests {
         let mut dec = FrameDecoder::new(&config).unwrap();
         let mut buf = vec![0x00, 0x05];
         buf.extend_from_slice(b"hello");
-        let frames = dec.push(&buf);
+        let frames = dec.push(&buf).unwrap();
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].data, b"hello");
     }
@@ -1489,7 +1824,7 @@ mod tests {
             ..Default::default()
         };
         let mut dec = FrameDecoder::new(&config).unwrap();
-        let frames = dec.push(b"noiseSTXdataETXjunkSTXmoreETX");
+        let frames = dec.push(b"noiseSTXdataETXjunkSTXmoreETX").unwrap();
         assert_eq!(frames.len(), 2);
         assert_eq!(frames[0].data, b"data");
         assert_eq!(frames[1].data, b"more");
@@ -1507,7 +1842,7 @@ mod tests {
             ..Default::default()
         };
         let mut dec = FrameDecoder::new(&config).unwrap();
-        let frames = dec.push(b"<data>");
+        let frames = dec.push(b"<data>").unwrap();
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].data, b"<data>");
     }
@@ -1619,7 +1954,7 @@ mod tests {
             ..Default::default()
         };
         let mut dec = FrameDecoder::new(&config).unwrap();
-        let frames = dec.push(b"OK\nERROR\n+CGREG: 0,1\n");
+        let frames = dec.push(b"OK\nERROR\n+CGREG: 0,1\n").unwrap();
         assert_eq!(frames.len(), 3);
         assert!(
             matches!(frames[0].parsed, Some(ParsedFrame::AtCommand { ref status, .. }) if status.as_deref() == Some("OK"))
@@ -1638,7 +1973,7 @@ mod tests {
     fn line_decoder_no_terminator_then_flush() {
         let config = RxFramingConfig::default();
         let mut dec = FrameDecoder::new(&config).unwrap();
-        let frames = dec.push(b"hello");
+        let frames = dec.push(b"hello").unwrap();
         assert!(frames.is_empty());
         assert_eq!(dec.pending_len(), 5);
         let partial = dec.flush_partial().expect("partial frame");
@@ -1674,7 +2009,7 @@ mod tests {
             ..Default::default()
         };
         let mut dec = FrameDecoder::new(&config).unwrap();
-        let frames = dec.push(b"\x00\x05hello");
+        let frames = dec.push(b"\x00\x05hello").unwrap();
         assert_eq!(frames.len(), 2);
         assert!(frames[0].data.is_empty());
         assert_eq!(frames[1].data, b"hello");
@@ -1691,7 +2026,7 @@ mod tests {
             ..Default::default()
         };
         let mut dec = FrameDecoder::new(&config).unwrap();
-        let frames = dec.push(b"\x0aABC");
+        let frames = dec.push(b"\x0aABC").unwrap();
         assert!(frames.is_empty());
         assert!(dec.pending_len() >= 3);
     }
@@ -1725,7 +2060,7 @@ mod tests {
         let mut dec = FrameDecoder::new(&config).unwrap();
         let mut buf = vec![0x00, 0x00, 0x00, 0x05];
         buf.extend_from_slice(b"hello");
-        let frames = dec.push(&buf);
+        let frames = dec.push(&buf).unwrap();
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].data, b"hello");
     }
@@ -1743,7 +2078,7 @@ mod tests {
         let mut dec = FrameDecoder::new(&config).unwrap();
         let mut buf = vec![0x05, 0x00, 0x00, 0x00];
         buf.extend_from_slice(b"hello");
-        let frames = dec.push(&buf);
+        let frames = dec.push(&buf).unwrap();
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].data, b"hello");
     }
@@ -1760,7 +2095,7 @@ mod tests {
             ..Default::default()
         };
         let mut dec = FrameDecoder::new(&config).unwrap();
-        let frames = dec.push(b"noise_without_markers");
+        let frames = dec.push(b"noise_without_markers").unwrap();
         assert!(frames.is_empty());
         assert!(dec.pending_len() <= 2);
     }
@@ -1777,7 +2112,7 @@ mod tests {
             ..Default::default()
         };
         let mut dec = FrameDecoder::new(&config).unwrap();
-        let frames = dec.push(b"<data_without_end");
+        let frames = dec.push(b"<data_without_end").unwrap();
         assert!(frames.is_empty(), "no end marker yet");
         let partial = dec.flush_partial().expect("partial frame after flush");
         assert_eq!(partial.data, b"data_without_end");
@@ -1815,9 +2150,9 @@ mod tests {
             ..Default::default()
         };
         let mut dec = FrameDecoder::new(&config).unwrap();
-        let frames = dec.push(b"AB");
+        let frames = dec.push(b"AB").unwrap();
         assert!(frames.is_empty());
-        let frames = dec.push(b"CdX");
+        let frames = dec.push(b"CdX").unwrap();
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].data, b"d");
     }
@@ -1949,7 +2284,7 @@ mod tests {
             ..Default::default()
         };
         let mut dec = FrameDecoder::new(&config).unwrap();
-        let frames = dec.push(b"hello\n");
+        let frames = dec.push(b"hello\n").unwrap();
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].data, b"hello");
     }
@@ -1965,7 +2300,7 @@ mod tests {
             ..Default::default()
         };
         let mut dec = FrameDecoder::new(&config).unwrap();
-        let frames = dec.push(b"XXXX\x05hello");
+        let frames = dec.push(b"XXXX\x05hello").unwrap();
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].data, b"hello");
     }
@@ -1981,7 +2316,7 @@ mod tests {
             ..Default::default()
         };
         let mut dec = FrameDecoder::new(&config).unwrap();
-        let frames = dec.push(b"a|b|");
+        let frames = dec.push(b"a|b|").unwrap();
         assert_eq!(frames.len(), 2);
         assert_eq!(frames[0].data, b"a|");
         assert_eq!(frames[1].data, b"b|");
@@ -2007,7 +2342,7 @@ mod tests {
             ..Default::default()
         };
         let mut dec = FrameDecoder::new(&config).unwrap();
-        let frames = dec.push(b"{\"a\":1}\n{\"b\":2}\n");
+        let frames = dec.push(b"{\"a\":1}\n{\"b\":2}\n").unwrap();
         assert_eq!(frames.len(), 2);
         assert!(matches!(frames[0].parsed, Some(ParsedFrame::Json(_))));
         assert!(matches!(frames[1].parsed, Some(ParsedFrame::Json(_))));
@@ -2025,13 +2360,13 @@ mod tests {
             ..Default::default()
         };
         let mut dec = FrameDecoder::new(&config).unwrap();
-        let frames = dec.push(b"||");
+        let frames = dec.push(b"||").unwrap();
         assert_eq!(frames.len(), 2);
         assert!(frames[0].data.is_empty());
         assert!(frames[1].data.is_empty());
 
         let mut dec = FrameDecoder::new(&config).unwrap();
-        let frames = dec.push(b"a||b|");
+        let frames = dec.push(b"a||b|").unwrap();
         assert_eq!(frames.len(), 3);
         assert_eq!(frames[0].data, b"a");
         assert!(frames[1].data.is_empty());
@@ -2049,9 +2384,9 @@ mod tests {
             ..Default::default()
         };
         let mut dec = FrameDecoder::new(&config).unwrap();
-        let frames = dec.push(b"\x00");
+        let frames = dec.push(b"\x00").unwrap();
         assert!(frames.is_empty());
-        let frames = dec.push(b"\x05hello");
+        let frames = dec.push(b"\x05hello").unwrap();
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].data, b"hello");
     }
@@ -2068,9 +2403,9 @@ mod tests {
             ..Default::default()
         };
         let mut dec = FrameDecoder::new(&config).unwrap();
-        let frames = dec.push(b"STXdataET");
+        let frames = dec.push(b"STXdataET").unwrap();
         assert!(frames.is_empty(), "end marker ETX not yet complete");
-        let frames = dec.push(b"X");
+        let frames = dec.push(b"X").unwrap();
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].data, b"data");
     }
@@ -2240,7 +2575,7 @@ mod tests {
         let payload = b"hello world";
         let framed = tx.encode(payload).unwrap();
         let mut dec = FrameDecoder::new(&rx_config).unwrap();
-        let frames = dec.push(&framed);
+        let frames = dec.push(&framed).unwrap();
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].data, payload);
     }
@@ -2259,7 +2594,7 @@ mod tests {
         let payload = b"hello world";
         let framed = tx.encode(payload).unwrap();
         let mut dec = FrameDecoder::new(&rx_config).unwrap();
-        let frames = dec.push(&framed);
+        let frames = dec.push(&framed).unwrap();
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].data, payload);
     }
@@ -2278,7 +2613,7 @@ mod tests {
         let payload = b"hello world";
         let framed = tx.encode(payload).unwrap();
         let mut dec = FrameDecoder::new(&rx_config).unwrap();
-        let frames = dec.push(&framed);
+        let frames = dec.push(&framed).unwrap();
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].data, payload);
     }
@@ -2299,7 +2634,7 @@ mod tests {
         let payload = b"data";
         let framed = tx.encode(payload).unwrap();
         let mut dec = FrameDecoder::new(&rx_config).unwrap();
-        let frames = dec.push(&framed);
+        let frames = dec.push(&framed).unwrap();
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].data, payload);
     }
@@ -2321,7 +2656,7 @@ mod tests {
         let payload = b"binary data";
         let framed = tx.encode(payload).unwrap();
         let mut dec = FrameDecoder::new(&rx_config).unwrap();
-        let frames = dec.push(&framed);
+        let frames = dec.push(&framed).unwrap();
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].data, payload);
     }
@@ -2343,7 +2678,7 @@ mod tests {
         let payload = b"binary data";
         let framed = tx.encode(payload).unwrap();
         let mut dec = FrameDecoder::new(&rx_config).unwrap();
-        let frames = dec.push(&framed);
+        let frames = dec.push(&framed).unwrap();
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].data, payload);
     }
@@ -2367,7 +2702,7 @@ mod tests {
         let payload = b"data";
         let framed = tx.encode(payload).unwrap();
         let mut dec = FrameDecoder::new(&rx_config).unwrap();
-        let frames = dec.push(&framed);
+        let frames = dec.push(&framed).unwrap();
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].data, payload);
     }
