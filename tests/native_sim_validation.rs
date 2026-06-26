@@ -179,6 +179,35 @@ async fn write_raw(
     assert_ne!(result.is_error, Some(true), "write failed: {result:?}");
 }
 
+async fn write_preset(
+    client: &rmcp::service::RunningService<
+        rmcp::service::RoleClient,
+        common::NotificationCollector,
+    >,
+    connection_id: &str,
+    data: &str,
+    extra_fields: serde_json::Value,
+) {
+    let mut body = json!({
+        "connection_id": connection_id,
+        "data": data,
+        "protocol": { "type": "at_command" },
+    });
+    if let serde_json::Value::Object(ref mut map) = body {
+        if let serde_json::Value::Object(extra) = extra_fields {
+            for (k, v) in extra {
+                map.insert(k, v);
+            }
+        }
+    }
+    let result = client
+        .peer()
+        .call_tool(tool_request("write", body))
+        .await
+        .expect("write call");
+    assert_ne!(result.is_error, Some(true), "write failed: {result:?}");
+}
+
 /// Read unstructured data string via the `read` tool.
 async fn read_str(
     client: &rmcp::service::RunningService<
@@ -2513,6 +2542,177 @@ async fn native_subscribe_framing_partial_on_close() {
     );
     assert!(saw_stop, "should emit stop notification on close");
 
+    client.cancel().await.ok();
+    drop(fw);
+}
+
+// ── Protocol preset e2e tests ─────────────────────────────────────────────<AZ>
+// (3 tests — requires native_sim firmware)
+
+#[tokio::test]
+#[ignore = "requires native_sim firmware binary"]
+#[cfg(unix)]
+async fn native_write_protocol_preset_appends_cr() {
+    let fw = NativeSimFirmware::spawn().await.expect("spawn zephyr.exe");
+    let pty_path = fw.pty_path().to_string();
+
+    let server = TestServer::start().await;
+    let (client, _rx) = connect_client(&server).await.unwrap();
+    let id = open_pty(&client, &pty_path).await;
+    sync_boot(&client, &id).await;
+    flush_both(&client, &id).await;
+
+    let read_handle = {
+        let peer = client.peer().clone();
+        let id2 = id.clone();
+        tokio::spawn(async move {
+            peer.call_tool(tool_request(
+                "read",
+                json!({
+                    "connection_id": id2,
+                    "timeout_ms": 3000,
+                    "max_buffered_bytes": 512,
+                    "encoding": "utf8",
+                    "protocol": { "type": "at_command" }
+                }),
+            ))
+            .await
+        })
+    };
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    write_preset(
+        &client,
+        &id,
+        "ping",
+        serde_json::Value::Object(Default::default()),
+    )
+    .await;
+
+    let result = read_handle.await.unwrap().expect("read task");
+    assert_ne!(result.is_error, Some(true), "{result:?}");
+    let s = result.structured_content.expect("structured");
+    let frames = s["frames"].as_array().expect("frames array");
+    assert!(!frames.is_empty(), "expected at least one frame");
+    let f0 = &frames[0];
+    let parsed = f0["parsed"].as_object().expect("parsed object");
+    assert_eq!(parsed["parser"], json!("at_command"), "parser: {parsed:?}");
+    assert_eq!(parsed["response_type"], json!("data"));
+    let fields = parsed["fields"].as_array().expect("fields array");
+    assert!(
+        fields.iter().any(|f| f.as_str().unwrap().contains("pong")),
+        "fields should contain pong: {fields:?}"
+    );
+
+    close_connection(&client, &id).await;
+    client.cancel().await.ok();
+    drop(fw);
+}
+
+#[tokio::test]
+#[ignore = "requires native_sim firmware binary"]
+#[cfg(unix)]
+async fn native_write_explicit_tx_framing_overrides_protocol() {
+    let fw = NativeSimFirmware::spawn().await.expect("spawn zephyr.exe");
+    let pty_path = fw.pty_path().to_string();
+
+    let server = TestServer::start().await;
+    let (client, _rx) = connect_client(&server).await.unwrap();
+    let id = open_pty(&client, &pty_path).await;
+    sync_boot(&client, &id).await;
+    flush_both(&client, &id).await;
+
+    let read_handle = {
+        let peer = client.peer().clone();
+        let id2 = id.clone();
+        tokio::spawn(async move {
+            peer.call_tool(tool_request(
+                "read",
+                json!({
+                    "connection_id": id2,
+                    "timeout_ms": 3000,
+                    "max_buffered_bytes": 512,
+                    "encoding": "utf8",
+                    "protocol": { "type": "at_command" }
+                }),
+            ))
+            .await
+        })
+    };
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    write_preset(
+        &client,
+        &id,
+        "ping",
+        json!({ "tx_framing": { "type": "line", "ending": "crlf" } }),
+    )
+    .await;
+
+    let result = read_handle.await.unwrap().expect("read task");
+    assert_ne!(result.is_error, Some(true), "{result:?}");
+    let s = result.structured_content.expect("structured");
+    let frames = s["frames"].as_array().expect("frames array");
+    assert!(!frames.is_empty(), "expected at least one frame");
+    let f0 = &frames[0];
+    let parsed = f0["parsed"].as_object().expect("parsed object");
+    assert_eq!(parsed["parser"], json!("at_command"), "parser: {parsed:?}");
+    assert_eq!(parsed["response_type"], json!("data"));
+
+    close_connection(&client, &id).await;
+    client.cancel().await.ok();
+    drop(fw);
+}
+
+#[tokio::test]
+#[ignore = "requires native_sim firmware binary"]
+#[cfg(unix)]
+async fn native_read_explicit_rx_framing_overrides_protocol() {
+    let fw = NativeSimFirmware::spawn().await.expect("spawn zephyr.exe");
+    let pty_path = fw.pty_path().to_string();
+
+    let server = TestServer::start().await;
+    let (client, _rx) = connect_client(&server).await.unwrap();
+    let id = open_pty(&client, &pty_path).await;
+    sync_boot(&client, &id).await;
+    flush_both(&client, &id).await;
+
+    let read_handle = {
+        let peer = client.peer().clone();
+        let id2 = id.clone();
+        tokio::spawn(async move {
+            peer.call_tool(tool_request(
+                "read",
+                json!({
+                    "connection_id": id2,
+                    "timeout_ms": 3000,
+                    "max_buffered_bytes": 512,
+                    "encoding": "utf8",
+                    "protocol": { "type": "at_command" },
+                    "rx_framing": { "type": "line", "ending": "lf" }
+                }),
+            ))
+            .await
+        })
+    };
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    write_cmd(&client, &id, "ping").await;
+
+    let result = read_handle.await.unwrap().expect("read task");
+    assert_ne!(result.is_error, Some(true), "{result:?}");
+    let s = result.structured_content.expect("structured");
+    let frames = s["frames"].as_array().expect("frames array");
+    assert!(!frames.is_empty(), "expected at least one frame");
+    let f0 = &frames[0];
+
+    let parsed = f0["parsed"].as_object().expect("parsed object");
+    assert_eq!(parsed["parser"], json!("at_command"), "parser: {parsed:?}");
+
+    let data = f0["data"].as_str().expect("frame data");
+    assert!(data.ends_with('\r'), "lf mode should retain \\r: {data:?}");
+
+    close_connection(&client, &id).await;
     client.cancel().await.ok();
     drop(fw);
 }
