@@ -2,7 +2,7 @@
 
 | Version | Date | Highlights |
 |---|---|---|
-| [Unreleased](#unreleased) | — | `--version` flag + `version` subcommand, `BUILD_TARGET` in build.rs |
+| [Unreleased](#unreleased) | — | `--version` flag + `version` subcommand, `BUILD_TARGET` in build.rs; removed dead `ProfileDefaults` fields |
 | [0.7.0](#070) | 2026-06-26 | Frame pipeline: TX framing, SLIP, protocol presets, profile defaults, parser relocation |
 | [0.6.2](#062) | 2026-06-25 | Schema fix: suppress non-standard `uint8`/`uint16` formats; expanded schema regression guards + AGENTS.md truth |
 | [0.6.1](#061) | 2026-06-24 | RX refactor: shared framing sink, SerialHandler builder, config FromStr, dedup; docs cleanup |
@@ -30,6 +30,19 @@
   `serial-mcp <semver> (<git-hash>, <build-target>)` and exits 0.
 - `build.rs` injects `BUILD_TARGET` alongside `GIT_HASH` so the output is
   self-describing. Falls back to `unknown` for source-tarball builds.
+
+**Breaking — schema removal (pre-1.0):**
+- Removed three dead, never-enforced `Option<String>` fields from
+  `ProfileDefaults`: `reconnect_policy`, `decoder`, `safety_policy`. These
+  were declared "Reserved … Not yet enforced" and read by nothing.
+  `decoder` is superseded by the `protocol`/`rx_parser` fields; future
+  intent for `reconnect_policy` and `safety_policy` is preserved in
+  `FEATURES.md`. The live `Connection.reconnect_policy` (`ReconnectPolicy`
+  struct) is unaffected.
+- **Migration:** callers who set these fields in profile JSON can simply
+  drop them — they were never enforced. Because `ProfileDefaults` does not
+  carry `#[serde(deny_unknown_fields)]`, existing profile configs with the
+  dead fields continue to load (fields are silently ignored).
 
 ## [0.7.0]
 
