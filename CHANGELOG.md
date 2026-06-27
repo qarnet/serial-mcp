@@ -2,7 +2,7 @@
 
 | Version | Date | Highlights |
 |---|---|---|
-| [Unreleased](#unreleased) | — | — |
+| [Unreleased](#unreleased) | — | `--version` flag + `version` subcommand, `BUILD_TARGET` in build.rs |
 | [0.7.0](#070) | 2026-06-26 | Frame pipeline: TX framing, SLIP, protocol presets, profile defaults, parser relocation |
 | [0.6.2](#062) | 2026-06-25 | Schema fix: suppress non-standard `uint8`/`uint16` formats; expanded schema regression guards + AGENTS.md truth |
 | [0.6.1](#061) | 2026-06-24 | RX refactor: shared framing sink, SerialHandler builder, config FromStr, dedup; docs cleanup |
@@ -22,6 +22,14 @@
 | [0.1.0](#010) | — | Initial release (5 tools, STM32 demo) |
 
 ---
+
+## [Unreleased]
+
+**Added — CLI version readout:**
+- `serial-mcp --version` / `-V` / `version` subcommand prints
+  `serial-mcp <semver> (<git-hash>, <build-target>)` and exits 0.
+- `build.rs` injects `BUILD_TARGET` alongside `GIT_HASH` so the output is
+  self-describing. Falls back to `unknown` for source-tarball builds.
 
 ## [0.7.0]
 

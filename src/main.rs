@@ -29,7 +29,30 @@ enum Transport {
     Http,
 }
 
+fn version_string() -> String {
+    format!(
+        "serial-mcp {} ({}, {})\n",
+        env!("CARGO_PKG_VERSION"),
+        option_env!("GIT_HASH").unwrap_or("unknown"),
+        option_env!("BUILD_TARGET").unwrap_or("unknown"),
+    )
+}
+
+fn print_version_and_exit() {
+    print!("{}", version_string());
+    std::process::exit(0);
+}
+
 fn parse_args() -> Result<Args, pico_args::Error> {
+    // Short-circuit version requests before parsing, so they are not
+    // rejected as unexpected arguments by pargs.finish().
+    if std::env::args().any(|a| a == "-V" || a == "--version") {
+        print_version_and_exit();
+    }
+    if std::env::args().nth(1).as_deref() == Some("version") {
+        print_version_and_exit();
+    }
+
     let mut pargs = pico_args::Arguments::from_env();
 
     if pargs.contains(["-h", "--help"]) {
@@ -45,7 +68,11 @@ Options:
   --bind <addr>                     HTTP bind address (default: {bind})
   --max-program-buffered-bytes <N>  Global budget for all in-flight RX tools (default: {prog_default})
   --max-tool-buffered-bytes <N>     Per-tool ceiling for max_buffered_bytes (default: {tool_default})
+  -V, --version                     Print version and exit
   -h, --help                        Print this help
+
+Commands:
+  version                           Print version and exit
 
 Environment:
   RUST_LOG                   Log level (error/warn/info/debug/trace)
