@@ -573,24 +573,21 @@ enum SlipState {
 /// COBS decoder state.
 #[derive(Debug, Clone)]
 enum CobsState {
-    /// Discard bytes until the first delimiter is seen.
+    /// Discard bytes until the first 0x00 delimiter is seen (SLIP parity:
+    /// skip junk before the first frame marker).
     BeforeFirstDelim,
-    /// Reading a code block. `buf` accumulates decoded payload bytes.
-    /// When the decoder needs to insert a phantom zero but hasn't confirmed
-    /// whether the next byte is a delimiter (which would make the phantom
-    /// redundant), it transitions to PendingPhantom.
-    InBlock {
-        buf: Vec<u8>,
-        /// Remaining data bytes to read in the current code block.
+    /// Inside a frame. `decoded` accumulates the reconstructed payload (with
+    /// phantom zeros inserted by each non-0xFF code). `remaining` is data
+    /// bytes still to copy for the current code block; when `remaining == 0`
+    /// the next byte is a code byte (or the 0x00 delimiter ending the frame).
+    /// `pending_zero` is true when the current code block (non-0xFF) has its
+    /// implicit zero still to be appended after the remaining data bytes are
+    /// copied.
+    InFrame {
+        decoded: Vec<u8>,
         remaining: u8,
-        /// The code byte for the current block (0 = not in a block).
-        code: u8,
+        pending_zero: bool,
     },
-    /// A code block just finished and a phantom delimiter byte is pending.
-    /// On the next byte: if it's the delimiter, the phantom equals the
-    /// delimiter, so emit the frame without inserting it. If it's not the
-    /// delimiter, insert the phantom, then process the byte.
-    PendingPhantom { buf: Vec<u8> },
 }
 
 trait FrameParser: Send + Sync {
@@ -691,11 +688,11 @@ fn slip_decode(
         }
     }
 }
-/// COBS decoder: consume `buf_outer` according to current [`CobsState`]
-/// in `mode`. The delimiter is hardcoded to 0x00 (plain COBS). Returns
-/// decoded frames, or `Err` for an invalid code byte. Updates `mode`
-/// state in-place.
-#[allow(clippy::too_many_arguments)]
+/// COBS decoder: consume `buf_outer` according to current [`CobsState`].
+/// Returns decoded frames. A code byte of 0x00 (the delimiter) terminates the
+/// frame; the trailing phantom zero (inserted by the final non-0xFF code) is
+/// dropped before emitting the frame. Malformed code bytes surface as
+/// [`FrameDecodeError::CobsInvalidCode`].
 fn cobs_decode(
     buf_outer: &mut Vec<u8>,
     frame_count: &mut usize,
@@ -713,153 +710,102 @@ fn cobs_decode(
             CobsState::BeforeFirstDelim => {
                 if let Some(pos) = buf_outer.iter().position(|&b| b == 0x00) {
                     buf_outer.drain(..=pos);
-                    *state = CobsState::InBlock {
-                        buf: Vec::new(),
+                    *state = CobsState::InFrame {
+                        decoded: Vec::new(),
                         remaining: 0,
-                        code: 0,
+                        pending_zero: false,
                     };
                     continue;
                 }
                 buf_outer.clear();
                 return Ok(frames);
             }
-            CobsState::PendingPhantom { ref mut buf } => {
-                // We owe a phantom zero from the previous code block.
-                // Peek at the first byte: if it's the delimiter, the
-                // phantom IS the delimiter — emit the frame. If it's
-                // not, insert the phantom and continue.
-                if buf_outer.is_empty() {
-                    return Ok(frames);
-                }
-                let b = buf_outer[0];
-                if b == 0x00 {
-                    // No more data after the phantom — emit.
-                    let data = std::mem::take(buf);
-                    *frame_count += 1;
-                    let parsed = parser.as_ref().map(|p| p.parse(&data));
-                    frames.push(Frame {
-                        data,
-                        index: *frame_count - 1,
-                        frame_type: "cobs".into(),
-                        parsed,
-                    });
-                    // Transition back to InBlock for the next frame.
-                    *state = CobsState::InBlock {
-                        buf: Vec::new(),
-                        remaining: 0,
-                        code: 0,
-                    };
-                    // Don't drain b yet — it will be consumed in the
-                    // InBlock loop (or we continue the outer loop).
-                    continue;
-                }
-                // Byte is not delimiter → insert phantom and fall
-                // through to InBlock to process it.
-                buf.push(0x00);
-                let b = buf_outer.remove(0);
-                // The removed byte will be processed by InBlock.
-                // Push it back as the first item to be read.
-                buf_outer.insert(0, b);
-                *state = CobsState::InBlock {
-                    buf: std::mem::take(buf),
-                    remaining: 0,
-                    code: 0,
-                };
-                continue;
-            }
-            CobsState::InBlock {
-                ref mut buf,
+            CobsState::InFrame {
+                ref mut decoded,
                 ref mut remaining,
-                ref mut code,
+                ref mut pending_zero,
             } => {
                 let mut read_pos: usize = 0;
                 let len = buf_outer.len();
-                while read_pos < len {
+                loop {
+                    // 1. Flush pending zero first (does NOT consume a
+                    //    byte). This handles the code==1 case (zero data
+                    //    bytes) where the implicit zero is due immediately
+                    //    before the next code byte. For code>1, this flush
+                    //    happens on the iteration after the last data byte
+                    //    was copied (when remaining just hit 0), and the
+                    //    current b is the next code byte.
+                    if *remaining == 0 && *pending_zero {
+                        decoded.push(0x00);
+                        *pending_zero = false;
+                        // Fall through to code-byte handling (or the next
+                        // iteration will read the next byte). Do NOT
+                        // consume a byte from buf_outer for this flush.
+                    }
+                    // 2. If we have consumed all bytes in buf_outer, break.
+                    if read_pos >= len {
+                        break;
+                    }
                     let b = buf_outer[read_pos];
                     read_pos += 1;
 
+                    // 3. Copy data bytes for the current code block.
                     if *remaining > 0 {
-                        // Accumulate data bytes.
-                        buf.push(b);
+                        decoded.push(b);
                         *remaining -= 1;
-                        if *remaining == 0 && *code < 255 {
-                            // End of a non-continuation block.
-                            // Peek at the next byte to decide phantom zero.
-                            if read_pos < len {
-                                // Next byte is available now.
-                                let next = buf_outer[read_pos];
-                                if next == 0x00 {
-                                    // Phantom equals delimiter — emit frame.
-                                    *code = 0;
-                                    // b (the delimiter) will be processed
-                                    // in the next iteration.
-                                } else {
-                                    // Next byte is NOT delimiter: insert
-                                    // phantom and continue to process it.
-                                    buf.push(0x00);
-                                    *code = 0;
-                                }
-                            } else {
-                                // Next byte not yet available. Defer.
-                                *state = CobsState::PendingPhantom {
-                                    buf: std::mem::take(buf),
-                                };
-                                buf_outer.drain(..read_pos);
-                                return Ok(frames);
-                            }
+                        // (Pending-zero flush happens at top of next
+                        //  iteration when remaining hits 0.)
+                        continue;
+                    }
+
+                    // 4. Expecting a code byte (or the 0x00 delimiter).
+                    if b == 0x00 {
+                        // Frame delimiter: the final code's implicit zero
+                        // is the phantom. Drop it and emit the frame.
+                        let mut data = std::mem::take(decoded);
+                        // The final code is always non-0xFF (the encoder
+                        // always writes a final code for the phantom,
+                        // which is 0x01-0xFE). Pop the trailing zero that
+                        // the final code inserted. Defensive: only pop if
+                        // the last byte is 0x00.
+                        if data.last() == Some(&0x00) {
+                            data.pop();
                         }
+                        *frame_count += 1;
+                        let parsed = parser.as_ref().map(|p| p.parse(&data));
+                        frames.push(Frame {
+                            data,
+                            index: *frame_count - 1,
+                            frame_type: "cobs".into(),
+                            parsed,
+                        });
+                        *state = CobsState::BeforeFirstDelim;
+                        buf_outer.drain(..read_pos);
+                        // Continue the outer loop to look for the next
+                        // frame's leading delimiter (or run out of bytes).
+                        break;
+                    }
+
+                    // 5. Code byte: 0x01-0xFE => (code-1) data bytes then
+                    //    a zero; 0xFF => 254 data bytes, no zero.
+                    if b == 0xFF {
+                        *remaining = 254;
+                        *pending_zero = false;
                     } else {
-                        // Expecting a code byte (or delimiter).
-                        if b == 0x00 {
-                            let data = std::mem::take(buf);
-                            *frame_count += 1;
-                            let parsed = parser.as_ref().map(|p| p.parse(&data));
-                            frames.push(Frame {
-                                data,
-                                index: *frame_count - 1,
-                                frame_type: "cobs".into(),
-                                parsed,
-                            });
-                        } else {
-                            // The raw code byte is already valid (delimiter
-                            // is 0x00, so no remapping needed).
-                            let c = b;
-                            if c == 0 {
-                                buf_outer.drain(..read_pos);
-                                buf.clear();
-                                *state = CobsState::BeforeFirstDelim;
-                                return Err(FrameDecodeError::CobsInvalidCode(b));
-                            } else if c == 1 {
-                                // 0 data bytes, phantom pending.
-                                if read_pos < len {
-                                    let next = buf_outer[read_pos];
-                                    if next == 0x00 {
-                                        *remaining = 0;
-                                        *code = 1;
-                                    } else {
-                                        buf.push(0x00);
-                                        *remaining = 0;
-                                        *code = 0;
-                                    }
-                                } else {
-                                    *state = CobsState::PendingPhantom {
-                                        buf: std::mem::take(buf),
-                                    };
-                                    buf_outer.drain(..read_pos);
-                                    return Ok(frames);
-                                }
-                            } else if c == 255 {
-                                *remaining = 254;
-                                *code = 255;
-                            } else {
-                                *remaining = c - 1;
-                                *code = c;
-                            }
-                        }
+                        // b in 0x01-0xFE: set (code-1) data bytes,
+                        // then insert a zero.
+                        *remaining = b - 1;
+                        *pending_zero = true;
                     }
                 }
-                buf_outer.drain(..read_pos);
-                return Ok(frames);
+                // If we broke out of the inner loop via the delimiter,
+                // the outer loop continues with BeforeFirstDelim.
+                // Otherwise we consumed all bytes in buf_outer without
+                // hitting a delimiter — drain and wait for more bytes.
+                if !matches!(state, CobsState::BeforeFirstDelim) {
+                    buf_outer.drain(..read_pos);
+                    return Ok(frames);
+                }
             }
         }
     }
@@ -1303,32 +1249,17 @@ impl FrameDecoder {
                 parsed: None,
             });
         }
-        // COBS: drain the in-frame buffer (InBlock or PendingPhantom).
+        // COBS: drain the in-frame decoded buffer.
         if let DecoderMode::Cobs {
-            state: CobsState::InBlock { ref mut buf, .. },
+            state: CobsState::InFrame {
+                ref mut decoded, ..
+            },
         } = self.mode
         {
-            if buf.is_empty() {
+            if decoded.is_empty() {
                 return None;
             }
-            let data = std::mem::take(buf);
-            self.frame_count += 1;
-            return Some(Frame {
-                data,
-                index: self.frame_count - 1,
-                frame_type: "cobs".into(),
-                parsed: None,
-            });
-        }
-        // COBS PendingPhantom: flush the pending buffer.
-        if let DecoderMode::Cobs {
-            state: CobsState::PendingPhantom { ref mut buf },
-        } = self.mode
-        {
-            if buf.is_empty() {
-                return None;
-            }
-            let data = std::mem::take(buf);
+            let data = std::mem::take(decoded);
             self.frame_count += 1;
             return Some(Frame {
                 data,
@@ -1572,38 +1503,47 @@ fn slip_stuff(payload: &[u8]) -> Vec<u8> {
 }
 
 /// COBS-encode a payload for TX framing using plain COBS (delimiter 0x00).
-/// The encoded block does NOT contain the 0x00 delimiter byte; the caller
-/// appends it (and prepends it for SLIP-parity framing). The output is a
-/// sequence of [code][data...][code][data...] blocks, where each code byte
-/// gives the distance (in bytes) to the next 0x00 in the decoded output.
-/// No 0x00 bytes appear in the output.
+/// The encoded block contains no 0x00 bytes. The caller wraps the result as
+/// `[0x00][block][0x00]` (SLIP-parity framing).
+///
+/// Plain COBS treats the payload as ending with a phantom trailing 0x00.
+/// Codes 0x01-0xFE mean "the next 0x00 is `code` bytes ahead"; the receiver
+/// inserts a 0x00 after `code-1` data bytes. Code 0xFF means "254 non-zero
+/// data bytes follow, no implicit zero" (continuation for runs > 253).
 fn cobs_stuff(payload: &[u8]) -> Vec<u8> {
+    // Worst-case overhead: ceil(payload_len / 254) + 1 code bytes.
     let mut out: Vec<u8> = Vec::with_capacity(payload.len() + payload.len() / 254 + 2);
+    // `code_index` tracks the placeholder position for the current block's
+    // code byte; `code` counts bytes since the last zero (the distance to the
+    // next zero, including the zero itself).
     let mut code_index: usize = 0;
-    out.push(0x00); // placeholder
+    out.push(0x00); // placeholder for the first code byte
     let mut code: u8 = 1;
 
     for &b in payload {
         if b == 0x00 {
+            // End of a run: write the code at the placeholder, start a new
+            // block with a fresh placeholder.
             out[code_index] = code;
             code = 1;
             code_index = out.len();
-            out.push(0x00);
+            out.push(0x00); // placeholder for the next code
         } else {
-            // Emit continuation block (0xFF) when code == 0xFF (254 data
-            // bytes already in this block).
+            out.push(b);
+            code = code.saturating_add(1);
+            // 254 non-zero bytes with no zero: emit a continuation block
+            // (code 0xFF = "254 data bytes, no implicit zero") and start a
+            // new block. This keeps code values in 0x01-0xFF and bounds the
+            // overhead.
             if code == 0xFF {
                 out[code_index] = 0xFF;
-                code = 2; // new block: this byte + phantom
+                code = 1;
                 code_index = out.len();
-                out.push(0x00);
-                out.push(b);
-            } else {
-                out.push(b);
-                code = code.saturating_add(1);
+                out.push(0x00); // placeholder for the next code
             }
         }
     }
+    // Final code for the phantom trailing zero.
     out[code_index] = code;
     out
 }
@@ -3453,32 +3393,33 @@ mod tests {
     }
 
     #[test]
-    fn rx_cobs_invalid_code_surfaces_framing_error() {
-        // With plain COBS (delimiter 0x00), the CobsInvalidCode error path
-        // is unreachable because 0x00 is always interpreted as the
-        // delimiter, never as a code byte. The error variant remains in
-        // the codebase as a safety guard; with the hardcoded 0x00
-        // delimiter it can never be triggered through normal use. This
-        // test verifies that a stream of delimiter bytes decodes
-        // correctly as empty frames rather than triggering an error.
+    fn rx_cobs_consecutive_delimiters_emit_empty_frame() {
+        // With the canonical plain-COBS decoder, every byte value 0x01-0xFF
+        // is a valid code and 0x00 is the frame delimiter, so CobsInvalidCode
+        // is unreachable in practice. This test verifies that consecutive
+        // delimiter bytes are handled correctly: the first is consumed as a
+        // leading delimiter, the second terminates the (empty) frame.
         let mut dec = FrameDecoder::new(&cobs_rx_config(), None).unwrap();
-        // Three delimiter bytes: first is skipped (BeforeFirstDelim),
-        // second emits empty frame, third emits another empty frame.
-        let frames = dec.push(b"\x00\x00\x00").unwrap();
-        assert_eq!(frames.len(), 2);
-        for f in &frames {
-            assert!(f.data.is_empty());
-        }
+        // Two delimiter bytes: first consumed by BeforeFirstDelim, second
+        // emits an empty frame.
+        let frames = dec.push(b"\x00\x00").unwrap();
+        assert_eq!(
+            frames.len(),
+            1,
+            "2 consecutive delimiters yield 1 empty frame"
+        );
+        assert!(frames[0].data.is_empty());
     }
 
     #[test]
-    fn rx_cobs_resyncs_after_invalid_code() {
-        // With plain COBS (delimiter 0x00), the resync-after-invalid-code
-        // path is unreachable by construction. This test instead verifies
-        // the decoder correctly handles consecutive delimiters by producing
-        // empty frames and then processes a real payload normally.
+    fn rx_cobs_handles_between_frame_delimiters() {
+        // After emitting a frame on a delimiter, the decoder transitions to
+        // BeforeFirstDelim and skips any additional delimiters until the next
+        // frame's stuffed block. This test verifies that a stream of
+        // delimiters + a valid frame + more delimiters is handled correctly.
         let mut dec = FrameDecoder::new(&cobs_rx_config(), None).unwrap();
-        // Two consecutive delimiter bytes → one empty frame.
+        // Two consecutive delimiter bytes → one empty frame, then sync for
+        // next frame.
         let frames = dec.push(b"\x00\x00").unwrap();
         assert_eq!(frames.len(), 1);
         assert!(frames[0].data.is_empty());
@@ -3546,6 +3487,86 @@ mod tests {
     #[test]
     fn roundtrip_cobs_255_ones() {
         let payload = vec![1u8; 255];
+        let mode = TxFramingMode::Cobs;
+        let framed = mode.encode(&payload).unwrap();
+        let mut dec = FrameDecoder::new(&cobs_rx_config(), None).unwrap();
+        let frames = dec.push(&framed).unwrap();
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].data, payload);
+    }
+
+    #[test]
+    fn roundtrip_cobs_254_ones_then_zero() {
+        // Regression: 254 non-zero bytes then a trailing zero. This crossed
+        // the continuation boundary and dropped the trailing zero in the
+        // pre-canonical implementation.
+        let mut payload = vec![1u8; 254];
+        payload.push(0);
+        let mode = TxFramingMode::Cobs;
+        let framed = mode.encode(&payload).unwrap();
+        let mut dec = FrameDecoder::new(&cobs_rx_config(), None).unwrap();
+        let frames = dec.push(&framed).unwrap();
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].data, payload);
+    }
+
+    #[test]
+    fn roundtrip_cobs_255_ones_then_zero() {
+        let mut payload = vec![1u8; 255];
+        payload.push(0);
+        let mode = TxFramingMode::Cobs;
+        let framed = mode.encode(&payload).unwrap();
+        let mut dec = FrameDecoder::new(&cobs_rx_config(), None).unwrap();
+        let frames = dec.push(&framed).unwrap();
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].data, payload);
+    }
+
+    #[test]
+    fn roundtrip_cobs_256_ones_then_zero() {
+        // Crosses two continuation blocks.
+        let mut payload = vec![1u8; 256];
+        payload.push(0);
+        let mode = TxFramingMode::Cobs;
+        let framed = mode.encode(&payload).unwrap();
+        let mut dec = FrameDecoder::new(&cobs_rx_config(), None).unwrap();
+        let frames = dec.push(&framed).unwrap();
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].data, payload);
+    }
+
+    #[test]
+    fn roundtrip_cobs_510_ones_then_zero() {
+        // Two full continuation blocks then a zero.
+        let mut payload = vec![1u8; 510];
+        payload.push(0);
+        let mode = TxFramingMode::Cobs;
+        let framed = mode.encode(&payload).unwrap();
+        let mut dec = FrameDecoder::new(&cobs_rx_config(), None).unwrap();
+        let frames = dec.push(&framed).unwrap();
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].data, payload);
+    }
+
+    #[test]
+    fn roundtrip_cobs_alternating_ones_zeros_300() {
+        // 300 bytes alternating 0x01 / 0x00 — heavy zero density across the
+        // continuation boundary.
+        let payload: Vec<u8> = (0..300).map(|i| if i % 2 == 0 { 1 } else { 0 }).collect();
+        let mode = TxFramingMode::Cobs;
+        let framed = mode.encode(&payload).unwrap();
+        let mut dec = FrameDecoder::new(&cobs_rx_config(), None).unwrap();
+        let frames = dec.push(&framed).unwrap();
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].data, payload);
+    }
+
+    #[test]
+    fn roundtrip_cobs_all_byte_values_256() {
+        // Every byte value 0x00-0xFF once. Exercises embedded 0x00 and 0xFF
+        // (which is a non-zero data byte, NOT a code, when it appears in the
+        // data portion).
+        let payload: Vec<u8> = (0..=255u8).collect();
         let mode = TxFramingMode::Cobs;
         let framed = mode.encode(&payload).unwrap();
         let mut dec = FrameDecoder::new(&cobs_rx_config(), None).unwrap();
