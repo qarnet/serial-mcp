@@ -2,7 +2,7 @@
 
 | Version | Date | Highlights |
 |---|---|---|
-| [Unreleased](#unreleased) | — | `--version` flag + `version` subcommand, `BUILD_TARGET` in build.rs; removed dead `ProfileDefaults` fields; `slip` and `json_lines` protocol presets; COBS framing mode + `cobs` preset + `checksums` module |
+| [Unreleased](#unreleased) | — | `--version` flag + `version` subcommand, `BUILD_TARGET` in build.rs; removed dead `ProfileDefaults` fields; `slip` and `json_lines` protocol presets; COBS framing mode + `cobs` preset + `checksums` module; `ndjson` preset + `skip_empty` framing option |
 | [0.7.0](#070) | 2026-06-26 | Frame pipeline: TX framing, SLIP, protocol presets, profile defaults, parser relocation |
 | [0.6.2](#062) | 2026-06-25 | Schema fix: suppress non-standard `uint8`/`uint16` formats; expanded schema regression guards + AGENTS.md truth |
 | [0.6.1](#061) | 2026-06-24 | RX refactor: shared framing sink, SerialHandler builder, config FromStr, dedup; docs cleanup |
@@ -78,6 +78,21 @@
   checksum). The trait is the extension point for LRC (Modbus ASCII, P2) and
   CRC-16 (Modbus RTU, P3) — those ship with their consumers. No in-tree
   consumer yet in this PR.
+
+**Added — ndjson preset + skip_empty option:**
+- New `ndjson` protocol preset (`{"type": "ndjson"}`) bundling line framing
+  (`ending: auto` RX, `lf` TX) with the JSON-lines parser, and enabling
+  `skip_empty: true` to skip empty/whitespace-only lines per the NDJSON spec.
+  `ndjson` differs from `json_lines` only in `skip_empty: true` — both
+  share the same line + JSON-lines primitives.
+- New `skip_empty: bool` field (default `false`) on `RxFramingConfig`. When
+  true, frames whose data is empty or contains only ASCII whitespace are
+  silently dropped at the decoder level — they do not count toward `max_frames`
+  and do not consume a frame index. The filter applies to all framing modes
+  (line, delimiter, SLIP, COBS, length-prefixed, start/end) and runs inside
+  `FrameDecoder::push`, so `consume_frames`/matcher only see kept frames.
+  `flush_partial` intentionally bypasses `skip_empty` to preserve partial-frame
+  signals at end-of-stream.
 
 ## [0.7.0]
 

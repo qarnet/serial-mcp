@@ -768,6 +768,7 @@ fn rx_framing_config_roundtrip_all_modes() {
         },
         max_frames: Some(10),
         include_terminators: true,
+        skip_empty: false,
     };
     let json = serde_json::to_value(&c1).unwrap();
     let c2: RxFramingConfig = serde_json::from_value(json).unwrap();
@@ -783,6 +784,7 @@ fn rx_framing_config_roundtrip_all_modes() {
         },
         max_frames: None,
         include_terminators: false,
+        skip_empty: false,
     };
     let json = serde_json::to_value(&c3).unwrap();
     let c4: RxFramingConfig = serde_json::from_value(json).unwrap();
@@ -797,6 +799,7 @@ fn rx_framing_config_roundtrip_all_modes() {
         },
         max_frames: Some(0),
         include_terminators: false,
+        skip_empty: false,
     };
     let json = serde_json::to_value(&c5).unwrap();
     let c6: RxFramingConfig = serde_json::from_value(json).unwrap();
@@ -813,6 +816,7 @@ fn rx_framing_config_roundtrip_all_modes() {
         },
         max_frames: None,
         include_terminators: false,
+        skip_empty: false,
     };
     let json = serde_json::to_value(&c7).unwrap();
     let c8: RxFramingConfig = serde_json::from_value(json).unwrap();
@@ -827,4 +831,18 @@ fn rx_framing_config_roundtrip_all_modes() {
     let json = serde_json::to_value(&c9).unwrap();
     let c10: RxFramingConfig = serde_json::from_value(json).unwrap();
     assert!(matches!(c10.mode, RxFramingMode::Slip));
+
+    // Line with skip_empty: true (ndjson-style)
+    let c11 = RxFramingConfig {
+        mode: RxFramingMode::Line {
+            ending: LineEnding::Auto,
+        },
+        max_frames: None,
+        include_terminators: false,
+        skip_empty: true,
+    };
+    let json = serde_json::to_value(&c11).unwrap();
+    let c12: RxFramingConfig = serde_json::from_value(json).unwrap();
+    assert!(matches!(c12.mode, RxFramingMode::Line { .. }));
+    assert!(c12.skip_empty);
 }

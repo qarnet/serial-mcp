@@ -39,6 +39,12 @@ pub struct RxFramingConfig {
     /// Default: false (terminators are stripped).
     #[serde(default)]
     pub include_terminators: bool,
+    /// Skip frames whose data is empty or whitespace-only (ASCII whitespace).
+    /// Default: false. When true, empty/whitespace-only frames are not emitted
+    /// and do not increment the frame index. Applies to all framing modes.
+    /// The `ndjson` preset sets this true (NDJSON spec: skip blank lines).
+    #[serde(default)]
+    pub skip_empty: bool,
 }
 
 impl Default for RxFramingConfig {
@@ -49,6 +55,7 @@ impl Default for RxFramingConfig {
             },
             max_frames: None,
             include_terminators: false,
+            skip_empty: false,
         }
     }
 }
@@ -160,6 +167,10 @@ pub enum ProtocolPreset {
     /// COBS (Consistent Overhead Byte Stuffing, plain 0x00-delimited) framing,
     /// raw payload (no parser).
     Cobs,
+    /// NDJSON (newline-delimited JSON). Line framing (`auto` RX, `lf` TX) +
+    /// JSON-lines parser, skipping empty/whitespace-only lines per the NDJSON
+    /// spec. Differs from `json_lines` only in `skip_empty`.
+    Ndjson,
 }
 
 /// The TX framing implied by a protocol preset.
@@ -181,6 +192,11 @@ pub fn preset_tx_framing(p: ProtocolPreset) -> TxFramingConfig {
         ProtocolPreset::Cobs => TxFramingConfig {
             mode: TxFramingMode::Cobs,
         },
+        ProtocolPreset::Ndjson => TxFramingConfig {
+            mode: TxFramingMode::Line {
+                ending: TxLineEnding::Lf,
+            },
+        },
     }
 }
 
@@ -193,11 +209,13 @@ pub fn preset_rx_framing(p: ProtocolPreset) -> RxFramingConfig {
             },
             max_frames: None,
             include_terminators: false,
+            skip_empty: false,
         },
         ProtocolPreset::Slip => RxFramingConfig {
             mode: RxFramingMode::Slip,
             max_frames: None,
             include_terminators: false,
+            skip_empty: false,
         },
         ProtocolPreset::JsonLines => RxFramingConfig {
             mode: RxFramingMode::Line {
@@ -205,11 +223,21 @@ pub fn preset_rx_framing(p: ProtocolPreset) -> RxFramingConfig {
             },
             max_frames: None,
             include_terminators: false,
+            skip_empty: false,
         },
         ProtocolPreset::Cobs => RxFramingConfig {
             mode: RxFramingMode::Cobs,
             max_frames: None,
             include_terminators: false,
+            skip_empty: false,
+        },
+        ProtocolPreset::Ndjson => RxFramingConfig {
+            mode: RxFramingMode::Line {
+                ending: LineEnding::Auto,
+            },
+            max_frames: None,
+            include_terminators: false,
+            skip_empty: true,
         },
     }
 }
@@ -231,6 +259,10 @@ pub fn preset_rx_parser(p: ProtocolPreset) -> ParserConfig {
         },
         ProtocolPreset::Cobs => ParserConfig {
             parser_type: ParserType::Raw,
+            custom_prompt: None,
+        },
+        ProtocolPreset::Ndjson => ParserConfig {
+            parser_type: ParserType::JsonLines,
             custom_prompt: None,
         },
     }
@@ -513,6 +545,8 @@ pub struct FrameDecoder {
     frame_count: usize,
     /// Include terminators in frame data.
     include_terminators: bool,
+    /// Skip frames whose data is empty or whitespace-only.
+    skip_empty: bool,
     /// Optional parser for frame content.
     parser: Option<Box<dyn FrameParser>>,
 }
@@ -602,6 +636,7 @@ fn slip_decode(
     frame_count: &mut usize,
     parser: &Option<Box<dyn FrameParser>>,
     mode: &mut DecoderMode,
+    skip_empty: bool,
 ) -> Result<Vec<Frame>, FrameDecodeError> {
     let mut frames = Vec::new();
     let state = match mode {
@@ -661,14 +696,16 @@ fn slip_decode(
                         match b {
                             SLIP_END => {
                                 let data = std::mem::take(buf);
-                                *frame_count += 1;
-                                let parsed = parser.as_ref().map(|p| p.parse(&data));
-                                frames.push(Frame {
-                                    data,
-                                    index: *frame_count - 1,
-                                    frame_type: "slip".into(),
-                                    parsed,
-                                });
+                                if !skip_empty || !is_blank_frame(&data) {
+                                    *frame_count += 1;
+                                    let parsed = parser.as_ref().map(|p| p.parse(&data));
+                                    frames.push(Frame {
+                                        data,
+                                        index: *frame_count - 1,
+                                        frame_type: "slip".into(),
+                                        parsed,
+                                    });
+                                }
                             }
                             SLIP_ESC => {
                                 *escaped = true;
@@ -698,6 +735,7 @@ fn cobs_decode(
     frame_count: &mut usize,
     parser: &Option<Box<dyn FrameParser>>,
     mode: &mut DecoderMode,
+    skip_empty: bool,
 ) -> Result<Vec<Frame>, FrameDecodeError> {
     let mut frames = Vec::new();
     let state = match mode {
@@ -771,14 +809,16 @@ fn cobs_decode(
                         if data.last() == Some(&0x00) {
                             data.pop();
                         }
-                        *frame_count += 1;
-                        let parsed = parser.as_ref().map(|p| p.parse(&data));
-                        frames.push(Frame {
-                            data,
-                            index: *frame_count - 1,
-                            frame_type: "cobs".into(),
-                            parsed,
-                        });
+                        if !skip_empty || !is_blank_frame(&data) {
+                            *frame_count += 1;
+                            let parsed = parser.as_ref().map(|p| p.parse(&data));
+                            frames.push(Frame {
+                                data,
+                                index: *frame_count - 1,
+                                frame_type: "cobs".into(),
+                                parsed,
+                            });
+                        }
                         *state = CobsState::BeforeFirstDelim;
                         buf_outer.drain(..read_pos);
                         // Continue the outer loop to look for the next
@@ -895,6 +935,7 @@ impl FrameDecoder {
             mode,
             frame_count: 0,
             include_terminators: config.include_terminators,
+            skip_empty: config.skip_empty,
             parser,
         })
     }
@@ -913,6 +954,7 @@ impl FrameDecoder {
                 &mut self.frame_count,
                 &self.parser,
                 &mut self.mode,
+                self.skip_empty,
             )?;
             return Ok(frames);
         }
@@ -922,6 +964,7 @@ impl FrameDecoder {
                 &mut self.frame_count,
                 &self.parser,
                 &mut self.mode,
+                self.skip_empty,
             )?;
             return Ok(frames);
         }
@@ -1039,15 +1082,17 @@ impl FrameDecoder {
             match consumed {
                 None => break,
                 Some(frame_bytes) => {
-                    self.frame_count += 1;
-                    let parsed = self.parser.as_ref().map(|p| p.parse(&frame_bytes));
-                    let frame_type = self.frame_type_str();
-                    frames.push(Frame {
-                        data: frame_bytes,
-                        index: self.frame_count - 1,
-                        frame_type,
-                        parsed,
-                    });
+                    if !self.skip_empty || !is_blank_frame(&frame_bytes) {
+                        self.frame_count += 1;
+                        let parsed = self.parser.as_ref().map(|p| p.parse(&frame_bytes));
+                        let frame_type = self.frame_type_str();
+                        frames.push(Frame {
+                            data: frame_bytes,
+                            index: self.frame_count - 1,
+                            frame_type,
+                            parsed,
+                        });
+                    }
                 }
             }
         }
@@ -1240,6 +1285,8 @@ impl FrameDecoder {
             if buf.is_empty() {
                 return None;
             }
+            // flush_partial does not apply skip_empty — partial
+            // frames at flush are emitted regardless.
             let data = std::mem::take(buf);
             self.frame_count += 1;
             return Some(Frame {
@@ -1259,6 +1306,8 @@ impl FrameDecoder {
             if decoded.is_empty() {
                 return None;
             }
+            // flush_partial does not apply skip_empty — partial
+            // frames at flush are emitted regardless.
             let data = std::mem::take(decoded);
             self.frame_count += 1;
             return Some(Frame {
@@ -1271,6 +1320,8 @@ impl FrameDecoder {
         if self.buf.is_empty() {
             return None;
         }
+        // flush_partial does not apply skip_empty — partial
+        // frames at flush are emitted regardless.
         let data = std::mem::take(&mut self.buf);
         self.frame_count += 1;
         Some(Frame {
@@ -1473,6 +1524,13 @@ impl std::fmt::Display for FrameDecodeError {
 }
 
 impl std::error::Error for FrameDecodeError {}
+
+/// Whether a frame's data should be skipped under `skip_empty`: true when the
+/// data is empty or contains only ASCII whitespace bytes (space, \t, \r, \n,
+/// \x0b, \x0c).
+fn is_blank_frame(data: &[u8]) -> bool {
+    data.iter().all(|&b| b.is_ascii_whitespace())
+}
 
 // ---- SLIP (RFC 1055) constants and codec ------------------------------------
 
@@ -2034,6 +2092,7 @@ mod tests {
             mode: RxFramingMode::Slip,
             max_frames: None,
             include_terminators: false,
+            skip_empty: false,
         };
         assert_eq!(preset_rx, bare_rx);
     }
@@ -3480,6 +3539,7 @@ mod tests {
             mode: RxFramingMode::Cobs,
             max_frames: None,
             include_terminators: false,
+            skip_empty: false,
         };
         assert_eq!(preset_rx, bare_rx);
     }
@@ -3573,5 +3633,317 @@ mod tests {
         let frames = dec.push(&framed).unwrap();
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].data, payload);
+    }
+
+    // ── skip_empty framing option ──────────────────────────────────────────
+
+    #[test]
+    fn skip_empty_default_is_false() {
+        assert!(!RxFramingConfig::default().skip_empty);
+    }
+
+    #[test]
+    fn skip_empty_drops_empty_line_frames() {
+        // Line framing (auto), input b"a\n\nb\n", skip_empty: true → 2 frames.
+        let config = RxFramingConfig {
+            mode: RxFramingMode::Line {
+                ending: LineEnding::Auto,
+            },
+            max_frames: None,
+            include_terminators: false,
+            skip_empty: true,
+        };
+        let mut dec = FrameDecoder::new(&config, None).unwrap();
+        let frames = dec.push(b"a\n\nb\n").unwrap();
+        assert_eq!(frames.len(), 2);
+        assert_eq!(frames[0].data, b"a");
+        assert_eq!(frames[1].data, b"b");
+
+        // skip_empty: false → 3 frames (a, empty, b).
+        let config_off = RxFramingConfig {
+            mode: RxFramingMode::Line {
+                ending: LineEnding::Auto,
+            },
+            max_frames: None,
+            include_terminators: false,
+            skip_empty: false,
+        };
+        let mut dec_off = FrameDecoder::new(&config_off, None).unwrap();
+        let frames_off = dec_off.push(b"a\n\nb\n").unwrap();
+        assert_eq!(frames_off.len(), 3);
+        assert_eq!(frames_off[0].data, b"a");
+        assert!(frames_off[1].data.is_empty());
+        assert_eq!(frames_off[2].data, b"b");
+    }
+
+    #[test]
+    fn skip_empty_drops_whitespace_only_frames() {
+        let input = b"a\n   \nb\n";
+        // skip_empty: true → middle line (3 spaces) skipped.
+        let config = RxFramingConfig {
+            mode: RxFramingMode::Line {
+                ending: LineEnding::Auto,
+            },
+            max_frames: None,
+            include_terminators: false,
+            skip_empty: true,
+        };
+        let mut dec = FrameDecoder::new(&config, None).unwrap();
+        let frames = dec.push(input).unwrap();
+        assert_eq!(frames.len(), 2);
+        assert_eq!(frames[0].data, b"a");
+        assert_eq!(frames[1].data, b"b");
+
+        // skip_empty: false → 3 frames.
+        let config_off = RxFramingConfig {
+            mode: RxFramingMode::Line {
+                ending: LineEnding::Auto,
+            },
+            max_frames: None,
+            include_terminators: false,
+            skip_empty: false,
+        };
+        let mut dec_off = FrameDecoder::new(&config_off, None).unwrap();
+        let frames_off = dec_off.push(input).unwrap();
+        assert_eq!(frames_off.len(), 3);
+        assert_eq!(frames_off[0].data, b"a");
+        assert_eq!(frames_off[1].data, b"   ");
+        assert_eq!(frames_off[2].data, b"b");
+    }
+
+    #[test]
+    fn skip_empty_drops_leading_and_trailing_blank_lines() {
+        // Input has leading, inner, and trailing blank lines.
+        let input = b"\n{\"k\":1}\n\n{\"k\":2}\n\n";
+        let config = RxFramingConfig {
+            mode: RxFramingMode::Line {
+                ending: LineEnding::Auto,
+            },
+            max_frames: None,
+            include_terminators: false,
+            skip_empty: true,
+        };
+        let parser = ParserConfig {
+            parser_type: ParserType::JsonLines,
+            custom_prompt: None,
+        };
+        let mut dec = FrameDecoder::new(&config, Some(&parser)).unwrap();
+        let frames = dec.push(input).unwrap();
+        // skip_empty: true → 2 Json frames, blank lines skipped.
+        assert_eq!(frames.len(), 2);
+        assert!(matches!(frames[0].parsed, Some(ParsedFrame::Json(_))));
+        assert!(matches!(frames[1].parsed, Some(ParsedFrame::Json(_))));
+    }
+
+    #[test]
+    fn skip_empty_does_not_count_skipped_frames_toward_max_frames() {
+        // line framing, input b"\na\n\nb\n", skip_empty: true →
+        // the empty lines do not appear in push output and do not increment
+        // frame_count. Only the 2 non-blank frames (a, b) are emitted.
+        let config = RxFramingConfig {
+            mode: RxFramingMode::Line {
+                ending: LineEnding::Auto,
+            },
+            max_frames: None,
+            include_terminators: false,
+            skip_empty: true,
+        };
+        let mut dec = FrameDecoder::new(&config, None).unwrap();
+        let frames = dec.push(b"\na\n\nb\n").unwrap();
+        assert_eq!(frames.len(), 2);
+        assert_eq!(frames[0].data, b"a");
+        assert_eq!(frames[0].index, 0);
+        assert_eq!(frames[1].data, b"b");
+        assert_eq!(frames[1].index, 1);
+        // With skip_empty: false, the empty lines appear and consume
+        // indices: frame 0 empty (leading \n), frame 1 'a', frame 2 empty
+        // (inner \n), frame 3 'b'.
+        let config_off = RxFramingConfig {
+            mode: RxFramingMode::Line {
+                ending: LineEnding::Auto,
+            },
+            max_frames: None,
+            include_terminators: false,
+            skip_empty: false,
+        };
+        let mut dec_off = FrameDecoder::new(&config_off, None).unwrap();
+        let frames_off = dec_off.push(b"\na\n\nb\n").unwrap();
+        assert_eq!(frames_off.len(), 4);
+        assert!(frames_off[0].data.is_empty());
+        assert_eq!(frames_off[0].index, 0);
+        assert_eq!(frames_off[1].data, b"a");
+        assert_eq!(frames_off[1].index, 1);
+        assert!(frames_off[2].data.is_empty());
+        assert_eq!(frames_off[2].index, 2);
+        assert_eq!(frames_off[3].data, b"b");
+        assert_eq!(frames_off[3].index, 3);
+    }
+
+    #[test]
+    fn skip_empty_preserves_frame_index_continuity() {
+        let config = RxFramingConfig {
+            mode: RxFramingMode::Line {
+                ending: LineEnding::Auto,
+            },
+            max_frames: None,
+            include_terminators: false,
+            skip_empty: true,
+        };
+        let mut dec = FrameDecoder::new(&config, None).unwrap();
+        let frames = dec.push(b"a\n\nb\n").unwrap();
+        assert_eq!(frames.len(), 2);
+        // The skipped blank line does NOT consume an index.
+        assert_eq!(frames[0].index, 0);
+        assert_eq!(frames[1].index, 1);
+    }
+
+    #[test]
+    fn skip_empty_applies_to_slip() {
+        // Two consecutive END bytes produce one empty frame, then 'a'.
+        // skip_empty: true → empty skipped, only 'a' emitted.
+        let framed: &[u8] = &[SLIP_END, SLIP_END, b'a', SLIP_END];
+        let config = RxFramingConfig {
+            mode: RxFramingMode::Slip,
+            max_frames: None,
+            include_terminators: false,
+            skip_empty: true,
+        };
+        let mut dec = FrameDecoder::new(&config, None).unwrap();
+        let frames = dec.push(framed).unwrap();
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].data, b"a");
+        assert_eq!(frames[0].index, 0);
+    }
+
+    #[test]
+    fn skip_empty_applies_to_cobs() {
+        // Leading 0x00 sync, then back-to-back 0x00 delimiters for an empty
+        // frame, then another 0x00 sync + COBS-stuffed 'a' + 0x00 delimiter.
+        // skip_empty: true → empty skipped, only 'a' emitted.
+        let framed: &[u8] = &[0x00, 0x00, 0x00, 0x02, 0x61, 0x00];
+        let config = RxFramingConfig {
+            mode: RxFramingMode::Cobs,
+            max_frames: None,
+            include_terminators: false,
+            skip_empty: true,
+        };
+        let mut dec = FrameDecoder::new(&config, None).unwrap();
+        let frames = dec.push(framed).unwrap();
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].data, b"a");
+        assert_eq!(frames[0].index, 0);
+    }
+
+    #[test]
+    fn skip_empty_off_by_default_in_preset_json_lines() {
+        assert!(!preset_rx_framing(ProtocolPreset::JsonLines).skip_empty);
+    }
+
+    #[test]
+    fn skip_empty_on_in_preset_ndjson() {
+        assert!(preset_rx_framing(ProtocolPreset::Ndjson).skip_empty);
+    }
+
+    #[test]
+    fn preset_tx_framing_ndjson_returns_line_lf() {
+        let tx = preset_tx_framing(ProtocolPreset::Ndjson);
+        assert!(matches!(
+            tx.mode,
+            TxFramingMode::Line {
+                ending: TxLineEnding::Lf
+            }
+        ));
+    }
+
+    #[test]
+    fn preset_rx_framing_ndjson_returns_line_auto_skip_empty() {
+        let rx = preset_rx_framing(ProtocolPreset::Ndjson);
+        assert!(matches!(
+            rx.mode,
+            RxFramingMode::Line {
+                ending: LineEnding::Auto
+            }
+        ));
+        assert!(rx.skip_empty);
+    }
+
+    #[test]
+    fn preset_rx_parser_ndjson_returns_json_lines() {
+        let parser = preset_rx_parser(ProtocolPreset::Ndjson);
+        assert!(matches!(parser.parser_type, ParserType::JsonLines));
+    }
+
+    #[test]
+    fn protocol_preset_ndjson_tagged_object_roundtrip() {
+        // Tagged-object {"type":"ndjson"} round-trips correctly.
+        let val = serde_json::json!({"type": "ndjson"});
+        let preset: ProtocolPreset = serde_json::from_value(val.clone()).unwrap();
+        assert_eq!(preset, ProtocolPreset::Ndjson);
+        let re = serde_json::to_value(preset).unwrap();
+        assert_eq!(re, val);
+        // Bare string "ndjson" must be rejected.
+        let err = serde_json::from_str::<ProtocolPreset>("\"ndjson\"").unwrap_err();
+        let err_str = err.to_string();
+        assert!(
+            err_str.contains("tag"),
+            "expected tag error, got: {err_str}"
+        );
+    }
+
+    #[test]
+    fn ndjson_preset_equivalent_to_bare_config() {
+        // TX config.
+        let preset_tx = preset_tx_framing(ProtocolPreset::Ndjson);
+        let bare_tx = TxFramingConfig {
+            mode: TxFramingMode::Line {
+                ending: TxLineEnding::Lf,
+            },
+        };
+        assert_eq!(preset_tx, bare_tx);
+
+        // RX config.
+        let preset_rx = preset_rx_framing(ProtocolPreset::Ndjson);
+        let bare_rx = RxFramingConfig {
+            mode: RxFramingMode::Line {
+                ending: LineEnding::Auto,
+            },
+            max_frames: None,
+            include_terminators: false,
+            skip_empty: true,
+        };
+        assert_eq!(preset_rx, bare_rx);
+
+        // Parser.
+        let preset_parser = preset_rx_parser(ProtocolPreset::Ndjson);
+        let bare_parser = ParserConfig {
+            parser_type: ParserType::JsonLines,
+            custom_prompt: None,
+        };
+        assert_eq!(preset_parser, bare_parser);
+    }
+
+    #[test]
+    fn flush_partial_does_not_apply_skip_empty() {
+        // Line framing, skip_empty: true. Push partial content, then flush.
+        // The partial frame is emitted even though it's a single character
+        // (not blank), so this test verifies flush_partial emits frames
+        // regardless of skip_empty. The bypass is structural: flush_partial
+        // does not check skip_empty at all.
+        let config = RxFramingConfig {
+            mode: RxFramingMode::Line {
+                ending: LineEnding::Auto,
+            },
+            max_frames: None,
+            include_terminators: false,
+            skip_empty: true,
+        };
+        let mut dec = FrameDecoder::new(&config, None).unwrap();
+        // Push "b" without a newline — no frame emitted by push.
+        let frames = dec.push(b"b").unwrap();
+        assert!(frames.is_empty());
+        // flush_partial emits the pending content regardless of skip_empty.
+        let partial = dec.flush_partial();
+        assert!(partial.is_some());
+        assert_eq!(partial.unwrap().data, b"b");
     }
 }

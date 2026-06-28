@@ -85,6 +85,7 @@ mod tests {
             },
             max_frames: None,
             include_terminators: false,
+            skip_empty: false,
         }
     }
 
@@ -95,6 +96,7 @@ mod tests {
             },
             max_frames: None,
             include_terminators: false,
+            skip_empty: false,
         }
     }
 
@@ -227,6 +229,7 @@ mod tests {
             },
             max_frames: None,
             include_terminators: false,
+            skip_empty: false,
         };
         let result = resolve_field::<RxFramingConfig>(
             Some(explicit.clone()),
@@ -258,5 +261,28 @@ mod tests {
         );
         assert_eq!(result, Some(explicit));
         assert_ne!(result, Some(preset_tx_framing(ProtocolPreset::Cobs)));
+    }
+
+    #[test]
+    fn ndjson_preset_explicit_framing_wins_over_preset() {
+        // Explicit rx_framing (Delimiter) wins over call_protocol=Ndjson.
+        let explicit = RxFramingConfig {
+            mode: RxFramingMode::Delimiter {
+                delimiter: ",".into(),
+                delimiter_encoding: PatternEncoding::Utf8,
+            },
+            max_frames: None,
+            include_terminators: false,
+            skip_empty: false,
+        };
+        let result = resolve_field::<RxFramingConfig>(
+            Some(explicit.clone()),
+            Some(ProtocolPreset::Ndjson),
+            preset_rx_framing,
+            None,
+            None,
+        );
+        assert_eq!(result, Some(explicit));
+        assert_ne!(result, Some(preset_rx_framing(ProtocolPreset::Ndjson)));
     }
 }
