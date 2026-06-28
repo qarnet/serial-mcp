@@ -56,11 +56,16 @@
 
 **Added — COBS framing + checksums module:**
 - New `cobs` framing mode (`RxFramingMode::Cobs`, `TxFramingMode::Cobs`) with
-  a configurable single-byte delimiter (default `0x00` plain COBS per
-  Cheshire/Baker; `0x7E` for the PPP-COBS draft variant). Modeled on the
-  existing SLIP implementation. TX: `cobs_stuff` encoder with `encode()` arm.
-  RX: stateful `cobs_decode` decoder via `FrameDecoder::push`, with
-  `CobsState` (BeforeFirstDelim / InBlock) and `DecoderMode::Cobs`.
+  plain 0x00-delimited COBS per Cheshire/Baker. Modeled on the existing SLIP
+  implementation. TX: `cobs_stuff` encoder with `encode()` arm. RX: stateful
+  `cobs_decode` decoder via `FrameDecoder::push`, with `CobsState`
+  (BeforeFirstDelim / InBlock) and `DecoderMode::Cobs`.
+  The PPP-COBS draft variant (`0x7E`) is not supported in this release; its
+  two-step zero-elimination + 7E-substitution will be tracked for a future PR.
+  (*Breaking fix*: the initial implementation's `delimiter: u8` field on the
+  `Cobs` variant was removed before a release because the `0x7E` path had a
+  correctness bug — the decoder inserted the delimiter byte as the phantom
+  zero instead of `0x00`, breaking roundtrip on 0x00-containing payloads.)
 - New `cobs` protocol preset (`{"type": "cobs"}`) bundling 0x00 COBS framing
   with a raw parser. Selectable via the `protocol` knob on `write`, `read`,
   and `subscribe`.
