@@ -2,7 +2,7 @@
 
 | Version | Date | Highlights |
 |---|---|---|
-| [Unreleased](#unreleased) | — | `--version` flag + `version` subcommand, `BUILD_TARGET` in build.rs; removed dead `ProfileDefaults` fields |
+| [Unreleased](#unreleased) | — | `--version` flag + `version` subcommand, `BUILD_TARGET` in build.rs; removed dead `ProfileDefaults` fields; `slip` and `json_lines` protocol presets |
 | [0.7.0](#070) | 2026-06-26 | Frame pipeline: TX framing, SLIP, protocol presets, profile defaults, parser relocation |
 | [0.6.2](#062) | 2026-06-25 | Schema fix: suppress non-standard `uint8`/`uint16` formats; expanded schema regression guards + AGENTS.md truth |
 | [0.6.1](#061) | 2026-06-24 | RX refactor: shared framing sink, SerialHandler builder, config FromStr, dedup; docs cleanup |
@@ -43,6 +43,16 @@
   drop them — they were never enforced. Because `ProfileDefaults` does not
   carry `#[serde(deny_unknown_fields)]`, existing profile configs with the
   dead fields continue to load (fields are silently ignored).
+
+**Added — protocol presets:**
+- Added `slip` and `json_lines` protocol presets, making the `protocol:` knob
+  uniform across every advertised protocol. The `slip` preset bundles SLIP
+  (RFC 1055) byte-stuffed framing with a raw parser; `json_lines` bundles line
+  framing (`ending: auto` RX, `lf` TX) with the JSON-lines parser. Previously,
+  SLIP was only reachable as a bare framing mode and JSON-lines as a bare parser;
+  now all three presets (`at_command`, `slip`, `json_lines`) are selectable via
+  `{"type": "…"}` on `write`, `read`, and `subscribe`. Pure wiring — no new
+  framing mode, parser, or option; the underlying primitives already shipped.
 
 ## [0.7.0]
 

@@ -147,6 +147,10 @@ pub enum ProtocolPreset {
     /// AT-command modem protocol. TX appends `\r`, RX splits on line
     /// endings (auto), RX frames are parsed as AT command responses/URCs.
     AtCommand,
+    /// SLIP (RFC 1055) byte-stuffed framing, raw payload (no parser).
+    Slip,
+    /// One JSON value per line (line framing + JSON-lines parser).
+    JsonLines,
 }
 
 /// The TX framing implied by a protocol preset.
@@ -155,6 +159,14 @@ pub fn preset_tx_framing(p: ProtocolPreset) -> TxFramingConfig {
         ProtocolPreset::AtCommand => TxFramingConfig {
             mode: TxFramingMode::Line {
                 ending: TxLineEnding::Cr,
+            },
+        },
+        ProtocolPreset::Slip => TxFramingConfig {
+            mode: TxFramingMode::Slip,
+        },
+        ProtocolPreset::JsonLines => TxFramingConfig {
+            mode: TxFramingMode::Line {
+                ending: TxLineEnding::Lf,
             },
         },
     }
@@ -170,6 +182,18 @@ pub fn preset_rx_framing(p: ProtocolPreset) -> RxFramingConfig {
             max_frames: None,
             include_terminators: false,
         },
+        ProtocolPreset::Slip => RxFramingConfig {
+            mode: RxFramingMode::Slip,
+            max_frames: None,
+            include_terminators: false,
+        },
+        ProtocolPreset::JsonLines => RxFramingConfig {
+            mode: RxFramingMode::Line {
+                ending: LineEnding::Auto,
+            },
+            max_frames: None,
+            include_terminators: false,
+        },
     }
 }
 
@@ -178,6 +202,14 @@ pub fn preset_rx_parser(p: ProtocolPreset) -> ParserConfig {
     match p {
         ProtocolPreset::AtCommand => ParserConfig {
             parser_type: ParserType::AtCommand,
+            custom_prompt: None,
+        },
+        ProtocolPreset::Slip => ParserConfig {
+            parser_type: ParserType::Raw,
+            custom_prompt: None,
+        },
+        ProtocolPreset::JsonLines => ParserConfig {
+            parser_type: ParserType::JsonLines,
             custom_prompt: None,
         },
     }
@@ -1650,6 +1682,98 @@ mod tests {
             serde_json::from_value::<ProtocolPreset>(serde_json::json!("at_command")).is_err(),
             "bare string form must be rejected after adding tag"
         );
+    }
+
+    #[test]
+    fn preset_tx_framing_slip_returns_slip_mode() {
+        let cfg = preset_tx_framing(ProtocolPreset::Slip);
+        assert!(matches!(cfg.mode, TxFramingMode::Slip));
+    }
+
+    #[test]
+    fn preset_tx_framing_json_lines_returns_line_lf() {
+        let cfg = preset_tx_framing(ProtocolPreset::JsonLines);
+        assert!(matches!(
+            cfg.mode,
+            TxFramingMode::Line {
+                ending: TxLineEnding::Lf
+            }
+        ));
+    }
+
+    #[test]
+    fn preset_rx_framing_slip_returns_slip_mode() {
+        let cfg = preset_rx_framing(ProtocolPreset::Slip);
+        assert!(matches!(cfg.mode, RxFramingMode::Slip));
+    }
+
+    #[test]
+    fn preset_rx_framing_json_lines_returns_line_auto() {
+        let cfg = preset_rx_framing(ProtocolPreset::JsonLines);
+        assert!(matches!(
+            cfg.mode,
+            RxFramingMode::Line {
+                ending: LineEnding::Auto
+            }
+        ));
+    }
+
+    #[test]
+    fn preset_rx_parser_slip_returns_raw() {
+        let cfg = preset_rx_parser(ProtocolPreset::Slip);
+        assert_eq!(cfg.parser_type, ParserType::Raw);
+    }
+
+    #[test]
+    fn preset_rx_parser_json_lines_returns_json_lines() {
+        let cfg = preset_rx_parser(ProtocolPreset::JsonLines);
+        assert_eq!(cfg.parser_type, ParserType::JsonLines);
+    }
+
+    #[test]
+    fn protocol_preset_slip_tagged_object_roundtrip() {
+        let json = serde_json::json!({ "type": "slip" });
+        let p: ProtocolPreset = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(p, ProtocolPreset::Slip);
+        let back = serde_json::to_value(p).unwrap();
+        assert_eq!(back, json, "must round-trip as tagged object");
+        // Bare string form must be rejected.
+        assert!(
+            serde_json::from_value::<ProtocolPreset>(serde_json::json!("slip")).is_err(),
+            "bare string form must be rejected after adding tag"
+        );
+    }
+
+    #[test]
+    fn protocol_preset_json_lines_tagged_object_roundtrip() {
+        let json = serde_json::json!({ "type": "json_lines" });
+        let p: ProtocolPreset = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(p, ProtocolPreset::JsonLines);
+        let back = serde_json::to_value(p).unwrap();
+        assert_eq!(back, json, "must round-trip as tagged object");
+        // Bare string form must be rejected.
+        assert!(
+            serde_json::from_value::<ProtocolPreset>(serde_json::json!("json_lines")).is_err(),
+            "bare string form must be rejected after adding tag"
+        );
+    }
+
+    #[test]
+    fn slip_preset_equivalent_to_bare_slip_framing() {
+        // TX: preset must match hand-built TxFramingConfig with Slip mode.
+        let preset_tx = preset_tx_framing(ProtocolPreset::Slip);
+        let bare_tx = TxFramingConfig {
+            mode: TxFramingMode::Slip,
+        };
+        assert_eq!(preset_tx, bare_tx);
+        // RX: preset must match hand-built RxFramingConfig with Slip mode.
+        let preset_rx = preset_rx_framing(ProtocolPreset::Slip);
+        let bare_rx = RxFramingConfig {
+            mode: RxFramingMode::Slip,
+            max_frames: None,
+            include_terminators: false,
+        };
+        assert_eq!(preset_rx, bare_rx);
     }
 
     // ── SLIP (RFC 1055) tests ─────────────────────────────────────────────

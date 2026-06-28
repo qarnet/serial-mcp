@@ -54,6 +54,7 @@ mod tests {
         ParserType, ProtocolPreset, RxFramingConfig, RxFramingMode, TxFramingConfig, TxFramingMode,
         TxLineEnding,
     };
+    use crate::match_config::PatternEncoding;
 
     const PROTO: Option<ProtocolPreset> = Some(ProtocolPreset::AtCommand);
 
@@ -193,5 +194,48 @@ mod tests {
             resolve_field::<ParserConfig>(None, PROTO, preset_rx_parser, Some(&conn_def), None);
         assert_eq!(result, Some(preset_rx_parser(ProtocolPreset::AtCommand)));
         assert_ne!(result, Some(conn_def));
+    }
+
+    // --- Slip + JsonLines preset precedence tests ---
+
+    #[test]
+    fn slip_preset_explicit_framing_wins_over_preset() {
+        // Explicit tx_framing (Line/Crlf) wins over call_protocol=Slip.
+        let explicit = TxFramingConfig {
+            mode: TxFramingMode::Line {
+                ending: TxLineEnding::Crlf,
+            },
+        };
+        let result = resolve_field::<TxFramingConfig>(
+            Some(explicit.clone()),
+            Some(ProtocolPreset::Slip),
+            preset_tx_framing,
+            None,
+            None,
+        );
+        assert_eq!(result, Some(explicit));
+        assert_ne!(result, Some(preset_tx_framing(ProtocolPreset::Slip)));
+    }
+
+    #[test]
+    fn json_lines_preset_explicit_framing_wins_over_preset() {
+        // Explicit rx_framing (Delimiter) wins over call_protocol=JsonLines.
+        let explicit = RxFramingConfig {
+            mode: RxFramingMode::Delimiter {
+                delimiter: ",".into(),
+                delimiter_encoding: PatternEncoding::Utf8,
+            },
+            max_frames: None,
+            include_terminators: false,
+        };
+        let result = resolve_field::<RxFramingConfig>(
+            Some(explicit.clone()),
+            Some(ProtocolPreset::JsonLines),
+            preset_rx_framing,
+            None,
+            None,
+        );
+        assert_eq!(result, Some(explicit));
+        assert_ne!(result, Some(preset_rx_framing(ProtocolPreset::JsonLines)));
     }
 }
