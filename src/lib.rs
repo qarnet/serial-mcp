@@ -1,4 +1,5 @@
 pub mod buffer_budget;
+pub(crate) mod checksums;
 pub mod codec;
 pub mod error;
 pub mod framing;

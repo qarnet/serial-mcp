@@ -238,4 +238,25 @@ mod tests {
         assert_eq!(result, Some(explicit));
         assert_ne!(result, Some(preset_rx_framing(ProtocolPreset::JsonLines)));
     }
+
+    // --- COBS preset precedence test ---
+
+    #[test]
+    fn cobs_preset_explicit_framing_wins_over_preset() {
+        // Explicit tx_framing (Line/Crlf) wins over call_protocol=Cobs.
+        let explicit = TxFramingConfig {
+            mode: TxFramingMode::Line {
+                ending: TxLineEnding::Crlf,
+            },
+        };
+        let result = resolve_field::<TxFramingConfig>(
+            Some(explicit.clone()),
+            Some(ProtocolPreset::Cobs),
+            preset_tx_framing,
+            None,
+            None,
+        );
+        assert_eq!(result, Some(explicit));
+        assert_ne!(result, Some(preset_tx_framing(ProtocolPreset::Cobs)));
+    }
 }

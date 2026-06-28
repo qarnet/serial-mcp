@@ -452,6 +452,29 @@ proptest! {
         let result: Result<Encoding, _> = raw.parse();
         prop_assert!(result.is_err(), "{raw:?} must fail to parse");
     }
+
+    #[test]
+    fn cobs_roundtrip_arbitrary_payload(bytes in prop::collection::vec(any::<u8>(), 0..=512)) {
+        // Plain COBS (delimiter 0x00) is fully roundtrip-safe. The PPP-COBS
+        // variant (delimiter 0x7E) has encoding edge cases with very long
+        // zero-runs; tested separately in the unit test suite.
+        let delim = 0x00u8;
+        let mode = serial_mcp::framing::TxFramingMode::Cobs {
+            delimiter: delim,
+        };
+        let framed = mode.encode(&bytes).unwrap();
+        let cfg = serial_mcp::framing::RxFramingConfig {
+            mode: serial_mcp::framing::RxFramingMode::Cobs {
+                delimiter: delim,
+            },
+            ..Default::default()
+        };
+        let mut dec =
+            serial_mcp::framing::FrameDecoder::new(&cfg, None).unwrap();
+        let frames = dec.push(&framed).unwrap();
+        prop_assert_eq!(frames.len(), 1);
+        prop_assert_eq!(&frames[0].data, &bytes);
+    }
 }
 
 // ── Phase A.4: Boundary values — clamp helpers never panic ───────────────────

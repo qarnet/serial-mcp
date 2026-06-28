@@ -2,7 +2,7 @@
 
 | Version | Date | Highlights |
 |---|---|---|
-| [Unreleased](#unreleased) | — | `--version` flag + `version` subcommand, `BUILD_TARGET` in build.rs; removed dead `ProfileDefaults` fields; `slip` and `json_lines` protocol presets |
+| [Unreleased](#unreleased) | — | `--version` flag + `version` subcommand, `BUILD_TARGET` in build.rs; removed dead `ProfileDefaults` fields; `slip` and `json_lines` protocol presets; COBS framing mode + `cobs` preset + `checksums` module |
 | [0.7.0](#070) | 2026-06-26 | Frame pipeline: TX framing, SLIP, protocol presets, profile defaults, parser relocation |
 | [0.6.2](#062) | 2026-06-25 | Schema fix: suppress non-standard `uint8`/`uint16` formats; expanded schema regression guards + AGENTS.md truth |
 | [0.6.1](#061) | 2026-06-24 | RX refactor: shared framing sink, SerialHandler builder, config FromStr, dedup; docs cleanup |
@@ -53,6 +53,26 @@
   now all three presets (`at_command`, `slip`, `json_lines`) are selectable via
   `{"type": "…"}` on `write`, `read`, and `subscribe`. Pure wiring — no new
   framing mode, parser, or option; the underlying primitives already shipped.
+
+**Added — COBS framing + checksums module:**
+- New `cobs` framing mode (`RxFramingMode::Cobs`, `TxFramingMode::Cobs`) with
+  a configurable single-byte delimiter (default `0x00` plain COBS per
+  Cheshire/Baker; `0x7E` for the PPP-COBS draft variant). Modeled on the
+  existing SLIP implementation. TX: `cobs_stuff` encoder with `encode()` arm.
+  RX: stateful `cobs_decode` decoder via `FrameDecoder::push`, with
+  `CobsState` (BeforeFirstDelim / InBlock) and `DecoderMode::Cobs`.
+- New `cobs` protocol preset (`{"type": "cobs"}`) bundling 0x00 COBS framing
+  with a raw parser. Selectable via the `protocol` knob on `write`, `read`,
+  and `subscribe`.
+- Malformed COBS code bytes surface through the existing `FramingError` stop
+  reason via a new `FrameDecodeError::CobsInvalidCode(u8)` variant
+  (read: `is_error: true`; subscribe: final notification with
+  `stop_reason: "framing_error"` + `error` field).
+- New `src/checksums.rs` `pub(crate)` module with a `Checksum` trait
+  (`compute`, `validate`) and `XorChecksum` implementation (NMEA `*XX` XOR
+  checksum). The trait is the extension point for LRC (Modbus ASCII, P2) and
+  CRC-16 (Modbus RTU, P3) — those ship with their consumers. No in-tree
+  consumer yet in this PR.
 
 ## [0.7.0]
 
