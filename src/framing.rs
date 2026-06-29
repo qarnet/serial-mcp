@@ -521,7 +521,10 @@ pub enum ParserType {
 // ---- Frame types -----------------------------------------------------------
 
 /// A decoded frame with optional parsed content.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+///
+/// `Frame` is constructed by decoders and serialized to clients; it is not
+/// deserialized, so no `Deserialize` derive.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct Frame {
     /// Raw frame bytes (without delimiters/terminators unless include_terminators is set).
     #[schemars(schema_with = "crate::schema_helpers::byte_array_schema")]
@@ -530,7 +533,7 @@ pub struct Frame {
     #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
     pub index: usize,
     /// Boundary detection mode used (for diagnostic purposes).
-    pub frame_type: String,
+    pub frame_type: &'static str,
     /// Parsed frame fields, if a parser is configured.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parsed: Option<ParsedFrame>,
@@ -778,7 +781,7 @@ fn slip_decode(
                                     frames.push(Frame {
                                         data,
                                         index: *frame_count - 1,
-                                        frame_type: "slip".into(),
+                                        frame_type: "slip",
                                         parsed,
                                     });
                                 }
@@ -902,7 +905,7 @@ fn cobs_decode(
                             frames.push(Frame {
                                 data,
                                 index: *frame_count - 1,
-                                frame_type: "cobs".into(),
+                                frame_type: "cobs",
                                 parsed,
                             });
                         }
@@ -1379,14 +1382,14 @@ impl FrameDecoder {
         Some(fb)
     }
 
-    fn frame_type_str(&self) -> String {
+    fn frame_type_str(&self) -> &'static str {
         match &self.mode {
-            DecoderMode::Line(_) => "line".into(),
-            DecoderMode::Delimiter(_) => "delimiter".into(),
-            DecoderMode::LengthPrefixed { .. } => "length_prefixed".into(),
-            DecoderMode::StartEnd { .. } => "start_end".into(),
-            DecoderMode::Slip { .. } => "slip".into(),
-            DecoderMode::Cobs { .. } => "cobs".into(),
+            DecoderMode::Line(_) => "line",
+            DecoderMode::Delimiter(_) => "delimiter",
+            DecoderMode::LengthPrefixed { .. } => "length_prefixed",
+            DecoderMode::StartEnd { .. } => "start_end",
+            DecoderMode::Slip { .. } => "slip",
+            DecoderMode::Cobs { .. } => "cobs",
         }
     }
 
@@ -1414,7 +1417,7 @@ impl FrameDecoder {
             return Some(Frame {
                 data,
                 index: self.frame_count - 1,
-                frame_type: "slip".into(),
+                frame_type: "slip",
                 parsed: None,
             });
         }
@@ -1435,7 +1438,7 @@ impl FrameDecoder {
             return Some(Frame {
                 data,
                 index: self.frame_count - 1,
-                frame_type: "cobs".into(),
+                frame_type: "cobs",
                 parsed: None,
             });
         }
@@ -1732,15 +1735,19 @@ impl FrameParser for NmeaParser {
         };
 
         // 5. Parse the sentence body: split into address + comma fields.
-        let body_str = String::from_utf8_lossy(&body);
-        let body_owned = body_str.into_owned();
+        // NMEA spec is ASCII; invalid UTF-8 is non-NMEA input → Raw
+        // (mirrors ModbusAsciiParser).
+        let body_str = match std::str::from_utf8(&body) {
+            Ok(s) => s,
+            Err(_) => return Ok(ParsedFrame::Raw),
+        };
 
-        let (address_part, fields_part) = match body_owned.find(',') {
+        let (address_part, fields_part) = match body_str.find(',') {
             Some(comma_pos) => (
-                body_owned[..comma_pos].to_string(),
-                body_owned[comma_pos + 1..].to_string(),
+                body_str[..comma_pos].to_string(),
+                body_str[comma_pos + 1..].to_string(),
             ),
-            None => (body_owned, String::new()),
+            None => (body_str.to_string(), String::new()),
         };
 
         let (talker_id, sentence_type) = if address_part.len() >= 5 {
@@ -4582,6 +4589,25 @@ mod tests {
 
         let result2 = p.parse(b"AT+CGMI").unwrap();
         assert!(matches!(result2, ParsedFrame::Raw));
+    }
+
+    #[test]
+    fn nmea_parser_invalid_utf8_body_returns_raw() {
+        // NMEA spec is ASCII; invalid UTF-8 is non-NMEA → Raw (mirrors Modbus).
+        // The NmeaParser now uses from_utf8 (not from_utf8_lossy) for the body.
+        let parser = build_parser(&ParserConfig {
+            parser_type: ParserType::Nmea,
+            custom_prompt: None,
+            validate: false,
+        })
+        .unwrap();
+        // Body with a comma (passes the NMEA-shape check) but invalid UTF-8.
+        let body: &[u8] = b"GPGLL,\xFF,";
+        let result = parser.parse(body).unwrap();
+        assert!(
+            matches!(result, ParsedFrame::Raw),
+            "invalid UTF-8 → Raw, got {result:?}"
+        );
     }
 
     #[test]

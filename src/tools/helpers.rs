@@ -707,7 +707,7 @@ pub fn build_read_result(
                     data: fdata,
                     encoding: encoding.to_string(),
                     frame_index: f.index,
-                    frame_type: f.frame_type.clone(),
+                    frame_type: f.frame_type.to_string(),
                     parsed: f.parsed.clone(),
                 }),
                 Err(e) => {

@@ -167,6 +167,14 @@
   `ParsedFrame::ModbusAscii.data`) and adding `Frame` to the `check_schema!`
   regression-net list. Schema-only fix; no runtime behavior change.
 
+**Changed — internal:**
+- `Frame.frame_type` changed from `String` to `&'static str` (removes a
+  per-frame allocation; JSON output unchanged). `Frame` no longer derives
+  `Deserialize` (it was never deserialized in-tree; the derive was unused).
+- `NmeaParser` now uses `from_utf8` instead of `from_utf8_lossy` for the
+  sentence body; invalid UTF-8 returns `ParsedFrame::Raw` instead of being
+  silently mangled with replacement chars (mirrors `ModbusAsciiParser`).
+
 ## [0.7.0]
 
 Minor release adding symmetric TX/RX framing, a SLIP framing mode, protocol
