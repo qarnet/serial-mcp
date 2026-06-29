@@ -3,11 +3,8 @@
 //! Pure functions, no I/O. Future home for LRC (Modbus ASCII),
 //! CRC-16 (Modbus RTU), and FCS-16 (HDLC) when those protocols land.
 //!
-//! The `Checksum` trait and `XorChecksum` have no in-tree consumer yet;
-//! they are infrastructure consumed by NMEA in P2. Allow dead_code until
-//! the first consumer lands.
-
-#![allow(dead_code)]
+//! The `Checksum` trait and `XorChecksum` are consumed by the
+//! `NmeaParser` in `src/framing.rs` for NMEA-0183 `*XX` XOR validation.
 
 /// A checksum algorithm over a byte slice.
 ///
@@ -15,6 +12,7 @@
 /// received checksum against recomputed bytes. The framing layer carries the
 /// raw frame bytes; checksum validation is a parser/preset concern that
 /// surfaces failures through the existing `FramingError` stop reason.
+#[allow(dead_code)] // `width` and `validate` will be consumed by Modbus (P2b)
 pub(crate) trait Checksum: Send + Sync {
     /// Width of the checksum value in bytes (e.g. 1 for XOR/LRC, 2 for CRC-16).
     fn width(&self) -> usize;

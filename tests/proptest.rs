@@ -230,7 +230,7 @@ proptest! {
                 endianness: Endianness::Big,
             },
             TxFramingMode::StartEnd {
-                start: "STX".into(),
+                start: vec!["STX".into()],
                 end: "ETX".into(),
                 marker_encoding: PatternEncoding::Utf8,
             },
@@ -809,7 +809,7 @@ fn rx_framing_config_roundtrip_all_modes() {
     // Start/end
     let c7 = RxFramingConfig {
         mode: RxFramingMode::StartEnd {
-            start: "STX".into(),
+            start: vec!["STX".into()],
             end: "ETX".into(),
             marker_encoding: PatternEncoding::Base64,
             include_markers: true,

@@ -2,7 +2,7 @@
 
 | Version | Date | Highlights |
 |---|---|---|
-| [Unreleased](#unreleased) | — | `--version` flag + `version` subcommand, `BUILD_TARGET` in build.rs; removed dead `ProfileDefaults` fields; `slip` and `json_lines` protocol presets; COBS framing mode + `cobs` preset + `checksums` module; `ndjson` preset + `skip_empty` framing option |
+| [Unreleased](#unreleased) | — | `--version` flag + `version` subcommand, `BUILD_TARGET` in build.rs; removed dead `ProfileDefaults` fields; `slip` and `json_lines` protocol presets; COBS framing mode + `cobs` preset + `checksums` module; `ndjson` preset + `skip_empty` framing option; `nmea0183` preset + `Nmea` parser + `StartEnd` multi-marker + checksum validation |
 | [0.7.0](#070) | 2026-06-26 | Frame pipeline: TX framing, SLIP, protocol presets, profile defaults, parser relocation |
 | [0.6.2](#062) | 2026-06-25 | Schema fix: suppress non-standard `uint8`/`uint16` formats; expanded schema regression guards + AGENTS.md truth |
 | [0.6.1](#061) | 2026-06-24 | RX refactor: shared framing sink, SerialHandler builder, config FromStr, dedup; docs cleanup |
@@ -91,8 +91,55 @@
   and do not consume a frame index. The filter applies to all framing modes
   (line, delimiter, SLIP, COBS, length-prefixed, start/end) and runs inside
   `FrameDecoder::push`, so `consume_frames`/matcher only see kept frames.
-  `flush_partial` intentionally bypasses `skip_empty` to preserve partial-frame
-  signals at end-of-stream.
+   `flush_partial` intentionally bypasses `skip_empty` to preserve partial-frame
+   signals at end-of-stream.
+
+**Added — NMEA-0183 preset:**
+- New `nmea0183` protocol preset (`{"type": "nmea0183"})` bundling `StartEnd`
+  framing (start markers `$` / `!`, end `\r\n`, include_markers: false) with
+  a `Nmea` parser and checksum validation. Selectable via the `protocol` knob
+  on `write`, `read`, and `subscribe`.
+- New `Nmea` parser type (`ParserType::Nmea`, `parser: "nmea"` in frame output).
+  Parses NMEA-0183 sentences: strips optional leading `$`/`!` and trailing
+  `\r\n` defensively, splits at `*` into content and checksum, computes an XOR
+  checksum over the content and compares to the hex-decoded received checksum,
+  then splits the address into `talker_id` (first 2 characters) and
+  `sentence_type` (rest of the address before the first comma) and
+  comma-separated `fields`. Returns `ParsedFrame::Nmea { talker_id,
+  sentence_type, fields, checksum_valid }`. Non-NMEA frames (no `$`/`!`) return
+  `Raw` — the parser is opt-in and does not error on non-matching frames.
+- New `validate: bool` field on `ParserConfig` (default `false`; the `nmea0183`
+  preset sets `true`). When `true`, a present checksum is enforced: a mismatch
+  returns a `FrameDecodeError::ChecksumMismatch` that surfaces as a
+  `framing_error` stop reason. When `false`, a present-but-invalid checksum is
+  reported as `checksum_valid: false` without error; sentences without a
+  checksum are always accepted (`checksum_valid: null`).
+- New `FrameDecodeError::ChecksumMismatch { expected: Vec<u8>, received: Vec<u8> }`
+  variant. Surfaces through the existing `FramingError` stop reason path
+  (`read`: `is_error: true`; `subscribe`: final notification with
+  `stop_reason: "framing_error"` + `error` field).
+- `FrameParser::parse` is now fallible (`Result<ParsedFrame, FrameDecodeError>`)
+  so checksum failures can propagate from parsers. The four existing parsers
+  return `Ok(...)`. The three call sites in `slip_decode`, `cobs_decode`, and
+  `FrameDecoder::push` propagate parser errors — a parser error drains consumed
+  bytes, clears in-progress state, and returns the error, stopping the
+  read/subscribe loop (mirroring how SLIP/COBS decode errors work).
+- `StartEnd` framing extended to support multiple start markers: the `start`
+  field is now `Vec<String>` on both `RxFramingMode::StartEnd` and
+  `TxFramingMode::StartEnd`. RX matches ANY start marker in the list (earliest
+  match wins); TX uses `start[0]`. The `nmea0183` preset uses
+  `start: ["$", "!"]` — two start markers for standard and AIS sentences.
+- `src/checksums.rs` `#![allow(dead_code)]` removed — `XorChecksum` is now
+  consumed by `NmeaParser`.
+
+**Breaking — schema changes (pre-1.0):**
+- `StartEnd.start` changed from `String` to `Vec<String>` on both
+  `RxFramingMode::StartEnd` and `TxFramingMode::StartEnd`. Callers must wrap
+  their start marker in an array (e.g. `"<"` → `["<"]`).
+- `FrameParser::parse` signature changed from `fn parse(&self, &[u8]) ->
+  ParsedFrame` to `Result<ParsedFrame, FrameDecodeError>`. This trait is
+  `pub(crate)`-ish and not part of the public API; no external callers are
+  affected.
 
 ## [0.7.0]
 

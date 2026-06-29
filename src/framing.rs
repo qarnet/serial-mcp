@@ -8,6 +8,8 @@
 //! Also provides TX framing via [`TxFramingMode`] which encodes payloads
 //! with frame boundaries matching the RX modes. Used on `write`.
 
+use crate::checksums::Checksum;
+use crate::checksums::XorChecksum;
 use crate::codec;
 use crate::match_config::PatternEncoding;
 use crate::util::find_subsequence;
@@ -99,10 +101,14 @@ pub enum RxFramingMode {
         initial_offset: Option<usize>,
     },
     /// Split based on start and end marker byte sequences.
+    /// `start` is a list of marker strings; RX matches ANY of them
+    /// (finds the earliest one). TX uses `start[0]`.
     #[serde(rename_all = "snake_case")]
     StartEnd {
-        /// Start marker (decoded per `marker_encoding`).
-        start: String,
+        /// Start marker(s) (decoded per `marker_encoding`).
+        /// RX matches any marker in the list (earliest match wins).
+        /// TX uses the first marker (`start[0]`).
+        start: Vec<String>,
         /// End marker (decoded per `marker_encoding`).
         end: String,
         /// How to decode the marker strings into bytes.
@@ -171,6 +177,9 @@ pub enum ProtocolPreset {
     /// JSON-lines parser, skipping empty/whitespace-only lines per the NDJSON
     /// spec. Differs from `json_lines` only in `skip_empty`.
     Ndjson,
+    /// NMEA-0183 marine sentence protocol. StartEnd framing (start markers
+    /// $ / !, end \r\n) + Nmea parser with checksum validation.
+    Nmea0183,
 }
 
 /// The TX framing implied by a protocol preset.
@@ -195,6 +204,13 @@ pub fn preset_tx_framing(p: ProtocolPreset) -> TxFramingConfig {
         ProtocolPreset::Ndjson => TxFramingConfig {
             mode: TxFramingMode::Line {
                 ending: TxLineEnding::Lf,
+            },
+        },
+        ProtocolPreset::Nmea0183 => TxFramingConfig {
+            mode: TxFramingMode::StartEnd {
+                start: vec!["$".into()],
+                end: "\r\n".into(),
+                marker_encoding: PatternEncoding::Utf8,
             },
         },
     }
@@ -239,6 +255,17 @@ pub fn preset_rx_framing(p: ProtocolPreset) -> RxFramingConfig {
             include_terminators: false,
             skip_empty: true,
         },
+        ProtocolPreset::Nmea0183 => RxFramingConfig {
+            mode: RxFramingMode::StartEnd {
+                start: vec!["$".into(), "!".into()],
+                end: "\r\n".into(),
+                marker_encoding: PatternEncoding::Utf8,
+                include_markers: false,
+            },
+            max_frames: None,
+            include_terminators: false,
+            skip_empty: false,
+        },
     }
 }
 
@@ -248,22 +275,32 @@ pub fn preset_rx_parser(p: ProtocolPreset) -> ParserConfig {
         ProtocolPreset::AtCommand => ParserConfig {
             parser_type: ParserType::AtCommand,
             custom_prompt: None,
+            validate: false,
         },
         ProtocolPreset::Slip => ParserConfig {
             parser_type: ParserType::Raw,
             custom_prompt: None,
+            validate: false,
         },
         ProtocolPreset::JsonLines => ParserConfig {
             parser_type: ParserType::JsonLines,
             custom_prompt: None,
+            validate: false,
         },
         ProtocolPreset::Cobs => ParserConfig {
             parser_type: ParserType::Raw,
             custom_prompt: None,
+            validate: false,
         },
         ProtocolPreset::Ndjson => ParserConfig {
             parser_type: ParserType::JsonLines,
             custom_prompt: None,
+            validate: false,
+        },
+        ProtocolPreset::Nmea0183 => ParserConfig {
+            parser_type: ParserType::Nmea,
+            custom_prompt: None,
+            validate: true,
         },
     }
 }
@@ -313,8 +350,9 @@ pub enum TxFramingMode {
     /// Write start marker, payload, end marker.
     #[serde(rename_all = "snake_case")]
     StartEnd {
-        /// Start marker (decoded per `marker_encoding`).
-        start: String,
+        /// Start marker(s) (decoded per `marker_encoding`).
+        /// TX uses the first marker (`start[0]`).
+        start: Vec<String>,
         /// End marker (decoded per `marker_encoding`).
         end: String,
         /// How to decode the marker strings into bytes.
@@ -421,7 +459,10 @@ impl TxFramingMode {
                 end,
                 marker_encoding,
             } => {
-                let start_bytes = codec::decode((*marker_encoding).into(), start)
+                if start.is_empty() {
+                    return Err("TX start markers must not be empty".into());
+                }
+                let start_bytes = codec::decode((*marker_encoding).into(), &start[0])
                     .map_err(|e| format!("Invalid TX start marker encoding: {e}"))?;
                 let end_bytes = codec::decode((*marker_encoding).into(), end)
                     .map_err(|e| format!("Invalid TX end marker encoding: {e}"))?;
@@ -472,6 +513,12 @@ pub struct ParserConfig {
     /// Accepts a regex pattern as a string.
     #[serde(default)]
     pub custom_prompt: Option<String>,
+    /// Whether to enforce a protocol checksum when present. Default: false.
+    /// When true, a protocol parser that defines a checksum (currently NMEA's
+    /// *XX XOR) validates it and surfaces a mismatch as a framing_error.
+    /// A sentence/message WITHOUT a checksum is accepted regardless.
+    #[serde(default)]
+    pub validate: bool,
 }
 
 /// Supported parser types.
@@ -486,6 +533,9 @@ pub enum ParserType {
     ShellPrompt,
     /// No parsing — frames are returned as raw data.
     Raw,
+    /// Parse NMEA-0183 sentences: talker ID + sentence type + comma fields,
+    /// with optional *XX XOR checksum validation.
+    Nmea,
 }
 
 // ---- Frame types -----------------------------------------------------------
@@ -527,6 +577,22 @@ pub enum ParsedFrame {
         prompt_type: String,
     },
     Raw,
+    Nmea {
+        /// Talker ID (e.g. "GP" for GPS, "GN" for GLONASS, "AI" for AIS).
+        /// Two characters for standard sentences; may be longer for proprietary.
+        talker_id: String,
+        /// Sentence type (e.g. "GGA", "RMC", "GLL", "AIVDM").
+        /// Three characters for standard; variable for proprietary ($P...).
+        sentence_type: String,
+        /// Comma-separated data fields (the body after the address, before '*').
+        fields: Vec<String>,
+        /// Checksum status:
+        /// - Some(true): checksum present and valid (or present, validate=false: not enforced but reported as valid-shape).
+        /// - Some(false): checksum present and INVALID (only reachable when validate=false; when validate=true a mismatch returns Err, not Some(false)).
+        /// - None: no checksum present in the sentence.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        checksum_valid: Option<bool>,
+    },
 }
 
 // ---- Frame decoder ---------------------------------------------------------
@@ -561,7 +627,7 @@ enum DecoderMode {
         next_payload_len: Option<usize>,
     },
     StartEnd {
-        start: Vec<u8>,
+        start: Vec<Vec<u8>>,
         end: Vec<u8>,
         include_markers: bool,
         in_frame: bool,
@@ -625,7 +691,7 @@ enum CobsState {
 }
 
 trait FrameParser: Send + Sync {
-    fn parse(&self, data: &[u8]) -> ParsedFrame;
+    fn parse(&self, data: &[u8]) -> Result<ParsedFrame, FrameDecodeError>;
 }
 
 /// SLIP decoder: consume `buf_outer` byte-by-byte according to current
@@ -698,7 +764,16 @@ fn slip_decode(
                                 let data = std::mem::take(buf);
                                 if !skip_empty || !is_blank_frame(&data) {
                                     *frame_count += 1;
-                                    let parsed = parser.as_ref().map(|p| p.parse(&data));
+                                    let parsed = match parser.as_ref().map(|p| p.parse(&data)) {
+                                        Some(Ok(pf)) => Some(pf),
+                                        Some(Err(e)) => {
+                                            // Drain consumed bytes, clear state, return error.
+                                            buf_outer.drain(..read_pos);
+                                            *state = SlipState::BeforeFirstEnd;
+                                            return Err(e);
+                                        }
+                                        None => None,
+                                    };
                                     frames.push(Frame {
                                         data,
                                         index: *frame_count - 1,
@@ -811,7 +886,18 @@ fn cobs_decode(
                         }
                         if !skip_empty || !is_blank_frame(&data) {
                             *frame_count += 1;
-                            let parsed = parser.as_ref().map(|p| p.parse(&data));
+                            let parsed = match parser.as_ref().map(|p| p.parse(&data)) {
+                                Some(Ok(pf)) => Some(pf),
+                                Some(Err(e)) => {
+                                    buf_outer.drain(..read_pos);
+                                    *decoded = Vec::new();
+                                    *remaining = 0;
+                                    *pending_zero = false;
+                                    *state = CobsState::BeforeFirstDelim;
+                                    return Err(e);
+                                }
+                                None => None,
+                            };
                             frames.push(Frame {
                                 data,
                                 index: *frame_count - 1,
@@ -901,15 +987,25 @@ impl FrameDecoder {
                 marker_encoding,
                 include_markers,
             } => {
-                let start_bytes = codec::decode((*marker_encoding).into(), start)
-                    .map_err(|e| format!("Invalid start marker encoding: {e}"))?;
+                if start.is_empty() {
+                    return Err("Start markers must not be empty".into());
+                }
+                let mut start_bytes_vec: Vec<Vec<u8>> = Vec::with_capacity(start.len());
+                for s in start {
+                    let sb = codec::decode((*marker_encoding).into(), s)
+                        .map_err(|e| format!("Invalid start marker encoding: {e}"))?;
+                    if sb.is_empty() {
+                        return Err("Start and end markers must not be empty".into());
+                    }
+                    start_bytes_vec.push(sb);
+                }
                 let end_bytes = codec::decode((*marker_encoding).into(), end)
                     .map_err(|e| format!("Invalid end marker encoding: {e}"))?;
-                if start_bytes.is_empty() || end_bytes.is_empty() {
+                if end_bytes.is_empty() {
                     return Err("Start and end markers must not be empty".into());
                 }
                 DecoderMode::StartEnd {
-                    start: start_bytes,
+                    start: start_bytes_vec,
                     end: end_bytes,
                     include_markers: *include_markers,
                     in_frame: false,
@@ -1041,14 +1137,35 @@ impl FrameDecoder {
                     let end = end.clone();
                     let include = *include_markers;
                     if !*in_frame {
-                        if let Some(pos) = find_subsequence(&self.buf, &start) {
+                        // Find the earliest start marker among all candidates.
+                        let mut best_pos: Option<(usize, usize)> = None; // (pos, marker_len)
+                        for marker in &start {
+                            if let Some(pos) = find_subsequence(&self.buf, marker) {
+                                match best_pos {
+                                    Some((bp, _)) if pos < bp => {
+                                        best_pos = Some((pos, marker.len()));
+                                    }
+                                    None => {
+                                        best_pos = Some((pos, marker.len()));
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                        if let Some((pos, marker_len)) = best_pos {
                             self.buf.drain(..pos);
                             if !include {
-                                self.buf.drain(..start.len());
+                                self.buf.drain(..marker_len);
                             }
                             *in_frame = true;
                         } else {
-                            let keep = start.len().saturating_sub(1);
+                            // Keep enough trailing bytes to allow a partial
+                            // match of the longest start marker.
+                            let keep = start
+                                .iter()
+                                .map(|m| m.len().saturating_sub(1))
+                                .max()
+                                .unwrap_or(0);
                             if self.buf.len() > keep {
                                 self.buf.drain(..(self.buf.len() - keep));
                             }
@@ -1084,7 +1201,11 @@ impl FrameDecoder {
                 Some(frame_bytes) => {
                     if !self.skip_empty || !is_blank_frame(&frame_bytes) {
                         self.frame_count += 1;
-                        let parsed = self.parser.as_ref().map(|p| p.parse(&frame_bytes));
+                        let parsed = match self.parser.as_ref().map(|p| p.parse(&frame_bytes)) {
+                            Some(Ok(pf)) => Some(pf),
+                            Some(Err(e)) => return Err(e),
+                            None => None,
+                        };
                         let frame_type = self.frame_type_str();
                         frames.push(Frame {
                             data: frame_bytes,
@@ -1350,6 +1471,9 @@ fn build_parser(config: &ParserConfig) -> Result<Box<dyn FrameParser>, String> {
             Ok(Box::new(ShellPromptParser { custom }))
         }
         ParserType::Raw => Ok(Box::new(RawParser)),
+        ParserType::Nmea => Ok(Box::new(NmeaParser {
+            validate: config.validate,
+        })),
     }
 }
 
@@ -1358,11 +1482,11 @@ fn build_parser(config: &ParserConfig) -> Result<Box<dyn FrameParser>, String> {
 struct AtCommandParser;
 
 impl FrameParser for AtCommandParser {
-    fn parse(&self, data: &[u8]) -> ParsedFrame {
+    fn parse(&self, data: &[u8]) -> Result<ParsedFrame, FrameDecodeError> {
         let text = String::from_utf8_lossy(data);
         let trimmed = text.trim();
         if trimmed.is_empty() {
-            return ParsedFrame::Raw;
+            return Ok(ParsedFrame::Raw);
         }
         if let Some(cmd) = trimmed.strip_prefix('+') {
             if let Some(colon) = cmd.find(':') {
@@ -1371,44 +1495,44 @@ impl FrameParser for AtCommandParser {
                     .split(',')
                     .map(|s| s.trim().to_string())
                     .collect();
-                return ParsedFrame::AtCommand {
+                return Ok(ParsedFrame::AtCommand {
                     response_type: "response".into(),
                     command: Some(cmd_name),
                     status: None,
                     fields,
-                };
+                });
             }
         }
         if trimmed == "OK" {
-            return ParsedFrame::AtCommand {
+            return Ok(ParsedFrame::AtCommand {
                 response_type: "status".into(),
                 command: None,
                 status: Some("OK".into()),
                 fields: vec![],
-            };
+            });
         }
         if trimmed == "ERROR" {
-            return ParsedFrame::AtCommand {
+            return Ok(ParsedFrame::AtCommand {
                 response_type: "error".into(),
                 command: None,
                 status: Some("ERROR".into()),
                 fields: vec![],
-            };
+            });
         }
         if trimmed.starts_with("+CME ERROR") || trimmed.starts_with("+CMS ERROR") {
-            return ParsedFrame::AtCommand {
+            return Ok(ParsedFrame::AtCommand {
                 response_type: "error".into(),
                 command: None,
                 status: Some(trimmed.to_string()),
                 fields: vec![],
-            };
+            });
         }
-        ParsedFrame::AtCommand {
+        Ok(ParsedFrame::AtCommand {
             response_type: "data".into(),
             command: None,
             status: None,
             fields: vec![trimmed.to_string()],
-        }
+        })
     }
 }
 
@@ -1417,10 +1541,10 @@ impl FrameParser for AtCommandParser {
 struct JsonLinesParser;
 
 impl FrameParser for JsonLinesParser {
-    fn parse(&self, data: &[u8]) -> ParsedFrame {
+    fn parse(&self, data: &[u8]) -> Result<ParsedFrame, FrameDecodeError> {
         match serde_json::from_slice::<serde_json::Value>(data) {
-            Ok(val) if val.is_object() => ParsedFrame::Json(val),
-            _ => ParsedFrame::Raw,
+            Ok(val) if val.is_object() => Ok(ParsedFrame::Json(val)),
+            _ => Ok(ParsedFrame::Raw),
         }
     }
 }
@@ -1432,37 +1556,37 @@ struct ShellPromptParser {
 }
 
 impl FrameParser for ShellPromptParser {
-    fn parse(&self, data: &[u8]) -> ParsedFrame {
+    fn parse(&self, data: &[u8]) -> Result<ParsedFrame, FrameDecodeError> {
         let text = String::from_utf8_lossy(data);
         let trimmed = text.trim_end();
         if trimmed.is_empty() {
-            return ParsedFrame::Raw;
+            return Ok(ParsedFrame::Raw);
         }
         if let Some(ref re) = self.custom {
             if re.is_match(data) {
-                return ParsedFrame::ShellPrompt {
+                return Ok(ParsedFrame::ShellPrompt {
                     prompt: trimmed.to_string(),
                     prompt_type: "custom".into(),
-                };
+                });
             }
         }
         if trimmed.ends_with("$ ") || trimmed.ends_with("$") {
-            return ParsedFrame::ShellPrompt {
+            return Ok(ParsedFrame::ShellPrompt {
                 prompt: trimmed.to_string(),
                 prompt_type: "user".into(),
-            };
+            });
         }
         if trimmed.ends_with("# ") || trimmed.ends_with("#") {
-            return ParsedFrame::ShellPrompt {
+            return Ok(ParsedFrame::ShellPrompt {
                 prompt: trimmed.to_string(),
                 prompt_type: "root".into(),
-            };
+            });
         }
         if trimmed.ends_with("> ") || trimmed.ends_with(">") {
-            return ParsedFrame::ShellPrompt {
+            return Ok(ParsedFrame::ShellPrompt {
                 prompt: trimmed.to_string(),
                 prompt_type: "generic".into(),
-            };
+            });
         }
         if let Some(at_pos) = trimmed.rfind('@') {
             if let Some(colon_pos) = trimmed[at_pos..].find(':') {
@@ -1470,18 +1594,18 @@ impl FrameParser for ShellPromptParser {
                 let _host = &trimmed[at_pos + 1..at_pos + colon_pos];
                 let suffix = &trimmed[at_pos + colon_pos + 1..];
                 if suffix == "$ " || suffix == "$" || suffix == "# " || suffix == "#" {
-                    return ParsedFrame::ShellPrompt {
+                    return Ok(ParsedFrame::ShellPrompt {
                         prompt: trimmed.to_string(),
                         prompt_type: if suffix.starts_with('#') {
                             "root".to_string()
                         } else {
                             "user".to_string()
                         },
-                    };
+                    });
                 }
             }
         }
-        ParsedFrame::Raw
+        Ok(ParsedFrame::Raw)
     }
 }
 
@@ -1490,8 +1614,145 @@ impl FrameParser for ShellPromptParser {
 struct RawParser;
 
 impl FrameParser for RawParser {
-    fn parse(&self, _data: &[u8]) -> ParsedFrame {
-        ParsedFrame::Raw
+    fn parse(&self, _data: &[u8]) -> Result<ParsedFrame, FrameDecodeError> {
+        Ok(ParsedFrame::Raw)
+    }
+}
+
+// NMEA-0183 parser
+
+struct NmeaParser {
+    validate: bool,
+}
+
+impl FrameParser for NmeaParser {
+    fn parse(&self, data: &[u8]) -> Result<ParsedFrame, FrameDecodeError> {
+        // 1. Strip optional leading $ or ! and trailing \r\n.
+        //    Defensive: when include_markers is true, data includes the start/end
+        //    markers. The nmea0183 preset uses include_markers=false, but bare
+        //    callers might set true. Handle both.
+        let mut content = data.to_vec();
+        // Strip leading $ or !
+        if content.first() == Some(&b'$') || content.first() == Some(&b'!') {
+            content.remove(0);
+        }
+        // Strip trailing \r\n or \n
+        if content.ends_with(b"\r\n") {
+            content.truncate(content.len() - 2);
+        } else if content.ends_with(b"\n") {
+            content.truncate(content.len() - 1);
+        }
+
+        // 2. Validate that this looks like a NMEA sentence. The preset strips
+        //    $/! via StartEnd framing, so the data may start directly with the
+        //    talker ID (e.g. "GPGLL,..."). If include_markers were true, $/!
+        //    was stripped by step 1 above. In either case, a valid NMEA
+        //    sentence always contains at least one comma (separating address
+        //    from fields). Non-NMEA frames (e.g. "hello world", "AT+CGMI")
+        //    have no comma and return Raw — the parser is opt-in; bare callers
+        //    mixing data types see Raw for non-matching frames.
+        if !content.contains(&b',') {
+            return Ok(ParsedFrame::Raw);
+        }
+
+        // 3. Split at '*': content before = sentence body, after = checksum hex.
+        let (body, checksum_hex) = if let Some(star_pos) = content.iter().position(|&b| b == b'*') {
+            let body = &content[..star_pos];
+            let checksum_hex = &content[star_pos + 1..];
+            (body.to_vec(), Some(checksum_hex.to_vec()))
+        } else {
+            (content, None)
+        };
+
+        // 4. Validate checksum if present and validate is true.
+        let checksum_valid = match &checksum_hex {
+            Some(hex) if hex.len() >= 2 => {
+                let hex_str = String::from_utf8_lossy(hex);
+                let received_val = match u8::from_str_radix(&hex_str[..2], 16) {
+                    Ok(v) => v,
+                    Err(_) => {
+                        // Invalid hex in checksum — treat as mismatch.
+                        if self.validate {
+                            let computed = XorChecksum.compute(&body);
+                            return Err(FrameDecodeError::ChecksumMismatch {
+                                expected: computed,
+                                received: hex.clone(),
+                            });
+                        }
+                        return Ok(ParsedFrame::Nmea {
+                            talker_id: String::new(),
+                            sentence_type: String::new(),
+                            fields: vec![],
+                            checksum_valid: Some(false),
+                        });
+                    }
+                };
+                let computed = XorChecksum.compute(&body);
+                let computed_val = computed[0];
+                if self.validate {
+                    if computed_val != received_val {
+                        return Err(FrameDecodeError::ChecksumMismatch {
+                            expected: computed,
+                            received: vec![received_val],
+                        });
+                    }
+                    Some(true)
+                } else {
+                    Some(computed_val == received_val)
+                }
+            }
+            Some(hex) => {
+                // Checksum present but too short (<2 hex chars). Treat as mismatch.
+                if self.validate {
+                    let computed = XorChecksum.compute(&body);
+                    return Err(FrameDecodeError::ChecksumMismatch {
+                        expected: computed,
+                        received: hex.clone(),
+                    });
+                }
+                Some(false)
+            }
+            None => None,
+        };
+
+        // 5. Parse the sentence body: split into address + comma fields.
+        let body_str = String::from_utf8_lossy(&body);
+        let body_owned = body_str.into_owned();
+
+        let (address_part, fields_part) = match body_owned.find(',') {
+            Some(comma_pos) => (
+                body_owned[..comma_pos].to_string(),
+                body_owned[comma_pos + 1..].to_string(),
+            ),
+            None => (body_owned, String::new()),
+        };
+
+        let (talker_id, sentence_type) = if address_part.len() >= 5 {
+            // Standard NMEA: talker = first 2, type = chars 3 onward
+            let tid = address_part[..2].to_string();
+            let stype = address_part[2..].to_string();
+            (tid, stype)
+        } else if address_part.len() >= 2 {
+            let tid = address_part[..2].to_string();
+            let stype = address_part[2..].to_string();
+            (tid, stype)
+        } else {
+            // < 2 chars: use whole as talker, no type
+            (address_part, String::new())
+        };
+
+        let fields: Vec<String> = if fields_part.is_empty() {
+            vec![]
+        } else {
+            fields_part.split(',').map(|s| s.to_string()).collect()
+        };
+
+        Ok(ParsedFrame::Nmea {
+            talker_id,
+            sentence_type,
+            fields,
+            checksum_valid,
+        })
     }
 }
 
@@ -1508,6 +1769,12 @@ pub enum FrameDecodeError {
     SlipInvalidEscape(u8),
     /// COBS invalid code byte (impossible run length or truncated frame).
     CobsInvalidCode(u8),
+    /// A protocol checksum (e.g. NMEA *XX XOR) did not match the recomputed value.
+    /// `expected` is the recomputed checksum bytes; `received` is the frame's value.
+    ChecksumMismatch {
+        expected: Vec<u8>,
+        received: Vec<u8>,
+    },
 }
 
 impl std::fmt::Display for FrameDecodeError {
@@ -1518,6 +1785,19 @@ impl std::fmt::Display for FrameDecodeError {
             }
             FrameDecodeError::CobsInvalidCode(b) => {
                 write!(f, "COBS framing error: invalid code byte 0x{b:02X}")
+            }
+            FrameDecodeError::ChecksumMismatch { expected, received } => {
+                let exp = expected
+                    .iter()
+                    .map(|b| format!("{b:02X}"))
+                    .collect::<Vec<_>>()
+                    .join("");
+                let rcv = received
+                    .iter()
+                    .map(|b| format!("{b:02X}"))
+                    .collect::<Vec<_>>()
+                    .join("");
+                write!(f, "checksum mismatch: expected {exp}, received {rcv}")
             }
         }
     }
@@ -2386,7 +2666,7 @@ mod tests {
     fn start_end_basic() {
         let config = RxFramingConfig {
             mode: RxFramingMode::StartEnd {
-                start: "STX".into(),
+                start: vec!["STX".into()],
                 end: "ETX".into(),
                 marker_encoding: PatternEncoding::Utf8,
                 include_markers: false,
@@ -2404,7 +2684,7 @@ mod tests {
     fn start_end_include_markers() {
         let config = RxFramingConfig {
             mode: RxFramingMode::StartEnd {
-                start: "<".into(),
+                start: vec!["<".into()],
                 end: ">".into(),
                 marker_encoding: PatternEncoding::Utf8,
                 include_markers: true,
@@ -2422,7 +2702,7 @@ mod tests {
     #[test]
     fn at_parser_ok() {
         let p = AtCommandParser;
-        let result = p.parse(b"OK");
+        let result = p.parse(b"OK").unwrap();
         assert!(matches!(
             result,
             ParsedFrame::AtCommand {
@@ -2436,7 +2716,7 @@ mod tests {
     #[test]
     fn at_parser_error() {
         let p = AtCommandParser;
-        let result = p.parse(b"ERROR");
+        let result = p.parse(b"ERROR").unwrap();
         assert!(matches!(
             result,
             ParsedFrame::AtCommand {
@@ -2450,7 +2730,7 @@ mod tests {
     #[test]
     fn at_parser_command_response() {
         let p = AtCommandParser;
-        let result = p.parse(b"+CGREG: 0,1");
+        let result = p.parse(b"+CGREG: 0,1").unwrap();
         assert!(matches!(
             result,
             ParsedFrame::AtCommand {
@@ -2464,30 +2744,33 @@ mod tests {
     #[test]
     fn json_parser_valid() {
         let p = JsonLinesParser;
-        let result = p.parse(b"{\"key\":\"value\"}");
+        let result = p.parse(b"{\"key\":\"value\"}").unwrap();
         assert!(matches!(result, ParsedFrame::Json(_)));
     }
 
     #[test]
     fn json_parser_invalid() {
         let p = JsonLinesParser;
-        let result = p.parse(b"not json");
+        let result = p.parse(b"not json").unwrap();
         assert!(matches!(result, ParsedFrame::Raw));
     }
 
     #[test]
     fn json_parser_non_object_is_raw() {
         let p = JsonLinesParser;
-        assert!(matches!(p.parse(b"[1,2,3]"), ParsedFrame::Raw));
-        assert!(matches!(p.parse(b"42"), ParsedFrame::Raw));
-        assert!(matches!(p.parse(b"\"hi\""), ParsedFrame::Raw));
-        assert!(matches!(p.parse(b"{\"k\":1}"), ParsedFrame::Json(_)));
+        assert!(matches!(p.parse(b"[1,2,3]").unwrap(), ParsedFrame::Raw));
+        assert!(matches!(p.parse(b"42").unwrap(), ParsedFrame::Raw));
+        assert!(matches!(p.parse(b"\"hi\"").unwrap(), ParsedFrame::Raw));
+        assert!(matches!(
+            p.parse(b"{\"k\":1}").unwrap(),
+            ParsedFrame::Json(_)
+        ));
     }
 
     #[test]
     fn shell_prompt_user() {
         let p = ShellPromptParser { custom: None };
-        let result = p.parse(b"$ ");
+        let result = p.parse(b"$ ").unwrap();
         assert!(
             matches!(result, ParsedFrame::ShellPrompt { prompt_type, .. } if prompt_type == "user")
         );
@@ -2496,7 +2779,7 @@ mod tests {
     #[test]
     fn shell_prompt_root() {
         let p = ShellPromptParser { custom: None };
-        let result = p.parse(b"# ");
+        let result = p.parse(b"# ").unwrap();
         assert!(
             matches!(result, ParsedFrame::ShellPrompt { prompt_type, .. } if prompt_type == "root")
         );
@@ -2505,7 +2788,7 @@ mod tests {
     #[test]
     fn shell_prompt_host() {
         let p = ShellPromptParser { custom: None };
-        let result = p.parse(b"root@host:~# ");
+        let result = p.parse(b"root@host:~# ").unwrap();
         assert!(
             matches!(result, ParsedFrame::ShellPrompt { prompt_type, .. } if prompt_type == "root")
         );
@@ -2522,6 +2805,7 @@ mod tests {
         let parser = ParserConfig {
             parser_type: ParserType::AtCommand,
             custom_prompt: None,
+            validate: false,
         };
         let mut dec = FrameDecoder::new(&config, Some(&parser)).unwrap();
         let frames = dec.push(b"OK\nERROR\n+CGREG: 0,1\n").unwrap();
@@ -2657,7 +2941,7 @@ mod tests {
     fn start_end_no_start_marker() {
         let config = RxFramingConfig {
             mode: RxFramingMode::StartEnd {
-                start: "STX".into(),
+                start: vec!["STX".into()],
                 end: "ETX".into(),
                 marker_encoding: PatternEncoding::Utf8,
                 include_markers: false,
@@ -2674,7 +2958,7 @@ mod tests {
     fn start_end_start_no_end_then_flush() {
         let config = RxFramingConfig {
             mode: RxFramingMode::StartEnd {
-                start: "<".into(),
+                start: vec!["<".into()],
                 end: ">".into(),
                 marker_encoding: PatternEncoding::Utf8,
                 include_markers: false,
@@ -2692,7 +2976,7 @@ mod tests {
     fn start_end_empty_markers_rejected() {
         let config = RxFramingConfig {
             mode: RxFramingMode::StartEnd {
-                start: "".into(),
+                start: vec!["".into()],
                 end: "X".into(),
                 marker_encoding: PatternEncoding::Utf8,
                 include_markers: false,
@@ -2712,7 +2996,7 @@ mod tests {
     fn start_end_start_split_across_chunks() {
         let config = RxFramingConfig {
             mode: RxFramingMode::StartEnd {
-                start: "ABC".into(),
+                start: vec!["ABC".into()],
                 end: "X".into(),
                 marker_encoding: PatternEncoding::Utf8,
                 include_markers: false,
@@ -2746,7 +3030,7 @@ mod tests {
     fn start_end_invalid_encoding_rejected() {
         let config = RxFramingConfig {
             mode: RxFramingMode::StartEnd {
-                start: "!!!".into(),
+                start: vec!["!!!".into()],
                 end: "X".into(),
                 marker_encoding: crate::match_config::PatternEncoding::Base64,
                 include_markers: false,
@@ -2762,14 +3046,14 @@ mod tests {
     #[test]
     fn at_parser_empty_input() {
         let p = AtCommandParser;
-        let result = p.parse(b"");
+        let result = p.parse(b"").unwrap();
         assert!(matches!(result, ParsedFrame::Raw));
     }
 
     #[test]
     fn at_parser_cme_error() {
         let p = AtCommandParser;
-        let result = p.parse(b"+CME ERROR: 100");
+        let result = p.parse(b"+CME ERROR: 100").unwrap();
         assert!(matches!(
             result,
             ParsedFrame::AtCommand {
@@ -2783,7 +3067,7 @@ mod tests {
     #[test]
     fn at_parser_cms_error() {
         let p = AtCommandParser;
-        let result = p.parse(b"+CMS ERROR: 500");
+        let result = p.parse(b"+CMS ERROR: 500").unwrap();
         assert!(matches!(
             result,
             ParsedFrame::AtCommand {
@@ -2797,14 +3081,14 @@ mod tests {
     #[test]
     fn json_parser_empty_input() {
         let p = JsonLinesParser;
-        let result = p.parse(b"");
+        let result = p.parse(b"").unwrap();
         assert!(matches!(result, ParsedFrame::Raw));
     }
 
     #[test]
     fn shell_prompt_empty_input() {
         let p = ShellPromptParser { custom: None };
-        let result = p.parse(b"");
+        let result = p.parse(b"").unwrap();
         assert!(matches!(result, ParsedFrame::Raw));
     }
 
@@ -2819,6 +3103,7 @@ mod tests {
         let parser = ParserConfig {
             parser_type: ParserType::ShellPrompt,
             custom_prompt: Some("[invalid".to_string()),
+            validate: false,
         };
         match FrameDecoder::new(&config, Some(&parser)) {
             Ok(_) => panic!("invalid regex should be rejected"),
@@ -2831,7 +3116,7 @@ mod tests {
         let p = ShellPromptParser {
             custom: Some(regex::bytes::Regex::new("^>>> $").unwrap()),
         };
-        let result = p.parse(b">>> ");
+        let result = p.parse(b">>> ").unwrap();
         assert!(
             matches!(result, ParsedFrame::ShellPrompt { prompt_type, .. } if prompt_type == "custom")
         );
@@ -2840,7 +3125,7 @@ mod tests {
     #[test]
     fn raw_parser_passthrough() {
         let p = RawParser;
-        let result = p.parse(b"anything");
+        let result = p.parse(b"anything").unwrap();
         assert!(matches!(result, ParsedFrame::Raw));
     }
 
@@ -2910,6 +3195,7 @@ mod tests {
         let parser = ParserConfig {
             parser_type: ParserType::JsonLines,
             custom_prompt: None,
+            validate: false,
         };
         let mut dec = FrameDecoder::new(&config, Some(&parser)).unwrap();
         let frames = dec.push(b"{\"a\":1}\n{\"b\":2}\n").unwrap();
@@ -2965,7 +3251,7 @@ mod tests {
     fn start_end_end_marker_split_across_chunks() {
         let config = RxFramingConfig {
             mode: RxFramingMode::StartEnd {
-                start: "STX".into(),
+                start: vec!["STX".into()],
                 end: "ETX".into(),
                 marker_encoding: PatternEncoding::Utf8,
                 include_markers: false,
@@ -3118,7 +3404,7 @@ mod tests {
     #[test]
     fn tx_start_end() {
         let mode = TxFramingMode::StartEnd {
-            start: "<".into(),
+            start: vec!["<".into()],
             end: ">".into(),
             marker_encoding: PatternEncoding::Utf8,
         };
@@ -3129,7 +3415,7 @@ mod tests {
     #[test]
     fn tx_start_end_empty_markers_rejected() {
         let mode = TxFramingMode::StartEnd {
-            start: "".into(),
+            start: vec!["".into()],
             end: ">".into(),
             marker_encoding: PatternEncoding::Utf8,
         };
@@ -3269,13 +3555,13 @@ mod tests {
     #[test]
     fn roundtrip_start_end() {
         let tx = TxFramingMode::StartEnd {
-            start: "STX".into(),
+            start: vec!["STX".into()],
             end: "ETX".into(),
             marker_encoding: PatternEncoding::Utf8,
         };
         let rx_config = RxFramingConfig {
             mode: RxFramingMode::StartEnd {
-                start: "STX".into(),
+                start: vec!["STX".into()],
                 end: "ETX".into(),
                 marker_encoding: PatternEncoding::Utf8,
                 include_markers: false,
@@ -3726,6 +4012,7 @@ mod tests {
         let parser = ParserConfig {
             parser_type: ParserType::JsonLines,
             custom_prompt: None,
+            validate: false,
         };
         let mut dec = FrameDecoder::new(&config, Some(&parser)).unwrap();
         let frames = dec.push(input).unwrap();
@@ -3918,6 +4205,7 @@ mod tests {
         let bare_parser = ParserConfig {
             parser_type: ParserType::JsonLines,
             custom_prompt: None,
+            validate: false,
         };
         assert_eq!(preset_parser, bare_parser);
     }
@@ -3945,5 +4233,453 @@ mod tests {
         let partial = dec.flush_partial();
         assert!(partial.is_some());
         assert_eq!(partial.unwrap().data, b"b");
+    }
+
+    // ── NMEA parser tests ──────────────────────────────────────────────
+
+    /// Helper: build a NMEA sentence body with a computed XOR checksum.
+    fn nmea_checksum_body(body: &[u8]) -> String {
+        let cs = XorChecksum.compute(body);
+        format!("{:02X}", cs[0])
+    }
+
+    #[test]
+    fn nmea_parser_valid_gga_sentence() {
+        let body = b"GPGGA,123519,4807.038,N,01131.000,E,1,08,0.9,545.4,M,46.9,M,,";
+        let cs_hex = nmea_checksum_body(body);
+        let sentence =
+            format!("GPGGA,123519,4807.038,N,01131.000,E,1,08,0.9,545.4,M,46.9,M,,*{cs_hex}");
+        let p = NmeaParser { validate: true };
+        let result = p.parse(sentence.as_bytes()).unwrap();
+        match result {
+            ParsedFrame::Nmea {
+                talker_id,
+                sentence_type,
+                fields,
+                checksum_valid,
+            } => {
+                assert_eq!(talker_id, "GP");
+                assert_eq!(sentence_type, "GGA");
+                assert_eq!(
+                    fields,
+                    vec![
+                        "123519",
+                        "4807.038",
+                        "N",
+                        "01131.000",
+                        "E",
+                        "1",
+                        "08",
+                        "0.9",
+                        "545.4",
+                        "M",
+                        "46.9",
+                        "M",
+                        "",
+                        ""
+                    ]
+                );
+                assert_eq!(checksum_valid, Some(true));
+            }
+            other => panic!("expected Nmea frame, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn nmea_parser_valid_gll_sentence() {
+        // Known-good sentence from checksums::tests::xor_checksum_known_nmea_sentence
+        // Body: "GPGLL,3751.65,N,12226.54,W" → XOR checksum 0x7E
+        let sentence = b"GPGLL,3751.65,N,12226.54,W*7E";
+        let p = NmeaParser { validate: true };
+        let result = p.parse(sentence).unwrap();
+        match result {
+            ParsedFrame::Nmea {
+                talker_id,
+                sentence_type,
+                fields,
+                checksum_valid,
+            } => {
+                assert_eq!(talker_id, "GP");
+                assert_eq!(sentence_type, "GLL");
+                assert_eq!(fields, vec!["3751.65", "N", "12226.54", "W"]);
+                assert_eq!(checksum_valid, Some(true));
+            }
+            other => panic!("expected Nmea frame, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn nmea_parser_ais_sentence_starts_with_bang() {
+        // Simple AIS sentence body.
+        let body = b"AIVDM,1,1,,B,15M67FC000G?ufbE`H9P<In,0";
+        let cs_hex = nmea_checksum_body(body);
+        let sentence = format!("AIVDM,1,1,,B,15M67FC000G?ufbE`H9P<In,0*{cs_hex}");
+        let p = NmeaParser { validate: true };
+        let result = p.parse(sentence.as_bytes()).unwrap();
+        match result {
+            ParsedFrame::Nmea {
+                talker_id,
+                sentence_type,
+                checksum_valid,
+                ..
+            } => {
+                assert_eq!(talker_id, "AI");
+                assert_eq!(sentence_type, "VDM");
+                assert_eq!(checksum_valid, Some(true));
+            }
+            other => panic!("expected Nmea frame, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn nmea_parser_bad_checksum_returns_error_when_validate_true() {
+        // GLL sentence with correct checksum 0x7E, but we pass *00 (wrong).
+        let sentence = b"GPGLL,3751.65,N,12226.54,W*00";
+        let p = NmeaParser { validate: true };
+        let result = p.parse(sentence);
+        match result {
+            Err(FrameDecodeError::ChecksumMismatch { expected, received }) => {
+                assert_eq!(expected, vec![0x7E]);
+                assert_eq!(received, vec![0x00]);
+            }
+            other => panic!("expected ChecksumMismatch error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn nmea_parser_bad_checksum_returns_some_false_when_validate_false() {
+        let sentence = b"GPGLL,3751.65,N,12226.54,W*00";
+        let p = NmeaParser { validate: false };
+        let result = p.parse(sentence).unwrap();
+        match result {
+            ParsedFrame::Nmea { checksum_valid, .. } => {
+                assert_eq!(checksum_valid, Some(false));
+            }
+            other => panic!("expected Nmea frame, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn nmea_parser_no_checksum_accepted() {
+        let sentence = b"GPGLL,3751.65,N,12226.54,W";
+        let p = NmeaParser { validate: true };
+        let result = p.parse(sentence).unwrap();
+        match result {
+            ParsedFrame::Nmea { checksum_valid, .. } => {
+                assert_eq!(checksum_valid, None);
+            }
+            other => panic!("expected Nmea frame, got {other:?}"),
+        }
+        // Also test with validate: false
+        let p2 = NmeaParser { validate: false };
+        let result2 = p2.parse(sentence).unwrap();
+        match result2 {
+            ParsedFrame::Nmea { checksum_valid, .. } => {
+                assert_eq!(checksum_valid, None);
+            }
+            other => panic!("expected Nmea frame, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn nmea_parser_non_nmea_frame_returns_raw() {
+        let p = NmeaParser { validate: true };
+        let result = p.parse(b"hello world").unwrap();
+        assert!(matches!(result, ParsedFrame::Raw));
+
+        let result2 = p.parse(b"AT+CGMI").unwrap();
+        assert!(matches!(result2, ParsedFrame::Raw));
+    }
+
+    #[test]
+    fn nmea_parser_strips_leading_start_char_if_present() {
+        // Simulate include_markers: true — the $ is included in the data.
+        let body = b"GPGLL,3751.65,N,12226.54,W";
+        let cs_hex = nmea_checksum_body(body);
+        let sentence = format!("$GPGLL,3751.65,N,12226.54,W*{cs_hex}");
+        let p = NmeaParser { validate: true };
+        let result = p.parse(sentence.as_bytes()).unwrap();
+        match result {
+            ParsedFrame::Nmea {
+                talker_id,
+                sentence_type,
+                checksum_valid,
+                ..
+            } => {
+                assert_eq!(talker_id, "GP");
+                assert_eq!(sentence_type, "GLL");
+                assert_eq!(checksum_valid, Some(true));
+            }
+            other => panic!("expected Nmea frame, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn nmea_parser_strips_trailing_crlf_if_present() {
+        // Simulate include_markers: true — the trailing \r\n is included.
+        let body = b"GPGLL,3751.65,N,12226.54,W";
+        let cs_hex = nmea_checksum_body(body);
+        let sentence = format!("GPGLL,3751.65,N,12226.54,W*{cs_hex}\r\n");
+        let p = NmeaParser { validate: true };
+        let result = p.parse(sentence.as_bytes()).unwrap();
+        match result {
+            ParsedFrame::Nmea {
+                talker_id,
+                sentence_type,
+                checksum_valid,
+                ..
+            } => {
+                assert_eq!(talker_id, "GP");
+                assert_eq!(sentence_type, "GLL");
+                assert_eq!(checksum_valid, Some(true));
+            }
+            other => panic!("expected Nmea frame, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn nmea_parser_proprietary_sentence() {
+        // $PGRMZ proprietary sentence without the $.
+        let body = b"PGRMZ,2010,f,3";
+        let cs_hex = nmea_checksum_body(body);
+        let sentence = format!("PGRMZ,2010,f,3*{cs_hex}");
+        let p = NmeaParser { validate: true };
+        let result = p.parse(sentence.as_bytes()).unwrap();
+        match result {
+            ParsedFrame::Nmea {
+                talker_id,
+                sentence_type,
+                fields,
+                checksum_valid,
+            } => {
+                // Address is "PGRMZ" (5 chars): talker = first 2 = "PG", type = rest = "RMZ"
+                assert_eq!(talker_id, "PG");
+                assert_eq!(sentence_type, "RMZ");
+                assert_eq!(fields, vec!["2010", "f", "3"]);
+                assert_eq!(checksum_valid, Some(true));
+            }
+            other => panic!("expected Nmea frame, got {other:?}"),
+        }
+    }
+
+    // ── StartEnd multi-marker tests ─────────────────────────────────────
+
+    #[test]
+    fn start_end_matches_either_of_multiple_start_markers() {
+        let config = RxFramingConfig {
+            mode: RxFramingMode::StartEnd {
+                start: vec!["$".into(), "!".into()],
+                end: "\r\n".into(),
+                marker_encoding: PatternEncoding::Utf8,
+                include_markers: false,
+            },
+            ..Default::default()
+        };
+        let mut dec = FrameDecoder::new(&config, None).unwrap();
+        // Input with $ marker
+        let frames = dec.push(b"junk$hi\r\n").unwrap();
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].data, b"hi");
+        // Input with ! marker
+        let frames = dec.push(b"junk!ok\r\n").unwrap();
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].data, b"ok");
+    }
+
+    #[test]
+    fn start_end_tx_uses_first_marker() {
+        let mode = TxFramingMode::StartEnd {
+            start: vec!["<".into(), ">".into()],
+            end: "|".into(),
+            marker_encoding: PatternEncoding::Utf8,
+        };
+        let framed = mode.encode(b"hi").unwrap();
+        // Uses start[0] = "<"
+        assert_eq!(framed, b"<hi|");
+    }
+
+    #[test]
+    fn start_end_empty_start_vec_rejected_at_construction() {
+        let config = RxFramingConfig {
+            mode: RxFramingMode::StartEnd {
+                start: vec![],
+                end: "X".into(),
+                marker_encoding: PatternEncoding::Utf8,
+                include_markers: false,
+            },
+            ..Default::default()
+        };
+        match FrameDecoder::new(&config, None) {
+            Ok(_) => panic!("empty start vec should be rejected"),
+            Err(err) => assert!(
+                err.contains("Start markers must not be empty"),
+                "got: {err}"
+            ),
+        }
+    }
+
+    #[test]
+    fn start_end_existing_single_marker_still_works() {
+        // Re-test start_end_basic but with start wrapped in vec![].
+        let config = RxFramingConfig {
+            mode: RxFramingMode::StartEnd {
+                start: vec!["STX".into()],
+                end: "ETX".into(),
+                marker_encoding: PatternEncoding::Utf8,
+                include_markers: false,
+            },
+            ..Default::default()
+        };
+        let mut dec = FrameDecoder::new(&config, None).unwrap();
+        let frames = dec.push(b"noiseSTXdataETXjunkSTXmoreETX").unwrap();
+        assert_eq!(frames.len(), 2);
+        assert_eq!(frames[0].data, b"data");
+        assert_eq!(frames[1].data, b"more");
+    }
+
+    // ── NMEA preset tests ──────────────────────────────────────────────
+
+    #[test]
+    fn preset_tx_framing_nmea0183_returns_start_end_dollar() {
+        let tx = preset_tx_framing(ProtocolPreset::Nmea0183);
+        assert!(matches!(
+            tx.mode,
+            TxFramingMode::StartEnd {
+                start,
+                end,
+                marker_encoding: PatternEncoding::Utf8,
+            } if start == vec!["$".to_string()] && end == "\r\n"
+        ));
+    }
+
+    #[test]
+    fn preset_rx_framing_nmea0183_returns_start_end_dollar_bang() {
+        let rx = preset_rx_framing(ProtocolPreset::Nmea0183);
+        match &rx.mode {
+            RxFramingMode::StartEnd {
+                start,
+                end,
+                marker_encoding,
+                include_markers,
+            } => {
+                assert_eq!(start, &vec!["$".to_string(), "!".to_string()]);
+                assert_eq!(end, "\r\n");
+                assert_eq!(*marker_encoding, PatternEncoding::Utf8);
+                assert!(!include_markers);
+            }
+            other => panic!("expected StartEnd, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn preset_rx_parser_nmea0183_returns_nmea_validate_true() {
+        let parser = preset_rx_parser(ProtocolPreset::Nmea0183);
+        assert!(matches!(parser.parser_type, ParserType::Nmea));
+        assert!(parser.validate);
+    }
+
+    #[test]
+    fn protocol_preset_nmea0183_tagged_object_roundtrip() {
+        let val = serde_json::json!({"type": "nmea0183"});
+        let preset: ProtocolPreset = serde_json::from_value(val.clone()).unwrap();
+        assert_eq!(preset, ProtocolPreset::Nmea0183);
+        let re = serde_json::to_value(preset).unwrap();
+        assert_eq!(re, val);
+        // Bare string "nmea0183" must be rejected.
+        let err = serde_json::from_str::<ProtocolPreset>("\"nmea0183\"").unwrap_err();
+        let err_str = err.to_string();
+        assert!(
+            err_str.contains("tag"),
+            "expected tag error, got: {err_str}"
+        );
+    }
+
+    #[test]
+    fn nmea0183_preset_equivalent_to_bare_config() {
+        // TX
+        let preset_tx = preset_tx_framing(ProtocolPreset::Nmea0183);
+        let bare_tx = TxFramingConfig {
+            mode: TxFramingMode::StartEnd {
+                start: vec!["$".into()],
+                end: "\r\n".into(),
+                marker_encoding: PatternEncoding::Utf8,
+            },
+        };
+        assert_eq!(preset_tx, bare_tx);
+
+        // RX
+        let preset_rx = preset_rx_framing(ProtocolPreset::Nmea0183);
+        let bare_rx = RxFramingConfig {
+            mode: RxFramingMode::StartEnd {
+                start: vec!["$".into(), "!".into()],
+                end: "\r\n".into(),
+                marker_encoding: PatternEncoding::Utf8,
+                include_markers: false,
+            },
+            max_frames: None,
+            include_terminators: false,
+            skip_empty: false,
+        };
+        assert_eq!(preset_rx, bare_rx);
+
+        // Parser
+        let preset_parser = preset_rx_parser(ProtocolPreset::Nmea0183);
+        let bare_parser = ParserConfig {
+            parser_type: ParserType::Nmea,
+            custom_prompt: None,
+            validate: true,
+        };
+        assert_eq!(preset_parser, bare_parser);
+    }
+
+    // ── Checksum-failure-surfacing via push ────────────────────────────
+
+    #[test]
+    fn nmea_checksum_failure_surfaces_as_framing_error_via_push() {
+        // Build a FrameDecoder with nmea0183 preset framing + parser.
+        let rx_config = preset_rx_framing(ProtocolPreset::Nmea0183);
+        let parser_config = preset_rx_parser(ProtocolPreset::Nmea0183);
+        let mut dec = FrameDecoder::new(&rx_config, Some(&parser_config)).unwrap();
+        // Push a full NMEA sentence with bad checksum ($...*00\r\n)
+        let result = dec.push(b"$GPGLL,3751.65,N,12226.54,W*00\r\n");
+        match result {
+            Err(FrameDecodeError::ChecksumMismatch { expected, received }) => {
+                assert_eq!(expected, vec![0x7E]);
+                assert_eq!(received, vec![0x00]);
+            }
+            other => panic!("expected ChecksumMismatch error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn nmea_valid_sentence_decodes_to_frame_with_parsed_nmea() {
+        // GLL with correct checksum *7E
+        let rx_config = preset_rx_framing(ProtocolPreset::Nmea0183);
+        let parser_config = preset_rx_parser(ProtocolPreset::Nmea0183);
+        let mut dec = FrameDecoder::new(&rx_config, Some(&parser_config)).unwrap();
+        let frames = dec.push(b"$GPGLL,3751.65,N,12226.54,W*7E\r\n").unwrap();
+        assert_eq!(frames.len(), 1);
+        match &frames[0].parsed {
+            Some(ParsedFrame::Nmea {
+                talker_id,
+                sentence_type,
+                fields,
+                checksum_valid,
+            }) => {
+                assert_eq!(talker_id, "GP");
+                assert_eq!(sentence_type, "GLL");
+                assert_eq!(
+                    fields,
+                    &vec![
+                        "3751.65".to_string(),
+                        "N".to_string(),
+                        "12226.54".to_string(),
+                        "W".to_string()
+                    ]
+                );
+                assert_eq!(*checksum_valid, Some(true));
+            }
+            other => panic!("expected Nmea parsed frame, got {other:?}"),
+        }
     }
 }

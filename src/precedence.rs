@@ -105,6 +105,7 @@ mod tests {
         ParserConfig {
             parser_type: ParserType::Raw,
             custom_prompt: None,
+            validate: false,
         }
     }
 
@@ -284,5 +285,26 @@ mod tests {
         );
         assert_eq!(result, Some(explicit));
         assert_ne!(result, Some(preset_rx_framing(ProtocolPreset::Ndjson)));
+    }
+
+    // --- Nmea0183 preset precedence test ---
+
+    #[test]
+    fn nmea0183_preset_explicit_framing_wins_over_preset() {
+        // Explicit tx_framing (Line/Crlf) wins over call_protocol=Nmea0183.
+        let explicit = TxFramingConfig {
+            mode: TxFramingMode::Line {
+                ending: TxLineEnding::Crlf,
+            },
+        };
+        let result = resolve_field::<TxFramingConfig>(
+            Some(explicit.clone()),
+            Some(ProtocolPreset::Nmea0183),
+            preset_tx_framing,
+            None,
+            None,
+        );
+        assert_eq!(result, Some(explicit));
+        assert_ne!(result, Some(preset_tx_framing(ProtocolPreset::Nmea0183)));
     }
 }
