@@ -5207,4 +5207,256 @@ mod tests {
         };
         assert_eq!(preset_parser, bare_parser);
     }
+
+    // ── Medium-risk gap tests (P3d) ───────────────────────────────────────
+
+    #[test]
+    fn skip_empty_applies_to_delimiter() {
+        // Delimiter mode + skip_empty: empty frames between consecutive
+        // delimiters are dropped. Mirror skip_empty_drops_empty_line_frames.
+        let config_on = RxFramingConfig {
+            mode: RxFramingMode::Delimiter {
+                delimiter: "|".into(),
+                delimiter_encoding: PatternEncoding::Utf8,
+            },
+            max_frames: None,
+            include_terminators: false,
+            skip_empty: true,
+        };
+        let mut dec = FrameDecoder::new(&config_on, None).unwrap();
+        let frames = dec.push(b"a||b|").unwrap();
+        assert_eq!(frames.len(), 2);
+        assert_eq!(frames[0].data, b"a");
+        assert_eq!(frames[1].data, b"b");
+
+        // skip_empty: false → 3 frames (a, empty, b).
+        let config_off = RxFramingConfig {
+            mode: RxFramingMode::Delimiter {
+                delimiter: "|".into(),
+                delimiter_encoding: PatternEncoding::Utf8,
+            },
+            max_frames: None,
+            include_terminators: false,
+            skip_empty: false,
+        };
+        let mut dec_off = FrameDecoder::new(&config_off, None).unwrap();
+        let frames_off = dec_off.push(b"a||b|").unwrap();
+        assert_eq!(frames_off.len(), 3);
+        assert_eq!(frames_off[0].data, b"a");
+        assert!(frames_off[1].data.is_empty());
+        assert_eq!(frames_off[2].data, b"b");
+    }
+
+    #[test]
+    fn skip_empty_applies_to_start_end() {
+        // StartEnd mode + skip_empty: the empty frame between a bare
+        // "$" .. "\r\n" is dropped. Input b"$\r\n$hi\r\n" → two frames
+        // (empty, "hi"). With skip_empty:true only the second frame emits.
+        let config_on = RxFramingConfig {
+            mode: RxFramingMode::StartEnd {
+                start: vec!["$".into()],
+                end: "\r\n".into(),
+                marker_encoding: PatternEncoding::Utf8,
+                include_markers: false,
+            },
+            max_frames: None,
+            include_terminators: false,
+            skip_empty: true,
+        };
+        let mut dec = FrameDecoder::new(&config_on, None).unwrap();
+        let frames = dec.push(b"$\r\n$hi\r\n").unwrap();
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].data, b"hi");
+
+        // skip_empty: false → 2 frames (empty, "hi").
+        let config_off = RxFramingConfig {
+            mode: RxFramingMode::StartEnd {
+                start: vec!["$".into()],
+                end: "\r\n".into(),
+                marker_encoding: PatternEncoding::Utf8,
+                include_markers: false,
+            },
+            max_frames: None,
+            include_terminators: false,
+            skip_empty: false,
+        };
+        let mut dec_off = FrameDecoder::new(&config_off, None).unwrap();
+        let frames_off = dec_off.push(b"$\r\n$hi\r\n").unwrap();
+        assert_eq!(frames_off.len(), 2);
+        assert!(frames_off[0].data.is_empty());
+        assert_eq!(frames_off[1].data, b"hi");
+    }
+
+    #[test]
+    fn start_end_picks_earliest_of_overlapping_markers() {
+        // Two start markers that share a prefix: "$G" and "$GPGGA".
+        // Input: b"$GPGGA,x\r\n". Both markers match at position 0.
+        // Tie-break: the first-listed marker in the start vec at the
+        // earliest position wins. With start: ["$G", "$GPGGA"], "$G"
+        // wins because it appears first in the list and both start at
+        // offset 0. After draining the 2-byte "$G" marker, the body is
+        // "PGGA,x" (the "$G" wins, not "$GPGGA").
+        let config = RxFramingConfig {
+            mode: RxFramingMode::StartEnd {
+                start: vec!["$G".into(), "$GPGGA".into()],
+                end: "\r\n".into(),
+                marker_encoding: PatternEncoding::Utf8,
+                include_markers: false,
+            },
+            ..Default::default()
+        };
+        let mut dec = FrameDecoder::new(&config, None).unwrap();
+        let frames = dec.push(b"$GPGGA,x\r\n").unwrap();
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].data, b"PGGA,x");
+    }
+
+    #[test]
+    fn nmea_parser_multi_fragment_ais_first_sentence() {
+        use crate::checksums::XorChecksum;
+
+        // AIS multi-fragment messages are NOT reassembled by the parser —
+        // each fragment is its own frame. This test pins the first-fragment
+        // parse and documents the no-reassembly behavior.
+        //
+        // Verify the XOR checksum of the body between ! and * (exclusive).
+        let checksum_body = b"AIVDM,2,1,3,B,55?MbV02;H0000,0";
+        let computed = XorChecksum.compute(checksum_body);
+        // The handoff documented checksum 0x5C but the correct XOR is 0x22.
+        assert_eq!(computed, [0x22], "AIS sentence checksum is 0x22, not 0x5C");
+
+        let sentence = b"!AIVDM,2,1,3,B,55?MbV02;H0000,0*22";
+        let p = NmeaParser { validate: true };
+        let result = p.parse(sentence).unwrap();
+        match result {
+            ParsedFrame::Nmea {
+                talker_id,
+                sentence_type,
+                fields,
+                checksum_valid,
+            } => {
+                assert_eq!(talker_id, "AI");
+                assert_eq!(sentence_type, "VDM");
+                assert_eq!(fields, vec!["2", "1", "3", "B", "55?MbV02;H0000", "0"]);
+                assert_eq!(checksum_valid, Some(true));
+            }
+            other => panic!("expected Nmea frame, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn nmea_parser_preserves_whitespace_in_fields() {
+        use crate::checksums::XorChecksum;
+
+        // The parser uses split(',') without per-field trimming; this test
+        // pins that whitespace inside a field is preserved. A future
+        // "helpful" refactor adding .trim() per field would break this.
+        let body_without_star = b"GPVTG,  48.7  ,T,,,N,,K,N";
+        let cs = XorChecksum.compute(body_without_star);
+        let cs_hex = format!("{:02X}", cs[0]);
+        // cs_hex = "58" for this body.
+        let sentence = format!(
+            "${}*{}",
+            std::str::from_utf8(body_without_star).unwrap(),
+            cs_hex
+        );
+        let p = NmeaParser { validate: true };
+        let result = p.parse(sentence.as_bytes()).unwrap();
+        match result {
+            ParsedFrame::Nmea {
+                talker_id,
+                sentence_type,
+                fields,
+                checksum_valid,
+            } => {
+                assert_eq!(talker_id, "GP");
+                assert_eq!(sentence_type, "VTG");
+                // The first data field (fields[0]) has leading + trailing
+                // spaces — they are NOT trimmed.
+                assert_eq!(fields[0], "  48.7  ");
+                assert_eq!(checksum_valid, Some(true));
+            }
+            other => panic!("expected Nmea frame, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn modbus_ascii_parser_max_adu_length() {
+        use crate::checksums::Lrc;
+
+        // A 253-byte data payload near the Modbus ADU max. Pins no-length-cap
+        // behavior. The frame is routed through a full FrameDecoder (StartEnd
+        // framing with ':' start and "\r\n" end) + ModbusAscii parser.
+        let address = 0x01u8;
+        let function = 0x03u8;
+        let data: Vec<u8> = (0..253u8).collect();
+        let mut pdu = vec![address, function];
+        pdu.extend_from_slice(&data);
+        let lrc = Lrc.compute(&pdu);
+        let lrc_byte = lrc[0];
+
+        let mut all_bytes = pdu.clone();
+        all_bytes.push(lrc_byte);
+        let hex_body: String = all_bytes.iter().map(|b| format!("{b:02X}")).collect();
+        let frame = format!(":{hex_body}\r\n");
+
+        let rx_config = preset_rx_framing(ProtocolPreset::ModbusAscii);
+        let parser_config = preset_rx_parser(ProtocolPreset::ModbusAscii);
+        let mut dec = FrameDecoder::new(&rx_config, Some(&parser_config)).unwrap();
+        let frames = dec.push(frame.as_bytes()).unwrap();
+        assert_eq!(frames.len(), 1);
+        match &frames[0].parsed {
+            Some(ParsedFrame::ModbusAscii {
+                address: a,
+                function_code: fc,
+                data: d,
+                checksum_valid: Some(true),
+            }) => {
+                assert_eq!(*a, 1);
+                assert_eq!(*fc, 3);
+                assert_eq!(d.len(), 253);
+            }
+            other => panic!("expected ModbusAscii parsed frame, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn modbus_ascii_parser_non_ascii_body_returns_raw() {
+        // Two branches in ModbusAsciiParser::parse that lead to Raw:
+        //
+        // Case 1: valid UTF-8 but non-ASCII → is_ascii_hexdigit fails.
+        // b"01\xC3\xA900" = "01é00" where é is U+00E9 (valid UTF-8, non-
+        // hex-digit byte 0xC3). The parser calls from_utf8 (Ok), then
+        // is_ascii_hexdigit fails → Raw.
+        let p = ModbusAsciiParser { validate: true };
+        let body1 = b"01\xC3\xA900";
+        let result1 = p.parse(body1).unwrap();
+        assert!(
+            matches!(result1, ParsedFrame::Raw),
+            "non-ASCII valid-UTF-8 body should return Raw, got {result1:?}"
+        );
+
+        // Case 2: invalid UTF-8 → from_utf8 returns Err → Raw.
+        // b"01\xFF00" — 0xFF is a lone byte >0x7F and not a valid UTF-8
+        // continuation. from_utf8 returns Err immediately.
+        let body2 = b"01\xFF00";
+        let result2 = p.parse(body2).unwrap();
+        assert!(
+            matches!(result2, ParsedFrame::Raw),
+            "invalid-UTF-8 body should return Raw, got {result2:?}"
+        );
+
+        // Sanity: a valid hex body with the same parser DOES parse to ModbusAscii.
+        let pdu = [0x01u8, 0x03, 0x00, 0x00, 0x00, 0x01];
+        let lrc_hex = {
+            let cs = Lrc.compute(&pdu);
+            format!("{:02X}", cs[0])
+        };
+        let body_valid = format!("010300000001{lrc_hex}");
+        let result_valid = p.parse(body_valid.as_bytes()).unwrap();
+        assert!(
+            matches!(result_valid, ParsedFrame::ModbusAscii { .. }),
+            "valid hex body should parse to ModbusAscii, got {result_valid:?}"
+        );
+    }
 }
