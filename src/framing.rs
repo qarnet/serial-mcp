@@ -197,18 +197,13 @@ pub fn preset_tx_framing(p: ProtocolPreset) -> TxFramingConfig {
         ProtocolPreset::Slip => TxFramingConfig {
             mode: TxFramingMode::Slip,
         },
-        ProtocolPreset::JsonLines => TxFramingConfig {
+        ProtocolPreset::JsonLines | ProtocolPreset::Ndjson => TxFramingConfig {
             mode: TxFramingMode::Line {
                 ending: TxLineEnding::Lf,
             },
         },
         ProtocolPreset::Cobs => TxFramingConfig {
             mode: TxFramingMode::Cobs,
-        },
-        ProtocolPreset::Ndjson => TxFramingConfig {
-            mode: TxFramingMode::Line {
-                ending: TxLineEnding::Lf,
-            },
         },
         ProtocolPreset::Nmea0183 => TxFramingConfig {
             mode: TxFramingMode::StartEnd {
@@ -229,106 +224,61 @@ pub fn preset_tx_framing(p: ProtocolPreset) -> TxFramingConfig {
 
 /// The RX framing implied by a protocol preset.
 pub fn preset_rx_framing(p: ProtocolPreset) -> RxFramingConfig {
-    match p {
-        ProtocolPreset::AtCommand => RxFramingConfig {
-            mode: RxFramingMode::Line {
+    let (mode, skip_empty) = match p {
+        ProtocolPreset::AtCommand | ProtocolPreset::JsonLines => (
+            RxFramingMode::Line {
                 ending: LineEnding::Auto,
             },
-            max_frames: None,
-            include_terminators: false,
-            skip_empty: false,
-        },
-        ProtocolPreset::Slip => RxFramingConfig {
-            mode: RxFramingMode::Slip,
-            max_frames: None,
-            include_terminators: false,
-            skip_empty: false,
-        },
-        ProtocolPreset::JsonLines => RxFramingConfig {
-            mode: RxFramingMode::Line {
+            false,
+        ),
+        ProtocolPreset::Slip => (RxFramingMode::Slip, false),
+        ProtocolPreset::Cobs => (RxFramingMode::Cobs, false),
+        ProtocolPreset::Ndjson => (
+            RxFramingMode::Line {
                 ending: LineEnding::Auto,
             },
-            max_frames: None,
-            include_terminators: false,
-            skip_empty: false,
-        },
-        ProtocolPreset::Cobs => RxFramingConfig {
-            mode: RxFramingMode::Cobs,
-            max_frames: None,
-            include_terminators: false,
-            skip_empty: false,
-        },
-        ProtocolPreset::Ndjson => RxFramingConfig {
-            mode: RxFramingMode::Line {
-                ending: LineEnding::Auto,
-            },
-            max_frames: None,
-            include_terminators: false,
-            skip_empty: true,
-        },
-        ProtocolPreset::Nmea0183 => RxFramingConfig {
-            mode: RxFramingMode::StartEnd {
+            true,
+        ),
+        ProtocolPreset::Nmea0183 => (
+            RxFramingMode::StartEnd {
                 start: vec!["$".into(), "!".into()],
                 end: "\r\n".into(),
                 marker_encoding: PatternEncoding::Utf8,
                 include_markers: false,
             },
-            max_frames: None,
-            include_terminators: false,
-            skip_empty: false,
-        },
-        ProtocolPreset::ModbusAscii => RxFramingConfig {
-            mode: RxFramingMode::StartEnd {
+            false,
+        ),
+        ProtocolPreset::ModbusAscii => (
+            RxFramingMode::StartEnd {
                 start: vec![":".into()],
                 end: "\r\n".into(),
                 marker_encoding: PatternEncoding::Utf8,
                 include_markers: false,
             },
-            max_frames: None,
-            include_terminators: false,
-            skip_empty: false,
-        },
+            false,
+        ),
+    };
+    RxFramingConfig {
+        mode,
+        max_frames: None,
+        include_terminators: false,
+        skip_empty,
     }
 }
 
 /// The RX parser implied by a protocol preset.
 pub fn preset_rx_parser(p: ProtocolPreset) -> ParserConfig {
-    match p {
-        ProtocolPreset::AtCommand => ParserConfig {
-            parser_type: ParserType::AtCommand,
-            custom_prompt: None,
-            validate: false,
-        },
-        ProtocolPreset::Slip => ParserConfig {
-            parser_type: ParserType::Raw,
-            custom_prompt: None,
-            validate: false,
-        },
-        ProtocolPreset::JsonLines => ParserConfig {
-            parser_type: ParserType::JsonLines,
-            custom_prompt: None,
-            validate: false,
-        },
-        ProtocolPreset::Cobs => ParserConfig {
-            parser_type: ParserType::Raw,
-            custom_prompt: None,
-            validate: false,
-        },
-        ProtocolPreset::Ndjson => ParserConfig {
-            parser_type: ParserType::JsonLines,
-            custom_prompt: None,
-            validate: false,
-        },
-        ProtocolPreset::Nmea0183 => ParserConfig {
-            parser_type: ParserType::Nmea,
-            custom_prompt: None,
-            validate: true,
-        },
-        ProtocolPreset::ModbusAscii => ParserConfig {
-            parser_type: ParserType::ModbusAscii,
-            custom_prompt: None,
-            validate: true,
-        },
+    let (parser_type, validate) = match p {
+        ProtocolPreset::AtCommand => (ParserType::AtCommand, false),
+        ProtocolPreset::Slip | ProtocolPreset::Cobs => (ParserType::Raw, false),
+        ProtocolPreset::JsonLines | ProtocolPreset::Ndjson => (ParserType::JsonLines, false),
+        ProtocolPreset::Nmea0183 => (ParserType::Nmea, true),
+        ProtocolPreset::ModbusAscii => (ParserType::ModbusAscii, true),
+    };
+    ParserConfig {
+        parser_type,
+        custom_prompt: None,
+        validate,
     }
 }
 
@@ -1673,6 +1623,26 @@ impl FrameParser for RawParser {
     }
 }
 
+/// Strip a trailing `\r\n` or bare `\n` from `content` in place (defensive:
+/// handles frames where the end marker was NOT stripped by the framing layer).
+fn strip_trailing_newline(content: &mut Vec<u8>) {
+    if content.ends_with(b"\r\n") {
+        content.truncate(content.len() - 2);
+    } else if content.ends_with(b"\n") {
+        content.truncate(content.len() - 1);
+    }
+}
+
+/// Strip a leading byte if it matches any of `markers` (defensive: handles
+/// frames where the start marker was NOT stripped by the framing layer).
+fn strip_leading_if_any(content: &mut Vec<u8>, markers: &[u8]) {
+    if let Some(&first) = content.first() {
+        if markers.contains(&first) {
+            content.remove(0);
+        }
+    }
+}
+
 // NMEA-0183 parser
 
 struct NmeaParser {
@@ -1686,16 +1656,8 @@ impl FrameParser for NmeaParser {
         //    markers. The nmea0183 preset uses include_markers=false, but bare
         //    callers might set true. Handle both.
         let mut content = data.to_vec();
-        // Strip leading $ or !
-        if content.first() == Some(&b'$') || content.first() == Some(&b'!') {
-            content.remove(0);
-        }
-        // Strip trailing \r\n or \n
-        if content.ends_with(b"\r\n") {
-            content.truncate(content.len() - 2);
-        } else if content.ends_with(b"\n") {
-            content.truncate(content.len() - 1);
-        }
+        strip_leading_if_any(&mut content, b"$!");
+        strip_trailing_newline(&mut content);
 
         // 2. Validate that this looks like a NMEA sentence. The preset strips
         //    $/! via StartEnd framing, so the data may start directly with the
@@ -1823,14 +1785,8 @@ impl FrameParser for ModbusAsciiParser {
         //    ':' and \r\n; a bare caller with include_markers=true would
         //    include them).
         let mut content = data.to_vec();
-        if content.first() == Some(&b':') {
-            content.remove(0);
-        }
-        if content.ends_with(b"\r\n") {
-            content.truncate(content.len() - 2);
-        } else if content.ends_with(b"\n") {
-            content.truncate(content.len() - 1);
-        }
+        strip_leading_if_any(&mut content, b":");
+        strip_trailing_newline(&mut content);
 
         // 2. Modbus ASCII body is all hex chars (0-9, A-F, a-f). Validate:
         //    if any non-hex byte is present, return Ok(ParsedFrame::Raw) —
@@ -2406,18 +2362,22 @@ mod tests {
         assert_eq!(cfg.parser_type, ParserType::AtCommand);
     }
 
+    /// Assert that a ProtocolPreset variant round-trips through the tagged-object
+    /// JSON shape `{"type": "<variant_str>"}` and rejects the bare-string form.
+    fn assert_preset_roundtrip(variant_str: &str, expected: ProtocolPreset) {
+        let val = serde_json::json!({ "type": variant_str });
+        let p: ProtocolPreset = serde_json::from_value(val.clone()).unwrap();
+        assert_eq!(p, expected);
+        assert_eq!(serde_json::to_value(p).unwrap(), val);
+        assert!(
+            serde_json::from_value::<ProtocolPreset>(serde_json::json!(variant_str)).is_err(),
+            "bare string form {variant_str:?} must be rejected (tagged-object shape required)"
+        );
+    }
+
     #[test]
     fn protocol_preset_tagged_object_roundtrip() {
-        let json = serde_json::json!({ "type": "at_command" });
-        let p: ProtocolPreset = serde_json::from_value(json.clone()).unwrap();
-        assert_eq!(p, ProtocolPreset::AtCommand);
-        let back = serde_json::to_value(p).unwrap();
-        assert_eq!(back, json, "must round-trip as tagged object");
-        // Bare string form must be rejected.
-        assert!(
-            serde_json::from_value::<ProtocolPreset>(serde_json::json!("at_command")).is_err(),
-            "bare string form must be rejected after adding tag"
-        );
+        assert_preset_roundtrip("at_command", ProtocolPreset::AtCommand);
     }
 
     #[test]
@@ -2468,30 +2428,12 @@ mod tests {
 
     #[test]
     fn protocol_preset_slip_tagged_object_roundtrip() {
-        let json = serde_json::json!({ "type": "slip" });
-        let p: ProtocolPreset = serde_json::from_value(json.clone()).unwrap();
-        assert_eq!(p, ProtocolPreset::Slip);
-        let back = serde_json::to_value(p).unwrap();
-        assert_eq!(back, json, "must round-trip as tagged object");
-        // Bare string form must be rejected.
-        assert!(
-            serde_json::from_value::<ProtocolPreset>(serde_json::json!("slip")).is_err(),
-            "bare string form must be rejected after adding tag"
-        );
+        assert_preset_roundtrip("slip", ProtocolPreset::Slip);
     }
 
     #[test]
     fn protocol_preset_json_lines_tagged_object_roundtrip() {
-        let json = serde_json::json!({ "type": "json_lines" });
-        let p: ProtocolPreset = serde_json::from_value(json.clone()).unwrap();
-        assert_eq!(p, ProtocolPreset::JsonLines);
-        let back = serde_json::to_value(p).unwrap();
-        assert_eq!(back, json, "must round-trip as tagged object");
-        // Bare string form must be rejected.
-        assert!(
-            serde_json::from_value::<ProtocolPreset>(serde_json::json!("json_lines")).is_err(),
-            "bare string form must be rejected after adding tag"
-        );
+        assert_preset_roundtrip("json_lines", ProtocolPreset::JsonLines);
     }
 
     #[test]
@@ -3935,16 +3877,7 @@ mod tests {
 
     #[test]
     fn protocol_preset_cobs_tagged_object_roundtrip() {
-        let json = serde_json::json!({ "type": "cobs" });
-        let p: ProtocolPreset = serde_json::from_value(json.clone()).unwrap();
-        assert_eq!(p, ProtocolPreset::Cobs);
-        let back = serde_json::to_value(p).unwrap();
-        assert_eq!(back, json, "must round-trip as tagged object");
-        // Bare string form must be rejected.
-        assert!(
-            serde_json::from_value::<ProtocolPreset>(serde_json::json!("cobs")).is_err(),
-            "bare string form must be rejected after adding tag"
-        );
+        assert_preset_roundtrip("cobs", ProtocolPreset::Cobs);
     }
 
     #[test]
@@ -4298,19 +4231,7 @@ mod tests {
 
     #[test]
     fn protocol_preset_ndjson_tagged_object_roundtrip() {
-        // Tagged-object {"type":"ndjson"} round-trips correctly.
-        let val = serde_json::json!({"type": "ndjson"});
-        let preset: ProtocolPreset = serde_json::from_value(val.clone()).unwrap();
-        assert_eq!(preset, ProtocolPreset::Ndjson);
-        let re = serde_json::to_value(preset).unwrap();
-        assert_eq!(re, val);
-        // Bare string "ndjson" must be rejected.
-        let err = serde_json::from_str::<ProtocolPreset>("\"ndjson\"").unwrap_err();
-        let err_str = err.to_string();
-        assert!(
-            err_str.contains("tag"),
-            "expected tag error, got: {err_str}"
-        );
+        assert_preset_roundtrip("ndjson", ProtocolPreset::Ndjson);
     }
 
     #[test]
@@ -4716,18 +4637,7 @@ mod tests {
 
     #[test]
     fn protocol_preset_nmea0183_tagged_object_roundtrip() {
-        let val = serde_json::json!({"type": "nmea0183"});
-        let preset: ProtocolPreset = serde_json::from_value(val.clone()).unwrap();
-        assert_eq!(preset, ProtocolPreset::Nmea0183);
-        let re = serde_json::to_value(preset).unwrap();
-        assert_eq!(re, val);
-        // Bare string "nmea0183" must be rejected.
-        let err = serde_json::from_str::<ProtocolPreset>("\"nmea0183\"").unwrap_err();
-        let err_str = err.to_string();
-        assert!(
-            err_str.contains("tag"),
-            "expected tag error, got: {err_str}"
-        );
+        assert_preset_roundtrip("nmea0183", ProtocolPreset::Nmea0183);
     }
 
     #[test]
@@ -5121,18 +5031,7 @@ mod tests {
 
     #[test]
     fn protocol_preset_modbus_ascii_tagged_object_roundtrip() {
-        let val = serde_json::json!({"type": "modbus_ascii"});
-        let preset: ProtocolPreset = serde_json::from_value(val.clone()).unwrap();
-        assert_eq!(preset, ProtocolPreset::ModbusAscii);
-        let re = serde_json::to_value(preset).unwrap();
-        assert_eq!(re, val);
-        // Bare string "modbus_ascii" must be rejected.
-        let err = serde_json::from_str::<ProtocolPreset>("\"modbus_ascii\"").unwrap_err();
-        let err_str = err.to_string();
-        assert!(
-            err_str.contains("tag"),
-            "expected tag error, got: {err_str}"
-        );
+        assert_preset_roundtrip("modbus_ascii", ProtocolPreset::ModbusAscii);
     }
 
     #[test]
