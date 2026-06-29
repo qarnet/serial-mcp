@@ -574,6 +574,7 @@ pub enum ParserType {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct Frame {
     /// Raw frame bytes (without delimiters/terminators unless include_terminators is set).
+    #[schemars(schema_with = "crate::schema_helpers::byte_array_schema")]
     pub data: Vec<u8>,
     /// Frame number since decoder creation (0-based).
     #[schemars(schema_with = "crate::schema_helpers::uint_schema")]

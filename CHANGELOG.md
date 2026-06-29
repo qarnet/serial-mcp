@@ -2,7 +2,7 @@
 
 | Version | Date | Highlights |
 |---|---|---|
-| [Unreleased](#unreleased) | — | `--version` flag + `version` subcommand, `BUILD_TARGET` in build.rs; removed dead `ProfileDefaults` fields; `slip` and `json_lines` protocol presets; COBS framing mode + `cobs` preset + `checksums` module; `ndjson` preset + `skip_empty` framing option; `nmea0183` preset + `Nmea` parser + `StartEnd` multi-marker + checksum validation; `modbus_ascii` preset + `ModbusAscii` parser + `Lrc` checksum |
+| [Unreleased](#unreleased) | — | `--version` flag + `version` subcommand, `BUILD_TARGET` in build.rs; removed dead `ProfileDefaults` fields; `slip` and `json_lines` protocol presets; COBS framing mode + `cobs` preset + `checksums` module; `ndjson` preset + `skip_empty` framing option; `nmea0183` preset + `Nmea` parser + `StartEnd` multi-marker + checksum validation; `modbus_ascii` preset + `ModbusAscii` parser + `Lrc` checksum; schema fix for `Frame.data` uint8 format |
 | [0.7.0](#070) | 2026-06-26 | Frame pipeline: TX framing, SLIP, protocol presets, profile defaults, parser relocation |
 | [0.6.2](#062) | 2026-06-25 | Schema fix: suppress non-standard `uint8`/`uint16` formats; expanded schema regression guards + AGENTS.md truth |
 | [0.6.1](#061) | 2026-06-24 | RX refactor: shared framing sink, SerialHandler builder, config FromStr, dedup; docs cleanup |
@@ -159,6 +159,13 @@
   `XorChecksum` for NMEA.
 - No breaking changes: all additions are new enum variants, a new struct,
   and a new checksum impl — existing field shapes are unchanged.
+
+**Fixed — schema:**
+- `Frame.data` (the decoded-frame byte array, shipped 0.6.0) was emitting the
+  non-standard `"format": "uint8"` on its array items; fixed by applying
+  `byte_array_schema` (the helper added in P2b for
+  `ParsedFrame::ModbusAscii.data`) and adding `Frame` to the `check_schema!`
+  regression-net list. Schema-only fix; no runtime behavior change.
 
 ## [0.7.0]
 

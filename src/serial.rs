@@ -2054,7 +2054,9 @@ mod schema {
     use schemars::schema_for;
     use serde_json::{self, Value};
 
-    use crate::framing::{ParsedFrame, RxFramingConfig, RxFramingMode, TxFramingConfig, TxFramingMode};
+    use crate::framing::{
+        Frame, ParsedFrame, RxFramingConfig, RxFramingMode, TxFramingConfig, TxFramingMode,
+    };
     use crate::profiles::{Profile, ProfileSelector};
     use crate::serial::{ConnectionStatus, PortInfo};
     use crate::tools::types::{
@@ -2177,6 +2179,9 @@ mod schema {
     // Parsed frame enum (guards uint fields on ParsedFrame::ModbusAscii
     // and any future variants that carry unsigned integers).
     check_schema!(parsed_frame_has_no_uint_formats, ParsedFrame);
+
+    // Decoded frame (guards the Vec<u8> data field + the usize index field).
+    check_schema!(frame_has_no_uint_formats, Frame);
 
     // Profile defaults (Phase 5 framing fields — no unsigned fields, but guard).
     check_schema!(
