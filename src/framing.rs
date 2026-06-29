@@ -9,6 +9,7 @@
 //! with frame boundaries matching the RX modes. Used on `write`.
 
 use crate::checksums::Checksum;
+use crate::checksums::Lrc;
 use crate::checksums::XorChecksum;
 use crate::codec;
 use crate::match_config::PatternEncoding;
@@ -180,6 +181,9 @@ pub enum ProtocolPreset {
     /// NMEA-0183 marine sentence protocol. StartEnd framing (start markers
     /// $ / !, end \r\n) + Nmea parser with checksum validation.
     Nmea0183,
+    /// Modbus ASCII mode. StartEnd framing (: start, \r\n end) + ModbusAscii
+    /// parser with LRC validation.
+    ModbusAscii,
 }
 
 /// The TX framing implied by a protocol preset.
@@ -209,6 +213,13 @@ pub fn preset_tx_framing(p: ProtocolPreset) -> TxFramingConfig {
         ProtocolPreset::Nmea0183 => TxFramingConfig {
             mode: TxFramingMode::StartEnd {
                 start: vec!["$".into()],
+                end: "\r\n".into(),
+                marker_encoding: PatternEncoding::Utf8,
+            },
+        },
+        ProtocolPreset::ModbusAscii => TxFramingConfig {
+            mode: TxFramingMode::StartEnd {
+                start: vec![":".into()],
                 end: "\r\n".into(),
                 marker_encoding: PatternEncoding::Utf8,
             },
@@ -266,6 +277,17 @@ pub fn preset_rx_framing(p: ProtocolPreset) -> RxFramingConfig {
             include_terminators: false,
             skip_empty: false,
         },
+        ProtocolPreset::ModbusAscii => RxFramingConfig {
+            mode: RxFramingMode::StartEnd {
+                start: vec![":".into()],
+                end: "\r\n".into(),
+                marker_encoding: PatternEncoding::Utf8,
+                include_markers: false,
+            },
+            max_frames: None,
+            include_terminators: false,
+            skip_empty: false,
+        },
     }
 }
 
@@ -299,6 +321,11 @@ pub fn preset_rx_parser(p: ProtocolPreset) -> ParserConfig {
         },
         ProtocolPreset::Nmea0183 => ParserConfig {
             parser_type: ParserType::Nmea,
+            custom_prompt: None,
+            validate: true,
+        },
+        ProtocolPreset::ModbusAscii => ParserConfig {
+            parser_type: ParserType::ModbusAscii,
             custom_prompt: None,
             validate: true,
         },
@@ -536,6 +563,9 @@ pub enum ParserType {
     /// Parse NMEA-0183 sentences: talker ID + sentence type + comma fields,
     /// with optional *XX XOR checksum validation.
     Nmea,
+    /// Parse Modbus ASCII frames: hex-decode the body, validate the LRC,
+    /// expose address + function code + data bytes.
+    ModbusAscii,
 }
 
 // ---- Frame types -----------------------------------------------------------
@@ -591,6 +621,26 @@ pub enum ParsedFrame {
         /// - Some(false): checksum present and INVALID (only reachable when validate=false; when validate=true a mismatch returns Err, not Some(false)).
         /// - None: no checksum present in the sentence.
         #[serde(skip_serializing_if = "Option::is_none")]
+        checksum_valid: Option<bool>,
+    },
+    ModbusAscii {
+        /// Slave address (1-247), decoded from the first 2 hex chars of the body.
+        /// 0 = broadcast. Stored as the decoded byte value (0-255).
+        #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+        address: u8,
+        /// Function code (decoded byte value). 1-127 = normal; 128+ = exception
+        /// response (the high bit set indicates an exception).
+        #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+        function_code: u8,
+        /// Decoded data bytes (the PDU payload after address + function code,
+        /// excluding the LRC). For an exception response, the first byte is the
+        /// exception code.
+        #[schemars(schema_with = "crate::schema_helpers::byte_array_schema")]
+        data: Vec<u8>,
+        /// LRC status:
+        /// - Some(true): LRC present and valid (or present, validate=false: not enforced but reported as valid-shape).
+        /// - Some(false): LRC present and INVALID (only reachable when validate=false; when validate=true a mismatch returns Err, not Some(false)).
+        /// - None: no LRC present (a malformed frame shorter than 2 hex chars after the data — should not happen for valid frames, but defensive).
         checksum_valid: Option<bool>,
     },
 }
@@ -1474,6 +1524,9 @@ fn build_parser(config: &ParserConfig) -> Result<Box<dyn FrameParser>, String> {
         ParserType::Nmea => Ok(Box::new(NmeaParser {
             validate: config.validate,
         })),
+        ParserType::ModbusAscii => Ok(Box::new(ModbusAsciiParser {
+            validate: config.validate,
+        })),
     }
 }
 
@@ -1751,6 +1804,88 @@ impl FrameParser for NmeaParser {
             talker_id,
             sentence_type,
             fields,
+            checksum_valid,
+        })
+    }
+}
+
+// Modbus ASCII parser
+
+struct ModbusAsciiParser {
+    validate: bool,
+}
+
+impl FrameParser for ModbusAsciiParser {
+    fn parse(&self, data: &[u8]) -> Result<ParsedFrame, FrameDecodeError> {
+        // 1. Strip optional leading ':' and trailing \r\n (defensive — the
+        //    preset uses include_markers=false so data is the body between
+        //    ':' and \r\n; a bare caller with include_markers=true would
+        //    include them).
+        let mut content = data.to_vec();
+        if content.first() == Some(&b':') {
+            content.remove(0);
+        }
+        if content.ends_with(b"\r\n") {
+            content.truncate(content.len() - 2);
+        } else if content.ends_with(b"\n") {
+            content.truncate(content.len() - 1);
+        }
+
+        // 2. Modbus ASCII body is all hex chars (0-9, A-F, a-f). Validate:
+        //    if any non-hex byte is present, return Ok(ParsedFrame::Raw) —
+        //    non-Modbus frames routed through this parser see Raw (mirror
+        //    Nmea's non-NMEA → Raw behavior). The body MUST have an even
+        //    number of hex chars (each decoded byte = 2 hex chars). Odd
+        //    length → Raw (malformed).
+        let body_str = match std::str::from_utf8(&content) {
+            Ok(s) => s,
+            Err(_) => return Ok(ParsedFrame::Raw),
+        };
+        if body_str.is_empty() || body_str.bytes().any(|b| !b.is_ascii_hexdigit()) {
+            return Ok(ParsedFrame::Raw);
+        }
+        if body_str.len() % 2 != 0 {
+            return Ok(ParsedFrame::Raw);
+        }
+
+        // 3. Hex-decode the body into bytes.
+        let decoded: Vec<u8> = (0..body_str.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&body_str[i..i + 2], 16).unwrap_or(0))
+            .collect();
+        // decoded = [address, function_code, data..., lrc]
+
+        // 4. Split off the LRC (last byte). Need at least 3 bytes
+        //    (address + function + lrc) for a minimal frame; fewer → Raw.
+        if decoded.len() < 3 {
+            return Ok(ParsedFrame::Raw);
+        }
+        let lrc_received = decoded[decoded.len() - 1];
+        let pdu = &decoded[..decoded.len() - 1]; // address + function + data
+        let address = pdu[0];
+        let function_code = pdu[1];
+        let data = pdu[2..].to_vec();
+
+        // 5. Validate LRC over the PDU (address + function + data — NOT the LRC byte).
+        let computed = Lrc.compute(pdu);
+        let computed_val = computed[0];
+        let checksum_valid = if self.validate {
+            if computed_val != lrc_received {
+                return Err(FrameDecodeError::ChecksumMismatch {
+                    expected: computed,
+                    received: vec![lrc_received],
+                });
+            }
+            Some(true)
+        } else {
+            Some(computed_val == lrc_received)
+        };
+
+        // 6. Return ParsedFrame::ModbusAscii.
+        Ok(ParsedFrame::ModbusAscii {
+            address,
+            function_code,
+            data,
             checksum_valid,
         })
     }
@@ -4681,5 +4816,359 @@ mod tests {
             }
             other => panic!("expected Nmea parsed frame, got {other:?}"),
         }
+    }
+
+    // ── Modbus ASCII parser unit tests ───────────────────────────────────
+
+    // Helper: compute LRC over a PDU byte slice and return the 1-byte hex string.
+    fn modbus_lrc(pdu: &[u8]) -> String {
+        let cs = Lrc.compute(pdu);
+        format!("{:02X}", cs[0])
+    }
+
+    // Helper: build a Modbus ASCII hex body from PDU and append LRC.
+    fn modbus_body(hex_pdu: &str) -> String {
+        let pdu_bytes: Vec<u8> = (0..hex_pdu.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&hex_pdu[i..i + 2], 16).unwrap())
+            .collect();
+        let lrc_hex = modbus_lrc(&pdu_bytes);
+        format!("{hex_pdu}{lrc_hex}")
+    }
+
+    #[test]
+    fn modbus_ascii_parser_valid_read_holding_registers() {
+        // :010300000001FB\r\n — address=1, fc=3, data=[0,0,0,1], LRC=FB
+        let body = modbus_body("010300000001");
+        let p = ModbusAsciiParser { validate: true };
+        let result = p.parse(body.as_bytes()).unwrap();
+        match result {
+            ParsedFrame::ModbusAscii {
+                address,
+                function_code,
+                data,
+                checksum_valid,
+            } => {
+                assert_eq!(address, 1);
+                assert_eq!(function_code, 3);
+                assert_eq!(data, vec![0, 0, 0, 1]);
+                assert_eq!(checksum_valid, Some(true));
+            }
+            other => panic!("expected ModbusAscii frame, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn modbus_ascii_parser_valid_write_single_register() {
+        // Address 0x01, FC 0x06, register 0x000A, value 0x0001
+        // PDU = [0x01, 0x06, 0x00, 0x0A, 0x00, 0x01]
+        // LRC = compute in test
+        let pdu = [0x01u8, 0x06, 0x00, 0x0A, 0x00, 0x01];
+        let lrc_hex = modbus_lrc(&pdu);
+        let body = format!("0106000A0001{lrc_hex}");
+        let p = ModbusAsciiParser { validate: true };
+        let result = p.parse(body.as_bytes()).unwrap();
+        match result {
+            ParsedFrame::ModbusAscii {
+                address,
+                function_code,
+                data,
+                checksum_valid,
+            } => {
+                assert_eq!(address, 1);
+                assert_eq!(function_code, 6);
+                assert_eq!(data, vec![0x00, 0x0A, 0x00, 0x01]);
+                assert_eq!(checksum_valid, Some(true));
+            }
+            other => panic!("expected ModbusAscii frame, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn modbus_ascii_parser_exception_response() {
+        // Exception response: address 0x01, FC 0x83 (0x03 | 0x80), exception code 0x02
+        let pdu = [0x01u8, 0x83, 0x02];
+        let lrc_hex = modbus_lrc(&pdu);
+        let body = format!("018302{lrc_hex}");
+        let p = ModbusAsciiParser { validate: true };
+        let result = p.parse(body.as_bytes()).unwrap();
+        match result {
+            ParsedFrame::ModbusAscii {
+                address,
+                function_code,
+                data,
+                checksum_valid,
+            } => {
+                assert_eq!(address, 1);
+                assert_eq!(function_code, 131); // 0x83
+                assert_eq!(data, vec![2]);
+                assert_eq!(checksum_valid, Some(true));
+            }
+            other => panic!("expected ModbusAscii frame, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn modbus_ascii_parser_broadcast_address_zero() {
+        let pdu = [0x00u8, 0x03, 0x00, 0x00, 0x00, 0x01];
+        let lrc_hex = modbus_lrc(&pdu);
+        let body = format!("000300000001{lrc_hex}");
+        let p = ModbusAsciiParser { validate: true };
+        let result = p.parse(body.as_bytes()).unwrap();
+        match result {
+            ParsedFrame::ModbusAscii {
+                address,
+                function_code,
+                ..
+            } => {
+                assert_eq!(address, 0);
+                assert_eq!(function_code, 3);
+            }
+            other => panic!("expected ModbusAscii frame, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn modbus_ascii_parser_bad_lrc_returns_error_when_validate_true() {
+        // Correct LRC is 0xFB, corrupt to 0x00
+        let body = b"01030000000100";
+        let p = ModbusAsciiParser { validate: true };
+        let result = p.parse(body);
+        match result {
+            Err(FrameDecodeError::ChecksumMismatch { expected, received }) => {
+                assert_eq!(expected, vec![0xFB]);
+                assert_eq!(received, vec![0x00]);
+            }
+            other => panic!("expected ChecksumMismatch error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn modbus_ascii_parser_bad_lrc_returns_some_false_when_validate_false() {
+        let body = b"01030000000100";
+        let p = ModbusAsciiParser { validate: false };
+        let result = p.parse(body).unwrap();
+        match result {
+            ParsedFrame::ModbusAscii {
+                address: 1,
+                function_code: 3,
+                checksum_valid: Some(false),
+                ..
+            } => {}
+            other => panic!("expected ModbusAscii with checksum_valid: false, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn modbus_ascii_parser_lowercase_hex_accepted() {
+        let body = b"010300000001fb";
+        let p = ModbusAsciiParser { validate: true };
+        let result = p.parse(body).unwrap();
+        match result {
+            ParsedFrame::ModbusAscii {
+                address: 1,
+                function_code: 3,
+                checksum_valid: Some(true),
+                ..
+            } => {}
+            other => panic!("expected valid ModbusAscii, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn modbus_ascii_parser_non_hex_returns_raw() {
+        let p = ModbusAsciiParser { validate: true };
+        let result = p.parse(b"hello world").unwrap();
+        assert!(matches!(result, ParsedFrame::Raw));
+    }
+
+    #[test]
+    fn modbus_ascii_parser_odd_length_returns_raw() {
+        let p = ModbusAsciiParser { validate: true };
+        let result = p.parse(b"010").unwrap();
+        assert!(matches!(result, ParsedFrame::Raw));
+    }
+
+    #[test]
+    fn modbus_ascii_parser_too_short_returns_raw() {
+        // "01" → 1 decoded byte, < 3
+        let p = ModbusAsciiParser { validate: true };
+        let result = p.parse(b"01").unwrap();
+        assert!(matches!(result, ParsedFrame::Raw));
+    }
+
+    #[test]
+    fn modbus_ascii_parser_strips_leading_colon_and_trailing_crlf() {
+        // Body with markers included — defensive stripping should still work.
+        let pdu = [0x01u8, 0x03, 0x00, 0x00, 0x00, 0x01];
+        let lrc_hex = modbus_lrc(&pdu);
+        let frame = format!(":010300000001{lrc_hex}\r\n");
+        let p = ModbusAsciiParser { validate: true };
+        let result = p.parse(frame.as_bytes()).unwrap();
+        match result {
+            ParsedFrame::ModbusAscii {
+                address: 1,
+                function_code: 3,
+                checksum_valid: Some(true),
+                ..
+            } => {}
+            other => panic!("expected valid ModbusAscii, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn modbus_ascii_parser_empty_body_returns_raw() {
+        let p = ModbusAsciiParser { validate: true };
+        let result = p.parse(b"").unwrap();
+        assert!(matches!(result, ParsedFrame::Raw));
+    }
+
+    #[test]
+    fn modbus_ascii_parser_minimal_frame_3_bytes() {
+        // address 0x01, function 0xFF, LRC: sum=0x01+0xFF=0x00 (wrap), LRC=0x00
+        let body = b"01FF00";
+        let p = ModbusAsciiParser { validate: true };
+        let result = p.parse(body).unwrap();
+        match result {
+            ParsedFrame::ModbusAscii {
+                address: 1,
+                function_code: 255,
+                data,
+                checksum_valid: Some(true),
+            } if data.is_empty() => {}
+            other => panic!("expected minimal ModbusAscii frame, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn modbus_ascii_checksum_failure_surfaces_as_framing_error_via_push() {
+        let rx_config = preset_rx_framing(ProtocolPreset::ModbusAscii);
+        let parser_config = preset_rx_parser(ProtocolPreset::ModbusAscii);
+        let mut dec = FrameDecoder::new(&rx_config, Some(&parser_config)).unwrap();
+        // Push a full frame with bad LRC: :01030000000100\r\n  (correct LRC is FB, here 00)
+        let result = dec.push(b":01030000000100\r\n");
+        match result {
+            Err(FrameDecodeError::ChecksumMismatch { expected, received }) => {
+                assert_eq!(expected, vec![0xFB]);
+                assert_eq!(received, vec![0x00]);
+            }
+            other => panic!("expected ChecksumMismatch error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn modbus_ascii_valid_frame_decodes_to_frame_with_parsed_modbus_ascii() {
+        let rx_config = preset_rx_framing(ProtocolPreset::ModbusAscii);
+        let parser_config = preset_rx_parser(ProtocolPreset::ModbusAscii);
+        let mut dec = FrameDecoder::new(&rx_config, Some(&parser_config)).unwrap();
+        // :010300000001FB\r\n  (valid read holding registers)
+        let frames = dec.push(b":010300000001FB\r\n").unwrap();
+        assert_eq!(frames.len(), 1);
+        match &frames[0].parsed {
+            Some(ParsedFrame::ModbusAscii {
+                address: 1,
+                function_code: 3,
+                data,
+                checksum_valid: Some(true),
+            }) => {
+                assert_eq!(data, &vec![0, 0, 0, 1]);
+            }
+            other => panic!("expected ModbusAscii parsed frame, got {other:?}"),
+        }
+    }
+
+    // ── Modbus ASCII preset tests ──────────────────────────────────────
+
+    #[test]
+    fn preset_tx_framing_modbus_ascii_returns_start_end_colon() {
+        let tx = preset_tx_framing(ProtocolPreset::ModbusAscii);
+        assert!(matches!(
+            tx.mode,
+            TxFramingMode::StartEnd {
+                start,
+                end,
+                marker_encoding: PatternEncoding::Utf8,
+            } if start == vec![":".to_string()] && end == "\r\n"
+        ));
+    }
+
+    #[test]
+    fn preset_rx_framing_modbus_ascii_returns_start_end_colon_crlf() {
+        let rx = preset_rx_framing(ProtocolPreset::ModbusAscii);
+        match &rx.mode {
+            RxFramingMode::StartEnd {
+                start,
+                end,
+                marker_encoding,
+                include_markers,
+            } => {
+                assert_eq!(start, &vec![":".to_string()]);
+                assert_eq!(end, "\r\n");
+                assert_eq!(*marker_encoding, PatternEncoding::Utf8);
+                assert!(!include_markers);
+            }
+            other => panic!("expected StartEnd, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn preset_rx_parser_modbus_ascii_returns_modbus_ascii_validate_true() {
+        let parser = preset_rx_parser(ProtocolPreset::ModbusAscii);
+        assert!(matches!(parser.parser_type, ParserType::ModbusAscii));
+        assert!(parser.validate);
+    }
+
+    #[test]
+    fn protocol_preset_modbus_ascii_tagged_object_roundtrip() {
+        let val = serde_json::json!({"type": "modbus_ascii"});
+        let preset: ProtocolPreset = serde_json::from_value(val.clone()).unwrap();
+        assert_eq!(preset, ProtocolPreset::ModbusAscii);
+        let re = serde_json::to_value(preset).unwrap();
+        assert_eq!(re, val);
+        // Bare string "modbus_ascii" must be rejected.
+        let err = serde_json::from_str::<ProtocolPreset>("\"modbus_ascii\"").unwrap_err();
+        let err_str = err.to_string();
+        assert!(
+            err_str.contains("tag"),
+            "expected tag error, got: {err_str}"
+        );
+    }
+
+    #[test]
+    fn modbus_ascii_preset_equivalent_to_bare_config() {
+        // TX
+        let preset_tx = preset_tx_framing(ProtocolPreset::ModbusAscii);
+        let bare_tx = TxFramingConfig {
+            mode: TxFramingMode::StartEnd {
+                start: vec![":".into()],
+                end: "\r\n".into(),
+                marker_encoding: PatternEncoding::Utf8,
+            },
+        };
+        assert_eq!(preset_tx, bare_tx);
+
+        // RX
+        let preset_rx = preset_rx_framing(ProtocolPreset::ModbusAscii);
+        let bare_rx = RxFramingConfig {
+            mode: RxFramingMode::StartEnd {
+                start: vec![":".into()],
+                end: "\r\n".into(),
+                marker_encoding: PatternEncoding::Utf8,
+                include_markers: false,
+            },
+            max_frames: None,
+            include_terminators: false,
+            skip_empty: false,
+        };
+        assert_eq!(preset_rx, bare_rx);
+
+        // Parser
+        let preset_parser = preset_rx_parser(ProtocolPreset::ModbusAscii);
+        let bare_parser = ParserConfig {
+            parser_type: ParserType::ModbusAscii,
+            custom_prompt: None,
+            validate: true,
+        };
+        assert_eq!(preset_parser, bare_parser);
     }
 }

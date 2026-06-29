@@ -2,7 +2,7 @@
 
 | Version | Date | Highlights |
 |---|---|---|
-| [Unreleased](#unreleased) | — | `--version` flag + `version` subcommand, `BUILD_TARGET` in build.rs; removed dead `ProfileDefaults` fields; `slip` and `json_lines` protocol presets; COBS framing mode + `cobs` preset + `checksums` module; `ndjson` preset + `skip_empty` framing option; `nmea0183` preset + `Nmea` parser + `StartEnd` multi-marker + checksum validation |
+| [Unreleased](#unreleased) | — | `--version` flag + `version` subcommand, `BUILD_TARGET` in build.rs; removed dead `ProfileDefaults` fields; `slip` and `json_lines` protocol presets; COBS framing mode + `cobs` preset + `checksums` module; `ndjson` preset + `skip_empty` framing option; `nmea0183` preset + `Nmea` parser + `StartEnd` multi-marker + checksum validation; `modbus_ascii` preset + `ModbusAscii` parser + `Lrc` checksum |
 | [0.7.0](#070) | 2026-06-26 | Frame pipeline: TX framing, SLIP, protocol presets, profile defaults, parser relocation |
 | [0.6.2](#062) | 2026-06-25 | Schema fix: suppress non-standard `uint8`/`uint16` formats; expanded schema regression guards + AGENTS.md truth |
 | [0.6.1](#061) | 2026-06-24 | RX refactor: shared framing sink, SerialHandler builder, config FromStr, dedup; docs cleanup |
@@ -140,6 +140,25 @@
   ParsedFrame` to `Result<ParsedFrame, FrameDecodeError>`. This trait is
   `pub(crate)`-ish and not part of the public API; no external callers are
   affected.
+
+**Added — Modbus ASCII preset:**
+- New `modbus_ascii` protocol preset (`{"type": "modbus_ascii"}`) bundling
+  `StartEnd` framing (`:` start, `\r\n` end, include_markers: false) with a
+  `ModbusAscii` parser and LRC validation. Selectable via the `protocol` knob
+  on `write`, `read`, and `subscribe`.
+- New `ModbusAscii` parser type (`ParserType::ModbusAscii`,
+  `parser: "modbus_ascii"` in frame output). Hex-decodes the body between `:`
+  and `\r\n`, validates the LRC (Longitudinal Redundancy Check — two's
+  complement of the sum of address + function + data bytes), and exposes
+  `address: u8`, `function_code: u8`, `data: Vec<u8>`, and `checksum_valid:
+  Option<bool>` via `ParsedFrame::ModbusAscii`. Non-hex or malformed frames
+  return `Raw`. A failed LRC with `validate: true` returns
+  `FrameDecodeError::ChecksumMismatch` (surfacing as `framing_error`).
+- New `Lrc` checksum implementation in `src/checksums.rs`: two's complement
+  of the wrapping sum, consumed by `ModbusAsciiParser`. Mirrors the existing
+  `XorChecksum` for NMEA.
+- No breaking changes: all additions are new enum variants, a new struct,
+  and a new checksum impl — existing field shapes are unchanged.
 
 ## [0.7.0]
 

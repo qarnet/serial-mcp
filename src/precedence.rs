@@ -307,4 +307,26 @@ mod tests {
         assert_eq!(result, Some(explicit));
         assert_ne!(result, Some(preset_tx_framing(ProtocolPreset::Nmea0183)));
     }
+
+    // --- ModbusAscii preset precedence test ---
+
+    #[test]
+    fn modbus_ascii_preset_explicit_framing_wins_over_preset() {
+        // Explicit rx_framing (Line/Crlf) wins over call_protocol=ModbusAscii.
+        let explicit = RxFramingConfig {
+            mode: RxFramingMode::Line {
+                ending: LineEnding::Crlf,
+            },
+            ..Default::default()
+        };
+        let result = resolve_field::<RxFramingConfig>(
+            Some(explicit.clone()),
+            Some(ProtocolPreset::ModbusAscii),
+            preset_rx_framing,
+            None,
+            None,
+        );
+        assert_eq!(result, Some(explicit));
+        assert_ne!(result, Some(preset_rx_framing(ProtocolPreset::ModbusAscii)));
+    }
 }
