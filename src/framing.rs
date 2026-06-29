@@ -2648,6 +2648,71 @@ mod tests {
         assert_eq!(frames[0].frame_type, "slip");
     }
 
+    #[test]
+    fn slip_parser_error_propagates_and_resets_state() {
+        // SLIP-frame a NMEA sentence with a BAD checksum. The NmeaParser with
+        // validate:true returns Err(ChecksumMismatch) when it sees the bad *XX.
+        // This exercises slip_decode's parser-Err path (src/framing.rs:770-774):
+        // drain consumed bytes, reset state to BeforeFirstEnd, return Err.
+        // Then push a well-formed SLIP-framed NMEA sentence and confirm the
+        // decoder recovers (state was reset — no stale escaped/buf corruption).
+        use crate::checksums::XorChecksum;
+
+        let bad_body = b"GPGLL,3751.65,N,12226.54,W*00"; // wrong checksum (correct is 7E)
+        let good_body = b"GPGLL,3751.65,N,12226.54,W";
+        let good_cs = XorChecksum.compute(good_body)[0];
+        let good_sentence = format!("GPGLL,3751.65,N,12226.54,W*{good_cs:02X}");
+
+        let framing = RxFramingConfig {
+            mode: RxFramingMode::Slip,
+            ..Default::default()
+        };
+        let parser = ParserConfig {
+            parser_type: ParserType::Nmea,
+            custom_prompt: None,
+            validate: true,
+        };
+        let mut dec = FrameDecoder::new(&framing, Some(&parser)).unwrap();
+
+        // Push 1: bad-checksum frame → Err(ChecksumMismatch).
+        let mut push1 = vec![SLIP_END];
+        push1.extend_from_slice(bad_body);
+        push1.push(SLIP_END);
+        let result = dec.push(&push1);
+        assert!(
+            result.is_err(),
+            "SLIP+parser must propagate the ChecksumMismatch"
+        );
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, FrameDecodeError::ChecksumMismatch { .. }),
+            "expected ChecksumMismatch, got {err:?}"
+        );
+
+        // Push 2: good-checksum frame → one clean Nmea frame (state was reset
+        // to BeforeFirstEnd by the error path; no stale escaped/buf corruption).
+        let mut push2 = vec![SLIP_END];
+        push2.extend_from_slice(good_sentence.as_bytes());
+        push2.push(SLIP_END);
+        let frames = dec.push(&push2).unwrap();
+        assert_eq!(
+            frames.len(),
+            1,
+            "decoder must recover after the parser error"
+        );
+        assert!(
+            matches!(
+                &frames[0].parsed,
+                Some(ParsedFrame::Nmea {
+                    checksum_valid: Some(true),
+                    ..
+                })
+            ),
+            "expected a clean Nmea frame after recovery, got {:?}",
+            frames[0].parsed
+        );
+    }
+
     // ── Delimiter decoder ───────────────────────────────────────────────
 
     #[test]
@@ -3853,6 +3918,77 @@ mod tests {
         assert!(!frames.is_empty());
         // The last frame should be "ok".
         assert_eq!(frames.last().unwrap().data, b"ok");
+    }
+
+    #[test]
+    fn cobs_parser_error_propagates_and_resets_state() {
+        // COBS-frame a NMEA sentence with a BAD checksum. The NmeaParser with
+        // validate:true returns Err(ChecksumMismatch) when it sees the bad *XX.
+        // This exercises cobs_decode's parser-Err path (src/framing.rs:892-898):
+        // drain consumed bytes, clear decoded/remaining/pending_zero, reset
+        // state to BeforeFirstDelim, return Err.
+        // Then push a well-formed COBS-framed NMEA sentence and confirm the
+        // decoder recovers (state was reset — no stale decoded/remaining/
+        // pending_zero corruption).
+        use crate::checksums::XorChecksum;
+
+        let bad_body = b"GPGLL,3751.65,N,12226.54,W*00"; // wrong checksum (correct is 7E)
+        let good_body = b"GPGLL,3751.65,N,12226.54,W";
+        let good_cs = XorChecksum.compute(good_body)[0];
+        let good_sentence = format!("GPGLL,3751.65,N,12226.54,W*{good_cs:02X}");
+
+        // COBS-encode each sentence via TxFramingMode::Cobs (which produces
+        // [0x00][cobs-stuffed block][0x00]).
+        let bad_framed = TxFramingMode::Cobs.encode(bad_body).unwrap();
+        let good_framed = TxFramingMode::Cobs
+            .encode(good_sentence.as_bytes())
+            .unwrap();
+
+        let framing = RxFramingConfig {
+            mode: RxFramingMode::Cobs,
+            ..Default::default()
+        };
+        let parser = ParserConfig {
+            parser_type: ParserType::Nmea,
+            custom_prompt: None,
+            validate: true,
+        };
+        let mut dec = FrameDecoder::new(&framing, Some(&parser)).unwrap();
+
+        // Push 1: bad-checksum frame → Err(ChecksumMismatch).
+        let result = dec.push(&bad_framed);
+        assert!(
+            result.is_err(),
+            "COBS+parser must propagate ChecksumMismatch"
+        );
+        assert!(
+            matches!(
+                result.unwrap_err(),
+                FrameDecodeError::ChecksumMismatch { .. }
+            ),
+            "expected ChecksumMismatch"
+        );
+
+        // Push 2: good-checksum frame → one clean Nmea frame (state was reset
+        // to BeforeFirstDelim by the error path; no stale decoded/remaining/
+        // pending_zero corruption).
+        let frames = dec.push(&good_framed).unwrap();
+        assert_eq!(
+            frames.len(),
+            1,
+            "decoder must recover after the parser error"
+        );
+        assert!(
+            matches!(
+                &frames[0].parsed,
+                Some(ParsedFrame::Nmea {
+                    checksum_valid: Some(true),
+                    ..
+                })
+            ),
+            "expected a clean Nmea frame after recovery, got {:?}",
+            frames[0].parsed
+        );
     }
 
     // ── COBS preset mapping tests ────────────────────────────────────────
