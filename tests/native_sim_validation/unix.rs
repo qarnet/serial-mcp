@@ -301,6 +301,11 @@ async fn flush_both(
         .expect("flush call");
 }
 
+/// Hex-encode raw bytes for `sendraw hex` commands.
+fn bytes_to_hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02X}")).collect()
+}
+
 async fn close_connection(
     client: &rmcp::service::RunningService<
         rmcp::service::RoleClient,
@@ -3469,6 +3474,307 @@ async fn native_read_slip_recovers_after_error_on_next_call() {
         assert_eq!(frames[0]["data"], json!("70 6f 6e 67"));
         assert_eq!(frames[0]["frame_type"], json!("slip"));
     }
+
+    close_connection(&client, &id).await;
+    client.cancel().await.ok();
+    drop(fw);
+}
+
+// ── Preset e2e tests (cobs / ndjson / nmea0183 / modbus_ascii) ──────────────
+
+/// Prove COBS RX decode via the `cobs` preset over the software-serial path.
+#[tokio::test]
+#[ignore = "requires native_sim firmware binary"]
+async fn native_read_cobs_preset_decodes_frame() {
+    let fw = NativeSimFirmware::spawn().await.expect("spawn zephyr.exe");
+    let pty_path = fw.pty_path().to_string();
+
+    let server = TestServer::start().await;
+    let (client, _rx) = connect_client(&server).await.unwrap();
+    let id = open_pty(&client, &pty_path).await;
+    sync_boot(&client, &id).await;
+    flush_both(&client, &id).await;
+
+    let read_handle = {
+        let peer = client.peer().clone();
+        let id2 = id.clone();
+        tokio::spawn(async move {
+            peer.call_tool(tool_request(
+                "read",
+                json!({
+                    "connection_id": id2,
+                    "timeout_ms": 3000,
+                    "max_buffered_bytes": 512,
+                    "encoding": "hex",
+                    "protocol": { "type": "cobs" }
+                }),
+            ))
+            .await
+        })
+    };
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let framed = serial_mcp::framing::TxFramingMode::Cobs
+        .encode(b"pong")
+        .expect("cobs encode pong");
+    let hex = bytes_to_hex(&framed);
+    write_cmd(&client, &id, &format!("sendraw hex {hex}")).await;
+
+    let result = read_handle.await.unwrap().expect("read task");
+    assert_ne!(result.is_error, Some(true), "{result:?}");
+    let s = result.structured_content.expect("structured");
+    let frames = s["frames"].as_array().expect("frames array");
+    assert!(!frames.is_empty(), "expected at least one frame");
+    assert_eq!(frames[0]["data"], json!("70 6f 6e 67"));
+    assert_eq!(frames[0]["frame_type"], json!("cobs"));
+
+    close_connection(&client, &id).await;
+    client.cancel().await.ok();
+    drop(fw);
+}
+
+/// Prove NDJSON RX decode via the `ndjson` preset: two JSON objects,
+/// blank line skipped.
+#[tokio::test]
+#[ignore = "requires native_sim firmware binary"]
+async fn native_read_ndjson_preset_decodes_json_frames() {
+    let fw = NativeSimFirmware::spawn().await.expect("spawn zephyr.exe");
+    let pty_path = fw.pty_path().to_string();
+
+    let server = TestServer::start().await;
+    let (client, _rx) = connect_client(&server).await.unwrap();
+    let id = open_pty(&client, &pty_path).await;
+    sync_boot(&client, &id).await;
+    flush_both(&client, &id).await;
+
+    let read_handle = {
+        let peer = client.peer().clone();
+        let id2 = id.clone();
+        tokio::spawn(async move {
+            peer.call_tool(tool_request(
+                "read",
+                json!({
+                    "connection_id": id2,
+                    "timeout_ms": 3000,
+                    "max_buffered_bytes": 512,
+                    "encoding": "utf8",
+                    "protocol": { "type": "ndjson" }
+                }),
+            ))
+            .await
+        })
+    };
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let payload = b"{\"a\":1}\n\n{\"b\":2}\n";
+    let hex = bytes_to_hex(payload);
+    write_cmd(&client, &id, &format!("sendraw hex {hex}")).await;
+
+    let result = read_handle.await.unwrap().expect("read task");
+    assert_ne!(result.is_error, Some(true), "{result:?}");
+    let s = result.structured_content.expect("structured");
+    let frames = s["frames"].as_array().expect("frames array");
+    assert_eq!(frames.len(), 2, "expected 2 frames (blank skipped)");
+
+    let f0 = &frames[0];
+    assert_eq!(f0["data"], json!("{\"a\":1}"));
+    assert_eq!(f0["frame_type"], json!("line"));
+    let parsed0 = f0["parsed"].as_object().expect("parsed object");
+    assert_eq!(parsed0["parser"], json!("json"));
+    assert_eq!(parsed0["a"], json!(1));
+
+    let f1 = &frames[1];
+    assert_eq!(f1["data"], json!("{\"b\":2}"));
+    assert_eq!(f1["frame_type"], json!("line"));
+    let parsed1 = f1["parsed"].as_object().expect("parsed object");
+    assert_eq!(parsed1["parser"], json!("json"));
+    assert_eq!(parsed1["b"], json!(2));
+
+    close_connection(&client, &id).await;
+    client.cancel().await.ok();
+    drop(fw);
+}
+
+/// Prove NDJSON skip_empty skips blank and whitespace-only lines end-to-end.
+#[tokio::test]
+#[ignore = "requires native_sim firmware binary"]
+async fn native_read_ndjson_preset_skips_empty_lines() {
+    let fw = NativeSimFirmware::spawn().await.expect("spawn zephyr.exe");
+    let pty_path = fw.pty_path().to_string();
+
+    let server = TestServer::start().await;
+    let (client, _rx) = connect_client(&server).await.unwrap();
+    let id = open_pty(&client, &pty_path).await;
+    sync_boot(&client, &id).await;
+    flush_both(&client, &id).await;
+
+    let read_handle = {
+        let peer = client.peer().clone();
+        let id2 = id.clone();
+        tokio::spawn(async move {
+            peer.call_tool(tool_request(
+                "read",
+                json!({
+                    "connection_id": id2,
+                    "timeout_ms": 3000,
+                    "max_buffered_bytes": 512,
+                    "encoding": "utf8",
+                    "protocol": { "type": "ndjson" }
+                }),
+            ))
+            .await
+        })
+    };
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let payload = b"{\"a\":1}\n\n\n{\"b\":2}\n   \n{\"c\":3}\n";
+    let hex = bytes_to_hex(payload);
+    write_cmd(&client, &id, &format!("sendraw hex {hex}")).await;
+
+    let result = read_handle.await.unwrap().expect("read task");
+    assert_ne!(result.is_error, Some(true), "{result:?}");
+    let s = result.structured_content.expect("structured");
+    let frames = s["frames"].as_array().expect("frames array");
+    assert_eq!(
+        frames.len(),
+        3,
+        "expected 3 frames (blanks+whitespace skipped)"
+    );
+
+    let parsed0 = frames[0]["parsed"].as_object().expect("parsed0");
+    assert_eq!(parsed0["parser"], json!("json"));
+    assert_eq!(parsed0["a"], json!(1));
+
+    let parsed1 = frames[1]["parsed"].as_object().expect("parsed1");
+    assert_eq!(parsed1["parser"], json!("json"));
+    assert_eq!(parsed1["b"], json!(2));
+
+    let parsed2 = frames[2]["parsed"].as_object().expect("parsed2");
+    assert_eq!(parsed2["parser"], json!("json"));
+    assert_eq!(parsed2["c"], json!(3));
+
+    close_connection(&client, &id).await;
+    client.cancel().await.ok();
+    drop(fw);
+}
+
+/// Prove NMEA-0183 RX decode via the `nmea0183` preset with checksum validation.
+#[tokio::test]
+#[ignore = "requires native_sim firmware binary"]
+async fn native_read_nmea0183_preset_decodes_parsed_frame() {
+    /// XOR checksum helper (the `checksums` module is pub(crate), not visible
+    /// from integration tests).
+    fn xor(bytes: &[u8]) -> u8 {
+        bytes.iter().fold(0u8, |acc, b| acc ^ b)
+    }
+
+    let fw = NativeSimFirmware::spawn().await.expect("spawn zephyr.exe");
+    let pty_path = fw.pty_path().to_string();
+
+    let server = TestServer::start().await;
+    let (client, _rx) = connect_client(&server).await.unwrap();
+    let id = open_pty(&client, &pty_path).await;
+    sync_boot(&client, &id).await;
+    flush_both(&client, &id).await;
+
+    let read_handle = {
+        let peer = client.peer().clone();
+        let id2 = id.clone();
+        tokio::spawn(async move {
+            peer.call_tool(tool_request(
+                "read",
+                json!({
+                    "connection_id": id2,
+                    "timeout_ms": 3000,
+                    "max_buffered_bytes": 512,
+                    "encoding": "utf8",
+                    "protocol": { "type": "nmea0183" }
+                }),
+            ))
+            .await
+        })
+    };
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let body = b"GPGGA,123519,4807.038,N,01131.000,E,1,08,0.9,545.4,M,46.9,M,,";
+    let checksum = xor(body);
+    let sentence = format!("${}*{checksum:02X}\r\n", std::str::from_utf8(body).unwrap());
+    let hex = bytes_to_hex(sentence.as_bytes());
+    write_cmd(&client, &id, &format!("sendraw hex {hex}")).await;
+
+    let result = read_handle.await.unwrap().expect("read task");
+    assert_ne!(result.is_error, Some(true), "{result:?}");
+    let s = result.structured_content.expect("structured");
+    let frames = s["frames"].as_array().expect("frames array");
+    assert!(!frames.is_empty(), "expected at least one NMEA frame");
+    let f0 = &frames[0];
+    assert_eq!(f0["frame_type"], json!("start_end"));
+    let parsed = f0["parsed"].as_object().expect("parsed object");
+    assert_eq!(parsed["parser"], json!("nmea"), "parser: {parsed:?}");
+    assert_eq!(parsed["talker_id"], json!("GP"));
+    assert_eq!(parsed["sentence_type"], json!("GGA"));
+    assert_eq!(parsed["checksum_valid"], json!(true));
+
+    close_connection(&client, &id).await;
+    client.cancel().await.ok();
+    drop(fw);
+}
+
+/// Prove Modbus ASCII RX decode via the `modbus_ascii` preset with LRC validation.
+#[tokio::test]
+#[ignore = "requires native_sim firmware binary"]
+async fn native_read_modbus_ascii_preset_decodes_parsed_frame() {
+    let fw = NativeSimFirmware::spawn().await.expect("spawn zephyr.exe");
+    let pty_path = fw.pty_path().to_string();
+
+    let server = TestServer::start().await;
+    let (client, _rx) = connect_client(&server).await.unwrap();
+    let id = open_pty(&client, &pty_path).await;
+    sync_boot(&client, &id).await;
+    flush_both(&client, &id).await;
+
+    let read_handle = {
+        let peer = client.peer().clone();
+        let id2 = id.clone();
+        tokio::spawn(async move {
+            peer.call_tool(tool_request(
+                "read",
+                json!({
+                    "connection_id": id2,
+                    "timeout_ms": 3000,
+                    "max_buffered_bytes": 512,
+                    "encoding": "utf8",
+                    "protocol": { "type": "modbus_ascii" }
+                }),
+            ))
+            .await
+        })
+    };
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let frame = b":010300000001FB\r\n";
+    let hex = bytes_to_hex(frame);
+    write_cmd(&client, &id, &format!("sendraw hex {hex}")).await;
+
+    let result = read_handle.await.unwrap().expect("read task");
+    assert_ne!(result.is_error, Some(true), "{result:?}");
+    let s = result.structured_content.expect("structured");
+    let frames = s["frames"].as_array().expect("frames array");
+    assert!(
+        !frames.is_empty(),
+        "expected at least one Modbus ASCII frame"
+    );
+    let f0 = &frames[0];
+    assert_eq!(f0["frame_type"], json!("start_end"));
+    let parsed = f0["parsed"].as_object().expect("parsed object");
+    assert_eq!(
+        parsed["parser"],
+        json!("modbus_ascii"),
+        "parser: {parsed:?}"
+    );
+    assert_eq!(parsed["address"], json!(1));
+    assert_eq!(parsed["function_code"], json!(3));
+    assert_eq!(parsed["checksum_valid"], json!(true));
 
     close_connection(&client, &id).await;
     client.cancel().await.ok();
