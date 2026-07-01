@@ -470,6 +470,130 @@ proptest! {
         prop_assert_eq!(frames.len(), 1);
         prop_assert_eq!(&frames[0].data, &bytes);
     }
+
+    #[test]
+    fn slip_roundtrip_arbitrary_payload(bytes in prop::collection::vec(any::<u8>(), 0..=512)) {
+        // SLIP (RFC 1055) roundtrip: TX encode → RX decode must reproduce
+        // the original payload for any byte sequence (including END/ESC).
+        let mode = serial_mcp::framing::TxFramingMode::Slip;
+        let framed = mode.encode(&bytes).unwrap();
+        let cfg = serial_mcp::framing::RxFramingConfig {
+            mode: serial_mcp::framing::RxFramingMode::Slip,
+            ..Default::default()
+        };
+        let mut dec = serial_mcp::framing::FrameDecoder::new(&cfg, None).unwrap();
+        let frames = dec.push(&framed).unwrap();
+        prop_assert_eq!(frames.len(), 1);
+        prop_assert_eq!(&frames[0].data, &bytes);
+    }
+}
+
+// ── Phase A.3b: Framing/parser roundtrips & no-panic — NMEA / Modbus ─────────
+
+proptest! {
+    #[test]
+    fn nmea_parser_roundtrip_valid_checksum(
+        talker in "[A-Z]{2}",
+        sentence_type in "[A-Z]{3}",
+        fields in prop::collection::vec("[A-Z0-9.]{1,10}", 0..8),
+    ) {
+        use serial_mcp::framing::{
+            FrameDecoder, LineEnding, ParserConfig, ParserType, ParsedFrame,
+            RxFramingConfig, RxFramingMode,
+        };
+        // Build the NMEA body: talker + sentence_type + comma + fields.
+        // Always include the comma so a zero-field sentence (e.g. "GPGGA,*XX")
+        // is still recognised as NMEA — the parser requires at least one
+        // comma in the content to distinguish NMEA from non-NMEA frames.
+        let mut body = format!("{talker}{sentence_type},");
+        if !fields.is_empty() {
+            body.push_str(&fields.join(","));
+        }
+        // Compute XOR checksum inline (serial_mcp::checksums::XorChecksum is
+        // pub(crate) — not visible from integration tests).
+        let cs: u8 = body.bytes().fold(0u8, |acc, b| acc ^ b);
+        let sentence = format!("{body}*{cs:02X}");
+
+        // Route through FrameDecoder: Line framing + NMEA parser with validation.
+        // build_parser is private; FrameDecoder is the correct integration path.
+        let cfg = RxFramingConfig {
+            mode: RxFramingMode::Line {
+                ending: LineEnding::Auto,
+            },
+            ..Default::default()
+        };
+        let parser = ParserConfig {
+            parser_type: ParserType::Nmea,
+            custom_prompt: None,
+            validate: true,
+        };
+        let mut dec = FrameDecoder::new(&cfg, Some(&parser)).unwrap();
+        let mut data = sentence.into_bytes();
+        data.push(b'\n');
+        let frames = dec.push(&data).unwrap();
+        prop_assert_eq!(frames.len(), 1);
+        let frame = &frames[0];
+        match &frame.parsed {
+            Some(ParsedFrame::Nmea {
+                talker_id,
+                sentence_type: st,
+                fields: pf,
+                checksum_valid,
+            }) => {
+                prop_assert_eq!(talker_id.as_str(), talker);
+                prop_assert_eq!(st.as_str(), sentence_type);
+                prop_assert_eq!(pf.as_slice(), fields.as_slice());
+                prop_assert_eq!(*checksum_valid, Some(true));
+            }
+            other => prop_assert!(false, "expected Nmea, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn nmea_parser_never_panics_on_arbitrary_bytes(
+        bytes in prop::collection::vec(any::<u8>(), 0..600),
+    ) {
+        use serial_mcp::framing::{
+            FrameDecoder, ParserConfig, ParserType, RxFramingConfig, RxFramingMode,
+        };
+        let cfg = RxFramingConfig {
+            mode: RxFramingMode::Line {
+                ending: serial_mcp::framing::LineEnding::Auto,
+            },
+            ..Default::default()
+        };
+        let parser = ParserConfig {
+            parser_type: ParserType::Nmea,
+            custom_prompt: None,
+            validate: true,
+        };
+        let mut dec = FrameDecoder::new(&cfg, Some(&parser)).unwrap();
+        let _ = dec.push(&bytes);
+        let _ = dec.flush_partial();
+    }
+
+    #[test]
+    fn modbus_ascii_parser_never_panics_on_arbitrary_bytes(
+        bytes in prop::collection::vec(any::<u8>(), 0..600),
+    ) {
+        use serial_mcp::framing::{
+            FrameDecoder, ParserConfig, ParserType, RxFramingConfig, RxFramingMode,
+        };
+        let cfg = RxFramingConfig {
+            mode: RxFramingMode::Line {
+                ending: serial_mcp::framing::LineEnding::Auto,
+            },
+            ..Default::default()
+        };
+        let parser = ParserConfig {
+            parser_type: ParserType::ModbusAscii,
+            custom_prompt: None,
+            validate: true,
+        };
+        let mut dec = FrameDecoder::new(&cfg, Some(&parser)).unwrap();
+        let _ = dec.push(&bytes);
+        let _ = dec.flush_partial();
+    }
 }
 
 // ── Phase A.4: Boundary values — clamp helpers never panic ───────────────────

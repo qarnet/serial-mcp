@@ -1686,10 +1686,17 @@ impl FrameParser for NmeaParser {
         // 4. Validate checksum if present and validate is true.
         let checksum_valid = match &checksum_hex {
             Some(hex) if hex.len() >= 2 => {
-                let hex_str = String::from_utf8_lossy(hex);
-                let received_val = match u8::from_str_radix(&hex_str[..2], 16) {
-                    Ok(v) => v,
-                    Err(_) => {
+                // Slice the raw bytes first — hex[..2] is always safe because
+                // hex.len() >= 2.  Then validate the two bytes as ASCII hex.
+                // String::from_utf8_lossy on the full hex vec must NOT be used
+                // because replacement characters (U+FFFD) are multibyte in
+                // UTF-8 and a byte-index slice panics when it lands inside one.
+                let received_val = match std::str::from_utf8(&hex[..2])
+                    .ok()
+                    .and_then(|s| u8::from_str_radix(s, 16).ok())
+                {
+                    Some(v) => v,
+                    None => {
                         // Invalid hex in checksum — treat as mismatch.
                         if self.validate {
                             let computed = XorChecksum.compute(&body);
