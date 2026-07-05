@@ -7,9 +7,9 @@
 > `main`. Baseline: all suites green (645+ tests), clippy clean. This plan
 > addresses every review finding — one verified crash bug, one data-loss
 > design flaw, a set of duplication targets inside `src/framing.rs`, parser
-> polish, doc drift, and repo housekeeping. **Phases 0 and 1 are PR-blocking;
-> 2–6 are hardening and may land in follow-ups.** Line numbers reference
-> `f45f984`.
+> polish, doc drift, and repo housekeeping. **Phases 0, 1, and 4D are
+> PR-blocking; the rest are hardening and may land in follow-ups.** Line
+> numbers reference `f45f984`.
 
 ## Why
 
@@ -306,6 +306,27 @@ RFC 1662, AT v2.0.0). Cite-only; nothing committed from `resources/`.
 
 Entries for 0A (panic fix), 1B/1C (decode-error behavior change), 3A/3B.
 
+### 4D. User-facing protocol guide (PR-blocking)
+
+The framing/preset/parser system is now the product's most differentiating
+feature, and its only documentation is tool descriptions and doc comments.
+Add `docs/protocols.md`:
+
+- one section per preset (`at_command`, `slip`, `json_lines`, `cobs`,
+  `ndjson`, `nmea0183`, `modbus_ascii`): what it wires up (TX framing / RX
+  framing / parser), a concrete write/read example with the `protocol` field,
+  and a sample decoded frame (`data` + `parsed` shape);
+- the precedence ladder in one paragraph (explicit field > call protocol >
+  connection default > connection protocol);
+- checksum behavior per the Phase 1B/3A semantics (`validate`,
+  `checksum_valid`, `frames_dropped`) — **write this after Phase 1 lands**
+  so it documents the shipped behavior, not the old one;
+- link it from the README § Documentation list.
+
+Sits next to the planned `docs/protocols/references.md` (4B). **This gates
+the feature-additions PR** together with Phases 0 and 1 — the branch should
+not ship its headline feature undocumented.
+
 ---
 
 ## Phase 5 — Repo housekeeping
@@ -355,11 +376,13 @@ last, after Phases 0–3 have settled what the expected values are.
 2. **Phase 1** — decode-error semantics (1A → 1B → 1C) + tests + CHANGELOG.
 3. **Phase 2** — dedup (2A–2F), one PR, pure refactor on green tests. 2F
    (checksum free functions) before 3B, which consumes `xor_checksum`.
-4. **Phase 3A + 4** — checksum-branch polish + doc drift, can share a PR.
+4. **Phase 3A + 4** — checksum-branch polish + doc drift + the 4D protocol
+   guide (4D after Phase 1, so it documents the shipped semantics), can
+   share a PR.
 5. **Phase 3B** — `TxFramingMode::Nmea` auto-checksum. Own PR: additive
    schema variant + preset TX change + its own test block.
 6. **Phase 5** — housekeeping, rides with any of the above.
 7. **Phase 6** — optional test consolidation, whenever convenient.
 
-Phases 0 and 1 gate the feature-additions PR; 2–6 may land as follow-ups on
-`main` afterwards.
+Phases 0, 1, and 4D gate the feature-additions PR; the rest may land as
+follow-ups on `main` afterwards.

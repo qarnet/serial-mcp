@@ -12,6 +12,8 @@
 > [protocol-matrix.md](protocol-matrix.md); this file tracks everything else.
 >
 > Priorities: **Near-term** · **Later** · **Wish** · **Needs architecture review**.
+> Non-feature work (refactors, CI, release mechanics) lives in
+> § Infrastructure / tech debt at the bottom.
 
 ## Near-term
 
@@ -175,3 +177,56 @@
 ## Explicit skip for now
 
 - **Remote monitor** — skip, keep off active roadmap
+- **SECURITY.md / vulnerability disclosure policy** — not important at the
+  current project size; revisit if outside contributors arrive
+
+## Infrastructure / tech debt
+
+Non-feature work, roughly in suggested order. From the 2026-07-05 repo review.
+
+### Split `src/framing.rs` into a module tree
+- at ~5.5k lines (config types, two codecs, six parsers, decoder state
+  machine, ~3.4k lines of tests) the single file is past its scaling limit
+- target shape: `framing/` with `config.rs`, `decoder.rs`, `codecs.rs`,
+  `parsers/`, tests alongside their subjects
+- **major rework — sequence AFTER
+  [review-hardening-plan.md](review-hardening-plan.md) Phases 1–2 land**;
+  those rewrite chunks of the same file and a split first would create
+  painful conflicts
+
+### Proper dependabot / renovate setup
+- dependency updates (cargo crates + pinned GitHub Actions) are currently
+  manual; some dependabot experimentation happened but nothing landed
+- monthly cadence, cargo + github-actions ecosystems; the 4-OS CI matrix is
+  strong enough to catch bad bumps automatically
+
+### Scheduled mutation testing + fuzz smoke in CI
+- `cargo-mutants` and the `fuzz/` targets exist but run only on demand — the
+  NMEA parser panic found in review is exactly the class a scheduled fuzz
+  run would have caught first
+- weekly `cargo-mutants` job (scope to `framing.rs` + `checksums.rs` to keep
+  runtime sane) + a short scheduled fuzz smoke
+  (`cargo fuzz run codec_roundtrip -- -max_total_time=300`)
+- follows the `schema-drift.yml` precedent for scheduled jobs
+
+### Release-flow guard: version bump ⇒ CHANGELOG roll
+- releases key off the `Cargo.toml` version on main, but nothing enforces
+  that a bump comes with a rolled `[Unreleased]` section — a stale changelog
+  can ship silently
+- small CI check: if `Cargo.toml` version changed vs the last release tag,
+  `CHANGELOG.md` must contain a section for that version
+
+### Toolchain single source of truth
+- `rust-toolchain.toml` pins 1.88.0 while workflows install
+  `dtolnay/rust-toolchain@stable`; rustup resolves the pin correctly but the
+  intent is ambiguous and the two can silently diverge (schema-drift job
+  runs whatever stable is that day)
+- pick one source (recommend: the toolchain file) and make the workflows
+  honor it explicitly
+
+### Windows e2e test path — investigate
+- CI builds and unit-tests Windows, but the native_sim e2e suite is
+  Unix-only (PTY-based; 56 tests ignored on the Windows runner)
+- investigate whether a Windows equivalent exists (e.g. com0com-style
+  virtual port pairs, or a named-pipe loopback backend); there may be a
+  sound reason this was skipped — document it if so, close the gap if not
