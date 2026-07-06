@@ -46,7 +46,10 @@
             in
             craneLib.filterCargoSources path type
             || pkgs.lib.hasPrefix "schemas" relPath
-            || pkgs.lib.hasPrefix "example-configs" relPath;
+            || pkgs.lib.hasPrefix "example-configs" relPath
+            # doc_drift tests read these via CARGO_MANIFEST_DIR
+            || pkgs.lib.hasSuffix "README.md" relPath
+            || pkgs.lib.hasSuffix "server.json" relPath;
         };
 
         # Common args shared by both the deps-only and final derivations.
