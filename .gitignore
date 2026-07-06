@@ -15,3 +15,5 @@ STATUS.md
 mutants.out/
 mutants.out.old/
 logs
+# local symlink to protocol reference material (specs, RFCs); not repo content
+/resources

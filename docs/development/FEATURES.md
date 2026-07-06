@@ -250,6 +250,15 @@ Non-feature work, roughly in suggested order. From the 2026-07-05 repo review.
 - small CI check: if `Cargo.toml` version changed vs the last release tag,
   `CHANGELOG.md` must contain a section for that version
 
+### Explicit `doc_drift` gate in CI
+- `tests/doc_drift.rs` (tool-count and preset-list guards across README,
+  Cargo.toml, server.json) already runs implicitly via `cargo test --locked`
+  in CI, but nothing names it — a failure shows up as a generic test failure,
+  and a future test-filtering change could silently drop it
+- add an explicit named step (`cargo test --locked --test doc_drift`)
+  following the `config_schema_validation` precedent in `ci.yml`, so doc
+  drift is its own visible, required check
+
 ### Toolchain single source of truth
 - `rust-toolchain.toml` pins 1.88.0 while workflows install
   `dtolnay/rust-toolchain@stable`; rustup resolves the pin correctly but the
