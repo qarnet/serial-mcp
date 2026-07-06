@@ -3199,7 +3199,7 @@ async fn native_read_start_end_framing_decodes() {
                     "encoding": "utf8",
                     "rx_framing": {
                         "type": "start_end",
-                        "start": "<<",
+                        "start": ["<<"],
                         "end": ">>",
                         "marker_encoding": "utf8"
                     }
@@ -3254,7 +3254,7 @@ async fn native_write_tx_framing_modes_observed_via_trace() {
         ),
         (
             "start_end",
-            json!({"type":"start_end","start":"<<","end":">>","marker_encoding":"utf8"}),
+            json!({"type":"start_end","start":["<<"],"end":">>","marker_encoding":"utf8"}),
             b"<<ping>>",
         ),
         (
