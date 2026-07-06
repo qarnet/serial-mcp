@@ -84,6 +84,40 @@
 
 ## Later
 
+### Flow-control-aware ring backpressure (pause-on-full)
+- follow-up to the RX ring redesign
+  ([rx-ring-redesign-plan.md](rx-ring-redesign-plan.md)): the always-on pump
+  drains the kernel buffer continuously, so with RTS/CTS enabled the kernel
+  never deasserts RTS and the device is never throttled — sustained unread
+  traffic wraps the ring (oldest bytes lost, observably via `bytes_lost`)
+- opt-in per-connection mode (`on_full: "wrap"` (default) | `"pause"`): when
+  the ring is full and RTS/CTS is active, pause the pump instead of
+  overwriting — the kernel buffer fills, RTS deasserts, the device pauses,
+  and hardware backpressure semantics are restored end-to-end
+- emit a log event + MCP notification on entering/leaving the paused state
+  so agents know the device is being held off rather than silent
+- only meaningful with hardware flow control; with none enabled, pausing
+  just moves the loss from our ring to the kernel buffer/UART FIFO
+
+### Persistent per-connection framing decoder
+- deferred from the RX ring redesign
+  ([rx-ring-redesign-plan.md](rx-ring-redesign-plan.md)): framing is per-call
+  and applied to the drained ring window, so a frame torn at a call boundary
+  (partial drain, ring wrap) decodes as garbage or a SLIP error
+- carrying decoder state across `read` calls fixes that, but requires
+  binding framing config to the connection rather than the call and
+  rethinking its place in the 4-layer precedence model — needs design
+
+### Per-client RX cursors
+- deferred from the RX ring redesign
+  ([rx-ring-redesign-plan.md](rx-ring-redesign-plan.md)): multiple HTTP
+  clients share the one consuming read cursor, so concurrent consuming reads
+  interleave their drains
+- offsets in every result already make this diagnosable; the fix, if shared
+  multi-agent access becomes real, is named cursor groups (one cursor per
+  client) — overlaps with "Multiple public subscriptions per connection"
+  and "Socket sharing / tee" below
+
 ### Baud-rate auto-detection
 - try candidate rates, score the RX per rate (ASCII ratio, framing-error
   rate, parser validity), return ranked guesses
