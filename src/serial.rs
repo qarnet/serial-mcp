@@ -1198,6 +1198,7 @@ impl SerialConnection {
         if self.closed.swap(true, Ordering::SeqCst) {
             return Ok(());
         }
+        self.set_state(ConnectionState::Closed);
         self.close_token.cancel();
 
         let mut io = self.io.lock().await;

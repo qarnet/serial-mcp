@@ -113,13 +113,17 @@ pub enum DisconnectState {
 /// timer when returning [`DisconnectState::Reconnecting`].
 pub fn disconnect_state(conn: &SerialConnection, ctrl: &mut RxStopController) -> DisconnectState {
     let state = conn.state();
-    if state == ConnectionState::Disconnected || state == ConnectionState::Reconnecting {
-        let reconnect_enabled = conn.reconnect_policy.lock().expect("poisoned").enabled;
-        if !reconnect_enabled {
-            return DisconnectState::Closed;
+    match state {
+        ConnectionState::Closed => return DisconnectState::Closed,
+        ConnectionState::Disconnected | ConnectionState::Reconnecting => {
+            let reconnect_enabled = conn.reconnect_policy.lock().expect("poisoned").enabled;
+            if !reconnect_enabled {
+                return DisconnectState::Closed;
+            }
+            ctrl.reset_silence_timer();
+            return DisconnectState::Reconnecting;
         }
-        ctrl.reset_silence_timer();
-        return DisconnectState::Reconnecting;
+        _ => {}
     }
     DisconnectState::Active
 }

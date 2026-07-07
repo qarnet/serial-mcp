@@ -295,6 +295,7 @@ proptest! {
             encoding: enc,
             max_buffered_bytes,
             poll_interval_ms: poll,
+            from: None,
             r#match: None,
             rx_framing: None,
             rx_parser: None,

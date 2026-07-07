@@ -207,9 +207,47 @@ pub struct SendBreakArgs {
     pub duration_ms: u64,
 }
 
+/// Where a subscription starts reading from. String shortcuts plus
+/// an explicit offset variant.
+///
+/// Wire format: `{"type": "now"}`, `{"type": "cursor"}`,
+/// `{"type": "buffer_start"}`, or `{"type": "offset", "offset": N}`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "type")]
+pub enum SubscribeFrom {
+    /// Start at the live edge — only new data after the call.
+    #[serde(rename = "now")]
+    Now,
+    /// Start at the shared read cursor — replay what `read` hasn't consumed.
+    #[serde(rename = "cursor")]
+    Cursor,
+    /// Replay everything retained in the ring, then go live.
+    #[serde(rename = "buffer_start")]
+    BufferStart,
+    /// Start at an absolute stream offset.
+    #[serde(rename = "offset")]
+    Offset {
+        #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+        offset: u64,
+    },
+}
+
+impl Default for SubscribeFrom {
+    fn default() -> Self {
+        Self::Now
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct SubscribeArgs {
     pub connection_id: String,
+    /// Where to start reading from. `"now"` (default) — live edge,
+    /// `"cursor"` — shared read cursor, `"buffer_start"` — oldest
+    /// retained byte, or `{"offset": N}` — absolute stream offset.
+    /// Replayed history flows through the same framing/match pipeline
+    /// as live data.
+    #[serde(default)]
+    pub from: Option<SubscribeFrom>,
     #[serde(default)]
     #[schemars(schema_with = "crate::schema_helpers::option_timeout_ms_schema")]
     pub timeout_ms: Option<u64>,

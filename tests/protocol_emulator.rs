@@ -122,11 +122,9 @@ async fn emulator_task(mut master: File) {
 // Full agent workflow test
 // ------------------------------------------------------------------
 
-// Ignored: the read stages (3-6, 8, 10-13) now work with ring-based read
-// semantics.  The subscribe stages (2, 7, 9) still race because subscribe
-// uses the fanout path — needs Phase 2 (subscribe rewrite onto the ring).
+// Ignored: the read stages (3-6, 8, 10-13) now work with ring-based read.
+// The subscribe stages (2, 7, 9) use ring-based subscribe (Phase 2).
 #[tokio::test]
-#[ignore = "subscribe stages need Phase 2 (fanout path) — read stages work under ring"]
 async fn protocol_emulator_workflow() {
     // ---- Stage 0: Open PTY, spawn emulator, start server, open port ----
     let pty = PtyPair::open().expect("openpty");
@@ -204,6 +202,8 @@ async fn protocol_emulator_workflow() {
 
     // Subscribe is always background after PLAN 1b. Data arrives as
     // notifications rather than inline in the tool result.
+    // Use from: "buffer_start" to replay the emulator's response that
+    // was already captured in the ring after the write.
     let sub_result = client
         .peer()
         .call_tool(tool_request(
@@ -213,6 +213,7 @@ async fn protocol_emulator_workflow() {
                 "timeout_ms": 3000,
                 "encoding": "utf8",
                 "poll_interval_ms": 50,
+                "from": {"type": "buffer_start"},
             }),
         ))
         .await

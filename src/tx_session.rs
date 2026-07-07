@@ -238,8 +238,7 @@ mod tests {
         let budget: Arc<dyn crate::buffer_budget::BufferBudget> =
             Arc::new(AtomicBudget::new(1024 * 1024, 1024 * 1024));
         let rx_mgr = RxSessionManager::new(budget);
-        let rx_session = rx_mgr.get_or_create(Arc::clone(&conn), 1024).await.unwrap();
-        let _rx = rx_session.register_blocking();
+        let _rx_session = rx_mgr.get_or_create(Arc::clone(&conn), 1024).await.unwrap();
 
         let tx_session = TxSession::new(Arc::clone(&conn));
 
@@ -315,7 +314,7 @@ mod tests {
             Arc::new(AtomicBudget::new(1024 * 1024, 1024 * 1024));
         let rx_mgr = RxSessionManager::new(budget);
         let rx_session = rx_mgr.get_or_create(Arc::clone(&conn), 1024).await.unwrap();
-        let _rx = rx_session.register_blocking();
+        drop(rx_session); // pump is running, no need to hold a consumer
 
         assert_eq!(mgr.count().await, 0);
 

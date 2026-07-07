@@ -2,34 +2,26 @@
 //!
 //! Each open serial connection has at most one [`RxSession`], which owns
 //! a single background pump task that reads from the serial port. The pump
-//! appends every received byte to a per-connection [`RxRing`] and fans out
-//! to registered consumer channels (legacy path; Phase 2 deletes registry).
+//! appends every received byte to a per-connection [`RxRing`].
 //!
 //! The pump runs from `open` to `close` — bytes are captured regardless of
 //! active tool calls. The ring is a budgeted allocation charged at open and
 //! released at close.
 //!
-//! Phase 1.2 scope:
+//! Both `read` and `subscribe` read from the ring via private or shared
+//! cursors. `read` advances a shared cursor; `subscribe` has per-call
+//! private cursors that do not move the shared read cursor.
+//!
 //! - always-on pump from open to close
 //! - RxRing capture (all bytes preserved)
 //! - budget reservation for the ring at construction
 //! - pause on disconnect, resume on reconnect (same ring, same offsets)
-//! - ConsumerRegistry + register_blocking/register_streaming still work
-//!   (Phase 2 deletes them)
-//!
-//! ## Consumer drop policy
-//!
-//! When the pump calls [`ConsumerRegistry::fanout`], any consumer whose
-//! channel is full (slow consumer) or closed (dropped receiver) is silently
-//! removed from the registry via `Vec::retain`. This prevents the pump from
-//! blocking or buffering indefinitely for lagging consumers.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use std::time::Duration;
 
-use tokio::sync::mpsc;
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -39,107 +31,20 @@ use crate::buffer_budget::{BufferBudget, BufferReservation};
 use crate::rx_ring::RxRing;
 use crate::serial::SerialConnection;
 
-// ---- Events pumped to consumers -------------------------------------------
-
-/// A chunk of data or a lifecycle event pushed to each consumer.
-#[derive(Debug)]
-pub enum RxEvent {
-    Data(Vec<u8>),
-    Closed,
-    Error(String),
-}
-
-impl Clone for RxEvent {
-    fn clone(&self) -> Self {
-        match self {
-            RxEvent::Data(bytes) => RxEvent::Data(bytes.clone()),
-            RxEvent::Closed => RxEvent::Closed,
-            RxEvent::Error(msg) => RxEvent::Error(msg.clone()),
-        }
-    }
-}
-
-// ---- Consumer channel wrapper ---------------------------------------------
-
-/// A registered consumer that receives [`RxEvent`]s through an mpsc channel.
-pub struct RxConsumer {
-    tx: mpsc::Sender<RxEvent>,
-}
-
-impl RxConsumer {
-    fn new(capacity: usize) -> (Self, mpsc::Receiver<RxEvent>) {
-        let (tx, rx) = mpsc::channel(capacity);
-        (Self { tx }, rx)
-    }
-
-    fn try_send(&self, event: RxEvent) -> bool {
-        self.tx.try_send(event).is_ok()
-    }
-}
-
-// ---- Shared consumer registry for pump access -----------------------------
-
-/// Consumer lists shared between `RxSession` and the pump task.
-///
-/// The pump reads from `connection.read()` and fans out chunks to all
-/// registered consumers via `try_send`. Consumers whose channels are full
-/// (slow consumer) or closed (dropped receiver) are silently removed from
-/// the registry by `retain()`. This is the explicit consumer-drop policy
-/// for PLAN 1a; see module-level docs for details.
-struct ConsumerRegistry {
-    blocking: Vec<RxConsumer>,
-    streaming: Vec<RxConsumer>,
-}
-
-impl ConsumerRegistry {
-    fn new() -> Self {
-        Self {
-            blocking: Vec::new(),
-            streaming: Vec::new(),
-        }
-    }
-
-    /// Fan out an event to all registered consumers.
-    ///
-    /// Consumers whose channels are full or closed are silently removed.
-    /// This never blocks — `try_send` is used for every consumer.
-    fn fanout(&mut self, event: RxEvent) {
-        self.blocking.retain(|c| c.try_send(event.clone()));
-        self.streaming.retain(|c| c.try_send(event.clone()));
-    }
-
-    fn prune_closed(&mut self) {
-        self.blocking.retain(|c| !c.tx.is_closed());
-        self.streaming.retain(|c| !c.tx.is_closed());
-    }
-
-    #[allow(dead_code)] // removed in Phase 2 (registry deletion)
-    fn is_empty(&self) -> bool {
-        self.blocking.is_empty() && self.streaming.is_empty()
-    }
-}
-
 // ---- Per-connection session ------------------------------------------------
 
 /// Manages one pump task and its registered consumers for a single connection.
 ///
-/// The pump task holds an `Arc<StdMutex<ConsumerRegistry>>` so it can
-/// fan out data without needing a reference back to this struct.
-///
 /// The [`RxRing`] captures all RX bytes from open to close. The pump appends
-/// to the ring AND fans out to consumer channels simultaneously. Phase 1.3
-/// rewrites `read`/`seek`/`flush` onto the ring; Phase 2 rewrites `subscribe`.
+/// to the ring. Both `read` and `subscribe` read from the ring via cursors.
 pub struct RxSession {
     connection_id: String,
     connection: Arc<SerialConnection>,
-    consumers: Arc<StdMutex<ConsumerRegistry>>,
     pump_task: StdMutex<Option<JoinHandle<()>>>,
     pump_token: StdMutex<CancellationToken>,
     /// Per-connection ring buffer capturing all RX bytes from open to close.
     ring: Arc<RxRing>,
-    /// Shared read cursor for Phase 1.3 `read`/`seek`/`flush` rewrite.
-    /// Absolute u64 offset; starts at 0.
-    #[allow(dead_code)] // used by Phase 1.3
+    /// Shared read cursor for `read`/`seek`/`flush`. Absolute u64 offset.
     read_cursor: StdMutex<u64>,
     /// Stored ring capacity so close can release the correct byte count.
     ring_capacity: usize,
@@ -149,7 +54,6 @@ pub struct RxSession {
 
 impl RxSession {
     const PUMP_READ_SIZE: usize = 4096;
-    const CONSUMER_CHANNEL_CAPACITY: usize = 256;
 
     /// Create a new RxSession with a budgeted ring buffer.
     ///
@@ -174,7 +78,6 @@ impl RxSession {
         Ok(Self {
             connection_id,
             connection,
-            consumers: Arc::new(StdMutex::new(ConsumerRegistry::new())),
             pump_task: StdMutex::new(None),
             pump_token: StdMutex::new(CancellationToken::new()),
             ring: Arc::new(RxRing::new(ring_capacity)),
@@ -188,22 +91,19 @@ impl RxSession {
         &self.connection_id
     }
 
-    // ── Phase 1.3 accessors (read/seek/flush rewrite) ─────────────────────
+    // ── Ring + cursor accessors ─────────────────────────────────────────────
 
-    /// Borrow the ring buffer. Phase 1.3 `read`/`seek`/`flush` use this.
-    #[allow(dead_code)] // used by Phase 1.3
+    /// Borrow the ring buffer.
     pub(crate) fn ring(&self) -> &RxRing {
         &self.ring
     }
 
     /// Current shared read cursor (absolute u64 offset).
-    #[allow(dead_code)] // used by Phase 1.3
     pub(crate) fn read_cursor(&self) -> u64 {
         *self.read_cursor.lock().expect("read_cursor mutex poisoned")
     }
 
-    /// Set the shared read cursor. Phase 1.3 `seek` uses this.
-    #[allow(dead_code)] // used by Phase 1.3
+    /// Set the shared read cursor.
     pub(crate) fn set_read_cursor(&self, off: u64) {
         *self.read_cursor.lock().expect("read_cursor mutex poisoned") = off;
     }
@@ -245,68 +145,13 @@ impl RxSession {
             .lock()
             .expect("pump_token mutex poisoned")
             .clone();
-        let consumers = Arc::clone(&self.consumers);
         let ring = Arc::clone(&self.ring);
-        let handle = tokio::spawn(pump_loop(connection, token, consumers, ring));
+        let handle = tokio::spawn(pump_loop(connection, token, ring));
         *task_slot = Some(handle);
         debug!("rx_session: pump started for {}", self.connection_id);
     }
 
-    /// Register a new blocking consumer and return its receiver.
-    ///
-    /// The consumer will only see bytes that arrive *after* registration.
-    /// The pump is assumed already running (started at open time).
-    pub fn register_blocking(&self) -> mpsc::Receiver<RxEvent> {
-        let (consumer, rx) = RxConsumer::new(Self::CONSUMER_CHANNEL_CAPACITY);
-        self.consumers
-            .lock()
-            .expect("consumers mutex poisoned")
-            .blocking
-            .push(consumer);
-        debug!(
-            "rx_session: blocking consumer registered for {}",
-            self.connection_id
-        );
-        rx
-    }
-
-    /// Register a new streaming consumer and return its receiver.
-    ///
-    /// Same future-only semantics as [`Self::register_blocking`].
-    pub fn register_streaming(&self) -> mpsc::Receiver<RxEvent> {
-        let (consumer, rx) = RxConsumer::new(Self::CONSUMER_CHANNEL_CAPACITY);
-        self.consumers
-            .lock()
-            .expect("consumers mutex poisoned")
-            .streaming
-            .push(consumer);
-        debug!(
-            "rx_session: streaming consumer registered for {}",
-            self.connection_id
-        );
-        rx
-    }
-
-    /// Prune consumers whose receivers have been dropped.
-    ///
-    /// Under the always-on pump model the pump keeps running regardless of
-    /// consumer count — bytes are captured to the ring from open to close.
-    /// Always returns `false` (pump is never cancelled by prune).
-    ///
-    /// Call this after removing a stream handle (e.g., unsubscribe) to clean
-    /// up closed consumer channels so the pump doesn't waste work on dead
-    /// fanout targets.
-    pub fn prune_consumers(&self) -> bool {
-        let mut reg = self.consumers.lock().expect("consumers mutex poisoned");
-        reg.prune_closed();
-        debug!(
-            "rx_session: pruned consumers for {} (pump stays alive)",
-            self.connection_id
-        );
-        false
-    }
-
-    /// Signal the pump to stop and notify all consumers with [`RxEvent::Closed`].
+    /// Signal the pump to stop.
     ///
     /// This only cancels the pump token — it does **not** wait for the pump
     /// task to finish. Call [`Self::join_pump`] after shutdown to await
@@ -316,10 +161,6 @@ impl RxSession {
             .lock()
             .expect("pump_token mutex poisoned")
             .cancel();
-        self.consumers
-            .lock()
-            .expect("consumers mutex poisoned")
-            .fanout(RxEvent::Closed);
         info!("rx_session: shut down for {}", self.connection_id);
     }
 
@@ -358,19 +199,13 @@ impl RxSession {
 
 // ---- Pump loop (standalone async function, not a method) -------------------
 
-/// Background task that reads from the serial port, appends to the ring,
-/// and fans out to consumers.
+/// Background task that reads from the serial port and appends to the ring.
 ///
 /// Runs from open to close. On fatal disconnect, pauses (50ms sleep loop)
 /// until the connection state returns to `Open` (reconnect succeeded) or
 /// `Closed` (reconnect exhausted/disabled). The ring persists across
 /// disconnect/reconnect cycles — `end_offset` is monotonic.
-async fn pump_loop(
-    connection: Arc<SerialConnection>,
-    token: CancellationToken,
-    consumers: Arc<StdMutex<ConsumerRegistry>>,
-    ring: Arc<RxRing>,
-) {
+async fn pump_loop(connection: Arc<SerialConnection>, token: CancellationToken, ring: Arc<RxRing>) {
     let conn_id = connection.id().to_string();
     let mut buf = vec![0u8; RxSession::PUMP_READ_SIZE];
     info!("rx_session: pump entered for {conn_id}");
@@ -385,21 +220,15 @@ async fn pump_loop(
         };
         match read_result {
             Ok(0) | Err(crate::error::SerialError::ReadTimeout) => {
-                // No data this cycle. Prune dead consumers but keep running.
-                let mut reg = consumers.lock().expect("consumers mutex poisoned");
-                reg.prune_closed();
+                // No data this cycle. Keep running.
                 continue;
             }
             Ok(n) => {
                 connection.log().rx_data(n);
                 let chunk = buf[..n].to_vec();
 
-                // Append to the ring first (capture all bytes).
+                // Append to the ring (capture all bytes).
                 ring.append(&chunk);
-
-                // Fan out to legacy consumers (read/subscribe still work).
-                let mut reg = consumers.lock().expect("consumers mutex poisoned");
-                reg.fanout(RxEvent::Data(chunk));
             }
             Err(e) => {
                 error!("rx_session: read error on {conn_id}: {e}");
@@ -450,11 +279,8 @@ async fn pump_loop(
                     continue;
                 }
 
-                // Non-fatal error: fan out error event and exit.
-                consumers
-                    .lock()
-                    .expect("consumers mutex poisoned")
-                    .fanout(RxEvent::Error(e.to_string()));
+                // Non-fatal error: pump exits.
+                error!("rx_session: non-fatal read error on {conn_id}, pump exiting: {e}");
                 break;
             }
         }
@@ -468,8 +294,8 @@ async fn pump_loop(
 /// Manages [`RxSession`] instances keyed by connection id.
 ///
 /// One session per connection. Creating a session is idempotent. Removing a
-/// session shuts down its pump, awaits pump task exit, releases the ring
-/// budget, and drops consumers deterministically.
+/// session shuts down its pump, awaits pump task exit, and releases the ring
+/// budget.
 pub struct RxSessionManager {
     sessions: AsyncMutex<HashMap<String, Arc<RxSession>>>,
     budget: Arc<dyn BufferBudget>,
@@ -513,8 +339,8 @@ impl RxSessionManager {
 
     /// Remove and shut down a session by connection id.
     ///
-    /// Cancels the pump, sends [`RxEvent::Closed`] to consumers, and awaits
-    /// pump task exit. Does nothing if no session exists for the given id.
+    /// Cancels the pump and awaits pump task exit.
+    /// Does nothing if no session exists for the given id.
     pub async fn remove(&self, connection_id: &str) {
         let session = {
             let mut sessions = self.sessions.lock().await;
@@ -563,21 +389,6 @@ mod tests {
         RxSessionManager::new(test_budget())
     }
 
-    fn collect_events(rx: &mut mpsc::Receiver<RxEvent>) -> Vec<RxEvent> {
-        let mut events = Vec::new();
-        while let Ok(event) = rx.try_recv() {
-            events.push(event);
-        }
-        events
-    }
-
-    #[test]
-    fn rx_event_clone_copies_data() {
-        let event = RxEvent::Data(b"hello".to_vec());
-        let cloned = event.clone();
-        assert!(matches!(cloned, RxEvent::Data(ref b) if b == b"hello"));
-    }
-
     // ── Manager idempotency ────────────────────────────────────────────────
 
     #[tokio::test]
@@ -600,7 +411,6 @@ mod tests {
         let mgr = test_manager();
         let session = mgr.get_or_create(Arc::clone(&conn), 1024).await.unwrap();
         let id = session.connection_id().to_string();
-        let _rx = session.register_blocking();
         assert!(!session
             .pump_token
             .lock()
@@ -656,54 +466,6 @@ mod tests {
             .is_cancelled());
     }
 
-    // ── Consumer fanout ────────────────────────────────────────────────────
-
-    #[tokio::test]
-    async fn consumer_receives_data_after_registration() {
-        let (conn, mut peer) = loopback_connection("test-fanout-data");
-        let conn = Arc::new(conn);
-        let session = test_session(Arc::clone(&conn));
-        session.ensure_pump_running();
-
-        let mut rx = session.register_blocking();
-
-        peer.write_all(b"hello").await.unwrap();
-
-        tokio::time::sleep(Duration::from_millis(300)).await;
-        session.shutdown();
-
-        let received = collect_events(&mut rx);
-        let has_data = received.iter().any(|e| matches!(e, RxEvent::Data(_)));
-        assert!(
-            has_data,
-            "consumer should have received at least one Data event"
-        );
-    }
-
-    #[tokio::test]
-    async fn two_consumers_both_receive_future_data() {
-        let (conn, mut peer) = loopback_connection("test-two-consumers");
-        let conn = Arc::new(conn);
-        let session = test_session(Arc::clone(&conn));
-        session.ensure_pump_running();
-
-        let mut rx1 = session.register_blocking();
-        let mut rx2 = session.register_streaming();
-
-        peer.write_all(b"abc").await.unwrap();
-
-        tokio::time::sleep(Duration::from_millis(300)).await;
-        session.shutdown();
-
-        let events1 = collect_events(&mut rx1);
-        let events2 = collect_events(&mut rx2);
-
-        let has_data1 = events1.iter().any(|e| matches!(e, RxEvent::Data(_)));
-        let has_data2 = events2.iter().any(|e| matches!(e, RxEvent::Data(_)));
-        assert!(has_data1, "blocking consumer should have received data");
-        assert!(has_data2, "streaming consumer should have received data");
-    }
-
     // ── Remove lifecycle ───────────────────────────────────────────────────
 
     #[tokio::test]
@@ -713,7 +475,6 @@ mod tests {
         let mgr = test_manager();
         let session = mgr.get_or_create(Arc::clone(&conn), 1024).await.unwrap();
         let conn_id = session.connection_id().to_string();
-        let _rx = session.register_blocking();
         assert!(!session
             .pump_token
             .lock()
@@ -740,7 +501,6 @@ mod tests {
         let conn = Arc::new(conn);
         let session = test_session(Arc::clone(&conn));
         session.ensure_pump_running();
-        let mut rx = session.register_blocking();
 
         peer.write_all(b"bye").await.unwrap();
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -748,13 +508,18 @@ mod tests {
 
         tokio::time::sleep(Duration::from_millis(300)).await;
 
-        let events = collect_events(&mut rx);
-        let has_closed_or_error = events
-            .iter()
-            .any(|e| matches!(e, RxEvent::Closed | RxEvent::Error(_)));
+        // After close, the pump should have exited. Verify by checking the
+        // pump task handle is consumed.
         assert!(
-            has_closed_or_error,
-            "consumer should receive Closed or Error event when connection closes"
+            session.pump_task.lock().expect("pump_task").is_none()
+                || session
+                    .pump_task
+                    .lock()
+                    .expect("pump_task")
+                    .as_ref()
+                    .map(|h| h.is_finished())
+                    .unwrap_or(true),
+            "pump should finish after connection close"
         );
     }
 
@@ -766,7 +531,6 @@ mod tests {
         let conn = Arc::new(conn);
         let session = test_session(Arc::clone(&conn));
         session.ensure_pump_running();
-        let _rx = session.register_blocking();
 
         session.shutdown_and_join().await;
 
@@ -782,7 +546,6 @@ mod tests {
         let conn = Arc::new(conn);
         let session = test_session(conn);
         session.ensure_pump_running();
-        let mut rx = session.register_blocking();
         session.shutdown();
         session.shutdown();
         session.shutdown();
@@ -791,12 +554,6 @@ mod tests {
             .lock()
             .expect("pump_token")
             .is_cancelled());
-        let events = collect_events(&mut rx);
-        let closed_count = events
-            .iter()
-            .filter(|e| matches!(e, RxEvent::Closed))
-            .count();
-        assert!(closed_count >= 1, "at least one Closed event expected");
     }
 
     // ── Stress: repeated create + remove ──────────────────────────────────
@@ -811,7 +568,6 @@ mod tests {
             let mgr = test_manager();
             let session = mgr.get_or_create(Arc::clone(&conn), 1024).await.unwrap();
             let conn_id = session.connection_id().to_string();
-            let _rx = session.register_blocking();
 
             // Verify pump is running
             assert!(
@@ -838,62 +594,6 @@ mod tests {
         }
     }
 
-    // ── Consumer overflow / drop ───────────────────────────────────────────
-
-    #[tokio::test]
-    async fn full_consumer_is_dropped_from_registry() {
-        let (conn, mut peer) = loopback_connection("test-full-consumer");
-        let conn = Arc::new(conn);
-        let session = test_session(Arc::clone(&conn));
-        session.ensure_pump_running();
-
-        // Register a consumer with a tiny channel capacity to force overflow.
-        let mut rx = session.register_blocking();
-
-        // Send enough data to exceed the channel capacity (256 events).
-        for _ in 0..300 {
-            peer.write_all(b"x").await.unwrap();
-            tokio::time::sleep(Duration::from_millis(2)).await;
-        }
-
-        tokio::time::sleep(Duration::from_millis(200)).await;
-        session.shutdown();
-
-        let events = collect_events(&mut rx);
-        assert!(
-            !events.is_empty(),
-            "should have received some events before consumer was dropped"
-        );
-    }
-
-    #[tokio::test]
-    async fn dropped_receiver_removed_from_registry() {
-        let (conn, _peer) = loopback_connection("test-dropped-receiver");
-        let conn = Arc::new(conn);
-        let session = test_session(Arc::clone(&conn));
-        session.ensure_pump_running();
-
-        let rx = session.register_blocking();
-        let consumer_count_before = {
-            let registry = session.consumers.lock().expect("consumers");
-            registry.blocking.len() + registry.streaming.len()
-        };
-        assert_eq!(consumer_count_before, 1);
-
-        drop(rx);
-
-        session.shutdown();
-
-        let consumer_count_after = {
-            let registry = session.consumers.lock().expect("consumers");
-            registry.blocking.len() + registry.streaming.len()
-        };
-        assert_eq!(
-            consumer_count_after, 0,
-            "dropped receiver should be removed from registry after fanout attempt"
-        );
-    }
-
     // ── NEW: Ring capture without consumers ────────────────────────────────
 
     #[tokio::test]
@@ -914,31 +614,6 @@ mod tests {
         let slice = session.ring().read_from(0, 10);
         assert_eq!(slice.bytes, b"hi");
         assert_eq!(slice.bytes_lost, 0);
-
-        session.shutdown_and_join().await;
-    }
-
-    #[tokio::test]
-    async fn ring_captures_bytes_alongside_consumers() {
-        let (conn, mut peer) = loopback_connection("test-ring-with-consumers");
-        let conn = Arc::new(conn);
-        let session = test_session(Arc::clone(&conn));
-        session.ensure_pump_running();
-        let mut rx = session.register_blocking();
-
-        peer.write_all(b"hello").await.unwrap();
-        tokio::time::sleep(Duration::from_millis(200)).await;
-
-        // Ring must have the data.
-        let end = session.ring().end_offset();
-        assert_eq!(end, 5);
-        let slice = session.ring().read_from(0, 10);
-        assert_eq!(slice.bytes, b"hello");
-
-        // Consumer must also have the data.
-        let events = collect_events(&mut rx);
-        let has_data = events.iter().any(|e| matches!(e, RxEvent::Data(_)));
-        assert!(has_data, "consumer should have received data too");
 
         session.shutdown_and_join().await;
     }
@@ -968,34 +643,6 @@ mod tests {
         let slice = session.ring().read_from(0, 20);
         assert_eq!(&slice.bytes[..6], b"before");
         assert_eq!(&slice.bytes[6..], b"after");
-
-        session.shutdown_and_join().await;
-    }
-
-    // ── NEW: prune_consumers does not cancel pump ──────────────────────────
-
-    #[tokio::test]
-    async fn prune_consumers_returns_false_pump_keeps_running() {
-        let (conn, _peer) = loopback_connection("test-prune-no-cancel");
-        let conn = Arc::new(conn);
-        let session = test_session(Arc::clone(&conn));
-        session.ensure_pump_running();
-
-        // Register a consumer then drop the receiver.
-        let rx = session.register_blocking();
-        drop(rx);
-
-        // Prune should return false (pump is not cancelled).
-        let cancelled = session.prune_consumers();
-        assert!(!cancelled, "prune_consumers must not cancel pump");
-        assert!(
-            !session
-                .pump_token
-                .lock()
-                .expect("pump_token")
-                .is_cancelled(),
-            "pump token must still be active after prune"
-        );
 
         session.shutdown_and_join().await;
     }

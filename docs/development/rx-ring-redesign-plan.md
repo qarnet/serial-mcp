@@ -271,6 +271,11 @@ and resource-subscription plumbing. Notifications on ring append can reuse
 
 ## Unified read/subscribe semantics
 
+> **IMPLEMENTED in Phase 2** (commit: rx-ring-redesign branch). The
+> AGENTS.md "Invariants easy to break" section has been updated to reflect
+> the unified semantics. The old `rx-read-vs-subscribe-semantics` guidance
+> ("the two loops legitimately differ") is SUPERSEDED by the table below.
+
 The historical asymmetries (see AGENTS.md "Invariants easy to break" and
 the `rx-read-vs-subscribe-semantics` design note) existed because
 unconsumed bytes used to be unrecoverable. With the ring they are redefined
