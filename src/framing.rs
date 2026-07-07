@@ -1763,22 +1763,29 @@ impl FrameParser for NmeaParser {
             (content, None)
         };
 
-        // 4. Validate checksum if present and validate is true.
+        // 4. Evaluate checksum validity. Yields None (no checksum present),
+        // Some(true) (present + correct), Some(false) (present + incorrect),
+        // or Err (present + incorrect + validate=true). Body parsing always
+        // runs afterward so malformed-checksum frames carry the full parsed
+        // body with checksum_valid: Some(false) when validate is false.
         let checksum_valid = match &checksum_hex {
             Some(hex) if hex.len() >= 2 => {
-                // Slice the raw bytes first — hex[..2] is always safe because
-                // hex.len() >= 2.  Then validate the two bytes as ASCII hex.
-                // String::from_utf8_lossy on the full hex vec must NOT be used
-                // because replacement characters (U+FFFD) are multibyte in
-                // UTF-8 and a byte-index slice panics when it lands inside one.
-                let received_val = match std::str::from_utf8(&hex[..2])
+                let computed_byte = xor_checksum(&body);
+                match std::str::from_utf8(&hex[..2])
                     .ok()
                     .and_then(|s| u8::from_str_radix(s, 16).ok())
                 {
-                    Some(v) => v,
+                    Some(received_val) => {
+                        // Valid hex — compare against computed checksum.
+                        check_checksum(
+                            self.validate,
+                            computed_byte,
+                            received_val,
+                            vec![received_val],
+                        )?
+                    }
                     None => {
-                        // Invalid hex in checksum — treat as mismatch.
-                        let computed_byte = xor_checksum(&body);
+                        // Invalid hex chars — guaranteed mismatch.
                         match check_checksum(
                             self.validate,
                             computed_byte,
@@ -1787,27 +1794,13 @@ impl FrameParser for NmeaParser {
                         ) {
                             Err(e) => return Err(e),
                             Ok(Some(true)) => unreachable!("invalid hex never matches"),
-                            Ok(Some(false)) | Ok(None) => {
-                                return Ok(ParsedFrame::Nmea {
-                                    talker_id: String::new(),
-                                    sentence_type: String::new(),
-                                    fields: vec![],
-                                    checksum_valid: Some(false),
-                                });
-                            }
+                            Ok(Some(false)) | Ok(None) => Some(false),
                         }
                     }
-                };
-                let computed_val = xor_checksum(&body);
-                check_checksum(
-                    self.validate,
-                    computed_val,
-                    received_val,
-                    vec![received_val],
-                )?
+                }
             }
             Some(hex) => {
-                // Checksum present but too short (<2 hex chars). Treat as mismatch.
+                // Checksum present but too short (<2 hex chars). Guaranteed mismatch.
                 let computed_byte = xor_checksum(&body);
                 match check_checksum(
                     self.validate,
@@ -4970,6 +4963,102 @@ mod tests {
                 assert_eq!(checksum_valid, Some(true));
             }
             other => panic!("expected Nmea frame, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn nmea_parser_invalid_hex_checksum_validate_false_returns_full_body() {
+        // Sentence with non-hex checksum chars (*GG), validate: false →
+        // full body parse + checksum_valid: Some(false).
+        let sentence = b"GPGGA,123519,4807.038,N,01131.000,E,1,08,0.9,545.4,M,46.9,M,,*GG";
+        let p = NmeaParser { validate: false };
+        let result = p.parse(sentence).unwrap();
+        match result {
+            ParsedFrame::Nmea {
+                talker_id,
+                sentence_type,
+                fields,
+                checksum_valid,
+            } => {
+                assert_eq!(talker_id, "GP");
+                assert_eq!(sentence_type, "GGA");
+                assert_eq!(
+                    fields,
+                    vec![
+                        "123519",
+                        "4807.038",
+                        "N",
+                        "01131.000",
+                        "E",
+                        "1",
+                        "08",
+                        "0.9",
+                        "545.4",
+                        "M",
+                        "46.9",
+                        "M",
+                        "",
+                        ""
+                    ]
+                );
+                assert_eq!(checksum_valid, Some(false));
+            }
+            other => panic!("expected Nmea frame with full body, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn nmea_parser_too_short_checksum_validate_false_returns_full_body() {
+        // Sentence with 1-hex-char checksum (*7), validate: false →
+        // full body parse + checksum_valid: Some(false).
+        let sentence = b"GPGLL,3751.65,N,12226.54,W*7";
+        let p = NmeaParser { validate: false };
+        let result = p.parse(sentence).unwrap();
+        match result {
+            ParsedFrame::Nmea {
+                talker_id,
+                sentence_type,
+                fields,
+                checksum_valid,
+            } => {
+                assert_eq!(talker_id, "GP");
+                assert_eq!(sentence_type, "GLL");
+                assert_eq!(fields, vec!["3751.65", "N", "12226.54", "W"]);
+                assert_eq!(checksum_valid, Some(false));
+            }
+            other => panic!("expected Nmea frame with full body, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn nmea_parser_invalid_hex_checksum_validate_true_returns_err() {
+        // Sentence with non-hex checksum chars (*GG), validate: true →
+        // Err(ChecksumMismatch). The received vec contains the raw hex bytes.
+        let sentence = b"GPGGA,123519,4807.038,N,01131.000,E,1,08,0.9,545.4,M,46.9,M,,*GG";
+        let p = NmeaParser { validate: true };
+        let result = p.parse(sentence);
+        match result {
+            Err(FrameDecodeError::ChecksumMismatch { expected, received }) => {
+                assert_eq!(expected.len(), 1);
+                assert_eq!(received, b"GG".to_vec());
+            }
+            other => panic!("expected ChecksumMismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn nmea_parser_too_short_checksum_validate_true_returns_err() {
+        // Sentence with 1-hex-char checksum (*7), validate: true →
+        // Err(ChecksumMismatch). The received vec contains the raw hex bytes.
+        let sentence = b"GPGLL,3751.65,N,12226.54,W*7";
+        let p = NmeaParser { validate: true };
+        let result = p.parse(sentence);
+        match result {
+            Err(FrameDecodeError::ChecksumMismatch { expected, received }) => {
+                assert_eq!(expected.len(), 1);
+                assert_eq!(received, b"7".to_vec());
+            }
+            other => panic!("expected ChecksumMismatch, got {other:?}"),
         }
     }
 
