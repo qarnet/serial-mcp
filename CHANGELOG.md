@@ -26,6 +26,16 @@
 
 ## Unreleased
 
+**Added — NMEA TX auto-checksum:**
+- The `nmea0183` preset's TX path now appends the `*XX` XOR checksum
+  automatically via a new `TxFramingMode::Nmea` variant. Payloads already
+  ending in a valid `*HH` pass through un-doubled (existing checksum
+  validated); a wrong `*HH` errors. Embedded `\r`/`\n` and non-printable
+  bytes are rejected. Explicit `tx_framing: start_end` still wins via
+  precedence for callers that want the old no-checksum behavior. The preset
+  now round-trips correctly: `write(protocol: nmea0183)` → `read(protocol:
+  nmea0183)` produces `checksum_valid: true`.
+
 **Fixed — NMEA parser panic:**
 - NMEA parser no longer panics on non-ASCII-but-valid-UTF-8 bodies; non-ASCII
   frames now return `Raw` (spec-conformant). The parser slices the address

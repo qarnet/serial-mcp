@@ -267,7 +267,7 @@ impl SerialHandler {
     }
 
     #[tool(
-        description = "Write data to a serial port connection. Use tx_framing to apply frame boundaries (line terminator, delimiter, length prefix, SLIP, COBS, or start/end markers) around the decoded payload. Use protocol to select a built-in preset (at_command, slip, json_lines, cobs, ndjson, nmea0183, modbus_ascii) that fills in framing defaults. Explicit tx_framing wins over the preset. When tx_framing is used, decoded_bytes reports the payload length before framing, and bytes_written reports the total framed bytes sent.",
+        description = "Write data to a serial port connection. Use tx_framing to apply frame boundaries (line terminator, delimiter, length prefix, SLIP, COBS, or start/end markers) around the decoded payload. Use protocol to select a built-in preset (at_command, slip, json_lines, cobs, ndjson, nmea0183, modbus_ascii) that fills in framing defaults. The nmea0183 preset auto-appends the *XX XOR checksum on write. Explicit tx_framing wins over the preset. When tx_framing is used, decoded_bytes reports the payload length before framing, and bytes_written reports the total framed bytes sent.",
         title = "Write Serial Data",
         annotations(destructive_hint = true, open_world_hint = false)
     )]

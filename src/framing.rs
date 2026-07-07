@@ -204,11 +204,7 @@ pub fn preset_tx_framing(p: ProtocolPreset) -> TxFramingConfig {
             mode: TxFramingMode::Cobs,
         },
         ProtocolPreset::Nmea0183 => TxFramingConfig {
-            mode: TxFramingMode::StartEnd {
-                start: vec!["$".into()],
-                end: "\r\n".into(),
-                marker_encoding: PatternEncoding::Utf8,
-            },
+            mode: TxFramingMode::Nmea,
         },
         ProtocolPreset::ModbusAscii => TxFramingConfig {
             mode: TxFramingMode::StartEnd {
@@ -339,10 +335,19 @@ pub enum TxFramingMode {
     Slip,
     /// COBS (Consistent Overhead Byte Stuffing) framing. Byte-stuffed payload
     /// followed by 0x00 delimiter (plain COBS). The delimiter never appears
-    /// inside the encoded block. The PPP-COBS draft variant (0x7E) is not
+    /// inside an encoded block. The PPP-COBS draft variant (0x7E) is not
     /// supported; it is tracked for a future PR.
     #[serde(rename_all = "snake_case")]
     Cobs,
+    /// NMEA-0183 sentence framing: `$<payload>*XX\r\n` with the `*XX` XOR
+    /// checksum auto-appended over the payload bytes. Used by the `nmea0183`
+    /// preset TX path. If the payload already ends in `*HH` (two hex chars
+    /// after a `*`), the existing checksum is validated and a mismatch
+    /// errors (no double-append). If the payload already starts with `$` or
+    /// `!`, that leading char is used (AIS `!` sentences); otherwise `$` is
+    /// prepended.
+    #[serde(rename_all = "snake_case")]
+    Nmea,
 }
 
 /// Line ending for TX framing. No `auto` — agents must pick one.
@@ -464,6 +469,70 @@ impl TxFramingMode {
                 let mut framed = vec![0x00];
                 framed.extend_from_slice(&cobs_stuff(payload));
                 framed.push(0x00);
+                Ok(framed)
+            }
+            TxFramingMode::Nmea => {
+                // Reject embedded terminators and non-printable bytes.
+                if payload.iter().any(|&b| b == b'\r' || b == b'\n') {
+                    return Err("TX NMEA payload must not contain \\r or \\n".into());
+                }
+                if payload.iter().any(|&b| !(0x20..=0x7E).contains(&b)) {
+                    return Err("TX NMEA payload must be printable ASCII".into());
+                }
+                // Determine leading character: preserve $/! if present, else '$'.
+                let lead_byte = if payload.first() == Some(&b'$') || payload.first() == Some(&b'!')
+                {
+                    payload[0]
+                } else {
+                    b'$'
+                };
+                let body_start = if payload.first() == Some(&b'$') || payload.first() == Some(&b'!')
+                {
+                    1
+                } else {
+                    0
+                };
+                let body = &payload[body_start..];
+
+                // Check for existing trailing *HH.
+                let existing_checksum = (body.len() >= 3
+                    && body[body.len() - 3] == b'*'
+                    && body[body.len() - 2].is_ascii_hexdigit()
+                    && body[body.len() - 1].is_ascii_hexdigit())
+                .then(|| {
+                    let hex_str = std::str::from_utf8(&body[body.len() - 2..])
+                        .map_err(|_| "TX NMEA invalid UTF-8 in checksum".to_string())?;
+                    u8::from_str_radix(hex_str, 16)
+                        .map_err(|_| "TX NMEA invalid hex in checksum".to_string())
+                });
+                // Exclusive borrow on body is done — derive the checksum input now.
+                let existing_val = match existing_checksum {
+                    Some(Ok(v)) => Some(v),
+                    Some(Err(e)) => return Err(e),
+                    None => None,
+                };
+                let body_to_checksum = match existing_val {
+                    Some(_) => &body[..body.len() - 3],
+                    None => body,
+                };
+                let computed = xor_checksum(body_to_checksum);
+                if let Some(received) = existing_val {
+                    if computed != received {
+                        return Err(format!(
+                            "TX NMEA checksum mismatch: payload declares {received:02X}, computed {computed:02X}"
+                        ));
+                    }
+                }
+                let cs_hex = format!("{computed:02X}");
+                let additional = if existing_val.is_some() { 0 } else { 3 };
+                let mut framed = Vec::with_capacity(1 + body.len() + additional + 2);
+                framed.push(lead_byte);
+                framed.extend_from_slice(body);
+                if existing_val.is_none() {
+                    framed.push(b'*');
+                    framed.extend_from_slice(cs_hex.as_bytes());
+                }
+                framed.extend_from_slice(b"\r\n");
                 Ok(framed)
             }
         }
@@ -5140,16 +5209,9 @@ mod tests {
     // ── NMEA preset tests ──────────────────────────────────────────────
 
     #[test]
-    fn preset_tx_framing_nmea0183_returns_start_end_dollar() {
+    fn preset_tx_framing_nmea0183_returns_nmea_mode() {
         let tx = preset_tx_framing(ProtocolPreset::Nmea0183);
-        assert!(matches!(
-            tx.mode,
-            TxFramingMode::StartEnd {
-                start,
-                end,
-                marker_encoding: PatternEncoding::Utf8,
-            } if start == vec!["$".to_string()] && end == "\r\n"
-        ));
+        assert!(matches!(tx.mode, TxFramingMode::Nmea));
     }
 
     #[test]
@@ -5188,11 +5250,7 @@ mod tests {
         // TX
         let preset_tx = preset_tx_framing(ProtocolPreset::Nmea0183);
         let bare_tx = TxFramingConfig {
-            mode: TxFramingMode::StartEnd {
-                start: vec!["$".into()],
-                end: "\r\n".into(),
-                marker_encoding: PatternEncoding::Utf8,
-            },
+            mode: TxFramingMode::Nmea,
         };
         assert_eq!(preset_tx, bare_tx);
 
@@ -5219,6 +5277,121 @@ mod tests {
             validate: true,
         };
         assert_eq!(preset_parser, bare_parser);
+    }
+
+    // ── NMEA TX auto-checksum tests ────────────────────────────────────
+
+    #[test]
+    fn tx_nmea_appends_checksum_and_terminators() {
+        let payload = b"GPGGA,123519,4807.038,N,01131.000,E,1,08,0.9,545.4,M,46.9,M,,";
+        let cs = xor_checksum(payload);
+        let framed = TxFramingMode::Nmea.encode(payload).unwrap();
+        let expected =
+            format!("${}*{cs:02X}\r\n", std::str::from_utf8(payload).unwrap(),).into_bytes();
+        assert_eq!(framed, expected);
+    }
+
+    #[test]
+    fn tx_nmea_validates_existing_correct_checksum() {
+        let payload = format!(
+            "$GPGA,123519,4807.038,N,01131.000,E,1,08,0.9,545.4,M,46.9,M,,*{:02X}",
+            xor_checksum(b"GPGA,123519,4807.038,N,01131.000,E,1,08,0.9,545.4,M,46.9,M,,"),
+        )
+        .into_bytes();
+        let framed = TxFramingMode::Nmea.encode(&payload).unwrap();
+        // Payload already starts with $ and has correct checksum — should pass through.
+        assert_eq!(framed.len(), payload.len() + 2);
+        assert!(framed.starts_with(b"$"));
+        assert!(framed.ends_with(b"\r\n"));
+        // No double checksum.
+        let inner = &framed[..framed.len() - 2];
+        assert_eq!(inner, payload);
+    }
+
+    #[test]
+    fn tx_nmea_rejects_existing_wrong_checksum() {
+        let body = b"GPGGA,123519";
+        let correct_cs = xor_checksum(body);
+        let wrong_cs = correct_cs ^ 0xFF;
+        let payload = format!("$GPGA,123519*{wrong_cs:02X}",).into_bytes();
+        let err = TxFramingMode::Nmea.encode(&payload).unwrap_err();
+        assert!(
+            err.contains("TX NMEA checksum mismatch"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn tx_nmea_keeps_bang_lead_for_ais() {
+        let payload = b"!AIVDM,1,1,,A,15M_@`P00P<8:HltHUV@vThPB80,4*";
+        let framed = TxFramingMode::Nmea.encode(payload).unwrap();
+        assert!(framed.starts_with(b"!"));
+        // Should not double the leading ! (no !! prefix).
+        assert!(!framed.starts_with(b"!!"));
+        // Should end with *XX\r\n where XX is computed over body after !
+        let body = b"AIVDM,1,1,,A,15M_@`P00P<8:HltHUV@vThPB80,4*";
+        let cs = xor_checksum(body);
+        let expected_end = format!("*{cs:02X}\r\n").into_bytes();
+        assert!(framed.ends_with(&expected_end));
+    }
+
+    #[test]
+    fn tx_nmea_rejects_embedded_crlf() {
+        let err = TxFramingMode::Nmea.encode(b"GPGGA\r\n").unwrap_err();
+        assert!(
+            err.contains("must not contain \\r or \\n"),
+            "unexpected error: {err}"
+        );
+
+        let err = TxFramingMode::Nmea.encode(b"\nGPGGA").unwrap_err();
+        assert!(
+            err.contains("must not contain \\r or \\n"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn tx_nmea_rejects_non_ascii_payload() {
+        let err = TxFramingMode::Nmea.encode(&[0x80]).unwrap_err();
+        assert!(
+            err.contains("must be printable ASCII"),
+            "unexpected error: {err}"
+        );
+
+        let err = TxFramingMode::Nmea.encode(&[0x1F]).unwrap_err();
+        assert!(
+            err.contains("must be printable ASCII"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn tx_nmea_roundtrip_validates_on_rx() {
+        let payload = b"$GPGGA,123519,4807.038,N,01131.000,E,1,08,0.9,545.4,M,46.9,M,,";
+        let framed = TxFramingMode::Nmea.encode(payload).unwrap();
+
+        let rx_config = preset_rx_framing(ProtocolPreset::Nmea0183);
+        let parser_config = preset_rx_parser(ProtocolPreset::Nmea0183);
+        let mut dec = FrameDecoder::new(&rx_config, Some(&parser_config)).unwrap();
+        let result = dec.push(&framed);
+        assert!(
+            result.error.is_none(),
+            "unexpected decode error: {:?}",
+            result.error
+        );
+        assert_eq!(
+            result.frames.len(),
+            1,
+            "expected 1 frame, got {:?}",
+            result.frames
+        );
+        let parsed = result.frames.first().unwrap();
+        match &parsed.parsed {
+            Some(ParsedFrame::Nmea { checksum_valid, .. }) => {
+                assert_eq!(*checksum_valid, Some(true));
+            }
+            other => panic!("expected Nmea with checksum_valid: Some(true), got {other:?}"),
+        }
     }
 
     // ── Checksum-failure-surfacing via push ────────────────────────────
