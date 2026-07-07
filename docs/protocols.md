@@ -270,3 +270,9 @@ Summary table:
 If none of the presets fit, drop down to explicit `rx_framing` + `rx_parser`
 — the preset is just a convenience bundle, and every layer can be set
 independently per the [precedence](#precedence) rules.
+
+## References
+
+Normative spec citations for each implemented framing mode, parser, and
+preset are in [references.md](protocols/references.md). Cite-only — no spec
+text is committed to this repository.

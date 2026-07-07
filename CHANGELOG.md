@@ -49,6 +49,14 @@
   NMEA proprietary convention. Previously the first two characters were used
   as the talker ID (`PG` + `RMM`).
 
+**Fixed — NMEA malformed-checksum body parse:**
+- A NMEA sentence with an invalid-hex or too-short checksum now returns the
+  full parsed body (talker_id, sentence_type, fields) with
+  `checksum_valid: Some(false)` when `validate: false`, consistent with the
+  wrong-value case. Previously the malformed-checksum branches returned
+  empty body fields. `validate: true` behavior is unchanged (Err → drop+count
+  in the decoder).
+
 **Breaking (pre-1.0) — decode-error semantics:**
 - `FrameDecoder::push` no longer drops frames decoded before a stream-fatal
   error; the frames are returned alongside the error via `PushOutcome`.
