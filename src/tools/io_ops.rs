@@ -5,6 +5,7 @@ use tracing::{debug, info};
 
 use crate::buffer_budget::BufferBudget;
 use crate::codec;
+use crate::limits::DEFAULT_RX_BUFFER_SIZE;
 use crate::rx_session::RxSessionManager;
 use crate::serial::ConnectionManager;
 use crate::serial::FlushTarget;
@@ -112,7 +113,10 @@ pub async fn read(
 
     let progress_token = meta.get_progress_token();
 
-    let session = rx_sessions.get_or_create(Arc::clone(&connection)).await;
+    let session = rx_sessions
+        .get_or_create(Arc::clone(&connection), DEFAULT_RX_BUFFER_SIZE)
+        .await
+        .map_err(|e| format!("read: {e}"))?;
     let event_rx = session.register_blocking();
 
     // Resolve rx_framing + rx_parser via the shared 4-layer precedence helper.

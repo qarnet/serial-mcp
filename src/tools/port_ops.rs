@@ -3,6 +3,8 @@ use std::sync::Arc;
 use rmcp::Json;
 use tracing::{debug, info};
 
+use crate::limits::DEFAULT_RX_BUFFER_SIZE;
+use crate::rx_session::RxSessionManager;
 use crate::security::SecurityManager;
 use crate::serial::{ConnectionManager, PortInfo};
 use crate::tools::helpers::log_tool_err;
@@ -39,6 +41,7 @@ pub async fn list_connections(
 
 pub async fn open(
     connections: &Arc<ConnectionManager>,
+    rx_sessions: &Arc<RxSessionManager>,
     security: &SecurityManager,
     args: OpenArgs,
 ) -> Result<Json<OpenResult>, String> {
@@ -72,6 +75,21 @@ pub async fn open(
     // Set reconnect policy on the newly opened connection.
     if let Ok(conn) = connections.get(&connection_id).await {
         *conn.reconnect_policy.lock().expect("poisoned") = reconnect_policy;
+    }
+
+    // Create the RX session and start the always-on pump with a budgeted ring.
+    // The session is idempotent — if another code path created one first, this
+    // returns the existing session.
+    if let Ok(conn) = connections.get(&connection_id).await {
+        let session = rx_sessions
+            .get_or_create(conn, DEFAULT_RX_BUFFER_SIZE)
+            .await
+            .map_err(|e| log_tool_err("open", "Failed to create RX session", e))?;
+        debug!(
+            "rx_session: pump started for {} (ring={} bytes)",
+            session.connection_id(),
+            session.ring_capacity()
+        );
     }
 
     info!("Opened connection {} -> {}", connection_id, port);
@@ -224,6 +242,7 @@ pub fn list_profiles(
 
 pub async fn open_profile(
     connections: &Arc<ConnectionManager>,
+    rx_sessions: &Arc<RxSessionManager>,
     security: &SecurityManager,
     profiles: &[crate::profiles::Profile],
     args: OpenProfileArgs,
@@ -245,6 +264,7 @@ pub async fn open_profile(
 
     open(
         connections,
+        rx_sessions,
         security,
         OpenArgs {
             port: matched.name.clone(),

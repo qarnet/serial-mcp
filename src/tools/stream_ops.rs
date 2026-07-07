@@ -11,6 +11,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::buffer_budget::BufferBudget;
 use crate::codec;
+use crate::limits::DEFAULT_RX_BUFFER_SIZE;
 use crate::match_config::{shape_match_context, Matcher};
 use crate::rx_metadata::{RxStopMetadata, RxStopReason};
 use crate::rx_session::{RxEvent, RxSessionManager};
@@ -155,7 +156,10 @@ pub async fn subscribe(
     // mpsc channel fed by the pump.
     let conn = Arc::clone(&connection);
     connection.record_read_op();
-    let session = rx_sessions.get_or_create(connection).await;
+    let session = rx_sessions
+        .get_or_create(connection, DEFAULT_RX_BUFFER_SIZE)
+        .await
+        .map_err(|e| format!("subscribe: {e}"))?;
     let event_rx = session.register_streaming();
 
     // Hold the reservation inside the spawned task so it lives for the
@@ -229,14 +233,11 @@ pub async fn unsubscribe(
         args.connection_id, was_active
     );
 
-    // Prune closed consumers from the RX session so the pump can exit if no
-    // consumers remain. When prune cancels the pump, await its exit so the
-    // serial port is quiescent before we return — otherwise a pump mid-read
-    // can grab and discard bytes a following read/wait_for is waiting for.
+    // Prune closed consumers from the RX session. Under the always-on pump
+    // model the pump keeps running regardless — bytes are captured to the
+    // ring from open to close. No need to join the pump.
     if let Some(session) = rx_sessions.get(&args.connection_id).await {
-        if session.prune_consumers() {
-            session.join_pump().await;
-        }
+        session.prune_consumers();
     }
 
     Ok(Json(UnsubscribeResult {

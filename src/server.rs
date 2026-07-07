@@ -144,7 +144,7 @@ impl SerialHandlerBuilder {
             streams,
             security,
             subscribers: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
-            rx_sessions: Arc::new(RxSessionManager::new()),
+            rx_sessions: Arc::new(RxSessionManager::new(Arc::clone(&budget))),
             tx_sessions: Arc::new(TxSessionManager::new()),
             budget,
             profiles: Arc::new(tokio::sync::RwLock::new(Vec::new())),
@@ -230,7 +230,8 @@ impl SerialHandler {
         Parameters(args): Parameters<OpenArgs>,
         ctx: RequestContext<RoleServer>,
     ) -> Result<Json<OpenResult>, String> {
-        let result = port_ops::open(&self.connections, &self.security, args).await?;
+        let result =
+            port_ops::open(&self.connections, &self.rx_sessions, &self.security, args).await?;
         let connection_id = result.0.connection_id.clone();
         self.notify_resource_changed(&connection_id, &ctx).await;
         Ok(result)
@@ -456,8 +457,14 @@ impl SerialHandler {
         ctx: RequestContext<RoleServer>,
     ) -> Result<Json<OpenResult>, String> {
         let profiles = self.profiles.read().await;
-        let result =
-            port_ops::open_profile(&self.connections, &self.security, &profiles, args).await?;
+        let result = port_ops::open_profile(
+            &self.connections,
+            &self.rx_sessions,
+            &self.security,
+            &profiles,
+            args,
+        )
+        .await?;
         let connection_id = result.0.connection_id.clone();
         self.notify_resource_changed(&connection_id, &ctx).await;
         Ok(result)
