@@ -143,6 +143,7 @@ serial-mcp is actively developed, and the [roadmap](docs/development/FEATURES.md
 
 ## Documentation
 
+- [Protocol Guide](docs/protocols.md) — framing, parsers, presets, precedence, checksum behavior
 - [Agent Configuration](docs/agent-config.md)
 - [Roadmap](docs/development/FEATURES.md)
 - [CHANGELOG.md](CHANGELOG.md)
