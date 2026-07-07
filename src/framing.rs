@@ -2529,8 +2529,10 @@ mod tests {
         expected_tx: TxFramingConfig,
         expected_rx: RxFramingConfig,
         expected_parser: ParserConfig,
-        /// Whether this preset had an explicit equivalence test before table-ification.
-        has_equivalence_test: bool,
+        /// `None` = run the equivalence check. `Some(reason)` = skip (documented
+        /// exemption for presets whose expansion cannot be expressed as a single
+        /// bare framing/parser config).
+        equivalence_skip: Option<&'static str>,
     }
 
     fn preset_test_table() -> Vec<PresetTestRow> {
@@ -2556,7 +2558,7 @@ mod tests {
                     custom_prompt: None,
                     validate: false,
                 },
-                has_equivalence_test: false,
+                equivalence_skip: None,
             },
             PresetTestRow {
                 preset: ProtocolPreset::Slip,
@@ -2575,7 +2577,7 @@ mod tests {
                     custom_prompt: None,
                     validate: false,
                 },
-                has_equivalence_test: true,
+                equivalence_skip: None,
             },
             PresetTestRow {
                 preset: ProtocolPreset::JsonLines,
@@ -2598,7 +2600,7 @@ mod tests {
                     custom_prompt: None,
                     validate: false,
                 },
-                has_equivalence_test: false,
+                equivalence_skip: None,
             },
             PresetTestRow {
                 preset: ProtocolPreset::Cobs,
@@ -2617,7 +2619,7 @@ mod tests {
                     custom_prompt: None,
                     validate: false,
                 },
-                has_equivalence_test: true,
+                equivalence_skip: None,
             },
             PresetTestRow {
                 preset: ProtocolPreset::Ndjson,
@@ -2640,7 +2642,7 @@ mod tests {
                     custom_prompt: None,
                     validate: false,
                 },
-                has_equivalence_test: true,
+                equivalence_skip: None,
             },
             PresetTestRow {
                 preset: ProtocolPreset::Nmea0183,
@@ -2664,7 +2666,7 @@ mod tests {
                     custom_prompt: None,
                     validate: true,
                 },
-                has_equivalence_test: true,
+                equivalence_skip: None,
             },
             PresetTestRow {
                 preset: ProtocolPreset::ModbusAscii,
@@ -2692,7 +2694,7 @@ mod tests {
                     custom_prompt: None,
                     validate: true,
                 },
-                has_equivalence_test: true,
+                equivalence_skip: None,
             },
         ]
     }
@@ -2733,17 +2735,23 @@ mod tests {
     #[test]
     fn presets_equivalent_to_bare_configs() {
         for row in preset_test_table() {
-            if !row.has_equivalence_test {
+            if let Some(reason) = row.equivalence_skip {
+                // Documented exemption, not a missing test.
+                eprintln!("skipping equivalence for {}: {}", row.wire_name, reason);
                 continue;
             }
             let preset_tx = preset_tx_framing(row.preset);
-            assert_eq!(preset_tx, row.expected_tx);
+            assert_eq!(preset_tx, row.expected_tx, "{} TX", row.wire_name);
 
             let preset_rx = preset_rx_framing(row.preset);
-            assert_eq!(preset_rx, row.expected_rx);
+            assert_eq!(preset_rx, row.expected_rx, "{} RX", row.wire_name);
 
             let preset_parser = preset_rx_parser(row.preset);
-            assert_eq!(preset_parser, row.expected_parser);
+            assert_eq!(
+                preset_parser, row.expected_parser,
+                "{} parser",
+                row.wire_name
+            );
         }
     }
 

@@ -235,6 +235,8 @@ proptest! {
                 marker_encoding: PatternEncoding::Utf8,
             },
             TxFramingMode::Slip,
+            TxFramingMode::Cobs,
+            TxFramingMode::Nmea,
         ];
         for mode in modes {
             let args = WriteArgs {

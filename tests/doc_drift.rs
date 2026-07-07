@@ -141,3 +141,56 @@ fn readme_mentions_every_protocol_preset() {
         );
     }
 }
+
+#[test]
+fn server_json_versions_match_cargo_toml() {
+    let cargo_version = cargo_toml_version();
+    let server_json = repo_file("server.json");
+    let v: serde_json::Value =
+        serde_json::from_str(&server_json).expect("server.json is valid JSON");
+    // Collect every "version" field value anywhere in the JSON tree.
+    let mut versions: Vec<String> = Vec::new();
+    collect_versions(&v, &mut versions);
+    assert!(
+        !versions.is_empty(),
+        "server.json must contain at least one \"version\" field — \
+         did the schema change?"
+    );
+    for ver in &versions {
+        assert_eq!(
+            ver, &cargo_version,
+            "server.json version field {ver:?} does not match Cargo.toml \
+             package version {cargo_version:?}"
+        );
+    }
+}
+
+fn collect_versions(v: &serde_json::Value, out: &mut Vec<String>) {
+    if let serde_json::Value::Object(map) = v {
+        for (k, val) in map {
+            if k == "version" {
+                if let serde_json::Value::String(s) = val {
+                    out.push(s.clone());
+                }
+            }
+            collect_versions(val, out);
+        }
+    } else if let serde_json::Value::Array(arr) = v {
+        for val in arr {
+            collect_versions(val, out);
+        }
+    }
+}
+
+fn cargo_toml_version() -> String {
+    let manifest = repo_file("Cargo.toml");
+    // Parse the [package] version = "..." line.
+    let line = manifest
+        .lines()
+        .find(|l| l.starts_with("version = "))
+        .expect("Cargo.toml must have a `version = \"...\"` line");
+    // Extract the quoted string.
+    let start = line.find('"').expect("version line has opening quote");
+    let end = line.rfind('"').expect("version line has closing quote");
+    line[start + 1..end].to_string()
+}
