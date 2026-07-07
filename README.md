@@ -8,10 +8,12 @@
 **serial-mcp is an MCP server that gives coding agents direct access to serial ports.** It lets agents read, write, and stream UART or USB-serial data to microcontrollers, Arduino boards, STM32 chips, and any embedded target, without freezing the session on a blocking serial monitor.
 
 Non-blocking reads with timeouts and pattern matching, background RX streaming,
-TX/RX frame decoding (line, delimiter, length-prefixed, start/end, SLIP) with
-AT, JSON, and shell parsers, auto-reconnect, event logging, and full line
-control (DTR/RTS, BREAK, flow control) let Claude, Codex, or any MCP client
-flash, reset, and talk to a board on their own.
+TX/RX frame decoding (line, delimiter, length-prefixed, start/end, SLIP, COBS)
+with AT, JSON, shell, NMEA-0183, and Modbus ASCII parsers, one-knob protocol
+presets (`at_command`, `slip`, `json_lines`, `cobs`, `ndjson`, `nmea0183`,
+`modbus_ascii`) with checksum validation, auto-reconnect, event logging, and
+full line control (DTR/RTS, BREAK, flow control) let Claude, Codex, or any MCP
+client flash, reset, and talk to a board on their own.
 
 **MCP 2025-11-25 compliant**, with resource change notifications, a port allowlist, and stdio plus HTTP transports.
 
@@ -89,10 +91,13 @@ Download [`serial-mcp-x86_64-windows.exe`](https://github.com/qarnet/serial-mcp/
 ```
 serial-mcp [OPTIONS]
 
-  --transport <stdio|http>   Transport to use (default: stdio)
-  --allowlist <patterns>     Comma-separated glob patterns for allowed ports
-  --bind <addr>              HTTP bind address (default: 127.0.0.1:8000)
-  -h, --help                 Print help
+  --transport <stdio|http>          Transport to use (default: stdio)
+  --allowlist <patterns>            Comma-separated glob patterns for allowed ports
+  --bind <addr>                     HTTP bind address (default: 127.0.0.1:8000)
+  --max-program-buffered-bytes <N>  Global budget for all in-flight RX tools
+  --max-tool-buffered-bytes <N>     Per-tool ceiling for max_buffered_bytes
+  -V, --version                     Print version and exit (also: `serial-mcp version`)
+  -h, --help                        Print help
 
   RUST_LOG                   Log level env var (error/warn/info/debug/trace)
 ```

@@ -42,12 +42,23 @@ pub struct SpawnedServer {
     shutdown: CancellationToken,
 }
 
+/// Serializes the pick-port → spawn → wait-listening window across
+/// concurrently running tests in this process. `pick_free_port` cannot
+/// return a port that is currently bound, so once `wait_for_port`
+/// confirms the child owns its port, later picks cannot collide.
+/// Without this, two tests could pick the same port between listener
+/// drop and child bind; the losing child exits silently (stderr is
+/// null) and both clients talk to the winning test's server — which
+/// dies mid-flight when that test completes.
+static SPAWN_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 impl SpawnedServer {
     /// Build the binary if necessary, then spawn the server on a free
     /// local port. Returns the URL (`http://127.0.0.1:<port>/mcp`) and
     /// the chosen port.
     pub async fn start() -> Self {
         ensure_serial_mcp_built().expect("serial-mcp binary available for spawned server");
+        let _guard = SPAWN_LOCK.lock().await;
         let port = pick_free_port().expect("find a free local TCP port for the spawned server");
         let child = spawn_serial_mcp_http(port)
             .await
@@ -85,8 +96,8 @@ impl Drop for SpawnedServer {
 
 fn pick_free_port() -> Option<u16> {
     // TcpListener::bind("127.0.0.1:0") assigns a free port. We close
-    // immediately; the brief window between close and the spawned
-    // server's bind is small enough to ignore for CI purposes.
+    // immediately; the window between close and the spawned server's
+    // bind is guarded by SPAWN_LOCK against intra-process collisions.
     let listener = TcpListener::bind("127.0.0.1:0").ok()?;
     let port = listener.local_addr().ok()?.port();
     drop(listener);

@@ -9,4 +9,7 @@ fn main() {
             println!("cargo:rustc-env=GIT_HASH_AVAILABLE=1");
         }
     }
+
+    let target = std::env::var("TARGET").unwrap_or_else(|_| "unknown".to_string());
+    println!("cargo:rustc-env=BUILD_TARGET={target}");
 }

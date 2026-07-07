@@ -2,7 +2,7 @@
 
 | Version | Date | Highlights |
 |---|---|---|
-| [Unreleased](#unreleased) | — | — |
+| [0.7.2](#072) | 2026-07-07 | `--version` flag + `version` subcommand, `BUILD_TARGET` in build.rs; removed dead `ProfileDefaults` fields; `slip` and `json_lines` protocol presets; COBS framing mode + `cobs` preset + `checksums` module; `ndjson` preset + `skip_empty` framing option; `nmea0183` preset + `Nmea` parser + `StartEnd` multi-marker + checksum validation; `modbus_ascii` preset + `ModbusAscii` parser + `Lrc` checksum; schema fix for `Frame.data` uint8 format |
 | [0.7.0](#070) | 2026-06-26 | Frame pipeline: TX framing, SLIP, protocol presets, profile defaults, parser relocation |
 | [0.6.2](#062) | 2026-06-25 | Schema fix: suppress non-standard `uint8`/`uint16` formats; expanded schema regression guards + AGENTS.md truth |
 | [0.6.1](#061) | 2026-06-24 | RX refactor: shared framing sink, SerialHandler builder, config FromStr, dedup; docs cleanup |
@@ -22,6 +22,158 @@
 | [0.1.0](#010) | — | Initial release (5 tools, STM32 demo) |
 
 ---
+
+## [0.7.2]
+
+**Added — CLI version readout:**
+- `serial-mcp --version` / `-V` / `version` subcommand prints
+  `serial-mcp <semver> (<git-hash>, <build-target>)` and exits 0.
+- `build.rs` injects `BUILD_TARGET` alongside `GIT_HASH` so the output is
+  self-describing. Falls back to `unknown` for source-tarball builds.
+
+**Breaking — schema removal (pre-1.0):**
+- Removed three dead, never-enforced `Option<String>` fields from
+  `ProfileDefaults`: `reconnect_policy`, `decoder`, `safety_policy`. These
+  were declared "Reserved … Not yet enforced" and read by nothing.
+  `decoder` is superseded by the `protocol`/`rx_parser` fields; future
+  intent for `reconnect_policy` and `safety_policy` is preserved in
+  `FEATURES.md`. The live `Connection.reconnect_policy` (`ReconnectPolicy`
+  struct) is unaffected.
+- **Migration:** callers who set these fields in profile JSON can simply
+  drop them — they were never enforced. Because `ProfileDefaults` does not
+  carry `#[serde(deny_unknown_fields)]`, existing profile configs with the
+  dead fields continue to load (fields are silently ignored).
+
+**Added — protocol presets:**
+- Added `slip` and `json_lines` protocol presets, making the `protocol:` knob
+  uniform across every advertised protocol. The `slip` preset bundles SLIP
+  (RFC 1055) byte-stuffed framing with a raw parser; `json_lines` bundles line
+  framing (`ending: auto` RX, `lf` TX) with the JSON-lines parser. Previously,
+  SLIP was only reachable as a bare framing mode and JSON-lines as a bare parser;
+  now all three presets (`at_command`, `slip`, `json_lines`) are selectable via
+  `{"type": "…"}` on `write`, `read`, and `subscribe`. Pure wiring — no new
+  framing mode, parser, or option; the underlying primitives already shipped.
+
+**Added — COBS framing + checksums module:**
+- New `cobs` framing mode (`RxFramingMode::Cobs`, `TxFramingMode::Cobs`) with
+  plain 0x00-delimited COBS per Cheshire/Baker. Modeled on the existing SLIP
+  implementation. TX: `cobs_stuff` encoder with `encode()` arm. RX: stateful
+  `cobs_decode` decoder via `FrameDecoder::push`, with `CobsState`
+  (BeforeFirstDelim / InBlock) and `DecoderMode::Cobs`.
+  The PPP-COBS draft variant (`0x7E`) is not supported in this release; its
+  two-step zero-elimination + 7E-substitution will be tracked for a future PR.
+  (*Breaking fix*: the initial implementation's `delimiter: u8` field on the
+  `Cobs` variant was removed before a release because the `0x7E` path had a
+  correctness bug — the decoder inserted the delimiter byte as the phantom
+  zero instead of `0x00`, breaking roundtrip on 0x00-containing payloads.)
+- New `cobs` protocol preset (`{"type": "cobs"}`) bundling 0x00 COBS framing
+  with a raw parser. Selectable via the `protocol` knob on `write`, `read`,
+  and `subscribe`.
+- Malformed COBS code bytes surface through the existing `FramingError` stop
+  reason via a new `FrameDecodeError::CobsInvalidCode(u8)` variant
+  (read: `is_error: true`; subscribe: final notification with
+  `stop_reason: "framing_error"` + `error` field).
+- New `src/checksums.rs` `pub(crate)` module with a `Checksum` trait
+  (`compute`, `validate`) and `XorChecksum` implementation (NMEA `*XX` XOR
+  checksum). The trait is the extension point for LRC (Modbus ASCII, P2) and
+  CRC-16 (Modbus RTU, P3) — those ship with their consumers. No in-tree
+  consumer yet in this PR.
+
+**Added — ndjson preset + skip_empty option:**
+- New `ndjson` protocol preset (`{"type": "ndjson"}`) bundling line framing
+  (`ending: auto` RX, `lf` TX) with the JSON-lines parser, and enabling
+  `skip_empty: true` to skip empty/whitespace-only lines per the NDJSON spec.
+  `ndjson` differs from `json_lines` only in `skip_empty: true` — both
+  share the same line + JSON-lines primitives.
+- New `skip_empty: bool` field (default `false`) on `RxFramingConfig`. When
+  true, frames whose data is empty or contains only ASCII whitespace are
+  silently dropped at the decoder level — they do not count toward `max_frames`
+  and do not consume a frame index. The filter applies to all framing modes
+  (line, delimiter, SLIP, COBS, length-prefixed, start/end) and runs inside
+  `FrameDecoder::push`, so `consume_frames`/matcher only see kept frames.
+   `flush_partial` intentionally bypasses `skip_empty` to preserve partial-frame
+   signals at end-of-stream.
+
+**Added — NMEA-0183 preset:**
+- New `nmea0183` protocol preset (`{"type": "nmea0183"})` bundling `StartEnd`
+  framing (start markers `$` / `!`, end `\r\n`, include_markers: false) with
+  a `Nmea` parser and checksum validation. Selectable via the `protocol` knob
+  on `write`, `read`, and `subscribe`.
+- New `Nmea` parser type (`ParserType::Nmea`, `parser: "nmea"` in frame output).
+  Parses NMEA-0183 sentences: strips optional leading `$`/`!` and trailing
+  `\r\n` defensively, splits at `*` into content and checksum, computes an XOR
+  checksum over the content and compares to the hex-decoded received checksum,
+  then splits the address into `talker_id` (first 2 characters) and
+  `sentence_type` (rest of the address before the first comma) and
+  comma-separated `fields`. Returns `ParsedFrame::Nmea { talker_id,
+  sentence_type, fields, checksum_valid }`. Non-NMEA frames (no `$`/`!`) return
+  `Raw` — the parser is opt-in and does not error on non-matching frames.
+- New `validate: bool` field on `ParserConfig` (default `false`; the `nmea0183`
+  preset sets `true`). When `true`, a present checksum is enforced: a mismatch
+  returns a `FrameDecodeError::ChecksumMismatch` that surfaces as a
+  `framing_error` stop reason. When `false`, a present-but-invalid checksum is
+  reported as `checksum_valid: false` without error; sentences without a
+  checksum are always accepted (`checksum_valid: null`).
+- New `FrameDecodeError::ChecksumMismatch { expected: Vec<u8>, received: Vec<u8> }`
+  variant. Surfaces through the existing `FramingError` stop reason path
+  (`read`: `is_error: true`; `subscribe`: final notification with
+  `stop_reason: "framing_error"` + `error` field).
+- `FrameParser::parse` is now fallible (`Result<ParsedFrame, FrameDecodeError>`)
+  so checksum failures can propagate from parsers. The four existing parsers
+  return `Ok(...)`. The three call sites in `slip_decode`, `cobs_decode`, and
+  `FrameDecoder::push` propagate parser errors — a parser error drains consumed
+  bytes, clears in-progress state, and returns the error, stopping the
+  read/subscribe loop (mirroring how SLIP/COBS decode errors work).
+- `StartEnd` framing extended to support multiple start markers: the `start`
+  field is now `Vec<String>` on both `RxFramingMode::StartEnd` and
+  `TxFramingMode::StartEnd`. RX matches ANY start marker in the list (earliest
+  match wins); TX uses `start[0]`. The `nmea0183` preset uses
+  `start: ["$", "!"]` — two start markers for standard and AIS sentences.
+- `src/checksums.rs` `#![allow(dead_code)]` removed — `XorChecksum` is now
+  consumed by `NmeaParser`.
+
+**Breaking — schema changes (pre-1.0):**
+- `StartEnd.start` changed from `String` to `Vec<String>` on both
+  `RxFramingMode::StartEnd` and `TxFramingMode::StartEnd`. Callers must wrap
+  their start marker in an array (e.g. `"<"` → `["<"]`).
+- `FrameParser::parse` signature changed from `fn parse(&self, &[u8]) ->
+  ParsedFrame` to `Result<ParsedFrame, FrameDecodeError>`. This trait is
+  `pub(crate)`-ish and not part of the public API; no external callers are
+  affected.
+
+**Added — Modbus ASCII preset:**
+- New `modbus_ascii` protocol preset (`{"type": "modbus_ascii"}`) bundling
+  `StartEnd` framing (`:` start, `\r\n` end, include_markers: false) with a
+  `ModbusAscii` parser and LRC validation. Selectable via the `protocol` knob
+  on `write`, `read`, and `subscribe`.
+- New `ModbusAscii` parser type (`ParserType::ModbusAscii`,
+  `parser: "modbus_ascii"` in frame output). Hex-decodes the body between `:`
+  and `\r\n`, validates the LRC (Longitudinal Redundancy Check — two's
+  complement of the sum of address + function + data bytes), and exposes
+  `address: u8`, `function_code: u8`, `data: Vec<u8>`, and `checksum_valid:
+  Option<bool>` via `ParsedFrame::ModbusAscii`. Non-hex or malformed frames
+  return `Raw`. A failed LRC with `validate: true` returns
+  `FrameDecodeError::ChecksumMismatch` (surfacing as `framing_error`).
+- New `Lrc` checksum implementation in `src/checksums.rs`: two's complement
+  of the wrapping sum, consumed by `ModbusAsciiParser`. Mirrors the existing
+  `XorChecksum` for NMEA.
+- No breaking changes: all additions are new enum variants, a new struct,
+  and a new checksum impl — existing field shapes are unchanged.
+
+**Fixed — schema:**
+- `Frame.data` (the decoded-frame byte array, shipped 0.6.0) was emitting the
+  non-standard `"format": "uint8"` on its array items; fixed by applying
+  `byte_array_schema` (the helper added in P2b for
+  `ParsedFrame::ModbusAscii.data`) and adding `Frame` to the `check_schema!`
+  regression-net list. Schema-only fix; no runtime behavior change.
+
+**Changed — internal:**
+- `Frame.frame_type` changed from `String` to `&'static str` (removes a
+  per-frame allocation; JSON output unchanged). `Frame` no longer derives
+  `Deserialize` (it was never deserialized in-tree; the derive was unused).
+- `NmeaParser` now uses `from_utf8` instead of `from_utf8_lossy` for the
+  sentence body; invalid UTF-8 returns `ParsedFrame::Raw` instead of being
+  silently mangled with replacement chars (mirrors `ModbusAsciiParser`).
 
 ## [0.7.0]
 

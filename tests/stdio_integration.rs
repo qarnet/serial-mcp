@@ -207,3 +207,76 @@ async fn stdio_full_connection_lifecycle_with_hardware() {
 
     client.cancel().await.ok();
 }
+
+// ── Version flag tests ────────────────────────────────────────────────
+//
+// These tests exercise the CLI --version / -V / version surface, which
+// prints a single line and exits before the MCP handshake. They use
+// std::process::Command directly, not the rmcp transport.
+
+fn run_bin(args: &[&str]) -> (std::process::Output, String) {
+    ensure_serial_mcp_built().expect("serial-mcp binary available");
+    let out = std::process::Command::new(common::binaries::serial_mcp_bin())
+        .args(args)
+        .output()
+        .expect("spawn serial-mcp");
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    (out, stdout)
+}
+
+#[test]
+fn stdio_version_flag_prints_version_string() {
+    let (out, stdout) = run_bin(&["--version"]);
+    assert!(
+        out.status.success(),
+        "expected exit 0, got {:?}",
+        out.status
+    );
+    // e.g. serial-mcp 0.7.1 (abc1234, x86_64-unknown-linux-gnu)
+    assert!(
+        regex::Regex::new(r"^serial-mcp \d+\.\d+\.\d+ \(.+, .+\)\n$")
+            .unwrap()
+            .is_match(&stdout),
+        "unexpected version output: {stdout:?}"
+    );
+}
+
+#[test]
+fn stdio_version_short_flag_matches_long() {
+    let (out_long, stdout_long) = run_bin(&["--version"]);
+    assert!(out_long.status.success());
+    let (out_short, stdout_short) = run_bin(&["-V"]);
+    assert!(out_short.status.success());
+    assert_eq!(
+        stdout_long, stdout_short,
+        "-V and --version output must be identical"
+    );
+}
+
+#[test]
+fn stdio_version_subcommand_matches_flag() {
+    let (out_flag, stdout_flag) = run_bin(&["--version"]);
+    assert!(out_flag.status.success());
+    let (out_sub, stdout_sub) = run_bin(&["version"]);
+    assert!(out_sub.status.success());
+    assert_eq!(
+        stdout_flag, stdout_sub,
+        "version subcommand and --version output must be identical"
+    );
+}
+
+#[test]
+fn stdio_version_flag_takes_precedence_over_other_args() {
+    let (out, stdout) = run_bin(&["--version", "--transport=http"]);
+    assert!(
+        out.status.success(),
+        "expected exit 0, got {:?}",
+        out.status
+    );
+    assert!(
+        regex::Regex::new(r"^serial-mcp \d+\.\d+\.\d+ \(.+, .+\)\n$")
+            .unwrap()
+            .is_match(&stdout),
+        "should print version and ignore trailing args, got: {stdout:?}"
+    );
+}

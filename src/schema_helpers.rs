@@ -111,3 +111,16 @@ pub fn poll_interval_ms_schema(_gen: &mut SchemaGenerator) -> Schema {
         "minimum": MIN_POLL_INTERVAL_MS
     })
 }
+
+/// Schema for `Vec<u8>` byte array fields, suppressing the non-standard
+/// `format: uint8` on the array items that schemars would otherwise emit.
+pub fn byte_array_schema(_gen: &mut SchemaGenerator) -> Schema {
+    json_schema!({
+        "type": "array",
+        "items": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 255
+        }
+    })
+}

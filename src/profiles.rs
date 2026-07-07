@@ -65,15 +65,6 @@ pub struct ProfileDefaults {
     /// Connection name prefix. The actual connection name will be
     /// `{name_prefix}-{short_port_name}` when a name is provided.
     pub name: Option<String>,
-    /// Reserved for future reconnect policy. Not yet enforced.
-    #[serde(default)]
-    pub reconnect_policy: Option<String>,
-    /// Reserved for future decoder selection. Not yet enforced.
-    #[serde(default)]
-    pub decoder: Option<String>,
-    /// Reserved for future safety policy hints. Not yet enforced.
-    #[serde(default)]
-    pub safety_policy: Option<String>,
     /// Default TX framing applied when `write` omits `tx_framing`.
     #[serde(default)]
     pub tx_framing: Option<crate::framing::TxFramingConfig>,
@@ -114,9 +105,6 @@ impl Default for ProfileDefaults {
             parity: default_parity(),
             flow_control: default_flow_control(),
             name: None,
-            reconnect_policy: None,
-            decoder: None,
-            safety_policy: None,
             tx_framing: None,
             rx_framing: None,
             rx_parser: None,
@@ -719,5 +707,29 @@ baud_rate = 9600
         };
         // Port with no hardware_id should not match
         assert!(!p.matches(&make_port("/dev/ttyACM0", None, None, None)));
+    }
+
+    #[test]
+    fn profile_defaults_has_no_dead_fields() {
+        // Deserializing a JSON object with ONLY the three removed field names
+        // must succeed (fields silently ignored — no deny_unknown_fields).
+        let json = serde_json::json!({
+            "reconnect_policy": "x",
+            "decoder": "y",
+            "safety_policy": "z"
+        });
+        let _: ProfileDefaults =
+            serde_json::from_value(json).expect("dead fields must be silently ignored");
+
+        // Serializing ProfileDefaults::default() must NOT contain the
+        // removed field names.
+        let value = serde_json::to_value(ProfileDefaults::default())
+            .expect("ProfileDefaults must serialize");
+        let obj = value
+            .as_object()
+            .expect("serialized ProfileDefaults must be an object");
+        assert!(!obj.contains_key("reconnect_policy"));
+        assert!(!obj.contains_key("decoder"));
+        assert!(!obj.contains_key("safety_policy"));
     }
 }

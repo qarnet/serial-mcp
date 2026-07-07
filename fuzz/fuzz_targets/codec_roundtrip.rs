@@ -28,4 +28,26 @@ fuzz_target!(|data: &[u8]| {
             assert!(encode(Encoding::Utf8, data).is_err());
         }
     }
+
+    // COBS roundtrip (plain COBS, delimiter 0x00)
+    {
+        use serial_mcp::framing;
+        let mode = framing::TxFramingMode::Cobs;
+        if let Ok(framed) = mode.encode(data) {
+            let cfg = framing::RxFramingConfig {
+                mode: framing::RxFramingMode::Cobs,
+                ..Default::default()
+            };
+            if let Ok(mut dec) = framing::FrameDecoder::new(&cfg, None) {
+                if let Ok(frames) = dec.push(&framed) {
+                    assert!(!frames.is_empty(), "COBS decode produced no frames");
+                    let mut reconstructed = Vec::new();
+                    for f in &frames {
+                        reconstructed.extend_from_slice(&f.data);
+                    }
+                    assert_eq!(reconstructed, data, "COBS roundtrip mismatch");
+                }
+            }
+        }
+    }
 });

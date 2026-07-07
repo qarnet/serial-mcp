@@ -54,6 +54,7 @@ mod tests {
         ParserType, ProtocolPreset, RxFramingConfig, RxFramingMode, TxFramingConfig, TxFramingMode,
         TxLineEnding,
     };
+    use crate::match_config::PatternEncoding;
 
     const PROTO: Option<ProtocolPreset> = Some(ProtocolPreset::AtCommand);
 
@@ -84,6 +85,7 @@ mod tests {
             },
             max_frames: None,
             include_terminators: false,
+            skip_empty: false,
         }
     }
 
@@ -94,6 +96,7 @@ mod tests {
             },
             max_frames: None,
             include_terminators: false,
+            skip_empty: false,
         }
     }
 
@@ -102,6 +105,7 @@ mod tests {
         ParserConfig {
             parser_type: ParserType::Raw,
             custom_prompt: None,
+            validate: false,
         }
     }
 
@@ -193,5 +197,195 @@ mod tests {
             resolve_field::<ParserConfig>(None, PROTO, preset_rx_parser, Some(&conn_def), None);
         assert_eq!(result, Some(preset_rx_parser(ProtocolPreset::AtCommand)));
         assert_ne!(result, Some(conn_def));
+    }
+
+    // --- Slip + JsonLines preset precedence tests ---
+
+    #[test]
+    fn slip_preset_explicit_framing_wins_over_preset() {
+        // Explicit tx_framing (Line/Crlf) wins over call_protocol=Slip.
+        let explicit = TxFramingConfig {
+            mode: TxFramingMode::Line {
+                ending: TxLineEnding::Crlf,
+            },
+        };
+        let result = resolve_field::<TxFramingConfig>(
+            Some(explicit.clone()),
+            Some(ProtocolPreset::Slip),
+            preset_tx_framing,
+            None,
+            None,
+        );
+        assert_eq!(result, Some(explicit));
+        assert_ne!(result, Some(preset_tx_framing(ProtocolPreset::Slip)));
+    }
+
+    #[test]
+    fn json_lines_preset_explicit_framing_wins_over_preset() {
+        // Explicit rx_framing (Delimiter) wins over call_protocol=JsonLines.
+        let explicit = RxFramingConfig {
+            mode: RxFramingMode::Delimiter {
+                delimiter: ",".into(),
+                delimiter_encoding: PatternEncoding::Utf8,
+            },
+            max_frames: None,
+            include_terminators: false,
+            skip_empty: false,
+        };
+        let result = resolve_field::<RxFramingConfig>(
+            Some(explicit.clone()),
+            Some(ProtocolPreset::JsonLines),
+            preset_rx_framing,
+            None,
+            None,
+        );
+        assert_eq!(result, Some(explicit));
+        assert_ne!(result, Some(preset_rx_framing(ProtocolPreset::JsonLines)));
+    }
+
+    // --- COBS preset precedence test ---
+
+    #[test]
+    fn cobs_preset_explicit_framing_wins_over_preset() {
+        // Explicit tx_framing (Line/Crlf) wins over call_protocol=Cobs.
+        let explicit = TxFramingConfig {
+            mode: TxFramingMode::Line {
+                ending: TxLineEnding::Crlf,
+            },
+        };
+        let result = resolve_field::<TxFramingConfig>(
+            Some(explicit.clone()),
+            Some(ProtocolPreset::Cobs),
+            preset_tx_framing,
+            None,
+            None,
+        );
+        assert_eq!(result, Some(explicit));
+        assert_ne!(result, Some(preset_tx_framing(ProtocolPreset::Cobs)));
+    }
+
+    #[test]
+    fn ndjson_preset_explicit_framing_wins_over_preset() {
+        // Explicit rx_framing (Delimiter) wins over call_protocol=Ndjson.
+        let explicit = RxFramingConfig {
+            mode: RxFramingMode::Delimiter {
+                delimiter: ",".into(),
+                delimiter_encoding: PatternEncoding::Utf8,
+            },
+            max_frames: None,
+            include_terminators: false,
+            skip_empty: false,
+        };
+        let result = resolve_field::<RxFramingConfig>(
+            Some(explicit.clone()),
+            Some(ProtocolPreset::Ndjson),
+            preset_rx_framing,
+            None,
+            None,
+        );
+        assert_eq!(result, Some(explicit));
+        assert_ne!(result, Some(preset_rx_framing(ProtocolPreset::Ndjson)));
+    }
+
+    // --- Nmea0183 preset precedence test ---
+
+    #[test]
+    fn nmea0183_preset_explicit_framing_wins_over_preset() {
+        // Explicit tx_framing (Line/Crlf) wins over call_protocol=Nmea0183.
+        let explicit = TxFramingConfig {
+            mode: TxFramingMode::Line {
+                ending: TxLineEnding::Crlf,
+            },
+        };
+        let result = resolve_field::<TxFramingConfig>(
+            Some(explicit.clone()),
+            Some(ProtocolPreset::Nmea0183),
+            preset_tx_framing,
+            None,
+            None,
+        );
+        assert_eq!(result, Some(explicit));
+        assert_ne!(result, Some(preset_tx_framing(ProtocolPreset::Nmea0183)));
+    }
+
+    // --- ModbusAscii preset precedence test ---
+
+    #[test]
+    fn modbus_ascii_preset_explicit_framing_wins_over_preset() {
+        // Explicit rx_framing (Line/Crlf) wins over call_protocol=ModbusAscii.
+        let explicit = RxFramingConfig {
+            mode: RxFramingMode::Line {
+                ending: LineEnding::Crlf,
+            },
+            ..Default::default()
+        };
+        let result = resolve_field::<RxFramingConfig>(
+            Some(explicit.clone()),
+            Some(ProtocolPreset::ModbusAscii),
+            preset_rx_framing,
+            None,
+            None,
+        );
+        assert_eq!(result, Some(explicit));
+        assert_ne!(result, Some(preset_rx_framing(ProtocolPreset::ModbusAscii)));
+    }
+
+    // ── Medium-risk gap tests (P3d) ───────────────────────────────────────
+
+    #[test]
+    fn nmea0183_full_four_layer_precedence() {
+        // Four-layer precedence (explicit > call_protocol > conn_default >
+        // conn_protocol) exercised for Nmea0183 preset (gaps: existing
+        // per-preset tests cover only 2 layers).
+        //
+        // Case (a): all 4 layers set; explicit wins over call_protocol,
+        // conn_default, and conn_protocol.
+        let explicit = RxFramingConfig {
+            mode: RxFramingMode::Line {
+                ending: LineEnding::Lf,
+            },
+            ..Default::default()
+        };
+        let conn_default_nmea = RxFramingConfig {
+            mode: RxFramingMode::StartEnd {
+                start: vec!["$".into()],
+                end: "\r\n".into(),
+                marker_encoding: PatternEncoding::Utf8,
+                include_markers: false,
+            },
+            ..Default::default()
+        };
+        let result = resolve_field::<RxFramingConfig>(
+            Some(explicit.clone()),
+            Some(ProtocolPreset::Nmea0183),
+            preset_rx_framing,
+            Some(&conn_default_nmea),
+            Some(ProtocolPreset::ModbusAscii),
+        );
+        assert_eq!(result, Some(explicit));
+        assert_ne!(result, Some(preset_rx_framing(ProtocolPreset::Nmea0183)));
+
+        // Case (b): explicit=None, call_protocol=None → conn_default wins
+        // over conn_protocol. conn_default=Delimiter, conn_protocol=Nmea0183
+        // (which would produce StartEnd framing). Result must be conn_default
+        // (Delimiter).
+        let conn_default_delim = RxFramingConfig {
+            mode: RxFramingMode::Delimiter {
+                delimiter: ",".into(),
+                delimiter_encoding: PatternEncoding::Utf8,
+            },
+            max_frames: None,
+            include_terminators: false,
+            skip_empty: false,
+        };
+        let result = resolve_field::<RxFramingConfig>(
+            None,
+            None,
+            preset_rx_framing,
+            Some(&conn_default_delim),
+            Some(ProtocolPreset::Nmea0183),
+        );
+        assert_eq!(result, Some(conn_default_delim));
+        assert_ne!(result, Some(preset_rx_framing(ProtocolPreset::Nmea0183)));
     }
 }

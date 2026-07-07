@@ -707,7 +707,7 @@ pub fn build_read_result(
                     data: fdata,
                     encoding: encoding.to_string(),
                     frame_index: f.index,
-                    frame_type: f.frame_type.clone(),
+                    frame_type: f.frame_type.to_string(),
                     parsed: f.parsed.clone(),
                 }),
                 Err(e) => {
@@ -1074,7 +1074,7 @@ mod tests {
         let ct = tokio_util::sync::CancellationToken::new();
         let framing = Some(crate::framing::RxFramingConfig {
             mode: crate::framing::RxFramingMode::StartEnd {
-                start: "".into(),
+                start: vec!["".into()],
                 end: "X".into(),
                 marker_encoding: crate::match_config::PatternEncoding::Utf8,
                 include_markers: false,
@@ -1107,6 +1107,7 @@ mod tests {
         let parser = Some(crate::framing::ParserConfig {
             parser_type: crate::framing::ParserType::ShellPrompt,
             custom_prompt: Some("[invalid".to_string()),
+            validate: false,
         });
         let result = read_bytes_via_session(
             rx, 128, None, &ct, None, None, None, None, None, framing, parser,
