@@ -153,6 +153,7 @@ fw-run-native
 
 - Release job derives tag from `Cargo.toml` version (`v<version>`), tags `main` automatically after CI success, uploads binaries, then publishes crate. Bumping package version has release consequences.
 - Release artifacts are built for: `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`, `aarch64-apple-darwin`, `x86_64-pc-windows-msvc`.
+- `server.json` is a registry template: it carries name/description/version only. The `packages` array (release-asset URLs + `fileSha256`) is generated at publish time by `publish-mcp-registry.yml` from the actual release binaries — never commit one (`tests/doc_drift.rs::server_json_omits_packages` enforces this). Version bump = `Cargo.toml` + the single top-level `server.json` version.
 
 ## Repo workflow
 

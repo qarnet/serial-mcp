@@ -69,6 +69,11 @@ jobs:
 
       - name: Build server.json from release binaries
         if: steps.gate.outputs.publish == 'true'
+        # The committed server.json is a template WITHOUT a packages array —
+        # this step is the only producer of package identifiers and sha256
+        # hashes, computed from the just-released binaries. Committed package
+        # entries would go stale on every release (they did: 0.5.1 URLs
+        # survived to 0.7.3); tests/doc_drift.rs guards against re-adding them.
         run: |
           VERSION="${{ steps.version.outputs.value }}"
           BASE="https://github.com/qarnet/serial-mcp/releases/download/v${VERSION}"

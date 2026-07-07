@@ -148,7 +148,10 @@ fn server_json_versions_match_cargo_toml() {
     let server_json = repo_file("server.json");
     let v: serde_json::Value =
         serde_json::from_str(&server_json).expect("server.json is valid JSON");
-    // Collect every "version" field value anywhere in the JSON tree.
+    // Collect every "version" field value anywhere in the JSON tree. With the
+    // packages array stripped from the committed file this is currently just
+    // the top-level field, but walking the whole tree keeps the guard honest
+    // if versioned sections are ever added back.
     let mut versions: Vec<String> = Vec::new();
     collect_versions(&v, &mut versions);
     assert!(
@@ -163,6 +166,25 @@ fn server_json_versions_match_cargo_toml() {
              package version {cargo_version:?}"
         );
     }
+}
+
+#[test]
+fn server_json_omits_packages() {
+    // The committed server.json is a registry template: the packages array
+    // (release-asset URLs + fileSha256) is generated at publish time by
+    // .github/workflows/publish-mcp-registry.yml from the actual release
+    // binaries. A committed packages array goes stale on every release —
+    // 0.5.1 URLs and hashes survived in the repo until 0.7.3 — so it must
+    // not exist here.
+    let server_json = repo_file("server.json");
+    let v: serde_json::Value =
+        serde_json::from_str(&server_json).expect("server.json is valid JSON");
+    assert!(
+        v.get("packages").is_none(),
+        "server.json must not contain a committed \"packages\" array — it is \
+         generated per-release by publish-mcp-registry.yml (committed entries \
+         inevitably go stale)"
+    );
 }
 
 fn collect_versions(v: &serde_json::Value, out: &mut Vec<String>) {

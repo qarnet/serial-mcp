@@ -2,6 +2,7 @@
 
 | Version | Date | Highlights |
 |---|---|---|
+| [0.7.4](#074) | 2026-07-07 | `server.json` becomes a packages-less registry template (publish workflow generates release URLs + hashes; drift guard forbids committed `packages`) |
 | [0.7.3](#073) | 2026-07-07 | NMEA parser panic fix + P-talker proprietary split; decode-error semantics (`PushOutcome`, drop-and-count checksums, `read` partial results + `error` field + hex fallback); `docs/protocols.md` guide; framing.rs dedup (`emit_frame`/`check_checksum`/`take_frame`/`match_line_byte`/`xor_checksum`/`lrc` free functions); NMEA malformed-checksum body parse; `TxFramingMode::Nmea` auto `*XX` checksum; `--version` argv scan strictness; table-driven preset tests |
 | [0.7.2](#072) | 2026-07-07 | `--version` flag + `version` subcommand, `BUILD_TARGET` in build.rs; removed dead `ProfileDefaults` fields; `slip` and `json_lines` protocol presets; COBS framing mode + `cobs` preset + `checksums` module; `ndjson` preset + `skip_empty` framing option; `nmea0183` preset + `Nmea` parser + `StartEnd` multi-marker + checksum validation; `modbus_ascii` preset + `ModbusAscii` parser + `Lrc` checksum; schema fix for `Frame.data` uint8 format |
 | [0.7.0](#070) | 2026-06-26 | Frame pipeline: TX framing, SLIP, protocol presets, profile defaults, parser relocation |
@@ -23,6 +24,21 @@
 | [0.1.0](#010) | — | Initial release (5 tools, STM32 demo) |
 
 ---
+
+## [0.7.4]
+
+**Changed — `server.json` is now a packages-less registry template:**
+- The committed `packages` array went stale on every release (0.5.1 asset
+  URLs and `fileSha256` hashes survived in the repo until 0.7.3) because
+  `publish-mcp-registry.yml` regenerates it from the actual release
+  binaries at publish time — the committed copy was never what got
+  published. `server.json` now carries only
+  name/title/description/repository/version; the publish workflow remains
+  the sole producer of package identifiers and hashes. No change to what
+  the MCP registry serves.
+- New `doc_drift` guard `server_json_omits_packages` fails the build if a
+  `packages` array is ever committed again.
+- Version bumps now touch a single `server.json` field instead of five.
 
 ## [0.7.3]
 
