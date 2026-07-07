@@ -2510,35 +2510,7 @@ mod tests {
         assert_eq!(partial.index, 2);
     }
 
-    // ── Protocol preset tests ──────────────────────────────────────────────
-
-    #[test]
-    fn preset_tx_framing_returns_line_cr() {
-        let cfg = preset_tx_framing(ProtocolPreset::AtCommand);
-        assert!(matches!(
-            cfg.mode,
-            TxFramingMode::Line {
-                ending: TxLineEnding::Cr
-            }
-        ));
-    }
-
-    #[test]
-    fn preset_rx_framing_returns_line_auto() {
-        let cfg = preset_rx_framing(ProtocolPreset::AtCommand);
-        assert!(matches!(
-            cfg.mode,
-            RxFramingMode::Line {
-                ending: LineEnding::Auto
-            }
-        ));
-    }
-
-    #[test]
-    fn preset_rx_parser_returns_at_command() {
-        let cfg = preset_rx_parser(ProtocolPreset::AtCommand);
-        assert_eq!(cfg.parser_type, ParserType::AtCommand);
-    }
+    // ── Protocol preset tests (table-driven) ────────────────────────────────
 
     /// Assert that a ProtocolPreset variant round-trips through the tagged-object
     /// JSON shape `{"type": "<variant_str>"}` and rejects the bare-string form.
@@ -2553,84 +2525,229 @@ mod tests {
         );
     }
 
-    #[test]
-    fn protocol_preset_tagged_object_roundtrip() {
-        assert_preset_roundtrip("at_command", ProtocolPreset::AtCommand);
+    /// One row per protocol preset: expected framing/parser expansions + roundtrip label.
+    struct PresetTestRow {
+        preset: ProtocolPreset,
+        wire_name: &'static str,
+        expected_tx: TxFramingConfig,
+        expected_rx: RxFramingConfig,
+        expected_parser: ParserConfig,
+        /// Whether this preset had an explicit equivalence test before table-ification.
+        has_equivalence_test: bool,
+    }
+
+    fn preset_test_table() -> Vec<PresetTestRow> {
+        vec![
+            PresetTestRow {
+                preset: ProtocolPreset::AtCommand,
+                wire_name: "at_command",
+                expected_tx: TxFramingConfig {
+                    mode: TxFramingMode::Line {
+                        ending: TxLineEnding::Cr,
+                    },
+                },
+                expected_rx: RxFramingConfig {
+                    mode: RxFramingMode::Line {
+                        ending: LineEnding::Auto,
+                    },
+                    max_frames: None,
+                    include_terminators: false,
+                    skip_empty: false,
+                },
+                expected_parser: ParserConfig {
+                    parser_type: ParserType::AtCommand,
+                    custom_prompt: None,
+                    validate: false,
+                },
+                has_equivalence_test: false,
+            },
+            PresetTestRow {
+                preset: ProtocolPreset::Slip,
+                wire_name: "slip",
+                expected_tx: TxFramingConfig {
+                    mode: TxFramingMode::Slip,
+                },
+                expected_rx: RxFramingConfig {
+                    mode: RxFramingMode::Slip,
+                    max_frames: None,
+                    include_terminators: false,
+                    skip_empty: false,
+                },
+                expected_parser: ParserConfig {
+                    parser_type: ParserType::Raw,
+                    custom_prompt: None,
+                    validate: false,
+                },
+                has_equivalence_test: true,
+            },
+            PresetTestRow {
+                preset: ProtocolPreset::JsonLines,
+                wire_name: "json_lines",
+                expected_tx: TxFramingConfig {
+                    mode: TxFramingMode::Line {
+                        ending: TxLineEnding::Lf,
+                    },
+                },
+                expected_rx: RxFramingConfig {
+                    mode: RxFramingMode::Line {
+                        ending: LineEnding::Auto,
+                    },
+                    max_frames: None,
+                    include_terminators: false,
+                    skip_empty: false,
+                },
+                expected_parser: ParserConfig {
+                    parser_type: ParserType::JsonLines,
+                    custom_prompt: None,
+                    validate: false,
+                },
+                has_equivalence_test: false,
+            },
+            PresetTestRow {
+                preset: ProtocolPreset::Cobs,
+                wire_name: "cobs",
+                expected_tx: TxFramingConfig {
+                    mode: TxFramingMode::Cobs,
+                },
+                expected_rx: RxFramingConfig {
+                    mode: RxFramingMode::Cobs,
+                    max_frames: None,
+                    include_terminators: false,
+                    skip_empty: false,
+                },
+                expected_parser: ParserConfig {
+                    parser_type: ParserType::Raw,
+                    custom_prompt: None,
+                    validate: false,
+                },
+                has_equivalence_test: true,
+            },
+            PresetTestRow {
+                preset: ProtocolPreset::Ndjson,
+                wire_name: "ndjson",
+                expected_tx: TxFramingConfig {
+                    mode: TxFramingMode::Line {
+                        ending: TxLineEnding::Lf,
+                    },
+                },
+                expected_rx: RxFramingConfig {
+                    mode: RxFramingMode::Line {
+                        ending: LineEnding::Auto,
+                    },
+                    max_frames: None,
+                    include_terminators: false,
+                    skip_empty: true,
+                },
+                expected_parser: ParserConfig {
+                    parser_type: ParserType::JsonLines,
+                    custom_prompt: None,
+                    validate: false,
+                },
+                has_equivalence_test: true,
+            },
+            PresetTestRow {
+                preset: ProtocolPreset::Nmea0183,
+                wire_name: "nmea0183",
+                expected_tx: TxFramingConfig {
+                    mode: TxFramingMode::Nmea,
+                },
+                expected_rx: RxFramingConfig {
+                    mode: RxFramingMode::StartEnd {
+                        start: vec!["$".into(), "!".into()],
+                        end: "\r\n".into(),
+                        marker_encoding: PatternEncoding::Utf8,
+                        include_markers: false,
+                    },
+                    max_frames: None,
+                    include_terminators: false,
+                    skip_empty: false,
+                },
+                expected_parser: ParserConfig {
+                    parser_type: ParserType::Nmea,
+                    custom_prompt: None,
+                    validate: true,
+                },
+                has_equivalence_test: true,
+            },
+            PresetTestRow {
+                preset: ProtocolPreset::ModbusAscii,
+                wire_name: "modbus_ascii",
+                expected_tx: TxFramingConfig {
+                    mode: TxFramingMode::StartEnd {
+                        start: vec![":".into()],
+                        end: "\r\n".into(),
+                        marker_encoding: PatternEncoding::Utf8,
+                    },
+                },
+                expected_rx: RxFramingConfig {
+                    mode: RxFramingMode::StartEnd {
+                        start: vec![":".into()],
+                        end: "\r\n".into(),
+                        marker_encoding: PatternEncoding::Utf8,
+                        include_markers: false,
+                    },
+                    max_frames: None,
+                    include_terminators: false,
+                    skip_empty: false,
+                },
+                expected_parser: ParserConfig {
+                    parser_type: ParserType::ModbusAscii,
+                    custom_prompt: None,
+                    validate: true,
+                },
+                has_equivalence_test: true,
+            },
+        ]
     }
 
     #[test]
-    fn preset_tx_framing_slip_returns_slip_mode() {
-        let cfg = preset_tx_framing(ProtocolPreset::Slip);
-        assert!(matches!(cfg.mode, TxFramingMode::Slip));
+    fn preset_tx_framing_matches_table() {
+        for row in preset_test_table() {
+            let cfg = preset_tx_framing(row.preset);
+            assert_eq!(cfg.mode, row.expected_tx.mode);
+        }
     }
 
     #[test]
-    fn preset_tx_framing_json_lines_returns_line_lf() {
-        let cfg = preset_tx_framing(ProtocolPreset::JsonLines);
-        assert!(matches!(
-            cfg.mode,
-            TxFramingMode::Line {
-                ending: TxLineEnding::Lf
+    fn preset_rx_framing_matches_table() {
+        for row in preset_test_table() {
+            let cfg = preset_rx_framing(row.preset);
+            assert_eq!(cfg.mode, row.expected_rx.mode);
+            assert_eq!(cfg.skip_empty, row.expected_rx.skip_empty);
+        }
+    }
+
+    #[test]
+    fn preset_rx_parser_matches_table() {
+        for row in preset_test_table() {
+            let cfg = preset_rx_parser(row.preset);
+            assert_eq!(cfg.parser_type, row.expected_parser.parser_type);
+            assert_eq!(cfg.validate, row.expected_parser.validate);
+        }
+    }
+
+    #[test]
+    fn protocol_preset_tagged_object_roundtrips() {
+        for row in preset_test_table() {
+            assert_preset_roundtrip(row.wire_name, row.preset);
+        }
+    }
+
+    #[test]
+    fn presets_equivalent_to_bare_configs() {
+        for row in preset_test_table() {
+            if !row.has_equivalence_test {
+                continue;
             }
-        ));
-    }
+            let preset_tx = preset_tx_framing(row.preset);
+            assert_eq!(preset_tx, row.expected_tx);
 
-    #[test]
-    fn preset_rx_framing_slip_returns_slip_mode() {
-        let cfg = preset_rx_framing(ProtocolPreset::Slip);
-        assert!(matches!(cfg.mode, RxFramingMode::Slip));
-    }
+            let preset_rx = preset_rx_framing(row.preset);
+            assert_eq!(preset_rx, row.expected_rx);
 
-    #[test]
-    fn preset_rx_framing_json_lines_returns_line_auto() {
-        let cfg = preset_rx_framing(ProtocolPreset::JsonLines);
-        assert!(matches!(
-            cfg.mode,
-            RxFramingMode::Line {
-                ending: LineEnding::Auto
-            }
-        ));
-    }
-
-    #[test]
-    fn preset_rx_parser_slip_returns_raw() {
-        let cfg = preset_rx_parser(ProtocolPreset::Slip);
-        assert_eq!(cfg.parser_type, ParserType::Raw);
-    }
-
-    #[test]
-    fn preset_rx_parser_json_lines_returns_json_lines() {
-        let cfg = preset_rx_parser(ProtocolPreset::JsonLines);
-        assert_eq!(cfg.parser_type, ParserType::JsonLines);
-    }
-
-    #[test]
-    fn protocol_preset_slip_tagged_object_roundtrip() {
-        assert_preset_roundtrip("slip", ProtocolPreset::Slip);
-    }
-
-    #[test]
-    fn protocol_preset_json_lines_tagged_object_roundtrip() {
-        assert_preset_roundtrip("json_lines", ProtocolPreset::JsonLines);
-    }
-
-    #[test]
-    fn slip_preset_equivalent_to_bare_slip_framing() {
-        // TX: preset must match hand-built TxFramingConfig with Slip mode.
-        let preset_tx = preset_tx_framing(ProtocolPreset::Slip);
-        let bare_tx = TxFramingConfig {
-            mode: TxFramingMode::Slip,
-        };
-        assert_eq!(preset_tx, bare_tx);
-        // RX: preset must match hand-built RxFramingConfig with Slip mode.
-        let preset_rx = preset_rx_framing(ProtocolPreset::Slip);
-        let bare_rx = RxFramingConfig {
-            mode: RxFramingMode::Slip,
-            max_frames: None,
-            include_terminators: false,
-            skip_empty: false,
-        };
-        assert_eq!(preset_rx, bare_rx);
+            let preset_parser = preset_rx_parser(row.preset);
+            assert_eq!(preset_parser, row.expected_parser);
+        }
     }
 
     // ── SLIP (RFC 1055) tests ─────────────────────────────────────────────
@@ -4209,50 +4326,6 @@ mod tests {
         );
     }
 
-    // ── COBS preset mapping tests ────────────────────────────────────────
-
-    #[test]
-    fn preset_tx_framing_cobs_returns_cobs() {
-        let cfg = preset_tx_framing(ProtocolPreset::Cobs);
-        assert!(matches!(cfg.mode, TxFramingMode::Cobs));
-    }
-
-    #[test]
-    fn preset_rx_framing_cobs_returns_cobs() {
-        let cfg = preset_rx_framing(ProtocolPreset::Cobs);
-        assert!(matches!(cfg.mode, RxFramingMode::Cobs));
-    }
-
-    #[test]
-    fn preset_rx_parser_cobs_returns_raw() {
-        let cfg = preset_rx_parser(ProtocolPreset::Cobs);
-        assert_eq!(cfg.parser_type, ParserType::Raw);
-    }
-
-    #[test]
-    fn protocol_preset_cobs_tagged_object_roundtrip() {
-        assert_preset_roundtrip("cobs", ProtocolPreset::Cobs);
-    }
-
-    #[test]
-    fn cobs_preset_equivalent_to_bare_cobs_framing() {
-        // TX: preset must match hand-built TxFramingConfig with Cobs mode.
-        let preset_tx = preset_tx_framing(ProtocolPreset::Cobs);
-        let bare_tx = TxFramingConfig {
-            mode: TxFramingMode::Cobs,
-        };
-        assert_eq!(preset_tx, bare_tx);
-        // RX: preset must match hand-built RxFramingConfig with Cobs mode.
-        let preset_rx = preset_rx_framing(ProtocolPreset::Cobs);
-        let bare_rx = RxFramingConfig {
-            mode: RxFramingMode::Cobs,
-            max_frames: None,
-            include_terminators: false,
-            skip_empty: false,
-        };
-        assert_eq!(preset_rx, bare_rx);
-    }
-
     #[test]
     fn roundtrip_cobs_255_ones() {
         let payload = vec![1u8; 255];
@@ -4575,73 +4648,6 @@ mod tests {
     #[test]
     fn skip_empty_on_in_preset_ndjson() {
         assert!(preset_rx_framing(ProtocolPreset::Ndjson).skip_empty);
-    }
-
-    #[test]
-    fn preset_tx_framing_ndjson_returns_line_lf() {
-        let tx = preset_tx_framing(ProtocolPreset::Ndjson);
-        assert!(matches!(
-            tx.mode,
-            TxFramingMode::Line {
-                ending: TxLineEnding::Lf
-            }
-        ));
-    }
-
-    #[test]
-    fn preset_rx_framing_ndjson_returns_line_auto_skip_empty() {
-        let rx = preset_rx_framing(ProtocolPreset::Ndjson);
-        assert!(matches!(
-            rx.mode,
-            RxFramingMode::Line {
-                ending: LineEnding::Auto
-            }
-        ));
-        assert!(rx.skip_empty);
-    }
-
-    #[test]
-    fn preset_rx_parser_ndjson_returns_json_lines() {
-        let parser = preset_rx_parser(ProtocolPreset::Ndjson);
-        assert!(matches!(parser.parser_type, ParserType::JsonLines));
-    }
-
-    #[test]
-    fn protocol_preset_ndjson_tagged_object_roundtrip() {
-        assert_preset_roundtrip("ndjson", ProtocolPreset::Ndjson);
-    }
-
-    #[test]
-    fn ndjson_preset_equivalent_to_bare_config() {
-        // TX config.
-        let preset_tx = preset_tx_framing(ProtocolPreset::Ndjson);
-        let bare_tx = TxFramingConfig {
-            mode: TxFramingMode::Line {
-                ending: TxLineEnding::Lf,
-            },
-        };
-        assert_eq!(preset_tx, bare_tx);
-
-        // RX config.
-        let preset_rx = preset_rx_framing(ProtocolPreset::Ndjson);
-        let bare_rx = RxFramingConfig {
-            mode: RxFramingMode::Line {
-                ending: LineEnding::Auto,
-            },
-            max_frames: None,
-            include_terminators: false,
-            skip_empty: true,
-        };
-        assert_eq!(preset_rx, bare_rx);
-
-        // Parser.
-        let preset_parser = preset_rx_parser(ProtocolPreset::Ndjson);
-        let bare_parser = ParserConfig {
-            parser_type: ParserType::JsonLines,
-            custom_prompt: None,
-            validate: false,
-        };
-        assert_eq!(preset_parser, bare_parser);
     }
 
     #[test]
@@ -5206,79 +5212,6 @@ mod tests {
         assert_eq!(frames[1].data, b"more");
     }
 
-    // ── NMEA preset tests ──────────────────────────────────────────────
-
-    #[test]
-    fn preset_tx_framing_nmea0183_returns_nmea_mode() {
-        let tx = preset_tx_framing(ProtocolPreset::Nmea0183);
-        assert!(matches!(tx.mode, TxFramingMode::Nmea));
-    }
-
-    #[test]
-    fn preset_rx_framing_nmea0183_returns_start_end_dollar_bang() {
-        let rx = preset_rx_framing(ProtocolPreset::Nmea0183);
-        match &rx.mode {
-            RxFramingMode::StartEnd {
-                start,
-                end,
-                marker_encoding,
-                include_markers,
-            } => {
-                assert_eq!(start, &vec!["$".to_string(), "!".to_string()]);
-                assert_eq!(end, "\r\n");
-                assert_eq!(*marker_encoding, PatternEncoding::Utf8);
-                assert!(!include_markers);
-            }
-            other => panic!("expected StartEnd, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn preset_rx_parser_nmea0183_returns_nmea_validate_true() {
-        let parser = preset_rx_parser(ProtocolPreset::Nmea0183);
-        assert!(matches!(parser.parser_type, ParserType::Nmea));
-        assert!(parser.validate);
-    }
-
-    #[test]
-    fn protocol_preset_nmea0183_tagged_object_roundtrip() {
-        assert_preset_roundtrip("nmea0183", ProtocolPreset::Nmea0183);
-    }
-
-    #[test]
-    fn nmea0183_preset_equivalent_to_bare_config() {
-        // TX
-        let preset_tx = preset_tx_framing(ProtocolPreset::Nmea0183);
-        let bare_tx = TxFramingConfig {
-            mode: TxFramingMode::Nmea,
-        };
-        assert_eq!(preset_tx, bare_tx);
-
-        // RX
-        let preset_rx = preset_rx_framing(ProtocolPreset::Nmea0183);
-        let bare_rx = RxFramingConfig {
-            mode: RxFramingMode::StartEnd {
-                start: vec!["$".into(), "!".into()],
-                end: "\r\n".into(),
-                marker_encoding: PatternEncoding::Utf8,
-                include_markers: false,
-            },
-            max_frames: None,
-            include_terminators: false,
-            skip_empty: false,
-        };
-        assert_eq!(preset_rx, bare_rx);
-
-        // Parser
-        let preset_parser = preset_rx_parser(ProtocolPreset::Nmea0183);
-        let bare_parser = ParserConfig {
-            parser_type: ParserType::Nmea,
-            custom_prompt: None,
-            validate: true,
-        };
-        assert_eq!(preset_parser, bare_parser);
-    }
-
     // ── NMEA TX auto-checksum tests ────────────────────────────────────
 
     #[test]
@@ -5721,90 +5654,6 @@ mod tests {
             }
             other => panic!("expected ModbusAscii parsed frame, got {other:?}"),
         }
-    }
-
-    // ── Modbus ASCII preset tests ──────────────────────────────────────
-
-    #[test]
-    fn preset_tx_framing_modbus_ascii_returns_start_end_colon() {
-        let tx = preset_tx_framing(ProtocolPreset::ModbusAscii);
-        assert!(matches!(
-            tx.mode,
-            TxFramingMode::StartEnd {
-                start,
-                end,
-                marker_encoding: PatternEncoding::Utf8,
-            } if start == vec![":".to_string()] && end == "\r\n"
-        ));
-    }
-
-    #[test]
-    fn preset_rx_framing_modbus_ascii_returns_start_end_colon_crlf() {
-        let rx = preset_rx_framing(ProtocolPreset::ModbusAscii);
-        match &rx.mode {
-            RxFramingMode::StartEnd {
-                start,
-                end,
-                marker_encoding,
-                include_markers,
-            } => {
-                assert_eq!(start, &vec![":".to_string()]);
-                assert_eq!(end, "\r\n");
-                assert_eq!(*marker_encoding, PatternEncoding::Utf8);
-                assert!(!include_markers);
-            }
-            other => panic!("expected StartEnd, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn preset_rx_parser_modbus_ascii_returns_modbus_ascii_validate_true() {
-        let parser = preset_rx_parser(ProtocolPreset::ModbusAscii);
-        assert!(matches!(parser.parser_type, ParserType::ModbusAscii));
-        assert!(parser.validate);
-    }
-
-    #[test]
-    fn protocol_preset_modbus_ascii_tagged_object_roundtrip() {
-        assert_preset_roundtrip("modbus_ascii", ProtocolPreset::ModbusAscii);
-    }
-
-    #[test]
-    fn modbus_ascii_preset_equivalent_to_bare_config() {
-        // TX
-        let preset_tx = preset_tx_framing(ProtocolPreset::ModbusAscii);
-        let bare_tx = TxFramingConfig {
-            mode: TxFramingMode::StartEnd {
-                start: vec![":".into()],
-                end: "\r\n".into(),
-                marker_encoding: PatternEncoding::Utf8,
-            },
-        };
-        assert_eq!(preset_tx, bare_tx);
-
-        // RX
-        let preset_rx = preset_rx_framing(ProtocolPreset::ModbusAscii);
-        let bare_rx = RxFramingConfig {
-            mode: RxFramingMode::StartEnd {
-                start: vec![":".into()],
-                end: "\r\n".into(),
-                marker_encoding: PatternEncoding::Utf8,
-                include_markers: false,
-            },
-            max_frames: None,
-            include_terminators: false,
-            skip_empty: false,
-        };
-        assert_eq!(preset_rx, bare_rx);
-
-        // Parser
-        let preset_parser = preset_rx_parser(ProtocolPreset::ModbusAscii);
-        let bare_parser = ParserConfig {
-            parser_type: ParserType::ModbusAscii,
-            custom_prompt: None,
-            validate: true,
-        };
-        assert_eq!(preset_parser, bare_parser);
     }
 
     // ── Medium-risk gap tests (P3d) ───────────────────────────────────────
