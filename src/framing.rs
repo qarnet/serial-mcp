@@ -8,9 +8,7 @@
 //! Also provides TX framing via [`TxFramingMode`] which encodes payloads
 //! with frame boundaries matching the RX modes. Used on `write`.
 
-use crate::checksums::Checksum;
-use crate::checksums::Lrc;
-use crate::checksums::XorChecksum;
+use crate::checksums::{lrc, xor_checksum};
 use crate::codec;
 use crate::match_config::PatternEncoding;
 use crate::util::find_subsequence;
@@ -394,42 +392,45 @@ impl TxFramingMode {
                     return Err("TX prefix_size must be 1, 2, or 4".into());
                 }
                 let len = payload.len();
-                let mut framed = Vec::with_capacity(*prefix_size as usize + len);
-                match (prefix_size, endianness) {
-                    (1, _) => {
+                match prefix_size {
+                    1 => {
                         if len > 255 {
                             return Err(format!(
                                 "TX payload length {len} exceeds maximum 255 for prefix_size=1"
                             ));
                         }
+                        let mut framed = Vec::with_capacity(1 + len);
                         framed.push(len as u8);
+                        framed.extend_from_slice(payload);
+                        Ok(framed)
                     }
-                    (2, Endianness::Big) => {
+                    2 => {
                         if len > 65535 {
                             return Err(format!(
                                 "TX payload length {len} exceeds maximum 65535 for prefix_size=2"
                             ));
                         }
-                        framed.extend_from_slice(&(len as u16).to_be_bytes());
+                        let mut framed = Vec::with_capacity(2 + len);
+                        let len_bytes = match endianness {
+                            Endianness::Big => (len as u16).to_be_bytes(),
+                            Endianness::Little => (len as u16).to_le_bytes(),
+                        };
+                        framed.extend_from_slice(&len_bytes);
+                        framed.extend_from_slice(payload);
+                        Ok(framed)
                     }
-                    (2, Endianness::Little) => {
-                        if len > 65535 {
-                            return Err(format!(
-                                "TX payload length {len} exceeds maximum 65535 for prefix_size=2"
-                            ));
-                        }
-                        framed.extend_from_slice(&(len as u16).to_le_bytes());
-                    }
-                    (4, Endianness::Big) => {
-                        framed.extend_from_slice(&(len as u32).to_be_bytes());
-                    }
-                    (4, Endianness::Little) => {
-                        framed.extend_from_slice(&(len as u32).to_le_bytes());
+                    4 => {
+                        let mut framed = Vec::with_capacity(4 + len);
+                        let len_bytes = match endianness {
+                            Endianness::Big => (len as u32).to_be_bytes(),
+                            Endianness::Little => (len as u32).to_le_bytes(),
+                        };
+                        framed.extend_from_slice(&len_bytes);
+                        framed.extend_from_slice(payload);
+                        Ok(framed)
                     }
                     _ => unreachable!("prefix_size validated above"),
                 }
-                framed.extend_from_slice(payload);
-                Ok(framed)
             }
             TxFramingMode::StartEnd {
                 start,
@@ -704,6 +705,55 @@ trait FrameParser: Send + Sync {
     fn parse(&self, data: &[u8]) -> Result<ParsedFrame, FrameDecodeError>;
 }
 
+/// Emit one decoded frame: apply skip_empty, run the parser with
+/// Phase-1 checksum drop-and-count semantics, increment frame_count on
+/// success, and return either `Some(Frame)` to emit or `None` to skip.
+/// On a `ChecksumMismatch` with `validate=true`: returns `Ok(None)`,
+/// increments `frames_dropped`, logs a `warn`. On a stream-fatal parser
+/// error: returns `Err(e)` so the caller can set `PushOutcome.error` and
+/// stop.
+fn emit_frame(
+    data: Vec<u8>,
+    frame_type: &'static str,
+    frame_count: &mut usize,
+    skip_empty: bool,
+    parser: &Option<Box<dyn FrameParser>>,
+    frames_dropped: &mut usize,
+) -> Result<Option<Frame>, FrameDecodeError> {
+    if skip_empty && is_blank_frame(&data) {
+        return Ok(None);
+    }
+    let parsed = match parser.as_ref().map(|p| p.parse(&data)) {
+        Some(Ok(pf)) => Some(pf),
+        Some(Err(FrameDecodeError::ChecksumMismatch { expected, received })) => {
+            *frames_dropped += 1;
+            let exp_hex: String = expected
+                .iter()
+                .map(|b| format!("{b:02X}"))
+                .collect::<Vec<_>>()
+                .join("");
+            let rcv_hex: String = received
+                .iter()
+                .map(|b| format!("{b:02X}"))
+                .collect::<Vec<_>>()
+                .join("");
+            tracing::warn!(
+                "frame dropped: checksum mismatch (expected {exp_hex}, received {rcv_hex})"
+            );
+            return Ok(None);
+        }
+        Some(Err(e)) => return Err(e),
+        None => None,
+    };
+    *frame_count += 1;
+    Ok(Some(Frame {
+        data,
+        index: *frame_count - 1,
+        frame_type,
+        parsed,
+    }))
+}
+
 /// SLIP decoder: consume `buf_outer` byte-by-byte according to current
 /// [`SlipState`] in `mode`. Returns decoded frames, or `Err` for a
 /// malformed escape sequence. Updates `mode` state in-place.
@@ -751,7 +801,7 @@ fn slip_decode(
                 ref mut escaped,
             } => {
                 let mut read_pos: usize = 0;
-                'inner: while read_pos < buf_outer.len() {
+                while read_pos < buf_outer.len() {
                     let b = buf_outer[read_pos];
                     read_pos += 1;
 
@@ -789,53 +839,26 @@ fn slip_decode(
                         match b {
                             SLIP_END => {
                                 let data = std::mem::take(buf);
-                                if !skip_empty || !is_blank_frame(&data) {
-                                    let parsed = match parser.as_ref().map(|p| p.parse(&data)) {
-                                        Some(Ok(pf)) => {
-                                            *frame_count += 1;
-                                            Some(pf)
-                                        }
-                                        Some(Err(FrameDecodeError::ChecksumMismatch {
-                                            expected,
-                                            received,
-                                        })) => {
-                                            frames_dropped += 1;
-                                            let exp_hex: String = expected
-                                                .iter()
-                                                .map(|b| format!("{b:02X}"))
-                                                .collect::<Vec<_>>()
-                                                .join("");
-                                            let rcv_hex: String = received
-                                                .iter()
-                                                .map(|b| format!("{b:02X}"))
-                                                .collect::<Vec<_>>()
-                                                .join("");
-                                            tracing::warn!(
-                                                "frame dropped: checksum mismatch (expected {exp_hex}, received {rcv_hex})"
-                                            );
-                                            continue 'inner;
-                                        }
-                                        Some(Err(e)) => {
-                                            buf_outer.drain(..read_pos);
-                                            *state = SlipState::BeforeFirstEnd;
-                                            error = Some(e);
-                                            return PushOutcome {
-                                                frames,
-                                                frames_dropped,
-                                                error,
-                                            };
-                                        }
-                                        None => {
-                                            *frame_count += 1;
-                                            None
-                                        }
-                                    };
-                                    frames.push(Frame {
-                                        data,
-                                        index: *frame_count - 1,
-                                        frame_type: "slip",
-                                        parsed,
-                                    });
+                                match emit_frame(
+                                    data,
+                                    "slip",
+                                    frame_count,
+                                    skip_empty,
+                                    parser,
+                                    &mut frames_dropped,
+                                ) {
+                                    Ok(Some(frame)) => frames.push(frame),
+                                    Ok(None) => (),
+                                    Err(e) => {
+                                        buf_outer.drain(..read_pos);
+                                        *state = SlipState::BeforeFirstEnd;
+                                        error = Some(e);
+                                        return PushOutcome {
+                                            frames,
+                                            frames_dropped,
+                                            error,
+                                        };
+                                    }
                                 }
                             }
                             SLIP_ESC => {
@@ -956,58 +979,29 @@ fn cobs_decode(
                         if data.last() == Some(&0x00) {
                             data.pop();
                         }
-                        if !skip_empty || !is_blank_frame(&data) {
-                            let parsed = match parser.as_ref().map(|p| p.parse(&data)) {
-                                Some(Ok(pf)) => {
-                                    *frame_count += 1;
-                                    Some(pf)
-                                }
-                                Some(Err(FrameDecodeError::ChecksumMismatch {
-                                    expected,
-                                    received,
-                                })) => {
-                                    frames_dropped += 1;
-                                    let exp_hex: String = expected
-                                        .iter()
-                                        .map(|b| format!("{b:02X}"))
-                                        .collect::<Vec<_>>()
-                                        .join("");
-                                    let rcv_hex: String = received
-                                        .iter()
-                                        .map(|b| format!("{b:02X}"))
-                                        .collect::<Vec<_>>()
-                                        .join("");
-                                    tracing::warn!(
-                                        "frame dropped: checksum mismatch (expected {exp_hex}, received {rcv_hex})"
-                                    );
-                                    *state = CobsState::BeforeFirstDelim;
-                                    buf_outer.drain(..read_pos);
-                                    break;
-                                }
-                                Some(Err(e)) => {
-                                    buf_outer.drain(..read_pos);
-                                    *decoded = Vec::new();
-                                    *remaining = 0;
-                                    *pending_zero = false;
-                                    *state = CobsState::BeforeFirstDelim;
-                                    error = Some(e);
-                                    return PushOutcome {
-                                        frames,
-                                        frames_dropped,
-                                        error,
-                                    };
-                                }
-                                None => {
-                                    *frame_count += 1;
-                                    None
-                                }
-                            };
-                            frames.push(Frame {
-                                data,
-                                index: *frame_count - 1,
-                                frame_type: "cobs",
-                                parsed,
-                            });
+                        match emit_frame(
+                            data,
+                            "cobs",
+                            frame_count,
+                            skip_empty,
+                            parser,
+                            &mut frames_dropped,
+                        ) {
+                            Ok(Some(frame)) => frames.push(frame),
+                            Ok(None) => (),
+                            Err(e) => {
+                                buf_outer.drain(..read_pos);
+                                *decoded = Vec::new();
+                                *remaining = 0;
+                                *pending_zero = false;
+                                *state = CobsState::BeforeFirstDelim;
+                                error = Some(e);
+                                return PushOutcome {
+                                    frames,
+                                    frames_dropped,
+                                    error,
+                                };
+                            }
                         }
                         *state = CobsState::BeforeFirstDelim;
                         buf_outer.drain(..read_pos);
@@ -1185,12 +1179,12 @@ impl FrameDecoder {
         'outer: loop {
             let consumed = match &mut self.mode {
                 DecoderMode::Line(state) => match state {
-                    LineState::Lf => self.match_line_lf(),
-                    LineState::Cr => self.match_line_cr(),
+                    LineState::Lf => self.match_line_byte(b'\n'),
+                    LineState::Cr => self.match_line_byte(b'\r'),
                     LineState::Crlf => self.match_line_crlf(),
                     LineState::AutoLf => self.match_auto_lf(),
                     LineState::PendingCr(_) => self.match_pending_cr(),
-                    LineState::CrMode => self.match_line_cr(),
+                    LineState::CrMode => self.match_line_byte(b'\r'),
                 },
                 DecoderMode::Delimiter(delim) => {
                     let d = delim.clone();
@@ -1316,49 +1310,20 @@ impl FrameDecoder {
             match consumed {
                 None => break,
                 Some(frame_bytes) => {
-                    if !self.skip_empty || !is_blank_frame(&frame_bytes) {
-                        let parse_result = self.parser.as_ref().map(|p| p.parse(&frame_bytes));
-                        let parsed = match parse_result {
-                            Some(Ok(pf)) => {
-                                self.frame_count += 1;
-                                Some(pf)
-                            }
-                            Some(Err(FrameDecodeError::ChecksumMismatch {
-                                expected,
-                                received,
-                            })) => {
-                                frames_dropped += 1;
-                                let exp_hex: String = expected
-                                    .iter()
-                                    .map(|b| format!("{b:02X}"))
-                                    .collect::<Vec<_>>()
-                                    .join("");
-                                let rcv_hex: String = received
-                                    .iter()
-                                    .map(|b| format!("{b:02X}"))
-                                    .collect::<Vec<_>>()
-                                    .join("");
-                                tracing::warn!(
-                                    "frame dropped: checksum mismatch (expected {exp_hex}, received {rcv_hex})"
-                                );
-                                continue;
-                            }
-                            Some(Err(e)) => {
-                                error = Some(e);
-                                break 'outer;
-                            }
-                            None => {
-                                self.frame_count += 1;
-                                None
-                            }
-                        };
-                        let frame_type = self.frame_type_str();
-                        frames.push(Frame {
-                            data: frame_bytes,
-                            index: self.frame_count - 1,
-                            frame_type,
-                            parsed,
-                        });
+                    match emit_frame(
+                        frame_bytes,
+                        self.frame_type_str(),
+                        &mut self.frame_count,
+                        self.skip_empty,
+                        &self.parser,
+                        &mut frames_dropped,
+                    ) {
+                        Ok(Some(frame)) => frames.push(frame),
+                        Ok(None) => continue,
+                        Err(e) => {
+                            error = Some(e);
+                            break 'outer;
+                        }
                     }
                 }
             }
@@ -1368,6 +1333,19 @@ impl FrameDecoder {
             frames_dropped,
             error,
         }
+    }
+
+    /// Split the frame at `split_pos` with terminator length `term_len`.
+    /// Returns the frame bytes (including terminators if
+    /// `include_terminators`), and drains consumed bytes from the buffer.
+    fn take_frame(&mut self, split_pos: usize, term_len: usize) -> Vec<u8> {
+        let fb = if self.include_terminators {
+            self.buf[..split_pos + term_len].to_vec()
+        } else {
+            self.buf[..split_pos].to_vec()
+        };
+        self.buf.drain(..split_pos + term_len);
+        fb
     }
 
     /// `auto` initial state: scan for `\n` (CRLF-aware), detect bare `\r`.
@@ -1385,18 +1363,13 @@ impl FrameDecoder {
             // immediately before \n, handle normally.
             // Walk backwards from lf_pos to check for any earlier \r that
             // isn't part of a CRLF.
-            let end = if !self.include_terminators && lf_pos > 0 && self.buf[lf_pos - 1] == b'\r' {
-                lf_pos - 1
-            } else {
-                lf_pos
-            };
-            let fb = if self.include_terminators {
-                self.buf[..lf_pos + 1].to_vec()
-            } else {
-                self.buf[..end].to_vec()
-            };
-            self.buf.drain(..lf_pos + 1);
-            return Some(fb);
+            let (split_pos, term_len) =
+                if !self.include_terminators && lf_pos > 0 && self.buf[lf_pos - 1] == b'\r' {
+                    (lf_pos - 1, 2)
+                } else {
+                    (lf_pos, 1)
+                };
+            return Some(self.take_frame(split_pos, term_len));
         }
 
         // No \n found. Look for a bare \r.
@@ -1405,24 +1378,13 @@ impl FrameDecoder {
             if next_is_lf {
                 // CRLF: \n is in the buffer right after \r. This means \n was
                 // found above. Unreachable in practice, but safe.
-                let fb = if self.include_terminators {
-                    self.buf[..cr_pos + 2].to_vec()
-                } else {
-                    self.buf[..cr_pos].to_vec()
-                };
-                self.buf.drain(..cr_pos + 2);
-                return Some(fb);
+                return Some(self.take_frame(cr_pos, 2));
             }
             // \r found, no \n follows in the buffer.
             if cr_pos + 1 < self.buf.len() {
                 // Bytes after \r exist in this chunk → bare CR confirmed immediately.
                 // Emit the line before \r, drain through \r, transition to CrMode.
-                let fb = if self.include_terminators {
-                    self.buf[..cr_pos + 1].to_vec()
-                } else {
-                    self.buf[..cr_pos].to_vec()
-                };
-                self.buf.drain(..cr_pos + 1);
+                let fb = self.take_frame(cr_pos, 1);
                 if let DecoderMode::Line(ref mut state) = self.mode {
                     *state = LineState::CrMode;
                 }
@@ -1466,12 +1428,7 @@ impl FrameDecoder {
         let next_byte = self.buf[cr_pos + 1];
         if next_byte == b'\n' {
             // CRLF confirmed. Emit frame (strip \r\n unless include_terminators).
-            let fb = if self.include_terminators {
-                self.buf[..cr_pos + 2].to_vec()
-            } else {
-                self.buf[..cr_pos].to_vec()
-            };
-            self.buf.drain(..cr_pos + 2);
+            let fb = self.take_frame(cr_pos, 2);
             if let DecoderMode::Line(ref mut state) = self.mode {
                 *state = LineState::AutoLf;
             }
@@ -1480,52 +1437,23 @@ impl FrameDecoder {
 
         // Non-\n byte after \r → bare CR confirmed.
         // Emit frame before \r, drain through \r, promote to CrMode.
-        let fb = if self.include_terminators {
-            self.buf[..cr_pos + 1].to_vec()
-        } else {
-            self.buf[..cr_pos].to_vec()
-        };
-        self.buf.drain(..cr_pos + 1);
+        let fb = self.take_frame(cr_pos, 1);
         if let DecoderMode::Line(ref mut state) = self.mode {
             *state = LineState::CrMode;
         }
         Some(fb)
     }
 
-    /// Match a line with `lf` ending: split on `\n` only, do NOT strip `\r`.
-    fn match_line_lf(&mut self) -> Option<Vec<u8>> {
-        let pos = self.buf.iter().position(|&b| b == b'\n')?;
-        let fb = if self.include_terminators {
-            self.buf[..pos + 1].to_vec()
-        } else {
-            self.buf[..pos].to_vec()
-        };
-        self.buf.drain(..pos + 1);
-        Some(fb)
-    }
-
-    /// Match a line with `cr` ending: split on bare `\r`.
-    fn match_line_cr(&mut self) -> Option<Vec<u8>> {
-        let pos = self.buf.iter().position(|&b| b == b'\r')?;
-        let fb = if self.include_terminators {
-            self.buf[..pos + 1].to_vec()
-        } else {
-            self.buf[..pos].to_vec()
-        };
-        self.buf.drain(..pos + 1);
-        Some(fb)
+    /// Match a line ending on a single byte: split on `b`, drain through it.
+    fn match_line_byte(&mut self, b: u8) -> Option<Vec<u8>> {
+        let pos = self.buf.iter().position(|&x| x == b)?;
+        Some(self.take_frame(pos, 1))
     }
 
     /// Match a line with `crlf` ending: split on exact `\r\n`.
     fn match_line_crlf(&mut self) -> Option<Vec<u8>> {
         let pos = find_subsequence(&self.buf, b"\r\n")?;
-        let fb = if self.include_terminators {
-            self.buf[..pos + 2].to_vec()
-        } else {
-            self.buf[..pos].to_vec()
-        };
-        self.buf.drain(..pos + 2);
-        Some(fb)
+        Some(self.take_frame(pos, 2))
     }
 
     fn frame_type_str(&self) -> &'static str {
@@ -1548,57 +1476,38 @@ impl FrameDecoder {
     /// drains the in-frame buffer; pending escaped/partial state is emitted as
     /// raw bytes.
     pub fn flush_partial(&mut self) -> Option<Frame> {
-        // SLIP: drain the in-frame buffer instead of self.buf.
-        if let DecoderMode::Slip {
-            state: SlipState::InFrame { ref mut buf, .. },
-        } = self.mode
-        {
-            if buf.is_empty() {
-                return None;
+        let (data, frame_type) = match &mut self.mode {
+            DecoderMode::Slip {
+                state: SlipState::InFrame { ref mut buf, .. },
+            } => {
+                if buf.is_empty() {
+                    return None;
+                }
+                (std::mem::take(buf), "slip")
             }
-            // flush_partial does not apply skip_empty — partial
-            // frames at flush are emitted regardless.
-            let data = std::mem::take(buf);
-            self.frame_count += 1;
-            return Some(Frame {
-                data,
-                index: self.frame_count - 1,
-                frame_type: "slip",
-                parsed: None,
-            });
-        }
-        // COBS: drain the in-frame decoded buffer.
-        if let DecoderMode::Cobs {
-            state: CobsState::InFrame {
-                ref mut decoded, ..
-            },
-        } = self.mode
-        {
-            if decoded.is_empty() {
-                return None;
+            DecoderMode::Cobs {
+                state:
+                    CobsState::InFrame {
+                        ref mut decoded, ..
+                    },
+            } => {
+                if decoded.is_empty() {
+                    return None;
+                }
+                (std::mem::take(decoded), "cobs")
             }
-            // flush_partial does not apply skip_empty — partial
-            // frames at flush are emitted regardless.
-            let data = std::mem::take(decoded);
-            self.frame_count += 1;
-            return Some(Frame {
-                data,
-                index: self.frame_count - 1,
-                frame_type: "cobs",
-                parsed: None,
-            });
-        }
-        if self.buf.is_empty() {
-            return None;
-        }
-        // flush_partial does not apply skip_empty — partial
-        // frames at flush are emitted regardless.
-        let data = std::mem::take(&mut self.buf);
+            _ => {
+                if self.buf.is_empty() {
+                    return None;
+                }
+                (std::mem::take(&mut self.buf), self.frame_type_str())
+            }
+        };
         self.frame_count += 1;
         Some(Frame {
             data,
             index: self.frame_count - 1,
-            frame_type: self.frame_type_str(),
+            frame_type,
             parsed: None,
         })
     }
@@ -1792,6 +1701,31 @@ fn strip_leading_if_any(content: &mut Vec<u8>, markers: &[u8]) {
     }
 }
 
+/// Shared checksum-validate ladder for NMEA XOR and Modbus ASCII LRC.
+///
+/// Returns `Ok(Some(true))` if computed == received, `Ok(Some(false))` if
+/// validate is false and they differ, or `Err(ChecksumMismatch)` if validate is
+/// true and they differ. `expected_byte`/`received_byte` are the single-byte
+/// checksum values; the error carries them as 1-byte vecs to preserve the
+/// [`FrameDecodeError`] shape.
+fn check_checksum(
+    validate: bool,
+    computed_byte: u8,
+    received_byte: u8,
+    received_raw: Vec<u8>,
+) -> Result<Option<bool>, FrameDecodeError> {
+    if computed_byte == received_byte {
+        Ok(Some(true))
+    } else if validate {
+        Err(FrameDecodeError::ChecksumMismatch {
+            expected: vec![computed_byte],
+            received: received_raw,
+        })
+    } else {
+        Ok(Some(false))
+    }
+}
+
 // NMEA-0183 parser
 
 struct NmeaParser {
@@ -1844,45 +1778,47 @@ impl FrameParser for NmeaParser {
                     Some(v) => v,
                     None => {
                         // Invalid hex in checksum — treat as mismatch.
-                        if self.validate {
-                            let computed = XorChecksum.compute(&body);
-                            return Err(FrameDecodeError::ChecksumMismatch {
-                                expected: computed,
-                                received: hex.clone(),
-                            });
+                        let computed_byte = xor_checksum(&body);
+                        match check_checksum(
+                            self.validate,
+                            computed_byte,
+                            computed_byte.wrapping_add(1),
+                            hex.clone(),
+                        ) {
+                            Err(e) => return Err(e),
+                            Ok(Some(true)) => unreachable!("invalid hex never matches"),
+                            Ok(Some(false)) | Ok(None) => {
+                                return Ok(ParsedFrame::Nmea {
+                                    talker_id: String::new(),
+                                    sentence_type: String::new(),
+                                    fields: vec![],
+                                    checksum_valid: Some(false),
+                                });
+                            }
                         }
-                        return Ok(ParsedFrame::Nmea {
-                            talker_id: String::new(),
-                            sentence_type: String::new(),
-                            fields: vec![],
-                            checksum_valid: Some(false),
-                        });
                     }
                 };
-                let computed = XorChecksum.compute(&body);
-                let computed_val = computed[0];
-                if self.validate {
-                    if computed_val != received_val {
-                        return Err(FrameDecodeError::ChecksumMismatch {
-                            expected: computed,
-                            received: vec![received_val],
-                        });
-                    }
-                    Some(true)
-                } else {
-                    Some(computed_val == received_val)
-                }
+                let computed_val = xor_checksum(&body);
+                check_checksum(
+                    self.validate,
+                    computed_val,
+                    received_val,
+                    vec![received_val],
+                )?
             }
             Some(hex) => {
                 // Checksum present but too short (<2 hex chars). Treat as mismatch.
-                if self.validate {
-                    let computed = XorChecksum.compute(&body);
-                    return Err(FrameDecodeError::ChecksumMismatch {
-                        expected: computed,
-                        received: hex.clone(),
-                    });
+                let computed_byte = xor_checksum(&body);
+                match check_checksum(
+                    self.validate,
+                    computed_byte,
+                    computed_byte.wrapping_add(1),
+                    hex.clone(),
+                ) {
+                    Err(e) => return Err(e),
+                    Ok(Some(true)) => unreachable!("too-short hex never matches"),
+                    Ok(Some(false)) | Ok(None) => Some(false),
                 }
-                Some(false)
             }
             None => None,
         };
@@ -1989,19 +1925,13 @@ impl FrameParser for ModbusAsciiParser {
         let data = pdu[2..].to_vec();
 
         // 5. Validate LRC over the PDU (address + function + data — NOT the LRC byte).
-        let computed = Lrc.compute(pdu);
-        let computed_val = computed[0];
-        let checksum_valid = if self.validate {
-            if computed_val != lrc_received {
-                return Err(FrameDecodeError::ChecksumMismatch {
-                    expected: computed,
-                    received: vec![lrc_received],
-                });
-            }
-            Some(true)
-        } else {
-            Some(computed_val == lrc_received)
-        };
+        let computed_val = lrc(pdu);
+        let checksum_valid = check_checksum(
+            self.validate,
+            computed_val,
+            lrc_received,
+            vec![lrc_received],
+        )?;
 
         // 6. Return ParsedFrame::ModbusAscii.
         Ok(ParsedFrame::ModbusAscii {
@@ -2867,11 +2797,11 @@ mod tests {
         // drain consumed bytes, reset state to BeforeFirstEnd, return Err.
         // Then push a well-formed SLIP-framed NMEA sentence and confirm the
         // decoder recovers (state was reset — no stale escaped/buf corruption).
-        use crate::checksums::XorChecksum;
+        use crate::checksums::xor_checksum;
 
         let bad_body = b"GPGLL,3751.65,N,12226.54,W*00"; // wrong checksum (correct is 7E)
         let good_body = b"GPGLL,3751.65,N,12226.54,W";
-        let good_cs = XorChecksum.compute(good_body)[0];
+        let good_cs = xor_checksum(good_body);
         let good_sentence = format!("GPGLL,3751.65,N,12226.54,W*{good_cs:02X}");
 
         let framing = RxFramingConfig {
@@ -4161,11 +4091,11 @@ mod tests {
         // Then push a well-formed COBS-framed NMEA sentence and confirm the
         // decoder recovers (state was reset — no stale decoded/remaining/
         // pending_zero corruption).
-        use crate::checksums::XorChecksum;
+        use crate::checksums::xor_checksum;
 
         let bad_body = b"GPGLL,3751.65,N,12226.54,W*00"; // wrong checksum (correct is 7E)
         let good_body = b"GPGLL,3751.65,N,12226.54,W";
-        let good_cs = XorChecksum.compute(good_body)[0];
+        let good_cs = xor_checksum(good_body);
         let good_sentence = format!("GPGLL,3751.65,N,12226.54,W*{good_cs:02X}");
 
         // COBS-encode each sentence via TxFramingMode::Cobs (which produces
@@ -4681,8 +4611,7 @@ mod tests {
 
     /// Helper: build a NMEA sentence body with a computed XOR checksum.
     fn nmea_checksum_body(body: &[u8]) -> String {
-        let cs = XorChecksum.compute(body);
-        format!("{:02X}", cs[0])
+        format!("{:02X}", xor_checksum(body))
     }
 
     #[test]
@@ -5282,8 +5211,7 @@ mod tests {
 
     // Helper: compute LRC over a PDU byte slice and return the 1-byte hex string.
     fn modbus_lrc(pdu: &[u8]) -> String {
-        let cs = Lrc.compute(pdu);
-        format!("{:02X}", cs[0])
+        format!("{:02X}", lrc(pdu))
     }
 
     // Helper: build a Modbus ASCII hex body from PDU and append LRC.
@@ -5722,7 +5650,7 @@ mod tests {
 
     #[test]
     fn nmea_parser_multi_fragment_ais_first_sentence() {
-        use crate::checksums::XorChecksum;
+        use crate::checksums::xor_checksum;
 
         // AIS multi-fragment messages are NOT reassembled by the parser —
         // each fragment is its own frame. This test pins the first-fragment
@@ -5730,9 +5658,9 @@ mod tests {
         //
         // Verify the XOR checksum of the body between ! and * (exclusive).
         let checksum_body = b"AIVDM,2,1,3,B,55?MbV02;H0000,0";
-        let computed = XorChecksum.compute(checksum_body);
+        let computed = xor_checksum(checksum_body);
         // The handoff documented checksum 0x5C but the correct XOR is 0x22.
-        assert_eq!(computed, [0x22], "AIS sentence checksum is 0x22, not 0x5C");
+        assert_eq!(computed, 0x22, "AIS sentence checksum is 0x22, not 0x5C");
 
         let sentence = b"!AIVDM,2,1,3,B,55?MbV02;H0000,0*22";
         let p = NmeaParser { validate: true };
@@ -5755,14 +5683,14 @@ mod tests {
 
     #[test]
     fn nmea_parser_preserves_whitespace_in_fields() {
-        use crate::checksums::XorChecksum;
+        use crate::checksums::xor_checksum;
 
         // The parser uses split(',') without per-field trimming; this test
         // pins that whitespace inside a field is preserved. A future
         // "helpful" refactor adding .trim() per field would break this.
         let body_without_star = b"GPVTG,  48.7  ,T,,,N,,K,N";
-        let cs = XorChecksum.compute(body_without_star);
-        let cs_hex = format!("{:02X}", cs[0]);
+        let cs = xor_checksum(body_without_star);
+        let cs_hex = format!("{cs:02X}");
         // cs_hex = "58" for this body.
         let sentence = format!(
             "${}*{}",
@@ -5791,8 +5719,6 @@ mod tests {
 
     #[test]
     fn modbus_ascii_parser_max_adu_length() {
-        use crate::checksums::Lrc;
-
         // A 253-byte data payload near the Modbus ADU max. Pins no-length-cap
         // behavior. The frame is routed through a full FrameDecoder (StartEnd
         // framing with ':' start and "\r\n" end) + ModbusAscii parser.
@@ -5801,8 +5727,7 @@ mod tests {
         let data: Vec<u8> = (0..253u8).collect();
         let mut pdu = vec![address, function];
         pdu.extend_from_slice(&data);
-        let lrc = Lrc.compute(&pdu);
-        let lrc_byte = lrc[0];
+        let lrc_byte = lrc(&pdu);
 
         let mut all_bytes = pdu.clone();
         all_bytes.push(lrc_byte);
@@ -5858,8 +5783,8 @@ mod tests {
         // Sanity: a valid hex body with the same parser DOES parse to ModbusAscii.
         let pdu = [0x01u8, 0x03, 0x00, 0x00, 0x00, 0x01];
         let lrc_hex = {
-            let cs = Lrc.compute(&pdu);
-            format!("{:02X}", cs[0])
+            let cs = lrc(&pdu);
+            format!("{cs:02X}")
         };
         let body_valid = format!("010300000001{lrc_hex}");
         let result_valid = p.parse(body_valid.as_bytes()).unwrap();
