@@ -79,11 +79,8 @@ fn get_text(result: &rmcp::model::CallToolResult) -> String {
         .unwrap_or_default()
 }
 
-// Ignored until Phase 1.3 (read rewrites onto the RxRing) + Phase 2
-// (subscribe rewrites onto the RxRing) land. See protocol_emulator.rs
-// for the full rationale.
 #[tokio::test]
-#[ignore = "write-then-read/subscribe ordering needs Phase 1.3 (read from ring) + Phase 2 (subscribe from ring)"]
+#[ignore = "needs Phase 2 (subscribe rewrite onto the ring) — read now works, subscribe doesn't"]
 async fn protocol_emulator_binary_workflow() {
     // ---- Stage 0: setup ----
     let pty = PtyPair::open().expect("openpty");

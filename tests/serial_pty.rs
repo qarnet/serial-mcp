@@ -14,6 +14,7 @@ use std::time::Duration;
 
 use rmcp::model::CallToolRequestParams;
 use serde_json::json;
+use tokio::io::AsyncWriteExt;
 
 mod common;
 use common::{connect_client, next_notification, pty::PtyPair, tool_request, TestServer};
@@ -84,12 +85,7 @@ async fn pty_client_write_reaches_device_side() {
     client.cancel().await.ok();
 }
 
-// Ignored until Phase 1.3 (read rewrites onto the RxRing). The always-on
-// pump (Phase 1.2) drains the PTY RX buffer before `read` registers its
-// consumer; read is still future-only (fanout) until Phase 1.3 makes it
-// read from the ring, which fixes the write-then-read race.
 #[tokio::test]
-#[ignore = "write-then-read needs Phase 1.3 (read from ring)"]
 async fn pty_device_write_then_client_read() {
     let (_server, client, _rx, mut pty, connection_id) = setup().await;
 
@@ -201,7 +197,6 @@ async fn pty_read_match_finds_real_serial_pattern() {
 }
 
 #[tokio::test]
-#[ignore = "write-then-read needs Phase 1.3 (read from ring)"]
 async fn pty_read_match_with_context_returns_shaped_payload() {
     let (_server, client, _rx, mut pty, connection_id) = setup().await;
 
@@ -248,7 +243,6 @@ async fn pty_read_match_with_context_returns_shaped_payload() {
 }
 
 #[tokio::test]
-#[ignore = "write-then-read needs Phase 1.3 (read from ring)"]
 async fn pty_read_match_with_zero_context_returns_only_matched_bytes() {
     let (_server, client, _rx, mut pty, connection_id) = setup().await;
 
@@ -289,7 +283,6 @@ async fn pty_read_match_with_zero_context_returns_only_matched_bytes() {
 }
 
 #[tokio::test]
-#[ignore = "write-then-read needs Phase 1.3 (read from ring)"]
 async fn pty_read_match_without_context_returns_full_accumulated() {
     let (_server, client, _rx, mut pty, connection_id) = setup().await;
 
@@ -701,6 +694,213 @@ async fn pty_subscribe_slip_malformed_escape_emits_framing_error() {
     assert!(
         err.contains("0x41"),
         "error msg names violating byte: {err}"
+    );
+    client.cancel().await.ok();
+}
+
+// ── Phase 1.3: ring-based read tests ────────────────────────────────────
+
+/// Cat semantics: write then read returns buffered bytes immediately
+/// with stop_reason="drained".
+#[tokio::test]
+async fn pty_read_returns_buffered_bytes_immediately() {
+    let (_server, client, _rx, mut pty, connection_id) = setup().await;
+
+    pty.write_device(b"HELLO").await.unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let result = client
+        .peer()
+        .call_tool(tool_request(
+            "read",
+            json!({
+                "connection_id": connection_id,
+                "timeout_ms": 1000,
+                "max_buffered_bytes": 64,
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_ne!(result.is_error, Some(true), "{result:?}");
+    let structured = result.structured_content.expect("structured");
+    assert_eq!(structured["bytes_read"], json!(5));
+    assert_eq!(structured["data"], json!("HELLO"));
+    assert_eq!(structured["stop_reason"], json!("drained"));
+    assert_eq!(structured["bytes_lost"], json!(0));
+    assert!(
+        structured
+            .get("from_offset")
+            .and_then(|v| v.as_u64())
+            .is_some(),
+        "from_offset should be present"
+    );
+    client.cancel().await.ok();
+}
+
+/// Wrap + bytes_lost: small buffer, write >8 bytes, read reports loss.
+#[tokio::test]
+async fn pty_read_wrap_reports_bytes_lost() {
+    let pty = PtyPair::open().expect("openpty");
+    let slave_path = pty.slave_path.to_string_lossy().into_owned();
+
+    let server = TestServer::start().await;
+    let (client, _rx) = connect_client(&server).await.unwrap();
+
+    // Open with tiny rx_buffer_size to force wrap.
+    let result = client
+        .peer()
+        .call_tool(tool_request(
+            "open",
+            json!({ "port": slave_path, "baud_rate": 115200, "rx_buffer_size": 8 }),
+        ))
+        .await
+        .unwrap();
+    assert_ne!(result.is_error, Some(true), "{result:?}");
+    let connection_id = result.structured_content.expect("structured")["connection_id"]
+        .as_str()
+        .expect("string")
+        .to_string();
+
+    let (mut pty_file, _slave_fd) = pty.into_parts();
+
+    // Write more than the ring capacity.
+    pty_file.write_all(b"abcdefghijklmnop").await.unwrap(); // 16 bytes, ring=8
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let result = client
+        .peer()
+        .call_tool(tool_request(
+            "read",
+            json!({
+                "connection_id": connection_id,
+                "timeout_ms": 1000,
+                "max_buffered_bytes": 32,
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_ne!(result.is_error, Some(true), "{result:?}");
+    let structured = result.structured_content.expect("structured");
+    assert!(
+        structured["bytes_lost"].as_u64().unwrap_or(0) > 0,
+        "bytes_lost should be > 0 for wrapped ring: {structured:?}"
+    );
+    client.cancel().await.ok();
+}
+
+/// Peek does not advance cursor: write, peek, then read returns same bytes.
+#[tokio::test]
+async fn pty_peek_does_not_advance_cursor() {
+    let (_server, client, _rx, mut pty, connection_id) = setup().await;
+
+    pty.write_device(b"UNIQUE").await.unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Peek first.
+    let peek_result = client
+        .peer()
+        .call_tool(tool_request(
+            "read",
+            json!({
+                "connection_id": connection_id,
+                "timeout_ms": 500,
+                "max_buffered_bytes": 32,
+                "peek": true,
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_ne!(peek_result.is_error, Some(true), "{peek_result:?}");
+    let peek_s = peek_result.structured_content.expect("structured");
+    let peek_from = peek_s["from_offset"].as_u64();
+    let peek_next = peek_s["next_offset"].as_u64();
+    assert_eq!(peek_from, peek_next, "peek should not advance cursor");
+
+    // Read should return the same bytes.
+    let read_result = client
+        .peer()
+        .call_tool(tool_request(
+            "read",
+            json!({
+                "connection_id": connection_id,
+                "timeout_ms": 500,
+                "max_buffered_bytes": 32,
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_ne!(read_result.is_error, Some(true), "{read_result:?}");
+    let read_s = read_result.structured_content.expect("structured");
+    assert_eq!(read_s["data"], json!("UNIQUE"));
+    client.cancel().await.ok();
+}
+
+/// Seek round-trip: write, seek live_edge, read → empty; seek buffer_start,
+/// read → returns data.
+#[tokio::test]
+async fn pty_seek_round_trip() {
+    let (_server, client, _rx, mut pty, connection_id) = setup().await;
+
+    pty.write_device(b"SEEKDATA").await.unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Seek to live_edge — skips past buffered data.
+    let seek_result = client
+        .peer()
+        .call_tool(tool_request(
+            "seek",
+            json!({ "connection_id": connection_id, "to": "live_edge" }),
+        ))
+        .await
+        .unwrap();
+    assert_ne!(seek_result.is_error, Some(true), "{seek_result:?}");
+    let seek_s = seek_result.structured_content.expect("structured");
+    assert_eq!(seek_s["buffered_remaining"].as_u64(), Some(0));
+
+    // Read after seek should be empty.
+    let empty = client
+        .peer()
+        .call_tool(tool_request(
+            "read",
+            json!({
+                "connection_id": connection_id,
+                "timeout_ms": 300,
+                "max_buffered_bytes": 32,
+            }),
+        ))
+        .await
+        .unwrap();
+    let empty_s = empty.structured_content.expect("structured");
+    assert_eq!(empty_s["bytes_read"].as_u64(), Some(0));
+
+    // Seek back to buffer_start — re-reads everything retained.
+    client
+        .peer()
+        .call_tool(tool_request(
+            "seek",
+            json!({ "connection_id": connection_id, "to": "buffer_start" }),
+        ))
+        .await
+        .unwrap();
+
+    // Read returns the data again.
+    let reread = client
+        .peer()
+        .call_tool(tool_request(
+            "read",
+            json!({
+                "connection_id": connection_id,
+                "timeout_ms": 500,
+                "max_buffered_bytes": 32,
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_ne!(reread.is_error, Some(true), "{reread:?}");
+    let reread_s = reread.structured_content.expect("structured");
+    assert!(
+        reread_s["data"].as_str().unwrap().contains("SEEKDATA"),
+        "should re-read SEEKDATA: {reread_s:?}"
     );
     client.cancel().await.ok();
 }

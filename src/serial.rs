@@ -224,8 +224,15 @@ pub struct ConnectionConfig {
     /// Default protocol preset. Expands to fill framing/parser gaps.
     #[serde(default)]
     pub protocol: Option<crate::framing::ProtocolPreset>,
+    /// RX ring buffer size in bytes for the always-on pump.
+    #[serde(default = "default_rx_buffer_size")]
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub rx_buffer_size: usize,
 }
 
+fn default_rx_buffer_size() -> usize {
+    crate::limits::DEFAULT_RX_BUFFER_SIZE
+}
 fn default_log_capacity() -> usize {
     1024
 }
@@ -668,6 +675,7 @@ impl SerialConnection {
                 rx_framing: None,
                 rx_parser: None,
                 protocol: None,
+                rx_buffer_size: crate::limits::DEFAULT_RX_BUFFER_SIZE,
             },
             io,
         )
@@ -883,6 +891,7 @@ impl SerialConnection {
             rx_framing: self.rx_framing_default().cloned(),
             rx_parser: self.rx_parser_default().cloned(),
             protocol: self.protocol_default(),
+            rx_buffer_size: crate::limits::DEFAULT_RX_BUFFER_SIZE,
         }
     }
 
@@ -1871,6 +1880,7 @@ mod tests {
             rx_framing: None,
             rx_parser: None,
             protocol: None,
+            rx_buffer_size: crate::limits::DEFAULT_RX_BUFFER_SIZE,
         });
         let owner_id = mgr.insert(c1).await.unwrap();
 
@@ -2062,7 +2072,7 @@ mod schema {
     use crate::tools::types::{
         ClearLogResult, CloseResult, DeleteProfileResult, ExportLogResult, FlushResult,
         GetLogResult, GetStatusResult, ListConnectionsResult, ListPortsResult, ListProfilesResult,
-        OpenResult, ReadResult, ReconfigureResult, ReconnectResult, SaveProfileResult,
+        OpenResult, ReadResult, ReconfigureResult, ReconnectResult, SaveProfileResult, SeekResult,
         SendBreakResult, SetDtrRtsResult, SetFlowControlResult, SubscribeResult, UnsubscribeResult,
         WriteResult,
     };
@@ -2168,6 +2178,7 @@ mod schema {
     check_schema!(clear_log_result_has_no_uint_formats, ClearLogResult);
     check_schema!(export_log_result_has_no_uint_formats, ExportLogResult);
     check_schema!(reconnect_result_has_no_uint_formats, ReconnectResult);
+    check_schema!(seek_result_has_no_uint_formats, SeekResult);
 
     // Framing config types (checked for uint format regressions on fields like
     // prefix_size, max_frames, and cobs delimiter).

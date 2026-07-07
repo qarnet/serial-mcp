@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use rmcp::{model::Meta, Json, Peer, RoleServer};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::buffer_budget::BufferBudget;
 use crate::codec;
@@ -11,10 +11,13 @@ use crate::serial::ConnectionManager;
 use crate::serial::FlushTarget;
 use crate::tools::helpers::{
     build_read_result, clamp_or_err, log_tool_err, lookup_connection, map_budget_err,
-    parse_encoding, read_bytes_via_session, validate_rx_request, ResolvedRxArgs, RxLimits,
+    parse_encoding, read_bytes_from_ring, validate_rx_request, ResolvedRxArgs, RxLimits,
     MAX_READ_BYTES, MAX_WRITE_BYTES, MIN_READ_BYTES,
 };
-use crate::tools::types::{FlushArgs, FlushResult, ReadArgs, ReadResult, WriteArgs, WriteResult};
+use crate::tools::types::{
+    FlushArgs, FlushResult, ReadArgs, ReadResult, SeekArgs, SeekResult, SeekTarget, WriteArgs,
+    WriteResult,
+};
 
 use crate::tx_session::TxSessionManager;
 pub async fn write(
@@ -106,7 +109,7 @@ pub async fn read(
     )
     .await?;
 
-    // Reserve budget before registering consumer.
+    // Reserve budget before reading.
     let _reservation = budget
         .try_reserve(max_buffered_bytes)
         .map_err(|e| map_budget_err("read.max_buffered_bytes", e))?;
@@ -117,7 +120,6 @@ pub async fn read(
         .get_or_create(Arc::clone(&connection), DEFAULT_RX_BUFFER_SIZE)
         .await
         .map_err(|e| format!("read: {e}"))?;
-    let event_rx = session.register_blocking();
 
     // Resolve rx_framing + rx_parser via the shared 4-layer precedence helper.
     let rx_framing = crate::precedence::resolve_field(
@@ -135,8 +137,8 @@ pub async fn read(
         connection.protocol_default(),
     );
 
-    let outcome = read_bytes_via_session(
-        event_rx,
+    let outcome = read_bytes_from_ring(
+        session,
         max_buffered_bytes,
         args.timeout_ms,
         &ct,
@@ -147,10 +149,9 @@ pub async fn read(
         Some(Arc::clone(&connection)),
         rx_framing,
         rx_parser,
+        args.peek,
     )
     .await?;
-
-    session.prune_consumers();
 
     let result = build_read_result(
         outcome,
@@ -168,7 +169,6 @@ pub async fn read(
         log.truncated(result.0.bytes_observed, result.0.bytes_returned);
     }
     if result.0.matched {
-        // Extract pattern info from the result
         if let Some(ref m) = args.r#match {
             log.match_found(&m.pattern, &m.config.mode.to_string());
         }
@@ -178,6 +178,7 @@ pub async fn read(
 
 pub async fn flush(
     connections: &Arc<ConnectionManager>,
+    rx_sessions: &Arc<RxSessionManager>,
     tx_sessions: &Arc<TxSessionManager>,
     args: FlushArgs,
 ) -> Result<Json<FlushResult>, String> {
@@ -196,6 +197,17 @@ pub async fn flush(
                         e,
                     )
                 })?;
+            // Clear the ring and clamp the shared read cursor to live edge.
+            // This discards all unread buffered RX data. To skip past data
+            // without destroying it, use `seek` to `live_edge` instead.
+            if let Some(session) = rx_sessions.get(&args.connection_id).await {
+                session.ring().clear();
+                session.set_read_cursor(session.ring().end_offset());
+                warn!(
+                    "flush(input): ring cleared for {}; all unread RX data discarded",
+                    args.connection_id
+                );
+            }
         }
         FlushTarget::Output => {
             let session = tx_sessions.get_or_create(Arc::clone(&connection)).await;
@@ -234,5 +246,59 @@ pub async fn flush(
         connection_id: args.connection_id,
         name: connection.name().map(str::to_string),
         target: args.target,
+    }))
+}
+
+pub async fn seek(
+    connections: &Arc<ConnectionManager>,
+    rx_sessions: &Arc<RxSessionManager>,
+    args: SeekArgs,
+) -> Result<Json<SeekResult>, String> {
+    debug!("Seek {} to={:?}", args.connection_id, args.to);
+
+    let connection = lookup_connection(connections, &args.connection_id).await?;
+    let session = rx_sessions
+        .get(&args.connection_id)
+        .await
+        .ok_or_else(|| format!("No RX session for {}", args.connection_id))?;
+
+    let ring = session.ring();
+    let start_offset = ring.start_offset();
+    let end_offset = ring.end_offset();
+    let current_cursor = session.read_cursor();
+
+    let requested = format!("{:?}", args.to);
+    let raw_target: i64 = match &args.to {
+        SeekTarget::LiveEdge => end_offset as i64,
+        SeekTarget::BufferStart => start_offset as i64,
+        SeekTarget::Offset { offset } => *offset as i64,
+        SeekTarget::Delta { delta } => current_cursor as i64 + delta,
+    };
+
+    // Clamp into [start_offset, end_offset].
+    let clamped = if raw_target < start_offset as i64 {
+        start_offset
+    } else if raw_target > end_offset as i64 {
+        end_offset
+    } else {
+        raw_target as u64
+    };
+
+    session.set_read_cursor(clamped);
+    let buffered_remaining = end_offset.saturating_sub(clamped);
+
+    info!(
+        "Seek {}: requested={} clamped={} range=[{}-{}]",
+        args.connection_id, requested, clamped, start_offset, end_offset
+    );
+
+    Ok(Json(SeekResult {
+        connection_id: args.connection_id,
+        name: connection.name().map(str::to_string),
+        cursor: clamped,
+        requested,
+        start_offset,
+        end_offset,
+        buffered_remaining,
     }))
 }

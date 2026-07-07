@@ -11,9 +11,10 @@ use tracing::error;
 use tokio::sync::mpsc;
 
 use crate::codec::{self, Encoding};
+use crate::match_config::MatchResult;
 use crate::match_config::{shape_match_context, validate_match_request, MatchRequest, Matcher};
 use crate::rx_metadata::RxStopMetadata;
-use crate::rx_session::RxEvent;
+use crate::rx_session::{RxEvent, RxSession};
 use crate::serial::{ConnectionConfig, ConnectionManager, SerialConnection};
 use crate::stop_controller::{RxStopController, RxStopDecision};
 use crate::tools::rx_consume::{
@@ -257,6 +258,14 @@ pub struct ReadOutcome {
     /// `stop_reason: framing_error`, else `None`. Surfaced as
     /// `ReadResult.error` by `build_read_result`.
     pub error: Option<String>,
+    /// Absolute stream offset where this read's data starts.
+    pub from_offset: Option<u64>,
+    /// Cursor value after this read: `from_offset + bytes.len()`.
+    pub next_offset: Option<u64>,
+    /// Bytes lost to ring wrap since the cursor's original position.
+    pub bytes_lost: u64,
+    /// Unread bytes remaining in the ring after this read.
+    pub buffered_remaining: u64,
 }
 
 /// `read`'s frame sink: collects every frame and records the first match so the
@@ -357,6 +366,10 @@ pub async fn read_bytes_via_session(
             frames,
             frames_dropped: fdropped,
             error,
+            from_offset: None,
+            next_offset: None,
+            bytes_lost: 0,
+            buffered_remaining: 0,
         };
         if !outcome.matched || context_amount.is_none() {
             return outcome;
@@ -379,6 +392,10 @@ pub async fn read_bytes_via_session(
             frames: outcome.frames,
             frames_dropped: outcome.frames_dropped,
             error: outcome.error,
+            from_offset: None,
+            next_offset: None,
+            bytes_lost: 0,
+            buffered_remaining: 0,
         }
     };
 
@@ -735,6 +752,689 @@ pub async fn read_bytes_via_session(
 pub(crate) use crate::util::find_subsequence as find_subslice;
 
 // ------------------------------------------------------------------
+// Ring-based read (Phase 1.3)
+// ------------------------------------------------------------------
+
+/// Drive a `read` from the ring buffer, with cat semantics: buffered-but-
+/// unread bytes are returned immediately. Pattern matching checks history
+/// first, then waits for new bytes. Peek never advances the cursor.
+#[allow(clippy::too_many_arguments)]
+pub async fn read_bytes_from_ring(
+    session: Arc<RxSession>,
+    max_bytes: usize,
+    timeout_ms: Option<u64>,
+    ct: &tokio_util::sync::CancellationToken,
+    _progress_token: Option<ProgressToken>,
+    _peer: Option<&Peer<RoleServer>>,
+    mut matcher: Option<Matcher>,
+    no_new_rx_timeout_ms: Option<u64>,
+    conn: Option<Arc<SerialConnection>>,
+    framing: Option<crate::framing::RxFramingConfig>,
+    parser: Option<crate::framing::ParserConfig>,
+    peek: bool,
+) -> Result<ReadOutcome, String> {
+    let effective_timeout_ms = timeout_ms.unwrap_or(DEFAULT_READ_TIMEOUT_MS);
+    let read_start = Instant::now();
+    let ring = session.ring();
+    let cursor = session.read_cursor();
+
+    let initial_slice = ring.read_from(cursor, max_bytes);
+
+    let mut ctrl = RxStopController::new(read_start, timeout_ms, max_bytes, no_new_rx_timeout_ms);
+
+    let context_amount = matcher.as_ref().and_then(|m| m.context_amount());
+    let needle_len = matcher.as_ref().and_then(|m| m.needle_len());
+
+    // Frame decoder state.
+    let max_frames = framing.as_ref().and_then(|f| f.max_frames);
+    let mut decoder: Option<crate::framing::FrameDecoder> = match framing.as_ref() {
+        Some(cfg) => Some(crate::framing::FrameDecoder::new(cfg, parser.as_ref())?),
+        None => None,
+    };
+    let mut collected_frames: Vec<crate::framing::Frame> = Vec::new();
+    let mut frames_seen: usize = 0;
+    let mut frames_dropped: usize = 0;
+
+    // We track how many raw bytes we consumed from the ring (for cursor advancement)
+    // and how many we return in the result.
+    let mut consumed_offset: u64 = 0; // raw bytes consumed from ring cursor
+    let mut returned_bytes: Vec<u8> = Vec::with_capacity(max_bytes);
+
+    // Helper: build the ReadOutcome from current state.
+    // Advances cursor unless `peek` is true.
+    let make_read_outcome = |returned_bytes: Vec<u8>,
+                             consumed_offset: u64,
+                             _ctrl: &RxStopController,
+                             elapsed_ms: u64,
+                             meta: RxStopMetadata,
+                             matched: bool,
+                             match_index: Option<usize>,
+                             match_frame_index: Option<usize>,
+                             frames: Vec<crate::framing::Frame>,
+                             frames_dropped: usize,
+                             error: Option<String>,
+                             ring: &crate::rx_ring::RxRing,
+                             cursor: u64,
+                             peek: bool|
+     -> ReadOutcome {
+        let start_off = ring.start_offset();
+        let end_off = ring.end_offset();
+        let clamped_from = cursor.max(start_off).min(end_off);
+        let bytes_lost = start_off.saturating_sub(cursor);
+        let used = consumed_offset.min(max_bytes as u64);
+        let next_off = if peek {
+            clamped_from
+        } else {
+            clamped_from + used
+        };
+        let from_off = if returned_bytes.is_empty() && consumed_offset == 0 {
+            None
+        } else {
+            Some(clamped_from)
+        };
+        let next_off_out = if returned_bytes.is_empty() && consumed_offset == 0 {
+            None
+        } else {
+            Some(next_off)
+        };
+        let buffered_remaining = end_off.saturating_sub(next_off);
+        ReadOutcome {
+            bytes: returned_bytes,
+            elapsed_ms,
+            meta,
+            matched,
+            match_index,
+            match_frame_index,
+            frames,
+            frames_dropped,
+            error,
+            from_offset: from_off,
+            next_offset: next_off_out,
+            bytes_lost,
+            buffered_remaining,
+        }
+    };
+
+    // Check if we have immediate cat-path data (no match, bytes available).
+    let has_immediate_data = !initial_slice.bytes.is_empty() && matcher.is_none();
+
+    if has_immediate_data && decoder.is_none() {
+        // Cat path: return buffered bytes immediately.
+        let take = initial_slice.bytes.len().min(max_bytes);
+        let data: Vec<u8> = initial_slice.bytes[..take].to_vec();
+        let consumed = data.len() as u64;
+        let meta = RxStopMetadata::drained(cursor + consumed, consumed as usize, consumed as usize);
+        if !peek {
+            session.set_read_cursor(
+                initial_slice
+                    .from_offset
+                    .wrapping_add(consumed)
+                    .min(ring.end_offset()),
+            );
+        }
+        return Ok(make_read_outcome(
+            data,
+            consumed,
+            &ctrl,
+            read_start.elapsed().as_millis() as u64,
+            meta,
+            false,
+            None,
+            None,
+            Vec::new(),
+            0,
+            None,
+            ring,
+            cursor,
+            peek,
+        ));
+    }
+
+    // Match-check history first if a matcher is present.
+    if matcher.is_some() && !initial_slice.bytes.is_empty() {
+        let take = initial_slice.bytes.len().min(max_bytes);
+        let hist = &initial_slice.bytes[..take];
+        let match_result = matcher.as_mut().map(|m| m.push(hist));
+        if let Some(MatchResult::Found(idx)) = match_result {
+            let match_end = idx + needle_len.unwrap_or(0);
+            let consumed = match_end as u64;
+            let data = hist[..match_end].to_vec();
+            let meta = RxStopMetadata::match_found(consumed as usize, consumed as usize);
+            if !peek {
+                session.set_read_cursor(
+                    initial_slice
+                        .from_offset
+                        .wrapping_add(consumed)
+                        .min(ring.end_offset()),
+                );
+            }
+            // Handle context shaping
+            if let Some(context) = context_amount {
+                let shaped = shape_match_context(hist, idx, needle_len.unwrap_or(0), Some(context));
+                let shaped_consumed = shaped.data.len() as u64;
+                return Ok(ReadOutcome {
+                    bytes: shaped.data,
+                    elapsed_ms: read_start.elapsed().as_millis() as u64,
+                    meta: RxStopMetadata::match_found(consumed as usize, shaped_consumed as usize),
+                    matched: true,
+                    match_index: Some(shaped.match_index),
+                    match_frame_index: None,
+                    frames: Vec::new(),
+                    frames_dropped: 0,
+                    error: None,
+                    from_offset: Some(initial_slice.from_offset),
+                    next_offset: Some(if peek {
+                        initial_slice.from_offset
+                    } else {
+                        initial_slice.from_offset + consumed
+                    }),
+                    bytes_lost: initial_slice.bytes_lost,
+                    buffered_remaining: ring.end_offset().saturating_sub(if peek {
+                        initial_slice.from_offset
+                    } else {
+                        initial_slice.from_offset + consumed
+                    }),
+                });
+            }
+            return Ok(make_read_outcome(
+                data,
+                consumed,
+                &ctrl,
+                read_start.elapsed().as_millis() as u64,
+                meta,
+                true,
+                Some(idx),
+                None,
+                Vec::new(),
+                0,
+                None,
+                ring,
+                cursor,
+                peek,
+            ));
+        }
+        // Not found in history — consume what we read from the ring for the result so far.
+        consumed_offset = take as u64;
+        returned_bytes = hist.to_vec();
+        ctrl.notify_data_received();
+        ctrl.push_data(take, take, Some(MatchResult::NoMatch));
+    }
+
+    // Process initial bytes through frame decoder if active.
+    if decoder.is_some() && !initial_slice.bytes.is_empty() {
+        let take = initial_slice.bytes.len().min(max_bytes);
+        let chunk = &initial_slice.bytes[..take];
+        consumed_offset += take as u64;
+        returned_bytes.extend_from_slice(chunk);
+
+        if let Some(ref mut dec) = decoder {
+            let mut sink = ReadFrameSink::new(&mut collected_frames);
+            let outcome = consume_frames(
+                chunk,
+                dec,
+                &mut matcher,
+                max_frames,
+                &mut frames_seen,
+                &mut sink,
+                &mut frames_dropped,
+            )
+            .await;
+            let ReadFrameSink {
+                match_data,
+                match_index,
+                match_frame_index,
+                ..
+            } = sink;
+            if let Some(data) = match_data {
+                let meta = RxStopMetadata::match_found(ctrl.bytes_observed(), returned_bytes.len());
+                if !peek {
+                    session.set_read_cursor(
+                        initial_slice
+                            .from_offset
+                            .wrapping_add(consumed_offset)
+                            .min(ring.end_offset()),
+                    );
+                }
+                return Ok(make_read_outcome(
+                    data,
+                    consumed_offset,
+                    &ctrl,
+                    read_start.elapsed().as_millis() as u64,
+                    meta,
+                    true,
+                    match_index,
+                    match_frame_index,
+                    std::mem::take(&mut collected_frames),
+                    frames_dropped,
+                    None,
+                    ring,
+                    cursor,
+                    peek,
+                ));
+            }
+            if let FrameOutcome::MaxFrames = outcome {
+                let meta = RxStopMetadata::max_frames(ctrl.bytes_observed(), returned_bytes.len());
+                if !peek {
+                    session.set_read_cursor(
+                        initial_slice
+                            .from_offset
+                            .wrapping_add(consumed_offset)
+                            .min(ring.end_offset()),
+                    );
+                }
+                return Ok(make_read_outcome(
+                    returned_bytes,
+                    consumed_offset,
+                    &ctrl,
+                    read_start.elapsed().as_millis() as u64,
+                    meta,
+                    false,
+                    None,
+                    None,
+                    std::mem::take(&mut collected_frames),
+                    frames_dropped,
+                    None,
+                    ring,
+                    cursor,
+                    peek,
+                ));
+            }
+            if let FrameOutcome::DecodeError(e) = outcome {
+                let meta = crate::rx_metadata::RxStopMetadata::framing_error(ctrl.bytes_observed());
+                tracing::error!("RX framing decode error: {e}");
+                let err_text = e.to_string();
+                if !peek {
+                    session.set_read_cursor(
+                        initial_slice
+                            .from_offset
+                            .wrapping_add(consumed_offset)
+                            .min(ring.end_offset()),
+                    );
+                }
+                return Ok(make_read_outcome(
+                    returned_bytes,
+                    consumed_offset,
+                    &ctrl,
+                    read_start.elapsed().as_millis() as u64,
+                    meta,
+                    false,
+                    None,
+                    None,
+                    std::mem::take(&mut collected_frames),
+                    frames_dropped,
+                    Some(err_text),
+                    ring,
+                    cursor,
+                    peek,
+                ));
+            }
+            if let FrameOutcome::SinkStop(reason) = outcome {
+                let meta =
+                    RxStopMetadata::new(reason, ctrl.bytes_observed(), returned_bytes.len(), false);
+                if !peek {
+                    session.set_read_cursor(
+                        initial_slice
+                            .from_offset
+                            .wrapping_add(consumed_offset)
+                            .min(ring.end_offset()),
+                    );
+                }
+                return Ok(make_read_outcome(
+                    returned_bytes,
+                    consumed_offset,
+                    &ctrl,
+                    read_start.elapsed().as_millis() as u64,
+                    meta,
+                    false,
+                    None,
+                    None,
+                    std::mem::take(&mut collected_frames),
+                    frames_dropped,
+                    None,
+                    ring,
+                    cursor,
+                    peek,
+                ));
+            }
+        }
+    }
+
+    // Wait loop: wait for new data, then process.
+    let mut clocked_cursor = initial_slice.next_offset;
+    loop {
+        // Pause timeouts while connection is disconnected/reconnecting.
+        if let Some(ref conn) = conn {
+            match disconnect_state(conn, &mut ctrl) {
+                DisconnectState::Closed => {
+                    let outcome = ctrl.connection_closed();
+                    if !peek {
+                        session.set_read_cursor(
+                            cursor.wrapping_add(consumed_offset).min(ring.end_offset()),
+                        );
+                    }
+                    return Ok(make_read_outcome(
+                        returned_bytes,
+                        consumed_offset,
+                        &ctrl,
+                        read_start.elapsed().as_millis() as u64,
+                        outcome.meta,
+                        outcome.matched,
+                        outcome.match_index,
+                        None,
+                        std::mem::take(&mut collected_frames),
+                        frames_dropped,
+                        None,
+                        ring,
+                        cursor,
+                        peek,
+                    ));
+                }
+                DisconnectState::Reconnecting => {
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                    continue;
+                }
+                DisconnectState::Active => {}
+            }
+        }
+
+        if let RxStopDecision::Stop(outcome) = ctrl.check_timeout() {
+            if !peek {
+                session
+                    .set_read_cursor(cursor.wrapping_add(consumed_offset).min(ring.end_offset()));
+            }
+            return Ok(make_read_outcome(
+                returned_bytes,
+                consumed_offset,
+                &ctrl,
+                read_start.elapsed().as_millis() as u64,
+                outcome.meta,
+                outcome.matched,
+                outcome.match_index,
+                None,
+                std::mem::take(&mut collected_frames),
+                frames_dropped,
+                None,
+                ring,
+                cursor,
+                peek,
+            ));
+        }
+        if let RxStopDecision::Stop(outcome) = ctrl.check_silence_timeout() {
+            if !peek {
+                session
+                    .set_read_cursor(cursor.wrapping_add(consumed_offset).min(ring.end_offset()));
+            }
+            return Ok(make_read_outcome(
+                returned_bytes,
+                consumed_offset,
+                &ctrl,
+                read_start.elapsed().as_millis() as u64,
+                outcome.meta,
+                outcome.matched,
+                outcome.match_index,
+                None,
+                std::mem::take(&mut collected_frames),
+                frames_dropped,
+                None,
+                ring,
+                cursor,
+                peek,
+            ));
+        }
+
+        // Wait for more data on the ring, or a short poll to check timeouts.
+        let deadline = ctrl
+            .deadline()
+            .unwrap_or_else(|| read_start + Duration::from_millis(effective_timeout_ms));
+        let remaining = deadline
+            .saturating_duration_since(Instant::now())
+            .as_millis() as u64;
+        let poll_ms = remaining.saturating_sub(1).clamp(1, 250); // adaptive: 1-250ms
+        tokio::select! {
+            _ = ct.cancelled() => {
+                let outcome = ctrl.cancelled();
+                if !peek {
+                    session.set_read_cursor(
+                        cursor.wrapping_add(consumed_offset).min(ring.end_offset()),
+                    );
+                }
+                return Ok(make_read_outcome(
+                    returned_bytes, consumed_offset, &ctrl,
+                    read_start.elapsed().as_millis() as u64,
+                    outcome.meta, outcome.matched, outcome.match_index, None,
+                    std::mem::take(&mut collected_frames),
+                    frames_dropped, None, ring, cursor, peek,
+                ));
+            }
+            _ = ring.wait_for_data(clocked_cursor) => {}
+            _ = tokio::time::sleep(std::time::Duration::from_millis(poll_ms)) => {
+                // Poll wakeup: loop back to check timeouts and stop conditions.
+                continue;
+            }
+        }
+
+        // New data arrived — read from ring at the clocked cursor.
+        let slice = ring.read_from(
+            clocked_cursor,
+            max_bytes.saturating_sub(returned_bytes.len()),
+        );
+        if slice.bytes.is_empty() {
+            continue; // spurious wakeup
+        }
+
+        ctrl.notify_data_received();
+        let take = slice
+            .bytes
+            .len()
+            .min(max_bytes.saturating_sub(returned_bytes.len()));
+        let chunk = &slice.bytes[..take];
+        returned_bytes.extend_from_slice(chunk);
+        consumed_offset = consumed_offset
+            .wrapping_add(take as u64)
+            .min(max_bytes as u64);
+
+        // Feed to frame decoder if active.
+        if let Some(ref mut dec) = decoder {
+            let mut sink = ReadFrameSink::new(&mut collected_frames);
+            let outcome = consume_frames(
+                chunk,
+                dec,
+                &mut matcher,
+                max_frames,
+                &mut frames_seen,
+                &mut sink,
+                &mut frames_dropped,
+            )
+            .await;
+            let ReadFrameSink {
+                match_data,
+                match_index,
+                match_frame_index,
+                ..
+            } = sink;
+            if let Some(data) = match_data {
+                let meta = RxStopMetadata::match_found(ctrl.bytes_observed(), returned_bytes.len());
+                if !peek {
+                    session.set_read_cursor(
+                        slice
+                            .from_offset
+                            .wrapping_add(take as u64)
+                            .min(ring.end_offset()),
+                    );
+                }
+                return Ok(make_read_outcome(
+                    data,
+                    consumed_offset,
+                    &ctrl,
+                    read_start.elapsed().as_millis() as u64,
+                    meta,
+                    true,
+                    match_index,
+                    match_frame_index,
+                    std::mem::take(&mut collected_frames),
+                    frames_dropped,
+                    None,
+                    ring,
+                    cursor,
+                    peek,
+                ));
+            }
+            if let FrameOutcome::MaxFrames = outcome {
+                let meta = RxStopMetadata::max_frames(ctrl.bytes_observed(), returned_bytes.len());
+                if !peek {
+                    session.set_read_cursor(
+                        slice
+                            .from_offset
+                            .wrapping_add(take as u64)
+                            .min(ring.end_offset()),
+                    );
+                }
+                return Ok(make_read_outcome(
+                    returned_bytes,
+                    consumed_offset,
+                    &ctrl,
+                    read_start.elapsed().as_millis() as u64,
+                    meta,
+                    false,
+                    None,
+                    None,
+                    std::mem::take(&mut collected_frames),
+                    frames_dropped,
+                    None,
+                    ring,
+                    cursor,
+                    peek,
+                ));
+            }
+            if let FrameOutcome::DecodeError(e) = outcome {
+                let meta = crate::rx_metadata::RxStopMetadata::framing_error(ctrl.bytes_observed());
+                tracing::error!("RX framing decode error: {e}");
+                let err_text = e.to_string();
+                if !peek {
+                    session.set_read_cursor(
+                        slice
+                            .from_offset
+                            .wrapping_add(take as u64)
+                            .min(ring.end_offset()),
+                    );
+                }
+                return Ok(make_read_outcome(
+                    returned_bytes,
+                    consumed_offset,
+                    &ctrl,
+                    read_start.elapsed().as_millis() as u64,
+                    meta,
+                    false,
+                    None,
+                    None,
+                    std::mem::take(&mut collected_frames),
+                    frames_dropped,
+                    Some(err_text),
+                    ring,
+                    cursor,
+                    peek,
+                ));
+            }
+            if let FrameOutcome::SinkStop(reason) = outcome {
+                let meta =
+                    RxStopMetadata::new(reason, ctrl.bytes_observed(), returned_bytes.len(), false);
+                if !peek {
+                    session.set_read_cursor(
+                        slice
+                            .from_offset
+                            .wrapping_add(take as u64)
+                            .min(ring.end_offset()),
+                    );
+                }
+                return Ok(make_read_outcome(
+                    returned_bytes,
+                    consumed_offset,
+                    &ctrl,
+                    read_start.elapsed().as_millis() as u64,
+                    meta,
+                    false,
+                    None,
+                    None,
+                    std::mem::take(&mut collected_frames),
+                    frames_dropped,
+                    None,
+                    ring,
+                    cursor,
+                    peek,
+                ));
+            }
+        }
+
+        // Raw matcher path (no framing).
+        if decoder.is_none() {
+            let match_result = matcher.as_mut().map(|m| m.push(chunk));
+            let buffered_len = returned_bytes.len();
+            let data_count = chunk.len();
+            if let RxStopDecision::Stop(outcome) =
+                ctrl.push_data(data_count, buffered_len, match_result)
+            {
+                if !peek {
+                    session.set_read_cursor(
+                        slice
+                            .from_offset
+                            .wrapping_add(take as u64)
+                            .min(ring.end_offset()),
+                    );
+                }
+                return Ok(make_read_outcome(
+                    returned_bytes,
+                    consumed_offset,
+                    &ctrl,
+                    read_start.elapsed().as_millis() as u64,
+                    outcome.meta,
+                    outcome.matched,
+                    outcome.match_index,
+                    None,
+                    std::mem::take(&mut collected_frames),
+                    frames_dropped,
+                    None,
+                    ring,
+                    cursor,
+                    peek,
+                ));
+            }
+        }
+
+        // Update clocked cursor for next iteration.
+        clocked_cursor = slice.next_offset;
+
+        // max_bytes reached -> drained
+        if returned_bytes.len() >= max_bytes {
+            let meta = RxStopMetadata::drained(
+                cursor.wrapping_add(consumed_offset),
+                returned_bytes.len(),
+                returned_bytes.len(),
+            );
+            if !peek {
+                session
+                    .set_read_cursor(cursor.wrapping_add(consumed_offset).min(ring.end_offset()));
+            }
+            return Ok(make_read_outcome(
+                returned_bytes,
+                consumed_offset,
+                &ctrl,
+                read_start.elapsed().as_millis() as u64,
+                meta,
+                false,
+                None,
+                None,
+                std::mem::take(&mut collected_frames),
+                frames_dropped,
+                None,
+                ring,
+                cursor,
+                peek,
+            ));
+        }
+    }
+}
+
+// ------------------------------------------------------------------
 // Result builders
 // ------------------------------------------------------------------
 
@@ -831,6 +1531,10 @@ pub fn build_read_result(
         frames,
         frames_dropped,
         error: outcome.error,
+        from_offset: outcome.from_offset,
+        next_offset: outcome.next_offset,
+        bytes_lost: outcome.bytes_lost,
+        buffered_remaining: outcome.buffered_remaining,
     }))
 }
 
@@ -859,6 +1563,7 @@ pub fn parse_open_args(args: OpenArgs) -> Result<ConnectionConfig, String> {
         rx_framing: args.rx_framing,
         rx_parser: args.rx_parser,
         protocol: args.protocol,
+        rx_buffer_size: args.rx_buffer_size,
     })
 }
 
@@ -895,6 +1600,7 @@ mod tests {
             rx_framing: None,
             rx_parser: None,
             protocol: None,
+            rx_buffer_size: crate::limits::DEFAULT_RX_BUFFER_SIZE,
         };
         let config = parse_open_args(args).unwrap();
         assert_eq!(config.port, "/dev/ttyUSB0");
@@ -919,6 +1625,7 @@ mod tests {
             rx_framing: None,
             rx_parser: None,
             protocol: None,
+            rx_buffer_size: crate::limits::DEFAULT_RX_BUFFER_SIZE,
         };
         let err = parse_open_args(args).unwrap_err();
         assert!(err.contains("data_bits"));
@@ -950,6 +1657,10 @@ mod tests {
             frames: vec![],
             frames_dropped: 0,
             error: None,
+            from_offset: None,
+            next_offset: None,
+            bytes_lost: 0,
+            buffered_remaining: 0,
         };
         let Json(result) =
             build_read_result(outcome, "abc".into(), None, Encoding::Utf8, Some(250), None)
@@ -972,6 +1683,10 @@ mod tests {
             frames: vec![],
             frames_dropped: 0,
             error: None,
+            from_offset: None,
+            next_offset: None,
+            bytes_lost: 0,
+            buffered_remaining: 0,
         };
         let Json(result) =
             build_read_result(outcome, "abc".into(), None, Encoding::Hex, None, None)
@@ -992,6 +1707,10 @@ mod tests {
             frames: vec![],
             frames_dropped: 0,
             error: None,
+            from_offset: None,
+            next_offset: None,
+            bytes_lost: 0,
+            buffered_remaining: 0,
         };
         let Json(result) =
             build_read_result(outcome, "abc".into(), None, Encoding::Hex, Some(500), None)
@@ -1020,6 +1739,10 @@ mod tests {
             frames: vec![],
             frames_dropped: 0,
             error: None,
+            from_offset: None,
+            next_offset: None,
+            bytes_lost: 0,
+            buffered_remaining: 0,
         };
         let Json(result) = build_read_result(
             outcome,
@@ -1045,6 +1768,10 @@ mod tests {
             frames: vec![],
             frames_dropped: 0,
             error: None,
+            from_offset: None,
+            next_offset: None,
+            bytes_lost: 0,
+            buffered_remaining: 0,
         };
         let Json(result) = build_read_result(
             outcome,

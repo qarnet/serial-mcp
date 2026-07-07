@@ -42,6 +42,8 @@ pub enum RxStopReason {
     /// A runtime frame decode error occurred (e.g. SLIP malformed escape
     /// sequence).
     FramingError,
+    /// The read drained all buffered bytes immediately (cat semantics).
+    Drained,
 }
 
 impl fmt::Display for RxStopReason {
@@ -186,6 +188,29 @@ impl RxStopMetadata {
             truncated: false,
             bytes_observed,
             bytes_returned: 0,
+        }
+    }
+
+    pub fn drained(_end_offset: u64, _bytes_observed: usize, bytes_returned: usize) -> Self {
+        Self {
+            stop_reason: RxStopReason::Drained,
+            truncated: false,
+            bytes_observed: bytes_returned,
+            bytes_returned,
+        }
+    }
+
+    pub fn new(
+        reason: RxStopReason,
+        bytes_observed: usize,
+        bytes_returned: usize,
+        truncated: bool,
+    ) -> Self {
+        Self {
+            stop_reason: reason,
+            truncated,
+            bytes_observed,
+            bytes_returned,
         }
     }
 

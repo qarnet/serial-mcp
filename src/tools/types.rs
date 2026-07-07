@@ -46,8 +46,18 @@ pub struct OpenArgs {
     /// Default protocol preset. Expands to fill framing/parser gaps.
     #[serde(default)]
     pub protocol: Option<crate::framing::ProtocolPreset>,
+    /// Per-connection RX ring buffer size in bytes. The ring retains
+    /// this much RX history between reads/subscribes. Default 256 KiB
+    /// (~23s of 115200-baud traffic). Open-time only; reopen to resize.
+    /// Validated against the buffer budget pool and a 16 MiB ceiling.
+    #[serde(default = "default_rx_buffer_size")]
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub rx_buffer_size: usize,
 }
 
+fn default_rx_buffer_size() -> usize {
+    crate::limits::DEFAULT_RX_BUFFER_SIZE
+}
 fn default_log_capacity() -> usize {
     1024
 }
@@ -120,6 +130,11 @@ pub struct ReadArgs {
     /// the preset's corresponding component.
     #[serde(default)]
     pub protocol: Option<crate::framing::ProtocolPreset>,
+    /// When true, return bytes without advancing the cursor. A peek may
+    /// still wait via timeout_ms for a match; it just doesn't consume.
+    /// A repeated peek finds the same match again.
+    #[serde(default)]
+    pub peek: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -127,6 +142,48 @@ pub struct FlushArgs {
     pub connection_id: String,
     #[serde(default = "default_flush_target")]
     pub target: FlushTarget,
+}
+
+/// Move the shared RX read cursor non-destructively.
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct SeekArgs {
+    pub connection_id: String,
+    pub to: SeekTarget,
+}
+
+/// Target position for [`SeekArgs`].
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SeekTarget {
+    /// Skip past all buffered data (cursor = end_offset).
+    LiveEdge,
+    /// Re-read from the oldest retained byte (cursor = start_offset).
+    BufferStart,
+    /// Seek to an absolute stream offset.
+    Offset {
+        #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+        offset: u64,
+    },
+    /// Seek relative to current cursor (negative = re-read).
+    Delta { delta: i64 },
+}
+
+/// Result of a seek operation.
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct SeekResult {
+    pub connection_id: String,
+    pub name: Option<String>,
+    /// The clamped new cursor position.
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub cursor: u64,
+    /// Requested target before clamping (for diagnostics).
+    pub requested: String,
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub start_offset: u64,
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub end_offset: u64,
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub buffered_remaining: u64,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -234,6 +291,11 @@ pub struct OpenProfileArgs {
     /// Whether logging is enabled. Default: true (ignored when capacity is 0).
     #[serde(default = "default_true")]
     pub log_enabled: bool,
+    /// Per-connection RX ring buffer size in bytes. Overrides the profile's
+    /// `rx_buffer_size` default. Default: 256 KiB.
+    #[serde(default = "default_rx_buffer_size")]
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub rx_buffer_size: usize,
 }
 
 // ---- Response structs ------------------------------------------------------
@@ -354,6 +416,30 @@ pub struct ReadResult {
     /// subscribe's final-notification `error` field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Absolute stream offset where this read's data starts (clamped to
+    /// ring start_offset if the cursor had fallen behind). `null` only
+    /// when the read produced no data and no cursor was consumed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "crate::schema_helpers::option_uint_schema")]
+    pub from_offset: Option<u64>,
+    /// Absolute stream offset of the cursor after this read (where the next
+    /// read starts). Equal to `from_offset + bytes_returned` for a consuming
+    /// read; equal to `from_offset` for a peek.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "crate::schema_helpers::option_uint_schema")]
+    pub next_offset: Option<u64>,
+    /// Bytes lost to ring wrap since the cursor's original position. Non-zero
+    /// means the cursor had fallen behind `start_offset` and the read
+    /// started at `start_offset` instead. Always 0 for a healthy read.
+    #[serde(default)]
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub bytes_lost: u64,
+    /// Unread bytes remaining in the ring after this read (between
+    /// `next_offset` and `end_offset`). 0 when the read drained to the live
+    /// edge.
+    #[serde(default)]
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub buffered_remaining: u64,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -444,6 +530,24 @@ pub struct GetStatusResult {
     pub reconnect_attempts: u64,
     /// Last fatal error message, or null.
     pub last_error: Option<String>,
+    /// RX ring buffer size in bytes.
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub rx_buffer_size: usize,
+    /// Oldest retained byte stream offset (ring start).
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub rx_start_offset: u64,
+    /// Total bytes appended since open (ring end, monotonic).
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub rx_end_offset: u64,
+    /// Shared read cursor position (where the next read starts).
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub rx_cursor: u64,
+    /// Unread bytes between cursor and end_offset.
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub rx_buffered_unread: u64,
+    /// Lifetime total of bytes lost to ring wrap.
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub rx_bytes_lost_total: u64,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]

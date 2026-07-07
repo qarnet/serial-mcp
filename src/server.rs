@@ -280,7 +280,7 @@ impl SerialHandler {
     }
 
     #[tool(
-        description = "Read data from a serial port connection. Returns only future bytes — data received after the call starts, not previously buffered data. With no options, reads available bytes with timeout and burst-settle. With match, accumulates until a pattern is found. With rx_framing, splits the byte stream into structured frames (line, delimiter, length-prefixed, SLIP, COBS, start/end marker). With rx_parser, interprets frame content (AT commands, JSON lines, shell prompts). rx_parser is a sibling to rx_framing. Use protocol to select a built-in preset (at_command, slip, json_lines, cobs, ndjson, nmea0183, modbus_ascii) that fills in rx_framing and rx_parser defaults; explicit fields win. Match and rx_framing can be combined. With validate: true, checksum-mismatched frames are dropped and counted in frames_dropped instead of aborting the read. A malformed SLIP escape sequence or COBS code byte stops with stop_reason=framing_error, returning partial results. Set no_new_rx_timeout_ms to stop when no new bytes arrive within the specified silence window.",
+        description = "Read data from a serial port connection. Returns buffered-but-unread bytes from the connection's cursor (like `cat`); consuming by default. With `peek: true`, returns without advancing the cursor. Pattern matching checks buffered history first, then waits for new bytes. With rx_framing, splits the byte stream into structured frames (line, delimiter, length-prefixed, SLIP, COBS, start/end marker). With rx_parser, interprets frame content (AT commands, JSON lines, shell prompts). rx_parser is a sibling to rx_framing. Use protocol to select a built-in preset (at_command, slip, json_lines, cobs, ndjson, nmea0183, modbus_ascii) that fills in rx_framing and rx_parser defaults; explicit fields win. Match and rx_framing can be combined. With validate: true, checksum-mismatched frames are dropped and counted in frames_dropped instead of aborting the read. A malformed SLIP escape sequence or COBS code byte stops with stop_reason=framing_error, returning partial results with an error field and hex fallback. Set no_new_rx_timeout_ms to stop when no new bytes arrive within the specified silence window. Results carry from_offset/next_offset/bytes_lost/buffered_remaining.",
         title = "Read Serial Data",
         annotations(read_only_hint = true, open_world_hint = false),
         execution(task_support = "optional")
@@ -305,7 +305,7 @@ impl SerialHandler {
     }
 
     #[tool(
-        description = "Discard buffered serial data. target=input clears OS read buffer (data the device sent that the app hasn't consumed); target=output clears the OS write queue; target=both clears both.",
+        description = "Discard buffered serial data. target=input clears OS read buffer and discards all unread buffered RX data; to skip past buffered data without destroying it, use `seek` to `live_edge` instead. target=output clears the OS write queue. target=both clears both.",
         title = "Flush Serial Buffers",
         annotations(destructive_hint = true, open_world_hint = false)
     )]
@@ -313,7 +313,29 @@ impl SerialHandler {
         &self,
         Parameters(args): Parameters<FlushArgs>,
     ) -> Result<Json<FlushResult>, String> {
-        io_ops::flush(&self.connections, &self.tx_sessions, args).await
+        io_ops::flush(
+            &self.connections,
+            &self.rx_sessions,
+            &self.tx_sessions,
+            args,
+        )
+        .await
+    }
+
+    #[tool(
+        description = "Move the shared RX read cursor. Non-destructive: `live_edge` skips past buffered data without discarding it (unlike `flush`); `buffer_start` re-reads everything retained; `offset` seeks to an absolute stream offset from a previous result; `delta` seeks relatively (negative = re-read). Out-of-range targets clamp into [start_offset, end_offset] and report the clamp. Returns the new cursor plus ring bounds, so it doubles as a 'what's in the buffer' query.",
+        title = "Seek RX Cursor",
+        annotations(
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn seek(
+        &self,
+        Parameters(args): Parameters<SeekArgs>,
+    ) -> Result<Json<SeekResult>, String> {
+        io_ops::seek(&self.connections, &self.rx_sessions, args).await
     }
 
     #[tool(
@@ -413,7 +435,7 @@ impl SerialHandler {
     }
 
     #[tool(
-        description = "Get the current status and configuration of an open serial connection",
+        description = "Get the current status and configuration of an open serial connection, including RX ring buffer state (size, offsets, cursor, buffered unread bytes, wrap loss).",
         title = "Get Connection Status",
         annotations(read_only_hint = true, open_world_hint = false)
     )]
@@ -421,7 +443,7 @@ impl SerialHandler {
         &self,
         Parameters(args): Parameters<GetStatusArgs>,
     ) -> Result<Json<GetStatusResult>, String> {
-        port_ops::get_status(&self.connections, args).await
+        port_ops::get_status(&self.connections, &self.rx_sessions, args).await
     }
 
     #[tool(

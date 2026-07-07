@@ -23,6 +23,8 @@
 //! locks. `wait_for_data` drops the internal `Mutex` before awaiting
 //! `Notify::notified()`, avoiding `clippy::await_holding_lock`.
 
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 use std::sync::Mutex;
 
 use tokio::sync::Notify;
@@ -42,6 +44,8 @@ pub(crate) struct RxRing {
     inner: Mutex<Inner>,
     /// Wakes readers blocked in `wait_for_data` when new data arrives.
     notify: Notify,
+    /// Lifetime total of bytes dropped due to ring wrap. Monotonic.
+    bytes_lost_total: AtomicU64,
 }
 
 /// A slice of data read from the ring at a specific offset range.
@@ -94,6 +98,7 @@ impl RxRing {
                 end_offset: 0,
             }),
             notify: Notify::new(),
+            bytes_lost_total: AtomicU64::new(0),
         }
     }
 
@@ -110,6 +115,11 @@ impl RxRing {
     /// Return the current end offset (total bytes appended, monotonic).
     pub fn end_offset(&self) -> u64 {
         self.inner.lock().expect("ring mutex poisoned").end_offset
+    }
+
+    /// Return the lifetime total of bytes lost to ring wrap.
+    pub fn bytes_lost_total(&self) -> u64 {
+        self.bytes_lost_total.load(Ordering::Relaxed)
     }
 }
 
@@ -140,6 +150,12 @@ impl RxRing {
 
         // The new start offset: drop oldest bytes if total retained exceeds capacity.
         let new_start = std::cmp::max(inner.start_offset, new_end.saturating_sub(cap));
+
+        // Track bytes lost to ring wrap (old start vs new start).
+        let lost = new_start.saturating_sub(inner.start_offset);
+        if lost > 0 {
+            self.bytes_lost_total.fetch_add(lost, Ordering::Relaxed);
+        }
 
         // Which input bytes survive?
         // Surviving bytes are those at logical positions [new_start, new_end).
