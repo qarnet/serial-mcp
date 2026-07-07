@@ -122,13 +122,11 @@ async fn emulator_task(mut master: File) {
 // Full agent workflow test
 // ------------------------------------------------------------------
 
-// Ignored until Phase 1.3 (read rewrites onto the RxRing) + Phase 2
-// (subscribe rewrites onto the RxRing) land. The always-on RX pump
-// (Phase 1.2) drains the kernel RX buffer continuously, so this test's
-// write-then-subscribe / write-then-read ordering races — the
-// emulator's response is in the ring (not the kernel buffer) by the
+// Ignored: the read stages (3-6, 8, 10-13) now work with ring-based read
+// semantics.  The subscribe stages (2, 7, 9) still race because subscribe
+// uses the fanout path — needs Phase 2 (subscribe rewrite onto the ring).
 #[tokio::test]
-#[ignore = "needs Phase 2 (subscribe rewrite onto the ring) — read now works, subscribe doesn't"]
+#[ignore = "subscribe stages need Phase 2 (fanout path) — read stages work under ring"]
 async fn protocol_emulator_workflow() {
     // ---- Stage 0: Open PTY, spawn emulator, start server, open port ----
     let pty = PtyPair::open().expect("openpty");

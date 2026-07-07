@@ -80,7 +80,6 @@ fn get_text(result: &rmcp::model::CallToolResult) -> String {
 }
 
 #[tokio::test]
-#[ignore = "needs Phase 2 (subscribe rewrite onto the ring) — read now works, subscribe doesn't"]
 async fn protocol_emulator_binary_workflow() {
     // ---- Stage 0: setup ----
     let pty = PtyPair::open().expect("openpty");
