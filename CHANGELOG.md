@@ -57,6 +57,15 @@
   empty body fields. `validate: true` behavior is unchanged (Err → drop+count
   in the decoder).
 
+**Fixed — `--version` argv scan strictness:**
+- `serial-mcp --bind --version` no longer prints the version; `--version` is
+  now correctly treated as the value of `--bind`, and the bind parse fails
+  with an argument error. The version-flag scan is now value-position-aware
+  (for `--transport`, `--allowlist`, `--bind`, `--max-program-buffered-bytes`,
+  `--max-tool-buffered-bytes`) and stops at a `--` separator. The `--opt=value`
+  form does not consume the next token, so `--bind=0.0.0.0:8000 --version`
+  still prints the version.
+
 **Breaking (pre-1.0) — decode-error semantics:**
 - `FrameDecoder::push` no longer drops frames decoded before a stream-fatal
   error; the frames are returned alongside the error via `PushOutcome`.

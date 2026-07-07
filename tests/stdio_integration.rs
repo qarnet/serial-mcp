@@ -280,3 +280,55 @@ fn stdio_version_flag_takes_precedence_over_other_args() {
         "should print version and ignore trailing args, got: {stdout:?}"
     );
 }
+
+#[test]
+fn stdio_version_flag_not_consumed_as_option_value() {
+    // `--bind --version`: `--version` is the value of `--bind`, not a
+    // version request. The bind parse fails on the bogus value and the
+    // process exits non-zero — it must NOT print the version string.
+    let (out, stdout) = run_bin(&["--bind", "--version"]);
+    assert!(
+        !out.status.success(),
+        "expected non-zero exit (argument error), got {:?}",
+        out.status
+    );
+    assert!(
+        !stdout.contains("serial-mcp"),
+        "must not print version when --version is the value of --bind, got: {stdout:?}"
+    );
+}
+
+#[test]
+fn stdio_version_flag_not_consumed_as_equal_form_option_value() {
+    // `--bind=--version`: value embedded via `=`, so the next token IS a
+    // flag position. `--version` after it should still print version.
+    let (out, stdout) = run_bin(&["--bind=0.0.0.0:8000", "--version"]);
+    assert!(
+        out.status.success(),
+        "expected exit 0, got {:?}",
+        out.status
+    );
+    assert!(
+        regex::Regex::new(r"^serial-mcp \d+\.\d+\.\d+ \(.+, .+\)\n$")
+            .unwrap()
+            .is_match(&stdout),
+        "should print version (--bind=value does not consume next token), got: {stdout:?}"
+    );
+}
+
+#[test]
+fn stdio_version_flag_not_recognized_after_double_dash() {
+    // `-- --version`: everything after `--` is positional, not a flag.
+    // The process should error on the unexpected positional `--version`,
+    // not print the version.
+    let (out, stdout) = run_bin(&["--", "--version"]);
+    assert!(
+        !out.status.success(),
+        "expected non-zero exit (unexpected positional), got {:?}",
+        out.status
+    );
+    assert!(
+        !stdout.contains("serial-mcp"),
+        "must not print version for `-- --version`, got: {stdout:?}"
+    );
+}
