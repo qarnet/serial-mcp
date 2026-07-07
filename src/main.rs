@@ -45,8 +45,12 @@ fn print_version_and_exit() {
 
 /// Options that consume the following token as their value (so a
 /// `--version` token immediately after one is that option's value, not a
-/// version request). Must stay in sync with the `opt_value_from_str` calls
-/// in `parse_args`.
+/// version request). **CROSS-REFERENCE:** must stay in sync with the
+/// `opt_value_from_str("--<opt>")` calls in `parse_args` below — adding a
+/// value-taking option there without adding it here lets `--version`
+/// detection silently drift (a `--<new-opt> --version` would misfire as a
+/// version request). Removing one here without removing the call has the
+/// inverse effect.
 const VALUE_TAKING_OPTIONS: &[&str] = &[
     "--transport",
     "--allowlist",
@@ -141,6 +145,10 @@ Examples:
         std::process::exit(0);
     }
 
+    // Value-taking options parsed below. CROSS-REFERENCE: every
+    // `opt_value_from_str("--<opt>")` call here MUST have a matching entry
+    // in `VALUE_TAKING_OPTIONS` above, or `argv_has_version_flag` will
+    // misclassify a `--<opt> --version` invocation.
     let transport_str: Option<String> = pargs.opt_value_from_str("--transport")?;
     let transport = match transport_str.as_deref() {
         Some("http") => Transport::Http,

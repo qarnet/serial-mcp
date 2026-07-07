@@ -73,7 +73,12 @@
   Modbus ASCII `modbus_ascii` preset) are now per-frame drop-and-count
   (counted in `frames_dropped`) instead of aborting the whole read/subscribe.
   `read` now returns partial results with `stop_reason: framing_error` on a
-  fatal SLIP/COBS decode error, matching `subscribe`. Previously `read`
+  fatal SLIP/COBS decode error, matching `subscribe`. The result carries a
+  new `error: Option<String>` field with the `FrameDecodeError` text (parity
+  with subscribe's final-notification `error` field). When the requested
+  encoding can't represent the raw bytes (binary SLIP/COBS under `utf8`),
+  the `data` field falls back to hex and `encoding` is set to `"hex"` so the
+  partial bytes and the framing diagnostic both survive. Previously `read`
   returned a bare tool error and discarded all collected frames.
 
 ---

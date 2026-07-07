@@ -64,26 +64,35 @@ cargo test --test native_sim_connection_lifecycle -- --ignored --test-threads=1
 ## Frame pipeline (TX + RX framing, parsers, presets, profile defaults)
 
 - `src/framing.rs` owns both RX and TX framing. RX: `RxFramingConfig` +
-  `RxFramingMode` (line/delimiter/length_prefixed/start_end/slip), `FrameDecoder`
-  (stateful, byte-driven), `FrameDecodeError`, `ParserConfig`/`ParserType`/
-  `ParsedFrame`. TX: `TxFramingConfig` + `TxFramingMode` (mirrors RX minus
-  `parser`/`max_frames`/`include_terminators`; SLIP; no `auto` line ending).
+  `RxFramingMode` (line/delimiter/length_prefixed/start_end/slip/cobs),
+  `FrameDecoder` (stateful, byte-driven), `FrameDecodeError`,
+  `ParserConfig`/`ParserType`/`ParsedFrame`. TX: `TxFramingConfig` +
+  `TxFramingMode` (mirrors RX minus `parser`/`max_frames`/
+  `include_terminators`; SLIP + COBS; no `auto` line ending; adds `Nmea`
+  for auto-checksum TX).
 - `FrameDecoder::new(&RxFramingConfig, Option<&ParserConfig>)` — 2-arg; parser
   is a sibling, NOT nested in `RxFramingConfig`. `ReadArgs`/`SubscribeArgs` carry
   `rx_framing` + `rx_parser` + `protocol` as siblings. `WriteArgs` carries
   `tx_framing` + `protocol` (no parser).
-- `FrameDecoder::push()` returns `Result<Vec<Frame>, FrameDecodeError>`. Only
-  SLIP can return `Err` (malformed escape). All other decoders always return
-  `Ok`. Runtime decode errors (not construction errors) STOP both read and
-  subscribe — there is NO resume-on-error in the loop (resync state in the
-  decoder is defensive only; the loops stop on first error). This is a
-  deliberate asymmetry exception vs the construction-error asymmetry below.
+- `FrameDecoder::push()` returns `PushOutcome { frames, frames_dropped,
+  error }` — frames decoded before a stream-fatal error are preserved and
+  dispatched to the sink BEFORE the error is surfaced (`consume_frames`
+  dispatches first, returns `FrameOutcome::DecodeError` after). SLIP
+  (malformed escape) **and COBS** (invalid code byte) produce stream-fatal
+  errors; checksum mismatches with `validate: true` (NMEA `*XX`, Modbus LRC)
+  are per-frame drop-and-count (increment `frames_dropped`, `warn!`, decoder
+  continues — does NOT set `error`). Runtime decode errors (not construction
+  errors) STOP both read and subscribe — there is NO resume-on-error in the
+  loop (resync state in the decoder is defensive only; the loops stop on
+  first stream-fatal error). This is a deliberate asymmetry exception vs
+  the construction-error asymmetry below.
 - `LineEnding::Auto` promotes to CR-split mode mid-stream when a bare `\r` is
   confirmed (next non-`\n` byte or stop flush). Per-call state — resets on the
   next read/subscribe. Confirmation timer reuses `no_new_rx_timeout_ms`; the
   decoder is byte-driven (no timer callback).
-- `ProtocolPreset` (currently `AtCommand` only) is a `#[serde(tag = "type")]`
-  enum — JSON shape `{"type": "at_command"}`, NOT a bare string. Expands via
+- `ProtocolPreset` (7 variants: `at_command`, `slip`, `json_lines`, `cobs`,
+  `ndjson`, `nmea0183`, `modbus_ascii`) is a `#[serde(tag = "type")]` enum —
+  JSON shape `{"type": "nmea0183"}`, NOT a bare string. Expands via
   `preset_tx_framing`/`preset_rx_framing`/`preset_rx_parser`.
 - Framing/parser/protocol field precedence is FOUR layers per field: explicit
   call field > call-time `protocol` preset > connection default (from
@@ -92,9 +101,14 @@ cargo test --test native_sim_connection_lifecycle -- --ignored --test-threads=1
   `stream_ops::subscribe`. `ConnectionConfig` + `SerialConnection` store the
   defaults; accessors `*_default()`.
 - `RxStopReason::FramingError` is a runtime decode-error stop reason (SLIP
-  malformed escape). NOT a normal stop (`is_normal_stop` excludes it). read
-  surfaces it as a tool `is_error: true` result; subscribe as a final
-  notification with `stop_reason: "framing_error"` + `error` field.
+  malformed escape, COBS invalid code). NOT a normal stop
+  (`is_normal_stop` excludes it). `read` surfaces it as a normal tool result
+  (`is_error: false`) with `stop_reason: "framing_error"`, an `error` field
+  carrying the `FrameDecodeError` text, and a hex-fallback `data` field when
+  the requested encoding can't represent the raw bytes (binary SLIP/COBS
+  data under utf8 → falls back to hex with `encoding: "hex"`); subscribe as a
+  final notification with `stop_reason: "framing_error"` + `error` field.
+  Both carry partial data (frames decoded before the error + raw bytes).
 - `subscribe` degrades bad framing configs (construction errors) to raw mode
   with `warn!`; `read` propagates construction errors. This asymmetry is for
   CONSTRUCTION errors (agent config). RUNTIME decode errors stop both.
