@@ -2925,10 +2925,11 @@ async fn native_read_slip_decodes_frame() {
     drop(fw);
 }
 
-/// Prove SLIP malformed escape surfaces as is_error on read path.
+/// Prove SLIP malformed escape surfaces as a partial result with
+/// stop_reason=framing_error (was: is_error tool error).
 #[tokio::test]
 #[ignore = "requires native_sim firmware binary"]
-async fn native_read_slip_malformed_escape_surfaces_framing_error() {
+async fn native_read_slip_malformed_escape_returns_partial_result() {
     let fw = NativeSimFirmware::spawn().await.expect("spawn zephyr.exe");
     let pty_path = fw.pty_path().to_string();
 
@@ -2961,19 +2962,24 @@ async fn native_read_slip_malformed_escape_surfaces_framing_error() {
     write_cmd(&client, &id, "sendraw hex C0DB41C0").await;
 
     let result = read_handle.await.unwrap().expect("read task");
-    assert_eq!(result.is_error, Some(true), "must surface as tool error");
-    // rmcp surfaces is_error messages in content[0].text.
-    let text: &str = result
-        .content
-        .first()
-        .and_then(|c| c.as_text())
-        .map(|rtc| rtc.text.as_str())
-        .unwrap_or("");
+    assert_ne!(result.is_error, Some(true), "{result:?}");
+    let s = result.structured_content.expect("structured");
+    assert_eq!(s["stop_reason"], json!("framing_error"));
+    let error = s["error"].as_str().expect("error field");
+    assert!(error.contains("SLIP"), "error should mention SLIP: {error}");
+    assert!(error.contains("0x41"), "error should name byte: {error}");
+    assert_eq!(s["encoding"], json!("hex"));
+    let data = s["data"].as_str().expect("data field");
     assert!(
-        text.contains("SLIP framing error"),
-        "error should mention SLIP: {text}"
+        data.chars().all(|c| c.is_ascii_hexdigit() || c == ' '),
+        "data should be hex-encoded: {data}"
     );
-    assert!(text.contains("0x41"), "error should name byte: {text}");
+    // frames may be null when no valid frames exist before the decode error
+    assert!(
+        s["frames"].is_array() || s["frames"].is_null(),
+        "frames should be array or null: {:?}",
+        s["frames"]
+    );
 
     close_connection(&client, &id).await;
     client.cancel().await.ok();
@@ -3445,7 +3451,18 @@ async fn native_read_slip_recovers_after_error_on_next_call() {
         tokio::time::sleep(Duration::from_millis(100)).await;
         write_cmd(&client, &id, "sendraw hex C0DB41C0").await;
         let result = read_handle.await.unwrap().expect("read task");
-        assert_eq!(result.is_error, Some(true), "read #1 must error");
+        assert_ne!(
+            result.is_error,
+            Some(true),
+            "read #1: new partial-result contract (was: is_error)"
+        );
+        let s1 = result.structured_content.expect("structured");
+        assert_eq!(s1["stop_reason"], json!("framing_error"));
+        let error1 = s1["error"].as_str().expect("error field");
+        assert!(
+            error1.contains("SLIP"),
+            "read #1 error must mention SLIP: {error1}"
+        );
     }
 
     // Read #2: valid SLIP → success.
@@ -3470,9 +3487,15 @@ async fn native_read_slip_recovers_after_error_on_next_call() {
         assert_ne!(result.is_error, Some(true), "read #2 must succeed");
         let s = result.structured_content.expect("structured");
         let frames = s["frames"].as_array().expect("frames array");
-        assert!(!frames.is_empty());
-        assert_eq!(frames[0]["data"], json!("70 6f 6e 67"));
-        assert_eq!(frames[0]["frame_type"], json!("slip"));
+        assert!(
+            !frames.is_empty(),
+            "read #2 should produce at least one frame"
+        );
+        let pong = frames
+            .iter()
+            .find(|f| f["data"] == json!("70 6f 6e 67"))
+            .expect("read #2 must contain the 'pong' frame somewhere (leading empty frame from trailing 0xC0 is allowed)");
+        assert_eq!(pong["frame_type"], json!("slip"));
     }
 
     close_connection(&client, &id).await;

@@ -2,6 +2,7 @@
 
 | Version | Date | Highlights |
 |---|---|---|
+| [0.7.3](#073) | 2026-07-07 | NMEA parser panic fix + P-talker proprietary split; decode-error semantics (`PushOutcome`, drop-and-count checksums, `read` partial results + `error` field + hex fallback); `docs/protocols.md` guide; framing.rs dedup (`emit_frame`/`check_checksum`/`take_frame`/`match_line_byte`/`xor_checksum`/`lrc` free functions); NMEA malformed-checksum body parse; `TxFramingMode::Nmea` auto `*XX` checksum; `--version` argv scan strictness; table-driven preset tests |
 | [0.7.2](#072) | 2026-07-07 | `--version` flag + `version` subcommand, `BUILD_TARGET` in build.rs; removed dead `ProfileDefaults` fields; `slip` and `json_lines` protocol presets; COBS framing mode + `cobs` preset + `checksums` module; `ndjson` preset + `skip_empty` framing option; `nmea0183` preset + `Nmea` parser + `StartEnd` multi-marker + checksum validation; `modbus_ascii` preset + `ModbusAscii` parser + `Lrc` checksum; schema fix for `Frame.data` uint8 format |
 | [0.7.0](#070) | 2026-06-26 | Frame pipeline: TX framing, SLIP, protocol presets, profile defaults, parser relocation |
 | [0.6.2](#062) | 2026-06-25 | Schema fix: suppress non-standard `uint8`/`uint16` formats; expanded schema regression guards + AGENTS.md truth |
@@ -20,6 +21,65 @@
 | [0.2.1](#021) | 2026-05-24 | MCP 2025-11-25, resource change notifications, port allowlist, stdio tests |
 | [0.2.0](#020) | 2026-05-23 | Project reset: rmcp 1.7 rewrite, 6 new tools, resources, prompts, HTTP transport |
 | [0.1.0](#010) | — | Initial release (5 tools, STM32 demo) |
+
+---
+
+## [0.7.3]
+
+**Added — NMEA TX auto-checksum:**
+- The `nmea0183` preset's TX path now appends the `*XX` XOR checksum
+  automatically via a new `TxFramingMode::Nmea` variant. Payloads already
+  ending in a valid `*HH` pass through un-doubled (existing checksum
+  validated); a wrong `*HH` errors. Embedded `\r`/`\n` and non-printable
+  bytes are rejected. Explicit `tx_framing: start_end` still wins via
+  precedence for callers that want the old no-checksum behavior. The preset
+  now round-trips correctly: `write(protocol: nmea0183)` → `read(protocol:
+  nmea0183)` produces `checksum_valid: true`.
+
+**Fixed — NMEA parser panic:**
+- NMEA parser no longer panics on non-ASCII-but-valid-UTF-8 bodies; non-ASCII
+  frames now return `Raw` (spec-conformant). The parser slices the address
+  field by byte index, but byte index 2 need not be a char boundary in
+  multi-byte UTF-8. A new `is_ascii()` guard mirrors `ModbusAsciiParser`'s
+  non-ASCII → `Raw` behavior.
+
+**Breaking (pre-1.0) — NMEA proprietary talker split:**
+- NMEA proprietary sentences (`$P...`) now split as `talker_id: "P"` +
+  `sentence_type:` the rest (e.g. `PGRMM` → `P` + `GRMM`), matching the
+  NMEA proprietary convention. Previously the first two characters were used
+  as the talker ID (`PG` + `RMM`).
+
+**Fixed — NMEA malformed-checksum body parse:**
+- A NMEA sentence with an invalid-hex or too-short checksum now returns the
+  full parsed body (talker_id, sentence_type, fields) with
+  `checksum_valid: Some(false)` when `validate: false`, consistent with the
+  wrong-value case. Previously the malformed-checksum branches returned
+  empty body fields. `validate: true` behavior is unchanged (Err → drop+count
+  in the decoder).
+
+**Fixed — `--version` argv scan strictness:**
+- `serial-mcp --bind --version` no longer prints the version; `--version` is
+  now correctly treated as the value of `--bind`, and the bind parse fails
+  with an argument error. The version-flag scan is now value-position-aware
+  (for `--transport`, `--allowlist`, `--bind`, `--max-program-buffered-bytes`,
+  `--max-tool-buffered-bytes`) and stops at a `--` separator. The `--opt=value`
+  form does not consume the next token, so `--bind=0.0.0.0:8000 --version`
+  still prints the version.
+
+**Breaking (pre-1.0) — decode-error semantics:**
+- `FrameDecoder::push` no longer drops frames decoded before a stream-fatal
+  error; the frames are returned alongside the error via `PushOutcome`.
+  Checksum mismatches with `validate: true` (e.g. NMEA `nmea0183` preset,
+  Modbus ASCII `modbus_ascii` preset) are now per-frame drop-and-count
+  (counted in `frames_dropped`) instead of aborting the whole read/subscribe.
+  `read` now returns partial results with `stop_reason: framing_error` on a
+  fatal SLIP/COBS decode error, matching `subscribe`. The result carries a
+  new `error: Option<String>` field with the `FrameDecodeError` text (parity
+  with subscribe's final-notification `error` field). When the requested
+  encoding can't represent the raw bytes (binary SLIP/COBS under `utf8`),
+  the `data` field falls back to hex and `encoding` is set to `"hex"` so the
+  partial bytes and the framing diagnostic both survive. Previously `read`
+  returned a bare tool error and discarded all collected frames.
 
 ---
 

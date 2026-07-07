@@ -43,10 +43,65 @@ fn print_version_and_exit() {
     std::process::exit(0);
 }
 
+/// Options that consume the following token as their value (so a
+/// `--version` token immediately after one is that option's value, not a
+/// version request). **CROSS-REFERENCE:** must stay in sync with the
+/// `opt_value_from_str("--<opt>")` calls in `parse_args` below — adding a
+/// value-taking option there without adding it here lets `--version`
+/// detection silently drift (a `--<new-opt> --version` would misfire as a
+/// version request). Removing one here without removing the call has the
+/// inverse effect.
+const VALUE_TAKING_OPTIONS: &[&str] = &[
+    "--transport",
+    "--allowlist",
+    "--bind",
+    "--max-program-buffered-bytes",
+    "--max-tool-buffered-bytes",
+];
+
+/// Scan argv for a version flag (`-V` / `--version`) that is NOT in the
+/// value position of a preceding value-taking option and NOT after a `--`
+/// separator. A token like `--bind --version` means `--version` is the
+/// value of `--bind`, not a version request.
+#[allow(clippy::while_let_on_iterator)] // needs manual next() to skip option values
+fn argv_has_version_flag() -> bool {
+    let mut args = std::env::args().skip(1);
+    let mut expect_value = false;
+    while let Some(arg) = args.next() {
+        if expect_value {
+            // This token is the value of the previous option, not a flag.
+            expect_value = false;
+            continue;
+        }
+        if arg == "--" {
+            // Everything after `--` is positional, not a flag.
+            return false;
+        }
+        // `--opt=value` form: the value is embedded, so the next token is
+        // NOT consumed as a value. Only the bare `--opt` form sets
+        // expect_value.
+        let is_bare_value_taking = VALUE_TAKING_OPTIONS.iter().any(|opt| arg == *opt);
+        if is_bare_value_taking {
+            expect_value = true;
+            continue;
+        }
+        if arg == "-V" || arg == "--version" {
+            return true;
+        }
+    }
+    false
+}
+
 fn parse_args() -> Result<Args, pico_args::Error> {
     // Short-circuit version requests before parsing, so they are not
     // rejected as unexpected arguments by pargs.finish().
-    if std::env::args().any(|a| a == "-V" || a == "--version") {
+    //
+    // Scan argv with value-position awareness: a token is only treated as
+    // a version flag if it is not the value of a preceding value-taking
+    // option and not after a `--` separator. This prevents
+    // `serial-mcp --bind --version` from printing the version instead of
+    // erroring (`--version` is the value of `--bind`).
+    if argv_has_version_flag() {
         print_version_and_exit();
     }
     if std::env::args().nth(1).as_deref() == Some("version") {
@@ -90,6 +145,10 @@ Examples:
         std::process::exit(0);
     }
 
+    // Value-taking options parsed below. CROSS-REFERENCE: every
+    // `opt_value_from_str("--<opt>")` call here MUST have a matching entry
+    // in `VALUE_TAKING_OPTIONS` above, or `argv_has_version_flag` will
+    // misclassify a `--<opt> --version` invocation.
     let transport_str: Option<String> = pargs.opt_value_from_str("--transport")?;
     let transport = match transport_str.as_deref() {
         Some("http") => Transport::Http,

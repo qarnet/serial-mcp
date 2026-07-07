@@ -59,6 +59,19 @@
 - deliberately split out of the NMEA TX auto-checksum work
   ([review-hardening-plan.md](review-hardening-plan.md) § 3B) — needs
   hex-encoding of a binary payload, not just a checksum append
+- **refactor trigger (one-consumer rule):** when this lands, extract a shared
+  TX checksum-append layer instead of growing `TxFramingMode` variant-by-
+  variant. The `TxFramingMode::Nmea` encode arm (shipped) is the first
+  checksum-appending TX mode; Modbus ASCII TX would be the second and should
+  share the "compute checksum → validate-or-append → wrap with markers"
+  skeleton so a third (CRC-16 / FCS-16) is a one-line diff.
+- **refactor trigger (one-consumer rule):** when CRC-16 (Modbus RTU) lands,
+  make `emit_frame`'s per-frame validation policy pluggable. Today
+  `emit_frame` hard-codes the `ChecksumMismatch` → drop-and-count behavior
+  for all parsers; a multi-checksum world (XOR/LRC now, CRC-16/FCS-16 future)
+  wants the validation outcome (drop+count vs. stream-fatal vs. emit-with-
+  flag) driven by the parser's declared checksum width, not a match on the
+  error variant.
 
 ### Profile-configurable reconnect policy
 - let profiles set the (already shipped and enforced) per-connection

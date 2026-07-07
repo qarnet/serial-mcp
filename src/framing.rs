@@ -8,9 +8,7 @@
 //! Also provides TX framing via [`TxFramingMode`] which encodes payloads
 //! with frame boundaries matching the RX modes. Used on `write`.
 
-use crate::checksums::Checksum;
-use crate::checksums::Lrc;
-use crate::checksums::XorChecksum;
+use crate::checksums::{lrc, xor_checksum};
 use crate::codec;
 use crate::match_config::PatternEncoding;
 use crate::util::find_subsequence;
@@ -206,11 +204,7 @@ pub fn preset_tx_framing(p: ProtocolPreset) -> TxFramingConfig {
             mode: TxFramingMode::Cobs,
         },
         ProtocolPreset::Nmea0183 => TxFramingConfig {
-            mode: TxFramingMode::StartEnd {
-                start: vec!["$".into()],
-                end: "\r\n".into(),
-                marker_encoding: PatternEncoding::Utf8,
-            },
+            mode: TxFramingMode::Nmea,
         },
         ProtocolPreset::ModbusAscii => TxFramingConfig {
             mode: TxFramingMode::StartEnd {
@@ -341,10 +335,19 @@ pub enum TxFramingMode {
     Slip,
     /// COBS (Consistent Overhead Byte Stuffing) framing. Byte-stuffed payload
     /// followed by 0x00 delimiter (plain COBS). The delimiter never appears
-    /// inside the encoded block. The PPP-COBS draft variant (0x7E) is not
+    /// inside an encoded block. The PPP-COBS draft variant (0x7E) is not
     /// supported; it is tracked for a future PR.
     #[serde(rename_all = "snake_case")]
     Cobs,
+    /// NMEA-0183 sentence framing: `$<payload>*XX\r\n` with the `*XX` XOR
+    /// checksum auto-appended over the payload bytes. Used by the `nmea0183`
+    /// preset TX path. If the payload already ends in `*HH` (two hex chars
+    /// after a `*`), the existing checksum is validated and a mismatch
+    /// errors (no double-append). If the payload already starts with `$` or
+    /// `!`, that leading char is used (AIS `!` sentences); otherwise `$` is
+    /// prepended.
+    #[serde(rename_all = "snake_case")]
+    Nmea,
 }
 
 /// Line ending for TX framing. No `auto` — agents must pick one.
@@ -394,42 +397,45 @@ impl TxFramingMode {
                     return Err("TX prefix_size must be 1, 2, or 4".into());
                 }
                 let len = payload.len();
-                let mut framed = Vec::with_capacity(*prefix_size as usize + len);
-                match (prefix_size, endianness) {
-                    (1, _) => {
+                match prefix_size {
+                    1 => {
                         if len > 255 {
                             return Err(format!(
                                 "TX payload length {len} exceeds maximum 255 for prefix_size=1"
                             ));
                         }
+                        let mut framed = Vec::with_capacity(1 + len);
                         framed.push(len as u8);
+                        framed.extend_from_slice(payload);
+                        Ok(framed)
                     }
-                    (2, Endianness::Big) => {
+                    2 => {
                         if len > 65535 {
                             return Err(format!(
                                 "TX payload length {len} exceeds maximum 65535 for prefix_size=2"
                             ));
                         }
-                        framed.extend_from_slice(&(len as u16).to_be_bytes());
+                        let mut framed = Vec::with_capacity(2 + len);
+                        let len_bytes = match endianness {
+                            Endianness::Big => (len as u16).to_be_bytes(),
+                            Endianness::Little => (len as u16).to_le_bytes(),
+                        };
+                        framed.extend_from_slice(&len_bytes);
+                        framed.extend_from_slice(payload);
+                        Ok(framed)
                     }
-                    (2, Endianness::Little) => {
-                        if len > 65535 {
-                            return Err(format!(
-                                "TX payload length {len} exceeds maximum 65535 for prefix_size=2"
-                            ));
-                        }
-                        framed.extend_from_slice(&(len as u16).to_le_bytes());
-                    }
-                    (4, Endianness::Big) => {
-                        framed.extend_from_slice(&(len as u32).to_be_bytes());
-                    }
-                    (4, Endianness::Little) => {
-                        framed.extend_from_slice(&(len as u32).to_le_bytes());
+                    4 => {
+                        let mut framed = Vec::with_capacity(4 + len);
+                        let len_bytes = match endianness {
+                            Endianness::Big => (len as u32).to_be_bytes(),
+                            Endianness::Little => (len as u32).to_le_bytes(),
+                        };
+                        framed.extend_from_slice(&len_bytes);
+                        framed.extend_from_slice(payload);
+                        Ok(framed)
                     }
                     _ => unreachable!("prefix_size validated above"),
                 }
-                framed.extend_from_slice(payload);
-                Ok(framed)
             }
             TxFramingMode::StartEnd {
                 start,
@@ -465,6 +471,70 @@ impl TxFramingMode {
                 framed.push(0x00);
                 Ok(framed)
             }
+            TxFramingMode::Nmea => {
+                // Reject embedded terminators and non-printable bytes.
+                if payload.iter().any(|&b| b == b'\r' || b == b'\n') {
+                    return Err("TX NMEA payload must not contain \\r or \\n".into());
+                }
+                if payload.iter().any(|&b| !(0x20..=0x7E).contains(&b)) {
+                    return Err("TX NMEA payload must be printable ASCII".into());
+                }
+                // Determine leading character: preserve $/! if present, else '$'.
+                let lead_byte = if payload.first() == Some(&b'$') || payload.first() == Some(&b'!')
+                {
+                    payload[0]
+                } else {
+                    b'$'
+                };
+                let body_start = if payload.first() == Some(&b'$') || payload.first() == Some(&b'!')
+                {
+                    1
+                } else {
+                    0
+                };
+                let body = &payload[body_start..];
+
+                // Check for existing trailing *HH.
+                let existing_checksum = (body.len() >= 3
+                    && body[body.len() - 3] == b'*'
+                    && body[body.len() - 2].is_ascii_hexdigit()
+                    && body[body.len() - 1].is_ascii_hexdigit())
+                .then(|| {
+                    let hex_str = std::str::from_utf8(&body[body.len() - 2..])
+                        .map_err(|_| "TX NMEA invalid UTF-8 in checksum".to_string())?;
+                    u8::from_str_radix(hex_str, 16)
+                        .map_err(|_| "TX NMEA invalid hex in checksum".to_string())
+                });
+                // Exclusive borrow on body is done — derive the checksum input now.
+                let existing_val = match existing_checksum {
+                    Some(Ok(v)) => Some(v),
+                    Some(Err(e)) => return Err(e),
+                    None => None,
+                };
+                let body_to_checksum = match existing_val {
+                    Some(_) => &body[..body.len() - 3],
+                    None => body,
+                };
+                let computed = xor_checksum(body_to_checksum);
+                if let Some(received) = existing_val {
+                    if computed != received {
+                        return Err(format!(
+                            "TX NMEA checksum mismatch: payload declares {received:02X}, computed {computed:02X}"
+                        ));
+                    }
+                }
+                let cs_hex = format!("{computed:02X}");
+                let additional = if existing_val.is_some() { 0 } else { 3 };
+                let mut framed = Vec::with_capacity(1 + body.len() + additional + 2);
+                framed.push(lead_byte);
+                framed.extend_from_slice(body);
+                if existing_val.is_none() {
+                    framed.push(b'*');
+                    framed.extend_from_slice(cs_hex.as_bytes());
+                }
+                framed.extend_from_slice(b"\r\n");
+                Ok(framed)
+            }
         }
     }
 }
@@ -492,7 +562,11 @@ pub struct ParserConfig {
     pub custom_prompt: Option<String>,
     /// Whether to enforce a protocol checksum when present. Default: false.
     /// When true, a protocol parser that defines a checksum (currently NMEA's
-    /// *XX XOR) validates it and surfaces a mismatch as a framing_error.
+    /// *XX XOR, Modbus ASCII LRC) drops mismatched frames instead of emitting
+    /// them. The dropped frame is counted in `PushOutcome.frames_dropped` and
+    /// does NOT halt the read or subscribe (stream-fatal errors like SLIP
+    /// malformed escapes still stop the decode). When false, the frame is
+    /// emitted with `checksum_valid: Some(false)` (no-op for the caller).
     /// A sentence/message WITHOUT a checksum is accepted regardless.
     #[serde(default)]
     pub validate: bool,
@@ -563,16 +637,18 @@ pub enum ParsedFrame {
     Raw,
     Nmea {
         /// Talker ID (e.g. "GP" for GPS, "GN" for GLONASS, "AI" for AIS).
-        /// Two characters for standard sentences; may be longer for proprietary.
+        /// Two characters for standard sentences; for proprietary sentences
+        /// (`$P...`) the talker_id is `"P"` and the rest forms the sentence_type.
         talker_id: String,
         /// Sentence type (e.g. "GGA", "RMC", "GLL", "AIVDM").
-        /// Three characters for standard; variable for proprietary ($P...).
+        /// Three characters for standard sentences; for proprietary (`$P...`)
+        /// this holds the remainder after the leading `P` (e.g. `"GRMM"`).
         sentence_type: String,
         /// Comma-separated data fields (the body after the address, before '*').
         fields: Vec<String>,
         /// Checksum status:
         /// - Some(true): checksum present and valid (or present, validate=false: not enforced but reported as valid-shape).
-        /// - Some(false): checksum present and INVALID (only reachable when validate=false; when validate=true a mismatch returns Err, not Some(false)).
+        /// - Some(false): checksum present and INVALID (only reachable when validate=false; when validate=true a mismatch drops the frame and increments `frames_dropped`).
         /// - None: no checksum present in the sentence.
         #[serde(skip_serializing_if = "Option::is_none")]
         checksum_valid: Option<bool>,
@@ -591,10 +667,11 @@ pub enum ParsedFrame {
         /// exception code.
         #[schemars(schema_with = "crate::schema_helpers::byte_array_schema")]
         data: Vec<u8>,
-        /// LRC status:
-        /// - Some(true): LRC present and valid (or present, validate=false: not enforced but reported as valid-shape).
-        /// - Some(false): LRC present and INVALID (only reachable when validate=false; when validate=true a mismatch returns Err, not Some(false)).
-        /// - None: no LRC present (a malformed frame shorter than 2 hex chars after the data — should not happen for valid frames, but defensive).
+        /// LRC status. Same semantics as `ParsedFrame::Nmea::checksum_valid`
+        /// (`Some(true)` valid, `Some(false)` invalid with `validate=false`,
+        /// `None` absent) — see that field's doc for the full explanation.
+        /// `None` here also covers a malformed frame shorter than 2 hex chars
+        /// after the data (defensive; should not occur for valid frames).
         checksum_valid: Option<bool>,
     },
 }
@@ -698,6 +775,47 @@ trait FrameParser: Send + Sync {
     fn parse(&self, data: &[u8]) -> Result<ParsedFrame, FrameDecodeError>;
 }
 
+/// Emit one decoded frame: apply skip_empty, run the parser with
+/// Phase-1 checksum drop-and-count semantics, increment frame_count on
+/// success, and return either `Some(Frame)` to emit or `None` to skip.
+/// On a `ChecksumMismatch` with `validate=true`: returns `Ok(None)`,
+/// increments `frames_dropped`, logs a `warn`. On a stream-fatal parser
+/// error: returns `Err(e)` so the caller can set `PushOutcome.error` and
+/// stop.
+fn emit_frame(
+    data: Vec<u8>,
+    frame_type: &'static str,
+    frame_count: &mut usize,
+    skip_empty: bool,
+    parser: &Option<Box<dyn FrameParser>>,
+    frames_dropped: &mut usize,
+) -> Result<Option<Frame>, FrameDecodeError> {
+    if skip_empty && is_blank_frame(&data) {
+        return Ok(None);
+    }
+    let parsed = match parser.as_ref().map(|p| p.parse(&data)) {
+        Some(Ok(pf)) => Some(pf),
+        Some(Err(FrameDecodeError::ChecksumMismatch { expected, received })) => {
+            *frames_dropped += 1;
+            tracing::warn!(
+                "frame dropped: checksum mismatch (expected {}, received {})",
+                hex_upper(&expected),
+                hex_upper(&received)
+            );
+            return Ok(None);
+        }
+        Some(Err(e)) => return Err(e),
+        None => None,
+    };
+    *frame_count += 1;
+    Ok(Some(Frame {
+        data,
+        index: *frame_count - 1,
+        frame_type,
+        parsed,
+    }))
+}
+
 /// SLIP decoder: consume `buf_outer` byte-by-byte according to current
 /// [`SlipState`] in `mode`. Returns decoded frames, or `Err` for a
 /// malformed escape sequence. Updates `mode` state in-place.
@@ -707,11 +825,19 @@ fn slip_decode(
     parser: &Option<Box<dyn FrameParser>>,
     mode: &mut DecoderMode,
     skip_empty: bool,
-) -> Result<Vec<Frame>, FrameDecodeError> {
+) -> PushOutcome {
     let mut frames = Vec::new();
+    let mut frames_dropped: usize = 0;
+    let mut error: Option<FrameDecodeError> = None;
     let state = match mode {
         DecoderMode::Slip { ref mut state } => state,
-        _ => return Ok(frames),
+        _ => {
+            return PushOutcome {
+                frames,
+                frames_dropped,
+                error,
+            }
+        }
     };
 
     loop {
@@ -726,7 +852,11 @@ fn slip_decode(
                     continue;
                 }
                 buf_outer.clear();
-                return Ok(frames);
+                return PushOutcome {
+                    frames,
+                    frames_dropped,
+                    error,
+                };
             }
             SlipState::InFrame {
                 ref mut buf,
@@ -759,31 +889,38 @@ fn slip_decode(
                                 buf.clear();
                                 *escaped = false;
                                 *state = SlipState::BeforeFirstEnd;
-                                return Err(FrameDecodeError::SlipInvalidEscape(b));
+                                error = Some(FrameDecodeError::SlipInvalidEscape(b));
+                                return PushOutcome {
+                                    frames,
+                                    frames_dropped,
+                                    error,
+                                };
                             }
                         }
                     } else {
                         match b {
                             SLIP_END => {
                                 let data = std::mem::take(buf);
-                                if !skip_empty || !is_blank_frame(&data) {
-                                    *frame_count += 1;
-                                    let parsed = match parser.as_ref().map(|p| p.parse(&data)) {
-                                        Some(Ok(pf)) => Some(pf),
-                                        Some(Err(e)) => {
-                                            // Drain consumed bytes, clear state, return error.
-                                            buf_outer.drain(..read_pos);
-                                            *state = SlipState::BeforeFirstEnd;
-                                            return Err(e);
-                                        }
-                                        None => None,
-                                    };
-                                    frames.push(Frame {
-                                        data,
-                                        index: *frame_count - 1,
-                                        frame_type: "slip",
-                                        parsed,
-                                    });
+                                match emit_frame(
+                                    data,
+                                    "slip",
+                                    frame_count,
+                                    skip_empty,
+                                    parser,
+                                    &mut frames_dropped,
+                                ) {
+                                    Ok(Some(frame)) => frames.push(frame),
+                                    Ok(None) => (),
+                                    Err(e) => {
+                                        buf_outer.drain(..read_pos);
+                                        *state = SlipState::BeforeFirstEnd;
+                                        error = Some(e);
+                                        return PushOutcome {
+                                            frames,
+                                            frames_dropped,
+                                            error,
+                                        };
+                                    }
                                 }
                             }
                             SLIP_ESC => {
@@ -799,7 +936,11 @@ fn slip_decode(
                 // return: drain everything read and fall through to the
                 // outer loop.
                 buf_outer.drain(..read_pos);
-                return Ok(frames);
+                return PushOutcome {
+                    frames,
+                    frames_dropped,
+                    error,
+                };
             }
         }
     }
@@ -815,11 +956,19 @@ fn cobs_decode(
     parser: &Option<Box<dyn FrameParser>>,
     mode: &mut DecoderMode,
     skip_empty: bool,
-) -> Result<Vec<Frame>, FrameDecodeError> {
+) -> PushOutcome {
     let mut frames = Vec::new();
+    let mut frames_dropped: usize = 0;
+    let mut error: Option<FrameDecodeError> = None;
     let state = match mode {
         DecoderMode::Cobs { ref mut state } => state,
-        _ => return Ok(frames),
+        _ => {
+            return PushOutcome {
+                frames,
+                frames_dropped,
+                error,
+            }
+        }
     };
 
     loop {
@@ -835,7 +984,11 @@ fn cobs_decode(
                     continue;
                 }
                 buf_outer.clear();
-                return Ok(frames);
+                return PushOutcome {
+                    frames,
+                    frames_dropped,
+                    error,
+                };
             }
             CobsState::InFrame {
                 ref mut decoded,
@@ -888,26 +1041,29 @@ fn cobs_decode(
                         if data.last() == Some(&0x00) {
                             data.pop();
                         }
-                        if !skip_empty || !is_blank_frame(&data) {
-                            *frame_count += 1;
-                            let parsed = match parser.as_ref().map(|p| p.parse(&data)) {
-                                Some(Ok(pf)) => Some(pf),
-                                Some(Err(e)) => {
-                                    buf_outer.drain(..read_pos);
-                                    *decoded = Vec::new();
-                                    *remaining = 0;
-                                    *pending_zero = false;
-                                    *state = CobsState::BeforeFirstDelim;
-                                    return Err(e);
-                                }
-                                None => None,
-                            };
-                            frames.push(Frame {
-                                data,
-                                index: *frame_count - 1,
-                                frame_type: "cobs",
-                                parsed,
-                            });
+                        match emit_frame(
+                            data,
+                            "cobs",
+                            frame_count,
+                            skip_empty,
+                            parser,
+                            &mut frames_dropped,
+                        ) {
+                            Ok(Some(frame)) => frames.push(frame),
+                            Ok(None) => (),
+                            Err(e) => {
+                                buf_outer.drain(..read_pos);
+                                *decoded = Vec::new();
+                                *remaining = 0;
+                                *pending_zero = false;
+                                *state = CobsState::BeforeFirstDelim;
+                                error = Some(e);
+                                return PushOutcome {
+                                    frames,
+                                    frames_dropped,
+                                    error,
+                                };
+                            }
                         }
                         *state = CobsState::BeforeFirstDelim;
                         buf_outer.drain(..read_pos);
@@ -934,7 +1090,11 @@ fn cobs_decode(
                 // hitting a delimiter — drain and wait for more bytes.
                 if !matches!(state, CobsState::BeforeFirstDelim) {
                     buf_outer.drain(..read_pos);
-                    return Ok(frames);
+                    return PushOutcome {
+                        frames,
+                        frames_dropped,
+                        error,
+                    };
                 }
             }
         }
@@ -1044,53 +1204,52 @@ impl FrameDecoder {
     /// [`FrameDecodeError`] for protocol violations (SLIP malformed escape).
     /// The caller is responsible for draining consumed bytes from their
     /// accumulation buffer.
-    pub fn push(&mut self, chunk: &[u8]) -> Result<Vec<Frame>, FrameDecodeError> {
+    /// Feed a chunk of bytes. Returns any complete frames found in a
+    /// [`PushOutcome`] that carries both the decoded frames and any
+    /// stream-fatal error (SLIP malformed escape, COBS invalid code).
+    /// Per-frame checksum mismatches are counted in `frames_dropped`
+    /// and do NOT set `error`.
+    /// The caller is responsible for draining consumed bytes from their
+    /// accumulation buffer.
+    pub fn push(&mut self, chunk: &[u8]) -> PushOutcome {
         self.buf.extend_from_slice(chunk);
         // SLIP and COBS are handled separately via free functions to avoid
         // borrow conflicts between the mutable mode borrow and self.
         if matches!(self.mode, DecoderMode::Slip { .. }) {
-            let frames = slip_decode(
+            let outcome = slip_decode(
                 &mut self.buf,
                 &mut self.frame_count,
                 &self.parser,
                 &mut self.mode,
                 self.skip_empty,
-            )?;
-            return Ok(frames);
+            );
+            return outcome;
         }
         if matches!(self.mode, DecoderMode::Cobs { .. }) {
-            let frames = cobs_decode(
+            let outcome = cobs_decode(
                 &mut self.buf,
                 &mut self.frame_count,
                 &self.parser,
                 &mut self.mode,
                 self.skip_empty,
-            )?;
-            return Ok(frames);
+            );
+            return outcome;
         }
         let mut frames = Vec::new();
-        loop {
+        let mut frames_dropped: usize = 0;
+        let mut error: Option<FrameDecodeError> = None;
+        'outer: loop {
             let consumed = match &mut self.mode {
                 DecoderMode::Line(state) => match state {
-                    LineState::Lf => self.match_line_lf(),
-                    LineState::Cr => self.match_line_cr(),
+                    LineState::Lf => self.match_line_byte(b'\n'),
+                    LineState::Cr => self.match_line_byte(b'\r'),
                     LineState::Crlf => self.match_line_crlf(),
                     LineState::AutoLf => self.match_auto_lf(),
                     LineState::PendingCr(_) => self.match_pending_cr(),
-                    LineState::CrMode => self.match_line_cr(),
+                    LineState::CrMode => self.match_line_byte(b'\r'),
                 },
                 DecoderMode::Delimiter(delim) => {
-                    let d = delim.clone();
-                    let pos = find_subsequence(&self.buf, &d);
-                    pos.map(|p| {
-                        let fb = if self.include_terminators {
-                            self.buf[..p + d.len()].to_vec()
-                        } else {
-                            self.buf[..p].to_vec()
-                        };
-                        self.buf.drain(..p + d.len());
-                        fb
-                    })
+                    extract_delimited(&mut self.buf, delim, self.include_terminators)
                 }
                 DecoderMode::LengthPrefixed {
                     prefix_size,
@@ -1203,25 +1362,42 @@ impl FrameDecoder {
             match consumed {
                 None => break,
                 Some(frame_bytes) => {
-                    if !self.skip_empty || !is_blank_frame(&frame_bytes) {
-                        self.frame_count += 1;
-                        let parsed = match self.parser.as_ref().map(|p| p.parse(&frame_bytes)) {
-                            Some(Ok(pf)) => Some(pf),
-                            Some(Err(e)) => return Err(e),
-                            None => None,
-                        };
-                        let frame_type = self.frame_type_str();
-                        frames.push(Frame {
-                            data: frame_bytes,
-                            index: self.frame_count - 1,
-                            frame_type,
-                            parsed,
-                        });
+                    match emit_frame(
+                        frame_bytes,
+                        self.frame_type_str(),
+                        &mut self.frame_count,
+                        self.skip_empty,
+                        &self.parser,
+                        &mut frames_dropped,
+                    ) {
+                        Ok(Some(frame)) => frames.push(frame),
+                        Ok(None) => continue,
+                        Err(e) => {
+                            error = Some(e);
+                            break 'outer;
+                        }
                     }
                 }
             }
         }
-        Ok(frames)
+        PushOutcome {
+            frames,
+            frames_dropped,
+            error,
+        }
+    }
+
+    /// Split the frame at `split_pos` with terminator length `term_len`.
+    /// Returns the frame bytes (including terminators if
+    /// `include_terminators`), and drains consumed bytes from the buffer.
+    fn take_frame(&mut self, split_pos: usize, term_len: usize) -> Vec<u8> {
+        let fb = if self.include_terminators {
+            self.buf[..split_pos + term_len].to_vec()
+        } else {
+            self.buf[..split_pos].to_vec()
+        };
+        self.buf.drain(..split_pos + term_len);
+        fb
     }
 
     /// `auto` initial state: scan for `\n` (CRLF-aware), detect bare `\r`.
@@ -1239,18 +1415,13 @@ impl FrameDecoder {
             // immediately before \n, handle normally.
             // Walk backwards from lf_pos to check for any earlier \r that
             // isn't part of a CRLF.
-            let end = if !self.include_terminators && lf_pos > 0 && self.buf[lf_pos - 1] == b'\r' {
-                lf_pos - 1
-            } else {
-                lf_pos
-            };
-            let fb = if self.include_terminators {
-                self.buf[..lf_pos + 1].to_vec()
-            } else {
-                self.buf[..end].to_vec()
-            };
-            self.buf.drain(..lf_pos + 1);
-            return Some(fb);
+            let (split_pos, term_len) =
+                if !self.include_terminators && lf_pos > 0 && self.buf[lf_pos - 1] == b'\r' {
+                    (lf_pos - 1, 2)
+                } else {
+                    (lf_pos, 1)
+                };
+            return Some(self.take_frame(split_pos, term_len));
         }
 
         // No \n found. Look for a bare \r.
@@ -1259,24 +1430,13 @@ impl FrameDecoder {
             if next_is_lf {
                 // CRLF: \n is in the buffer right after \r. This means \n was
                 // found above. Unreachable in practice, but safe.
-                let fb = if self.include_terminators {
-                    self.buf[..cr_pos + 2].to_vec()
-                } else {
-                    self.buf[..cr_pos].to_vec()
-                };
-                self.buf.drain(..cr_pos + 2);
-                return Some(fb);
+                return Some(self.take_frame(cr_pos, 2));
             }
             // \r found, no \n follows in the buffer.
             if cr_pos + 1 < self.buf.len() {
                 // Bytes after \r exist in this chunk → bare CR confirmed immediately.
                 // Emit the line before \r, drain through \r, transition to CrMode.
-                let fb = if self.include_terminators {
-                    self.buf[..cr_pos + 1].to_vec()
-                } else {
-                    self.buf[..cr_pos].to_vec()
-                };
-                self.buf.drain(..cr_pos + 1);
+                let fb = self.take_frame(cr_pos, 1);
                 if let DecoderMode::Line(ref mut state) = self.mode {
                     *state = LineState::CrMode;
                 }
@@ -1320,12 +1480,7 @@ impl FrameDecoder {
         let next_byte = self.buf[cr_pos + 1];
         if next_byte == b'\n' {
             // CRLF confirmed. Emit frame (strip \r\n unless include_terminators).
-            let fb = if self.include_terminators {
-                self.buf[..cr_pos + 2].to_vec()
-            } else {
-                self.buf[..cr_pos].to_vec()
-            };
-            self.buf.drain(..cr_pos + 2);
+            let fb = self.take_frame(cr_pos, 2);
             if let DecoderMode::Line(ref mut state) = self.mode {
                 *state = LineState::AutoLf;
             }
@@ -1334,52 +1489,23 @@ impl FrameDecoder {
 
         // Non-\n byte after \r → bare CR confirmed.
         // Emit frame before \r, drain through \r, promote to CrMode.
-        let fb = if self.include_terminators {
-            self.buf[..cr_pos + 1].to_vec()
-        } else {
-            self.buf[..cr_pos].to_vec()
-        };
-        self.buf.drain(..cr_pos + 1);
+        let fb = self.take_frame(cr_pos, 1);
         if let DecoderMode::Line(ref mut state) = self.mode {
             *state = LineState::CrMode;
         }
         Some(fb)
     }
 
-    /// Match a line with `lf` ending: split on `\n` only, do NOT strip `\r`.
-    fn match_line_lf(&mut self) -> Option<Vec<u8>> {
-        let pos = self.buf.iter().position(|&b| b == b'\n')?;
-        let fb = if self.include_terminators {
-            self.buf[..pos + 1].to_vec()
-        } else {
-            self.buf[..pos].to_vec()
-        };
-        self.buf.drain(..pos + 1);
-        Some(fb)
-    }
-
-    /// Match a line with `cr` ending: split on bare `\r`.
-    fn match_line_cr(&mut self) -> Option<Vec<u8>> {
-        let pos = self.buf.iter().position(|&b| b == b'\r')?;
-        let fb = if self.include_terminators {
-            self.buf[..pos + 1].to_vec()
-        } else {
-            self.buf[..pos].to_vec()
-        };
-        self.buf.drain(..pos + 1);
-        Some(fb)
+    /// Match a line ending on a single byte: split on `b`, drain through it.
+    fn match_line_byte(&mut self, b: u8) -> Option<Vec<u8>> {
+        let pos = self.buf.iter().position(|&x| x == b)?;
+        Some(self.take_frame(pos, 1))
     }
 
     /// Match a line with `crlf` ending: split on exact `\r\n`.
     fn match_line_crlf(&mut self) -> Option<Vec<u8>> {
         let pos = find_subsequence(&self.buf, b"\r\n")?;
-        let fb = if self.include_terminators {
-            self.buf[..pos + 2].to_vec()
-        } else {
-            self.buf[..pos].to_vec()
-        };
-        self.buf.drain(..pos + 2);
-        Some(fb)
+        Some(self.take_frame(pos, 2))
     }
 
     fn frame_type_str(&self) -> &'static str {
@@ -1402,57 +1528,38 @@ impl FrameDecoder {
     /// drains the in-frame buffer; pending escaped/partial state is emitted as
     /// raw bytes.
     pub fn flush_partial(&mut self) -> Option<Frame> {
-        // SLIP: drain the in-frame buffer instead of self.buf.
-        if let DecoderMode::Slip {
-            state: SlipState::InFrame { ref mut buf, .. },
-        } = self.mode
-        {
-            if buf.is_empty() {
-                return None;
+        let (data, frame_type) = match &mut self.mode {
+            DecoderMode::Slip {
+                state: SlipState::InFrame { ref mut buf, .. },
+            } => {
+                if buf.is_empty() {
+                    return None;
+                }
+                (std::mem::take(buf), "slip")
             }
-            // flush_partial does not apply skip_empty — partial
-            // frames at flush are emitted regardless.
-            let data = std::mem::take(buf);
-            self.frame_count += 1;
-            return Some(Frame {
-                data,
-                index: self.frame_count - 1,
-                frame_type: "slip",
-                parsed: None,
-            });
-        }
-        // COBS: drain the in-frame decoded buffer.
-        if let DecoderMode::Cobs {
-            state: CobsState::InFrame {
-                ref mut decoded, ..
-            },
-        } = self.mode
-        {
-            if decoded.is_empty() {
-                return None;
+            DecoderMode::Cobs {
+                state:
+                    CobsState::InFrame {
+                        ref mut decoded, ..
+                    },
+            } => {
+                if decoded.is_empty() {
+                    return None;
+                }
+                (std::mem::take(decoded), "cobs")
             }
-            // flush_partial does not apply skip_empty — partial
-            // frames at flush are emitted regardless.
-            let data = std::mem::take(decoded);
-            self.frame_count += 1;
-            return Some(Frame {
-                data,
-                index: self.frame_count - 1,
-                frame_type: "cobs",
-                parsed: None,
-            });
-        }
-        if self.buf.is_empty() {
-            return None;
-        }
-        // flush_partial does not apply skip_empty — partial
-        // frames at flush are emitted regardless.
-        let data = std::mem::take(&mut self.buf);
+            _ => {
+                if self.buf.is_empty() {
+                    return None;
+                }
+                (std::mem::take(&mut self.buf), self.frame_type_str())
+            }
+        };
         self.frame_count += 1;
         Some(Frame {
             data,
             index: self.frame_count - 1,
-            frame_type: self.frame_type_str(),
+            frame_type,
             parsed: None,
         })
     }
@@ -1646,6 +1753,35 @@ fn strip_leading_if_any(content: &mut Vec<u8>, markers: &[u8]) {
     }
 }
 
+/// Shared checksum-validate ladder for NMEA XOR and Modbus ASCII LRC.
+///
+/// Returns `Ok(Some(true))` if computed == received, `Ok(Some(false))` if
+/// validate is false and they differ, or `Err(ChecksumMismatch)` if validate is
+/// true and they differ. `received` is `None` when the received checksum is
+/// unparseable or too short (guaranteed mismatch). The error carries the 1-byte
+/// `computed_byte` as `expected` and the raw received bytes as `received` to
+/// preserve the [`FrameDecodeError`] shape.
+fn check_checksum(
+    validate: bool,
+    computed_byte: u8,
+    received: Option<u8>,
+    received_raw: Vec<u8>,
+) -> Result<Option<bool>, FrameDecodeError> {
+    match received {
+        Some(r) if r == computed_byte => Ok(Some(true)),
+        Some(_) if validate => Err(FrameDecodeError::ChecksumMismatch {
+            expected: vec![computed_byte],
+            received: received_raw,
+        }),
+        Some(_) => Ok(Some(false)),
+        None if validate => Err(FrameDecodeError::ChecksumMismatch {
+            expected: vec![computed_byte],
+            received: received_raw,
+        }),
+        None => Ok(Some(false)),
+    }
+}
+
 // NMEA-0183 parser
 
 struct NmeaParser {
@@ -1683,60 +1819,37 @@ impl FrameParser for NmeaParser {
             (content, None)
         };
 
-        // 4. Validate checksum if present and validate is true.
+        // 4. Evaluate checksum validity. Yields None (no checksum present),
+        // Some(true) (present + correct), Some(false) (present + incorrect),
+        // or Err (present + incorrect + validate=true). Body parsing always
+        // runs afterward so malformed-checksum frames carry the full parsed
+        // body with checksum_valid: Some(false) when validate is false.
         let checksum_valid = match &checksum_hex {
             Some(hex) if hex.len() >= 2 => {
-                // Slice the raw bytes first — hex[..2] is always safe because
-                // hex.len() >= 2.  Then validate the two bytes as ASCII hex.
-                // String::from_utf8_lossy on the full hex vec must NOT be used
-                // because replacement characters (U+FFFD) are multibyte in
-                // UTF-8 and a byte-index slice panics when it lands inside one.
-                let received_val = match std::str::from_utf8(&hex[..2])
+                let computed_byte = xor_checksum(&body);
+                match std::str::from_utf8(&hex[..2])
                     .ok()
                     .and_then(|s| u8::from_str_radix(s, 16).ok())
                 {
-                    Some(v) => v,
+                    Some(received_val) => {
+                        // Valid hex — compare against computed checksum.
+                        check_checksum(
+                            self.validate,
+                            computed_byte,
+                            Some(received_val),
+                            vec![received_val],
+                        )?
+                    }
                     None => {
-                        // Invalid hex in checksum — treat as mismatch.
-                        if self.validate {
-                            let computed = XorChecksum.compute(&body);
-                            return Err(FrameDecodeError::ChecksumMismatch {
-                                expected: computed,
-                                received: hex.clone(),
-                            });
-                        }
-                        return Ok(ParsedFrame::Nmea {
-                            talker_id: String::new(),
-                            sentence_type: String::new(),
-                            fields: vec![],
-                            checksum_valid: Some(false),
-                        });
+                        // Invalid hex chars — guaranteed mismatch (None).
+                        check_checksum(self.validate, computed_byte, None, hex.clone())?
                     }
-                };
-                let computed = XorChecksum.compute(&body);
-                let computed_val = computed[0];
-                if self.validate {
-                    if computed_val != received_val {
-                        return Err(FrameDecodeError::ChecksumMismatch {
-                            expected: computed,
-                            received: vec![received_val],
-                        });
-                    }
-                    Some(true)
-                } else {
-                    Some(computed_val == received_val)
                 }
             }
             Some(hex) => {
-                // Checksum present but too short (<2 hex chars). Treat as mismatch.
-                if self.validate {
-                    let computed = XorChecksum.compute(&body);
-                    return Err(FrameDecodeError::ChecksumMismatch {
-                        expected: computed,
-                        received: hex.clone(),
-                    });
-                }
-                Some(false)
+                // Checksum present but too short (<2 hex chars). Guaranteed mismatch.
+                let computed_byte = xor_checksum(&body);
+                check_checksum(self.validate, computed_byte, None, hex.clone())?
             }
             None => None,
         };
@@ -1748,6 +1861,9 @@ impl FrameParser for NmeaParser {
             Ok(s) => s,
             Err(_) => return Ok(ParsedFrame::Raw),
         };
+        if !body_str.is_ascii() {
+            return Ok(ParsedFrame::Raw);
+        }
 
         let (address_part, fields_part) = match body_str.find(',') {
             Some(comma_pos) => (
@@ -1757,12 +1873,14 @@ impl FrameParser for NmeaParser {
             None => (body_str.to_string(), String::new()),
         };
 
-        let (talker_id, sentence_type) = if address_part.len() >= 5 {
-            // Standard NMEA: talker = first 2, type = chars 3 onward
-            let tid = address_part[..2].to_string();
-            let stype = address_part[2..].to_string();
+        let (talker_id, sentence_type) = if address_part.len() >= 2 && address_part.starts_with('P')
+        {
+            // Proprietary NMEA: talker = "P", type = rest of address
+            let tid = "P".to_string();
+            let stype = address_part[1..].to_string();
             (tid, stype)
         } else if address_part.len() >= 2 {
+            // Standard NMEA: talker = first 2, type = rest
             let tid = address_part[..2].to_string();
             let stype = address_part[2..].to_string();
             (tid, stype)
@@ -1838,19 +1956,13 @@ impl FrameParser for ModbusAsciiParser {
         let data = pdu[2..].to_vec();
 
         // 5. Validate LRC over the PDU (address + function + data — NOT the LRC byte).
-        let computed = Lrc.compute(pdu);
-        let computed_val = computed[0];
-        let checksum_valid = if self.validate {
-            if computed_val != lrc_received {
-                return Err(FrameDecodeError::ChecksumMismatch {
-                    expected: computed,
-                    received: vec![lrc_received],
-                });
-            }
-            Some(true)
-        } else {
-            Some(computed_val == lrc_received)
-        };
+        let computed_val = lrc(pdu);
+        let checksum_valid = check_checksum(
+            self.validate,
+            computed_val,
+            Some(lrc_received),
+            vec![lrc_received],
+        )?;
 
         // 6. Return ParsedFrame::ModbusAscii.
         Ok(ParsedFrame::ModbusAscii {
@@ -1911,11 +2023,60 @@ impl std::fmt::Display for FrameDecodeError {
 
 impl std::error::Error for FrameDecodeError {}
 
+/// Result of pushing a chunk through a [`FrameDecoder`].
+///
+/// Always carries the frames decoded before any error — stream-fatal errors
+/// (SLIP malformed escape, COBS invalid code) no longer discard frames that
+/// were successfully decoded from the same chunk. Per-frame checksum mismatches
+/// are counted in `frames_dropped` and do NOT set `error`.
+#[derive(Debug)]
+pub struct PushOutcome {
+    /// Frames successfully decoded from this chunk.
+    pub frames: Vec<Frame>,
+    /// Per-frame drops (currently only checksum mismatches with `validate: true`).
+    /// Does NOT include frames skipped by `skip_empty` (those never consume
+    /// an index by design).
+    pub frames_dropped: usize,
+    /// Stream-fatal error (SLIP malformed escape, COBS invalid code).
+    /// `None` for per-frame checksum drops — those are counted in
+    /// `frames_dropped` and the decoder keeps going.
+    pub error: Option<FrameDecodeError>,
+}
+
 /// Whether a frame's data should be skipped under `skip_empty`: true when the
 /// data is empty or contains only ASCII whitespace bytes (space, \t, \r, \n,
 /// \x0b, \x0c).
 fn is_blank_frame(data: &[u8]) -> bool {
     data.iter().all(|&b| b.is_ascii_whitespace())
+}
+
+/// Extract the next delimited frame from the buffer, returning `Some(frame)`
+/// when the delimiter byte sequence is found. Returns `None` if the delimiter
+/// has not yet appeared. The delimiter bytes are always drained from the buffer;
+/// they are included in the returned frame only when `include_terminators` is
+/// `true`.
+fn extract_delimited(
+    buf: &mut Vec<u8>,
+    delim: &[u8],
+    include_terminators: bool,
+) -> Option<Vec<u8>> {
+    let pos = find_subsequence(buf, delim)?;
+    let fb = if include_terminators {
+        buf[..pos + delim.len()].to_vec()
+    } else {
+        buf[..pos].to_vec()
+    };
+    buf.drain(..pos + delim.len());
+    Some(fb)
+}
+
+/// Format a byte slice as uppercase hex with no separator (e.g. "4F1A").
+pub(crate) fn hex_upper(bytes: &[u8]) -> String {
+    bytes
+        .iter()
+        .map(|b| format!("{b:02X}"))
+        .collect::<Vec<_>>()
+        .join("")
 }
 
 // ---- SLIP (RFC 1055) constants and codec ------------------------------------
@@ -2037,7 +2198,7 @@ mod tests {
             ..Default::default()
         };
         let mut dec = FrameDecoder::new(&config, None).unwrap();
-        let frames = dec.push(b"hello\n").unwrap();
+        let frames = dec.push(b"hello\n").frames;
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].data, b"hello");
         assert_eq!(frames[0].index, 0);
@@ -2053,7 +2214,7 @@ mod tests {
             ..Default::default()
         };
         let mut dec = FrameDecoder::new(&config, None).unwrap();
-        let frames = dec.push(b"hello\r\nworld\n").unwrap();
+        let frames = dec.push(b"hello\r\nworld\n").frames;
         assert_eq!(frames.len(), 2);
         assert_eq!(frames[0].data, b"hello");
         assert_eq!(frames[1].data, b"world");
@@ -2063,12 +2224,12 @@ mod tests {
     fn line_decoder_partial_across_chunks() {
         let config = RxFramingConfig::default();
         let mut dec = FrameDecoder::new(&config, None).unwrap();
-        let frames = dec.push(b"hel").unwrap();
+        let frames = dec.push(b"hel").frames;
         assert!(frames.is_empty());
-        let frames = dec.push(b"lo\nwor").unwrap();
+        let frames = dec.push(b"lo\nwor").frames;
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].data, b"hello");
-        let frames = dec.push(b"ld\n").unwrap();
+        let frames = dec.push(b"ld\n").frames;
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].data, b"world");
     }
@@ -2077,7 +2238,7 @@ mod tests {
     fn line_decoder_empty_lines() {
         let config = RxFramingConfig::default();
         let mut dec = FrameDecoder::new(&config, None).unwrap();
-        let frames = dec.push(b"\n\n\n").unwrap();
+        let frames = dec.push(b"\n\n\n").frames;
         assert_eq!(frames.len(), 3);
         for f in &frames {
             assert!(f.data.is_empty());
@@ -2094,7 +2255,7 @@ mod tests {
             ..Default::default()
         };
         let mut dec = FrameDecoder::new(&config, None).unwrap();
-        let frames = dec.push(b"hello\r\n").unwrap();
+        let frames = dec.push(b"hello\r\n").frames;
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].data, b"hello\r\n");
     }
@@ -2110,7 +2271,7 @@ mod tests {
             ..Default::default()
         };
         let mut dec = FrameDecoder::new(&config, None).unwrap();
-        let frames = dec.push(b"hello\r\n").unwrap();
+        let frames = dec.push(b"hello\r\n").frames;
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].data, b"hello\r");
         assert_eq!(frames[0].frame_type, "line");
@@ -2125,7 +2286,7 @@ mod tests {
             ..Default::default()
         };
         let mut dec = FrameDecoder::new(&config, None).unwrap();
-        let frames = dec.push(b"a\rb\r").unwrap();
+        let frames = dec.push(b"a\rb\r").frames;
         assert_eq!(frames.len(), 2);
         assert_eq!(frames[0].data, b"a");
         assert_eq!(frames[1].data, b"b");
@@ -2141,7 +2302,7 @@ mod tests {
             ..Default::default()
         };
         let mut dec = FrameDecoder::new(&config, None).unwrap();
-        let frames = dec.push(b"a\r").unwrap();
+        let frames = dec.push(b"a\r").frames;
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].data, b"a\r");
     }
@@ -2156,9 +2317,9 @@ mod tests {
         };
         let mut dec = FrameDecoder::new(&config, None).unwrap();
         // CRLF split across chunks: "\r" in first, "\n" in second.
-        let frames = dec.push(b"a\r").unwrap();
+        let frames = dec.push(b"a\r").frames;
         assert!(frames.is_empty());
-        let frames = dec.push(b"\nb").unwrap();
+        let frames = dec.push(b"\nb").frames;
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].data, b"a");
     }
@@ -2172,7 +2333,7 @@ mod tests {
             ..Default::default()
         };
         let mut dec = FrameDecoder::new(&config, None).unwrap();
-        let frames = dec.push(b"a\rb\n").unwrap();
+        let frames = dec.push(b"a\rb\n").frames;
         assert_eq!(frames.len(), 0, "bare \\r should not split in crlf mode");
     }
 
@@ -2186,7 +2347,7 @@ mod tests {
             ..Default::default()
         };
         let mut dec = FrameDecoder::new(&config, None).unwrap();
-        let frames = dec.push(b"hello\r\n").unwrap();
+        let frames = dec.push(b"hello\r\n").frames;
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].data, b"hello\r\n");
     }
@@ -2230,19 +2391,19 @@ mod tests {
     #[test]
     fn auto_does_not_promote_on_crlf() {
         let mut dec = FrameDecoder::new(&auto_config(), None).unwrap();
-        let frames = dec.push(b"a\r\nb\r\n").unwrap();
+        let frames = dec.push(b"a\r\nb\r\n").frames;
         assert_eq!(frames.len(), 2);
         assert_eq!(frames[0].data, b"a");
         assert_eq!(frames[1].data, b"b");
         // After CRLF, decoder stays in AutoLf — next bare \r still triggers promotion.
-        let frames = dec.push(b"c\r").unwrap();
+        let frames = dec.push(b"c\r").frames;
         assert!(frames.is_empty(), "pending CR after CRLF");
         // Push "d" — confirmation byte stays buffered as start of next line.
-        let frames = dec.push(b"d").unwrap();
+        let frames = dec.push(b"d").frames;
         assert_eq!(frames.len(), 1, "bare CR confirmed on next non-\\n byte");
         assert_eq!(frames[0].data, b"c");
         // Now in CrMode. Buffer has "d". Push "e\r" → "de\r" → frame "de".
-        let frames = dec.push(b"e\r").unwrap();
+        let frames = dec.push(b"e\r").frames;
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].data, b"de");
     }
@@ -2250,7 +2411,7 @@ mod tests {
     #[test]
     fn auto_does_not_promote_on_lf() {
         let mut dec = FrameDecoder::new(&auto_config(), None).unwrap();
-        let frames = dec.push(b"a\nb\n").unwrap();
+        let frames = dec.push(b"a\nb\n").frames;
         assert_eq!(frames.len(), 2);
         assert_eq!(frames[0].data, b"a");
         assert_eq!(frames[1].data, b"b");
@@ -2260,15 +2421,15 @@ mod tests {
     fn auto_promotes_on_next_non_lf_byte() {
         let mut dec = FrameDecoder::new(&auto_config(), None).unwrap();
         // Push "line1\r" → \r at end, no frame emitted, enters PendingCr.
-        let frames = dec.push(b"line1\r").unwrap();
+        let frames = dec.push(b"line1\r").frames;
         assert!(frames.is_empty());
         // Push "x" → non-\n byte confirms bare CR. Emit "line1", enter CrMode.
         // The "x" stays buffered as the start of the next line.
-        let frames = dec.push(b"x").unwrap();
+        let frames = dec.push(b"x").frames;
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].data, b"line1");
         // In CrMode: push "more\r" → split on \r. Buffer had "x" + "more\r".
-        let frames = dec.push(b"more\r").unwrap();
+        let frames = dec.push(b"more\r").frames;
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].data, b"xmore");
     }
@@ -2277,14 +2438,14 @@ mod tests {
     fn auto_crlf_after_pending_cr_cancels_promotion() {
         let mut dec = FrameDecoder::new(&auto_config(), None).unwrap();
         // Push "a\r" → pending CR.
-        let frames = dec.push(b"a\r").unwrap();
+        let frames = dec.push(b"a\r").frames;
         assert!(frames.is_empty());
         // Push "\nb" → \n arrives, CRLF recognized. "b" stays buffered.
-        let frames = dec.push(b"\nb").unwrap();
+        let frames = dec.push(b"\nb").frames;
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].data, b"a");
         // Back to AutoLf. Buffer has "b". Push "c\n" → "bc\n" → frame "bc".
-        let frames = dec.push(b"c\n").unwrap();
+        let frames = dec.push(b"c\n").frames;
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].data, b"bc");
     }
@@ -2292,7 +2453,7 @@ mod tests {
     #[test]
     fn auto_flush_partial_emits_pending_cr() {
         let mut dec = FrameDecoder::new(&auto_config(), None).unwrap();
-        let frames = dec.push(b"tail\r").unwrap();
+        let frames = dec.push(b"tail\r").frames;
         assert!(frames.is_empty());
         let partial = dec.flush_partial().expect("partial frame");
         assert_eq!(partial.data, b"tail\r");
@@ -2302,7 +2463,7 @@ mod tests {
     #[test]
     fn auto_flush_partial_emits_pending_cr_include_terminators() {
         let mut dec = FrameDecoder::new(&auto_config_include_terms(), None).unwrap();
-        let frames = dec.push(b"tail\r").unwrap();
+        let frames = dec.push(b"tail\r").frames;
         assert!(frames.is_empty());
         let partial = dec.flush_partial().expect("partial frame");
         // include_terminators=true → the \r is included (already in buffer).
@@ -2313,11 +2474,11 @@ mod tests {
     fn auto_promotes_and_stays_in_cr_mode() {
         let mut dec = FrameDecoder::new(&auto_config(), None).unwrap();
         // Promote to CrMode.
-        dec.push(b"a\r").unwrap();
-        dec.push(b"b").unwrap();
+        dec.push(b"a\r");
+        dec.push(b"b");
         // In CrMode: \n is NOT a terminator, \r is.
         // Buffer has "b" from confirmation, then "x\ny\r" → "bx\ny\r" → split on \r.
-        let frames = dec.push(b"x\ny\r").unwrap();
+        let frames = dec.push(b"x\ny\r").frames;
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].data, b"bx\ny");
     }
@@ -2325,9 +2486,9 @@ mod tests {
     #[test]
     fn auto_promotion_include_terminators() {
         let mut dec = FrameDecoder::new(&auto_config_include_terms(), None).unwrap();
-        let frames = dec.push(b"line1\r").unwrap();
+        let frames = dec.push(b"line1\r").frames;
         assert!(frames.is_empty());
-        let frames = dec.push(b"x").unwrap();
+        let frames = dec.push(b"x").frames;
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].data, b"line1\r");
     }
@@ -2336,45 +2497,17 @@ mod tests {
     fn auto_pending_cr_then_flush_keeps_frame_index_monotonic() {
         let mut dec = FrameDecoder::new(&auto_config(), None).unwrap();
         // Two LF lines.
-        let frames = dec.push(b"a\nb\n").unwrap();
+        let frames = dec.push(b"a\nb\n").frames;
         assert_eq!(frames.len(), 2);
         assert_eq!(frames[0].index, 0);
         assert_eq!(frames[1].index, 1);
         // Pending CR, then flush.
-        dec.push(b"c\r").unwrap();
+        dec.push(b"c\r");
         let partial = dec.flush_partial().expect("partial frame");
         assert_eq!(partial.index, 2);
     }
 
-    // ── Protocol preset tests ──────────────────────────────────────────────
-
-    #[test]
-    fn preset_tx_framing_returns_line_cr() {
-        let cfg = preset_tx_framing(ProtocolPreset::AtCommand);
-        assert!(matches!(
-            cfg.mode,
-            TxFramingMode::Line {
-                ending: TxLineEnding::Cr
-            }
-        ));
-    }
-
-    #[test]
-    fn preset_rx_framing_returns_line_auto() {
-        let cfg = preset_rx_framing(ProtocolPreset::AtCommand);
-        assert!(matches!(
-            cfg.mode,
-            RxFramingMode::Line {
-                ending: LineEnding::Auto
-            }
-        ));
-    }
-
-    #[test]
-    fn preset_rx_parser_returns_at_command() {
-        let cfg = preset_rx_parser(ProtocolPreset::AtCommand);
-        assert_eq!(cfg.parser_type, ParserType::AtCommand);
-    }
+    // ── Protocol preset tests (table-driven) ────────────────────────────────
 
     /// Assert that a ProtocolPreset variant round-trips through the tagged-object
     /// JSON shape `{"type": "<variant_str>"}` and rejects the bare-string form.
@@ -2389,84 +2522,237 @@ mod tests {
         );
     }
 
-    #[test]
-    fn protocol_preset_tagged_object_roundtrip() {
-        assert_preset_roundtrip("at_command", ProtocolPreset::AtCommand);
+    /// One row per protocol preset: expected framing/parser expansions + roundtrip label.
+    struct PresetTestRow {
+        preset: ProtocolPreset,
+        wire_name: &'static str,
+        expected_tx: TxFramingConfig,
+        expected_rx: RxFramingConfig,
+        expected_parser: ParserConfig,
+        /// `None` = run the equivalence check. `Some(reason)` = skip (documented
+        /// exemption for presets whose expansion cannot be expressed as a single
+        /// bare framing/parser config).
+        equivalence_skip: Option<&'static str>,
+    }
+
+    fn preset_test_table() -> Vec<PresetTestRow> {
+        vec![
+            PresetTestRow {
+                preset: ProtocolPreset::AtCommand,
+                wire_name: "at_command",
+                expected_tx: TxFramingConfig {
+                    mode: TxFramingMode::Line {
+                        ending: TxLineEnding::Cr,
+                    },
+                },
+                expected_rx: RxFramingConfig {
+                    mode: RxFramingMode::Line {
+                        ending: LineEnding::Auto,
+                    },
+                    max_frames: None,
+                    include_terminators: false,
+                    skip_empty: false,
+                },
+                expected_parser: ParserConfig {
+                    parser_type: ParserType::AtCommand,
+                    custom_prompt: None,
+                    validate: false,
+                },
+                equivalence_skip: None,
+            },
+            PresetTestRow {
+                preset: ProtocolPreset::Slip,
+                wire_name: "slip",
+                expected_tx: TxFramingConfig {
+                    mode: TxFramingMode::Slip,
+                },
+                expected_rx: RxFramingConfig {
+                    mode: RxFramingMode::Slip,
+                    max_frames: None,
+                    include_terminators: false,
+                    skip_empty: false,
+                },
+                expected_parser: ParserConfig {
+                    parser_type: ParserType::Raw,
+                    custom_prompt: None,
+                    validate: false,
+                },
+                equivalence_skip: None,
+            },
+            PresetTestRow {
+                preset: ProtocolPreset::JsonLines,
+                wire_name: "json_lines",
+                expected_tx: TxFramingConfig {
+                    mode: TxFramingMode::Line {
+                        ending: TxLineEnding::Lf,
+                    },
+                },
+                expected_rx: RxFramingConfig {
+                    mode: RxFramingMode::Line {
+                        ending: LineEnding::Auto,
+                    },
+                    max_frames: None,
+                    include_terminators: false,
+                    skip_empty: false,
+                },
+                expected_parser: ParserConfig {
+                    parser_type: ParserType::JsonLines,
+                    custom_prompt: None,
+                    validate: false,
+                },
+                equivalence_skip: None,
+            },
+            PresetTestRow {
+                preset: ProtocolPreset::Cobs,
+                wire_name: "cobs",
+                expected_tx: TxFramingConfig {
+                    mode: TxFramingMode::Cobs,
+                },
+                expected_rx: RxFramingConfig {
+                    mode: RxFramingMode::Cobs,
+                    max_frames: None,
+                    include_terminators: false,
+                    skip_empty: false,
+                },
+                expected_parser: ParserConfig {
+                    parser_type: ParserType::Raw,
+                    custom_prompt: None,
+                    validate: false,
+                },
+                equivalence_skip: None,
+            },
+            PresetTestRow {
+                preset: ProtocolPreset::Ndjson,
+                wire_name: "ndjson",
+                expected_tx: TxFramingConfig {
+                    mode: TxFramingMode::Line {
+                        ending: TxLineEnding::Lf,
+                    },
+                },
+                expected_rx: RxFramingConfig {
+                    mode: RxFramingMode::Line {
+                        ending: LineEnding::Auto,
+                    },
+                    max_frames: None,
+                    include_terminators: false,
+                    skip_empty: true,
+                },
+                expected_parser: ParserConfig {
+                    parser_type: ParserType::JsonLines,
+                    custom_prompt: None,
+                    validate: false,
+                },
+                equivalence_skip: None,
+            },
+            PresetTestRow {
+                preset: ProtocolPreset::Nmea0183,
+                wire_name: "nmea0183",
+                expected_tx: TxFramingConfig {
+                    mode: TxFramingMode::Nmea,
+                },
+                expected_rx: RxFramingConfig {
+                    mode: RxFramingMode::StartEnd {
+                        start: vec!["$".into(), "!".into()],
+                        end: "\r\n".into(),
+                        marker_encoding: PatternEncoding::Utf8,
+                        include_markers: false,
+                    },
+                    max_frames: None,
+                    include_terminators: false,
+                    skip_empty: false,
+                },
+                expected_parser: ParserConfig {
+                    parser_type: ParserType::Nmea,
+                    custom_prompt: None,
+                    validate: true,
+                },
+                equivalence_skip: None,
+            },
+            PresetTestRow {
+                preset: ProtocolPreset::ModbusAscii,
+                wire_name: "modbus_ascii",
+                expected_tx: TxFramingConfig {
+                    mode: TxFramingMode::StartEnd {
+                        start: vec![":".into()],
+                        end: "\r\n".into(),
+                        marker_encoding: PatternEncoding::Utf8,
+                    },
+                },
+                expected_rx: RxFramingConfig {
+                    mode: RxFramingMode::StartEnd {
+                        start: vec![":".into()],
+                        end: "\r\n".into(),
+                        marker_encoding: PatternEncoding::Utf8,
+                        include_markers: false,
+                    },
+                    max_frames: None,
+                    include_terminators: false,
+                    skip_empty: false,
+                },
+                expected_parser: ParserConfig {
+                    parser_type: ParserType::ModbusAscii,
+                    custom_prompt: None,
+                    validate: true,
+                },
+                equivalence_skip: None,
+            },
+        ]
     }
 
     #[test]
-    fn preset_tx_framing_slip_returns_slip_mode() {
-        let cfg = preset_tx_framing(ProtocolPreset::Slip);
-        assert!(matches!(cfg.mode, TxFramingMode::Slip));
+    fn preset_tx_framing_matches_table() {
+        for row in preset_test_table() {
+            let cfg = preset_tx_framing(row.preset);
+            assert_eq!(cfg.mode, row.expected_tx.mode);
+        }
     }
 
     #[test]
-    fn preset_tx_framing_json_lines_returns_line_lf() {
-        let cfg = preset_tx_framing(ProtocolPreset::JsonLines);
-        assert!(matches!(
-            cfg.mode,
-            TxFramingMode::Line {
-                ending: TxLineEnding::Lf
+    fn preset_rx_framing_matches_table() {
+        for row in preset_test_table() {
+            let cfg = preset_rx_framing(row.preset);
+            assert_eq!(cfg.mode, row.expected_rx.mode);
+            assert_eq!(cfg.skip_empty, row.expected_rx.skip_empty);
+        }
+    }
+
+    #[test]
+    fn preset_rx_parser_matches_table() {
+        for row in preset_test_table() {
+            let cfg = preset_rx_parser(row.preset);
+            assert_eq!(cfg.parser_type, row.expected_parser.parser_type);
+            assert_eq!(cfg.validate, row.expected_parser.validate);
+        }
+    }
+
+    #[test]
+    fn protocol_preset_tagged_object_roundtrips() {
+        for row in preset_test_table() {
+            assert_preset_roundtrip(row.wire_name, row.preset);
+        }
+    }
+
+    #[test]
+    fn presets_equivalent_to_bare_configs() {
+        for row in preset_test_table() {
+            if let Some(reason) = row.equivalence_skip {
+                // Documented exemption, not a missing test.
+                eprintln!("skipping equivalence for {}: {}", row.wire_name, reason);
+                continue;
             }
-        ));
-    }
+            let preset_tx = preset_tx_framing(row.preset);
+            assert_eq!(preset_tx, row.expected_tx, "{} TX", row.wire_name);
 
-    #[test]
-    fn preset_rx_framing_slip_returns_slip_mode() {
-        let cfg = preset_rx_framing(ProtocolPreset::Slip);
-        assert!(matches!(cfg.mode, RxFramingMode::Slip));
-    }
+            let preset_rx = preset_rx_framing(row.preset);
+            assert_eq!(preset_rx, row.expected_rx, "{} RX", row.wire_name);
 
-    #[test]
-    fn preset_rx_framing_json_lines_returns_line_auto() {
-        let cfg = preset_rx_framing(ProtocolPreset::JsonLines);
-        assert!(matches!(
-            cfg.mode,
-            RxFramingMode::Line {
-                ending: LineEnding::Auto
-            }
-        ));
-    }
-
-    #[test]
-    fn preset_rx_parser_slip_returns_raw() {
-        let cfg = preset_rx_parser(ProtocolPreset::Slip);
-        assert_eq!(cfg.parser_type, ParserType::Raw);
-    }
-
-    #[test]
-    fn preset_rx_parser_json_lines_returns_json_lines() {
-        let cfg = preset_rx_parser(ProtocolPreset::JsonLines);
-        assert_eq!(cfg.parser_type, ParserType::JsonLines);
-    }
-
-    #[test]
-    fn protocol_preset_slip_tagged_object_roundtrip() {
-        assert_preset_roundtrip("slip", ProtocolPreset::Slip);
-    }
-
-    #[test]
-    fn protocol_preset_json_lines_tagged_object_roundtrip() {
-        assert_preset_roundtrip("json_lines", ProtocolPreset::JsonLines);
-    }
-
-    #[test]
-    fn slip_preset_equivalent_to_bare_slip_framing() {
-        // TX: preset must match hand-built TxFramingConfig with Slip mode.
-        let preset_tx = preset_tx_framing(ProtocolPreset::Slip);
-        let bare_tx = TxFramingConfig {
-            mode: TxFramingMode::Slip,
-        };
-        assert_eq!(preset_tx, bare_tx);
-        // RX: preset must match hand-built RxFramingConfig with Slip mode.
-        let preset_rx = preset_rx_framing(ProtocolPreset::Slip);
-        let bare_rx = RxFramingConfig {
-            mode: RxFramingMode::Slip,
-            max_frames: None,
-            include_terminators: false,
-            skip_empty: false,
-        };
-        assert_eq!(preset_rx, bare_rx);
+            let preset_parser = preset_rx_parser(row.preset);
+            assert_eq!(
+                preset_parser, row.expected_parser,
+                "{} parser",
+                row.wire_name
+            );
+        }
     }
 
     // ── SLIP (RFC 1055) tests ─────────────────────────────────────────────
@@ -2512,7 +2798,7 @@ mod tests {
     #[test]
     fn rx_slip_skips_to_first_end() {
         let mut dec = FrameDecoder::new(&slip_rx_config(), None).unwrap();
-        let frames = dec.push(b"junk\xC0hi\xC0").unwrap();
+        let frames = dec.push(b"junk\xC0hi\xC0").frames;
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].data, b"hi");
     }
@@ -2520,7 +2806,7 @@ mod tests {
     #[test]
     fn rx_slip_decodes_basic_frame() {
         let mut dec = FrameDecoder::new(&slip_rx_config(), None).unwrap();
-        let frames = dec.push(b"\xC0hello\xC0").unwrap();
+        let frames = dec.push(b"\xC0hello\xC0").frames;
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].data, b"hello");
     }
@@ -2528,7 +2814,7 @@ mod tests {
     #[test]
     fn rx_slip_decodes_esc_end() {
         let mut dec = FrameDecoder::new(&slip_rx_config(), None).unwrap();
-        let frames = dec.push(b"\xC0\xDB\xDC\xC0").unwrap();
+        let frames = dec.push(b"\xC0\xDB\xDC\xC0").frames;
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].data, b"\xC0");
     }
@@ -2536,7 +2822,7 @@ mod tests {
     #[test]
     fn rx_slip_decodes_esc_esc() {
         let mut dec = FrameDecoder::new(&slip_rx_config(), None).unwrap();
-        let frames = dec.push(b"\xC0\xDB\xDD\xC0").unwrap();
+        let frames = dec.push(b"\xC0\xDB\xDD\xC0").frames;
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].data, b"\xDB");
     }
@@ -2545,10 +2831,10 @@ mod tests {
     fn rx_slip_malformed_escape_returns_err() {
         let mut dec = FrameDecoder::new(&slip_rx_config(), None).unwrap();
         let result = dec.push(b"\xC0\xDB\x41\xC0");
-        match result {
-            Ok(_) => panic!("expected decode error"),
-            Err(FrameDecodeError::SlipInvalidEscape(b)) => assert_eq!(b, 0x41),
-            Err(_) => panic!("unexpected error variant"),
+        assert!(result.error.is_some(), "expected decode error");
+        match result.error {
+            Some(FrameDecodeError::SlipInvalidEscape(b)) => assert_eq!(b, 0x41),
+            other => panic!("unexpected error variant: {other:?}"),
         }
     }
 
@@ -2557,11 +2843,11 @@ mod tests {
         let mut dec = FrameDecoder::new(&slip_rx_config(), None).unwrap();
         // Malformed escape.
         let result = dec.push(b"\xC0\xDB\x41\xC0");
-        assert!(result.is_err());
+        assert!(result.error.is_some());
         // After resync, decoder is in BeforeFirstEnd. The trailing END from
         // the malformed chunk remains in buf_outer. Push a valid frame —
         // two consecutive ENDs produce one empty frame then "ok".
-        let frames = dec.push(b"\xC0ok\xC0").unwrap();
+        let frames = dec.push(b"\xC0ok\xC0").frames;
         assert_eq!(frames.len(), 2);
         assert!(frames[0].data.is_empty());
         assert_eq!(frames[1].data, b"ok");
@@ -2572,17 +2858,42 @@ mod tests {
         let mut dec = FrameDecoder::new(&slip_rx_config(), None).unwrap();
         // Partial frame "hello", then malformed escape.
         let result = dec.push(b"\xC0hello\xDB\x41");
-        assert!(result.is_err());
+        assert!(result.error.is_some());
         // After resync, "hello" must be cleared. Push a new frame.
-        let frames = dec.push(b"\xC0world\xC0").unwrap();
+        let frames = dec.push(b"\xC0world\xC0").frames;
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].data, b"world");
     }
 
     #[test]
+    fn push_survives_frames_decoded_before_slip_invalid_escape() {
+        // Two good SLIP frames, then a malformed escape → 2 frames survive.
+        let mut dec = FrameDecoder::new(&slip_rx_config(), None).unwrap();
+        // Build: C0 aa C0 bb C0 DB 41 (two valid frames, then malformed).
+        let mut chunk = vec![SLIP_END];
+        chunk.extend_from_slice(b"aa");
+        chunk.push(SLIP_END);
+        // One SLIP_END separates frames — no empty frame between them.
+        chunk.extend_from_slice(b"bb");
+        chunk.push(SLIP_END);
+        // Now append a malformed escape: ESC followed by invalid byte.
+        chunk.push(SLIP_ESC);
+        chunk.push(0x41); // Invalid escape byte
+        let result = dec.push(&chunk);
+        assert_eq!(result.frames.len(), 2, "frames before error should survive");
+        assert_eq!(result.frames[0].data, b"aa");
+        assert_eq!(result.frames[1].data, b"bb");
+        assert_eq!(result.frames_dropped, 0);
+        assert!(matches!(
+            result.error,
+            Some(FrameDecodeError::SlipInvalidEscape(0x41))
+        ));
+    }
+
+    #[test]
     fn rx_slip_two_frames_in_one_chunk() {
         let mut dec = FrameDecoder::new(&slip_rx_config(), None).unwrap();
-        let frames = dec.push(b"\xC0aa\xC0bb\xC0").unwrap();
+        let frames = dec.push(b"\xC0aa\xC0bb\xC0").frames;
         assert_eq!(frames.len(), 2);
         assert_eq!(frames[0].data, b"aa");
         assert_eq!(frames[1].data, b"bb");
@@ -2591,9 +2902,9 @@ mod tests {
     #[test]
     fn rx_slip_cross_chunk_frame() {
         let mut dec = FrameDecoder::new(&slip_rx_config(), None).unwrap();
-        let frames = dec.push(b"\xC0hel").unwrap();
+        let frames = dec.push(b"\xC0hel").frames;
         assert!(frames.is_empty());
-        let frames = dec.push(b"lo\xC0").unwrap();
+        let frames = dec.push(b"lo\xC0").frames;
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].data, b"hello");
     }
@@ -2601,9 +2912,9 @@ mod tests {
     #[test]
     fn rx_slip_truncated_escape_holds_pending() {
         let mut dec = FrameDecoder::new(&slip_rx_config(), None).unwrap();
-        let frames = dec.push(b"\xC0\xDB").unwrap();
+        let frames = dec.push(b"\xC0\xDB").frames;
         assert!(frames.is_empty());
-        let frames = dec.push(b"\xDC\xC0").unwrap();
+        let frames = dec.push(b"\xDC\xC0").frames;
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].data, b"\xC0");
     }
@@ -2611,7 +2922,7 @@ mod tests {
     #[test]
     fn rx_slip_flush_partial_emits_pending() {
         let mut dec = FrameDecoder::new(&slip_rx_config(), None).unwrap();
-        let frames = dec.push(b"\xC0hel").unwrap();
+        let frames = dec.push(b"\xC0hel").frames;
         assert!(frames.is_empty());
         let partial = dec.flush_partial().expect("partial frame");
         assert_eq!(partial.data, b"hel");
@@ -2624,7 +2935,7 @@ mod tests {
         let mode = TxFramingMode::Slip;
         let framed = mode.encode(payload).unwrap();
         let mut dec = FrameDecoder::new(&slip_rx_config(), None).unwrap();
-        let frames = dec.push(&framed).unwrap();
+        let frames = dec.push(&framed).frames;
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].data, payload);
     }
@@ -2635,7 +2946,7 @@ mod tests {
         let framed = mode.encode(b"").unwrap();
         assert_eq!(framed, &[SLIP_END, SLIP_END]);
         let mut dec = FrameDecoder::new(&slip_rx_config(), None).unwrap();
-        let frames = dec.push(&framed).unwrap();
+        let frames = dec.push(&framed).frames;
         assert_eq!(frames.len(), 1);
         assert!(frames[0].data.is_empty());
     }
@@ -2653,7 +2964,7 @@ mod tests {
         framed.push(SLIP_END);
 
         let mut dec = FrameDecoder::new(&slip_rx_config(), None).unwrap();
-        let frames = dec.push(&framed).unwrap();
+        let frames = dec.push(&framed).frames;
         assert_eq!(frames.len(), 1, "expected exactly one frame");
         assert_eq!(
             frames[0].data, payload,
@@ -2670,11 +2981,11 @@ mod tests {
         // drain consumed bytes, reset state to BeforeFirstEnd, return Err.
         // Then push a well-formed SLIP-framed NMEA sentence and confirm the
         // decoder recovers (state was reset — no stale escaped/buf corruption).
-        use crate::checksums::XorChecksum;
+        use crate::checksums::xor_checksum;
 
         let bad_body = b"GPGLL,3751.65,N,12226.54,W*00"; // wrong checksum (correct is 7E)
         let good_body = b"GPGLL,3751.65,N,12226.54,W";
-        let good_cs = XorChecksum.compute(good_body)[0];
+        let good_cs = xor_checksum(good_body);
         let good_sentence = format!("GPGLL,3751.65,N,12226.54,W*{good_cs:02X}");
 
         let framing = RxFramingConfig {
@@ -2688,42 +2999,47 @@ mod tests {
         };
         let mut dec = FrameDecoder::new(&framing, Some(&parser)).unwrap();
 
-        // Push 1: bad-checksum frame → Err(ChecksumMismatch).
+        // Push 1: bad-checksum frame → dropped (frames_dropped=1, no error).
         let mut push1 = vec![SLIP_END];
         push1.extend_from_slice(bad_body);
         push1.push(SLIP_END);
         let result = dec.push(&push1);
         assert!(
-            result.is_err(),
-            "SLIP+parser must propagate the ChecksumMismatch"
+            result.frames.is_empty(),
+            "bad-checksum frame should be dropped, not emitted"
         );
-        let err = result.unwrap_err();
-        assert!(
-            matches!(err, FrameDecodeError::ChecksumMismatch { .. }),
-            "expected ChecksumMismatch, got {err:?}"
-        );
+        assert_eq!(result.frames_dropped, 1, "checksum drop should be counted");
+        assert!(result.error.is_none(), "checksum drop should not set error");
 
-        // Push 2: good-checksum frame → one clean Nmea frame (state was reset
-        // to BeforeFirstEnd by the error path; no stale escaped/buf corruption).
+        // Push 2: good-checksum frame → decoder was NOT reset by the checksum
+        // drop (state stayed InFrame with empty buf). The leading SLIP_END
+        // produces an empty frame; the good sentence produces a parsed Nmea frame.
         let mut push2 = vec![SLIP_END];
         push2.extend_from_slice(good_sentence.as_bytes());
         push2.push(SLIP_END);
-        let frames = dec.push(&push2).unwrap();
-        assert_eq!(
-            frames.len(),
-            1,
-            "decoder must recover after the parser error"
+        let result2 = dec.push(&push2);
+        // First frame is empty (leading SLIP_END with empty buf), second has our NMEA.
+        assert!(
+            result2.frames.len() >= 2,
+            "expected at least 2 frames, got {}",
+            result2.frames.len()
         );
+        // Find the Nmea frame (skip the empty one).
+        let nmea_frame = result2
+            .frames
+            .iter()
+            .find(|f| matches!(f.parsed, Some(ParsedFrame::Nmea { .. })))
+            .expect("expected a clean Nmea frame after recovery");
         assert!(
             matches!(
-                &frames[0].parsed,
+                &nmea_frame.parsed,
                 Some(ParsedFrame::Nmea {
                     checksum_valid: Some(true),
                     ..
                 })
             ),
             "expected a clean Nmea frame after recovery, got {:?}",
-            frames[0].parsed
+            nmea_frame.parsed
         );
     }
 
@@ -2739,7 +3055,7 @@ mod tests {
             ..Default::default()
         };
         let mut dec = FrameDecoder::new(&config, None).unwrap();
-        let frames = dec.push(b"a|b|c|").unwrap();
+        let frames = dec.push(b"a|b|c|").frames;
         assert_eq!(frames.len(), 3);
         assert_eq!(frames[0].data, b"a");
         assert_eq!(frames[1].data, b"b");
@@ -2756,7 +3072,7 @@ mod tests {
             ..Default::default()
         };
         let mut dec = FrameDecoder::new(&config, None).unwrap();
-        let frames = dec.push(b"xAAyAAz").unwrap();
+        let frames = dec.push(b"xAAyAAz").frames;
         assert_eq!(frames.len(), 2);
         assert_eq!(frames[0].data, b"x");
         assert_eq!(frames[1].data, b"y");
@@ -2772,9 +3088,9 @@ mod tests {
             ..Default::default()
         };
         let mut dec = FrameDecoder::new(&config, None).unwrap();
-        let frames = dec.push(b"xA").unwrap();
+        let frames = dec.push(b"xA").frames;
         assert!(frames.is_empty());
-        let frames = dec.push(b"By").unwrap();
+        let frames = dec.push(b"By").frames;
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].data, b"x");
     }
@@ -2792,7 +3108,7 @@ mod tests {
             ..Default::default()
         };
         let mut dec = FrameDecoder::new(&config, None).unwrap();
-        let frames = dec.push(b"\x05hello\x02wo\x02rb").unwrap();
+        let frames = dec.push(b"\x05hello\x02wo\x02rb").frames;
         assert_eq!(frames.len(), 3);
         assert_eq!(frames[0].data, b"hello");
         assert_eq!(frames[1].data, b"wo");
@@ -2812,7 +3128,7 @@ mod tests {
         let mut dec = FrameDecoder::new(&config, None).unwrap();
         let mut buf = vec![0x00, 0x05];
         buf.extend_from_slice(b"hello");
-        let frames = dec.push(&buf).unwrap();
+        let frames = dec.push(&buf).frames;
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].data, b"hello");
     }
@@ -2831,7 +3147,7 @@ mod tests {
             ..Default::default()
         };
         let mut dec = FrameDecoder::new(&config, None).unwrap();
-        let frames = dec.push(b"noiseSTXdataETXjunkSTXmoreETX").unwrap();
+        let frames = dec.push(b"noiseSTXdataETXjunkSTXmoreETX").frames;
         assert_eq!(frames.len(), 2);
         assert_eq!(frames[0].data, b"data");
         assert_eq!(frames[1].data, b"more");
@@ -2849,7 +3165,7 @@ mod tests {
             ..Default::default()
         };
         let mut dec = FrameDecoder::new(&config, None).unwrap();
-        let frames = dec.push(b"<data>").unwrap();
+        let frames = dec.push(b"<data>").frames;
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].data, b"<data>");
     }
@@ -2965,7 +3281,7 @@ mod tests {
             validate: false,
         };
         let mut dec = FrameDecoder::new(&config, Some(&parser)).unwrap();
-        let frames = dec.push(b"OK\nERROR\n+CGREG: 0,1\n").unwrap();
+        let frames = dec.push(b"OK\nERROR\n+CGREG: 0,1\n").frames;
         assert_eq!(frames.len(), 3);
         assert!(
             matches!(frames[0].parsed, Some(ParsedFrame::AtCommand { ref status, .. }) if status.as_deref() == Some("OK"))
@@ -2984,7 +3300,7 @@ mod tests {
     fn line_decoder_no_terminator_then_flush() {
         let config = RxFramingConfig::default();
         let mut dec = FrameDecoder::new(&config, None).unwrap();
-        let frames = dec.push(b"hello").unwrap();
+        let frames = dec.push(b"hello").frames;
         assert!(frames.is_empty());
         assert_eq!(dec.pending_len(), 5);
         let partial = dec.flush_partial().expect("partial frame");
@@ -3020,7 +3336,7 @@ mod tests {
             ..Default::default()
         };
         let mut dec = FrameDecoder::new(&config, None).unwrap();
-        let frames = dec.push(b"\x00\x05hello").unwrap();
+        let frames = dec.push(b"\x00\x05hello").frames;
         assert_eq!(frames.len(), 2);
         assert!(frames[0].data.is_empty());
         assert_eq!(frames[1].data, b"hello");
@@ -3037,7 +3353,7 @@ mod tests {
             ..Default::default()
         };
         let mut dec = FrameDecoder::new(&config, None).unwrap();
-        let frames = dec.push(b"\x0aABC").unwrap();
+        let frames = dec.push(b"\x0aABC").frames;
         assert!(frames.is_empty());
         assert!(dec.pending_len() >= 3);
     }
@@ -3071,7 +3387,7 @@ mod tests {
         let mut dec = FrameDecoder::new(&config, None).unwrap();
         let mut buf = vec![0x00, 0x00, 0x00, 0x05];
         buf.extend_from_slice(b"hello");
-        let frames = dec.push(&buf).unwrap();
+        let frames = dec.push(&buf).frames;
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].data, b"hello");
     }
@@ -3089,7 +3405,7 @@ mod tests {
         let mut dec = FrameDecoder::new(&config, None).unwrap();
         let mut buf = vec![0x05, 0x00, 0x00, 0x00];
         buf.extend_from_slice(b"hello");
-        let frames = dec.push(&buf).unwrap();
+        let frames = dec.push(&buf).frames;
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].data, b"hello");
     }
@@ -3106,7 +3422,7 @@ mod tests {
             ..Default::default()
         };
         let mut dec = FrameDecoder::new(&config, None).unwrap();
-        let frames = dec.push(b"noise_without_markers").unwrap();
+        let frames = dec.push(b"noise_without_markers").frames;
         assert!(frames.is_empty());
         assert!(dec.pending_len() <= 2);
     }
@@ -3123,7 +3439,7 @@ mod tests {
             ..Default::default()
         };
         let mut dec = FrameDecoder::new(&config, None).unwrap();
-        let frames = dec.push(b"<data_without_end").unwrap();
+        let frames = dec.push(b"<data_without_end").frames;
         assert!(frames.is_empty(), "no end marker yet");
         let partial = dec.flush_partial().expect("partial frame after flush");
         assert_eq!(partial.data, b"data_without_end");
@@ -3161,9 +3477,9 @@ mod tests {
             ..Default::default()
         };
         let mut dec = FrameDecoder::new(&config, None).unwrap();
-        let frames = dec.push(b"AB").unwrap();
+        let frames = dec.push(b"AB").frames;
         assert!(frames.is_empty());
-        let frames = dec.push(b"CdX").unwrap();
+        let frames = dec.push(b"CdX").frames;
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].data, b"d");
     }
@@ -3296,7 +3612,7 @@ mod tests {
             ..Default::default()
         };
         let mut dec = FrameDecoder::new(&config, None).unwrap();
-        let frames = dec.push(b"hello\n").unwrap();
+        let frames = dec.push(b"hello\n").frames;
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].data, b"hello");
     }
@@ -3312,7 +3628,7 @@ mod tests {
             ..Default::default()
         };
         let mut dec = FrameDecoder::new(&config, None).unwrap();
-        let frames = dec.push(b"XXXX\x05hello").unwrap();
+        let frames = dec.push(b"XXXX\x05hello").frames;
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].data, b"hello");
     }
@@ -3328,7 +3644,7 @@ mod tests {
             ..Default::default()
         };
         let mut dec = FrameDecoder::new(&config, None).unwrap();
-        let frames = dec.push(b"a|b|").unwrap();
+        let frames = dec.push(b"a|b|").frames;
         assert_eq!(frames.len(), 2);
         assert_eq!(frames[0].data, b"a|");
         assert_eq!(frames[1].data, b"b|");
@@ -3355,7 +3671,7 @@ mod tests {
             validate: false,
         };
         let mut dec = FrameDecoder::new(&config, Some(&parser)).unwrap();
-        let frames = dec.push(b"{\"a\":1}\n{\"b\":2}\n").unwrap();
+        let frames = dec.push(b"{\"a\":1}\n{\"b\":2}\n").frames;
         assert_eq!(frames.len(), 2);
         assert!(matches!(frames[0].parsed, Some(ParsedFrame::Json(_))));
         assert!(matches!(frames[1].parsed, Some(ParsedFrame::Json(_))));
@@ -3373,13 +3689,13 @@ mod tests {
             ..Default::default()
         };
         let mut dec = FrameDecoder::new(&config, None).unwrap();
-        let frames = dec.push(b"||").unwrap();
+        let frames = dec.push(b"||").frames;
         assert_eq!(frames.len(), 2);
         assert!(frames[0].data.is_empty());
         assert!(frames[1].data.is_empty());
 
         let mut dec = FrameDecoder::new(&config, None).unwrap();
-        let frames = dec.push(b"a||b|").unwrap();
+        let frames = dec.push(b"a||b|").frames;
         assert_eq!(frames.len(), 3);
         assert_eq!(frames[0].data, b"a");
         assert!(frames[1].data.is_empty());
@@ -3397,9 +3713,9 @@ mod tests {
             ..Default::default()
         };
         let mut dec = FrameDecoder::new(&config, None).unwrap();
-        let frames = dec.push(b"\x00").unwrap();
+        let frames = dec.push(b"\x00").frames;
         assert!(frames.is_empty());
-        let frames = dec.push(b"\x05hello").unwrap();
+        let frames = dec.push(b"\x05hello").frames;
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].data, b"hello");
     }
@@ -3416,9 +3732,9 @@ mod tests {
             ..Default::default()
         };
         let mut dec = FrameDecoder::new(&config, None).unwrap();
-        let frames = dec.push(b"STXdataET").unwrap();
+        let frames = dec.push(b"STXdataET").frames;
         assert!(frames.is_empty(), "end marker ETX not yet complete");
-        let frames = dec.push(b"X").unwrap();
+        let frames = dec.push(b"X").frames;
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].data, b"data");
     }
@@ -3601,7 +3917,7 @@ mod tests {
         let payload = b"hello world";
         let framed = tx.encode(payload).unwrap();
         let mut dec = FrameDecoder::new(&rx_config, None).unwrap();
-        let frames = dec.push(&framed).unwrap();
+        let frames = dec.push(&framed).frames;
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].data, payload);
     }
@@ -3620,7 +3936,7 @@ mod tests {
         let payload = b"hello world";
         let framed = tx.encode(payload).unwrap();
         let mut dec = FrameDecoder::new(&rx_config, None).unwrap();
-        let frames = dec.push(&framed).unwrap();
+        let frames = dec.push(&framed).frames;
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].data, payload);
     }
@@ -3639,7 +3955,7 @@ mod tests {
         let payload = b"hello world";
         let framed = tx.encode(payload).unwrap();
         let mut dec = FrameDecoder::new(&rx_config, None).unwrap();
-        let frames = dec.push(&framed).unwrap();
+        let frames = dec.push(&framed).frames;
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].data, payload);
     }
@@ -3660,7 +3976,7 @@ mod tests {
         let payload = b"data";
         let framed = tx.encode(payload).unwrap();
         let mut dec = FrameDecoder::new(&rx_config, None).unwrap();
-        let frames = dec.push(&framed).unwrap();
+        let frames = dec.push(&framed).frames;
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].data, payload);
     }
@@ -3682,7 +3998,7 @@ mod tests {
         let payload = b"binary data";
         let framed = tx.encode(payload).unwrap();
         let mut dec = FrameDecoder::new(&rx_config, None).unwrap();
-        let frames = dec.push(&framed).unwrap();
+        let frames = dec.push(&framed).frames;
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].data, payload);
     }
@@ -3704,7 +4020,7 @@ mod tests {
         let payload = b"binary data";
         let framed = tx.encode(payload).unwrap();
         let mut dec = FrameDecoder::new(&rx_config, None).unwrap();
-        let frames = dec.push(&framed).unwrap();
+        let frames = dec.push(&framed).frames;
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].data, payload);
     }
@@ -3728,7 +4044,7 @@ mod tests {
         let payload = b"data";
         let framed = tx.encode(payload).unwrap();
         let mut dec = FrameDecoder::new(&rx_config, None).unwrap();
-        let frames = dec.push(&framed).unwrap();
+        let frames = dec.push(&framed).frames;
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].data, payload);
     }
@@ -3814,7 +4130,7 @@ mod tests {
         let good_frame = mode.encode(b"hi").unwrap();
         let mut input = b"junk".to_vec();
         input.extend_from_slice(&good_frame);
-        let frames = dec.push(&input).unwrap();
+        let frames = dec.push(&input).frames;
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].data, b"hi");
     }
@@ -3824,7 +4140,7 @@ mod tests {
         let mut dec = FrameDecoder::new(&cobs_rx_config(), None).unwrap();
         let mode = TxFramingMode::Cobs;
         let framed = mode.encode(b"hello").unwrap();
-        let frames = dec.push(&framed).unwrap();
+        let frames = dec.push(&framed).frames;
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].data, b"hello");
     }
@@ -3837,7 +4153,7 @@ mod tests {
         // to phantom zero: 'B' + phantom = 2), then 'B'.
         let mode = TxFramingMode::Cobs;
         let framed = mode.encode(&[0x41, 0x00, 0x42]).unwrap();
-        let frames = dec.push(&framed).unwrap();
+        let frames = dec.push(&framed).frames;
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].data, &[0x41, 0x00, 0x42]);
     }
@@ -3848,7 +4164,7 @@ mod tests {
         let mode = TxFramingMode::Cobs;
         let framed = mode.encode(payload).unwrap();
         let mut dec = FrameDecoder::new(&cobs_rx_config(), None).unwrap();
-        let frames = dec.push(&framed).unwrap();
+        let frames = dec.push(&framed).frames;
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].data, payload);
     }
@@ -3860,7 +4176,7 @@ mod tests {
         // Empty payload: [delim][code 0x01][delim] → [0x00, 0x01, 0x00].
         assert_eq!(framed, &[0x00, 0x01, 0x00]);
         let mut dec = FrameDecoder::new(&cobs_rx_config(), None).unwrap();
-        let frames = dec.push(&framed).unwrap();
+        let frames = dec.push(&framed).frames;
         assert_eq!(frames.len(), 1);
         assert!(frames[0].data.is_empty());
     }
@@ -3874,7 +4190,7 @@ mod tests {
         let mode = TxFramingMode::Cobs;
         let framed = mode.encode(&payload).unwrap();
         let mut dec = FrameDecoder::new(&cobs_rx_config(), None).unwrap();
-        let frames = dec.push(&framed).unwrap();
+        let frames = dec.push(&framed).frames;
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].data, payload);
     }
@@ -3889,7 +4205,7 @@ mod tests {
         let mode = TxFramingMode::Cobs;
         let framed = mode.encode(&payload).unwrap();
         let mut dec = FrameDecoder::new(&cobs_rx_config(), None).unwrap();
-        let frames = dec.push(&framed).unwrap();
+        let frames = dec.push(&framed).frames;
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].data, payload);
     }
@@ -3904,13 +4220,28 @@ mod tests {
         let mut dec = FrameDecoder::new(&cobs_rx_config(), None).unwrap();
         // Two delimiter bytes: first consumed by BeforeFirstDelim, second
         // emits an empty frame.
-        let frames = dec.push(b"\x00\x00").unwrap();
+        let frames = dec.push(b"\x00\x00").frames;
         assert_eq!(
             frames.len(),
             1,
             "2 consecutive delimiters yield 1 empty frame"
         );
         assert!(frames[0].data.is_empty());
+    }
+
+    #[test]
+    fn push_survives_frames_decoded_before_cobs_invalid_code() {
+        // COBS decoder does not currently produce CobsInvalidCode errors
+        // (all code bytes are valid). Verify PushOutcome structure:
+        // good COBS frames decode without error.
+        let mut dec = FrameDecoder::new(&cobs_rx_config(), None).unwrap();
+        let mode = TxFramingMode::Cobs;
+        let framed = mode.encode(b"hello").unwrap();
+        let result = dec.push(&framed);
+        assert_eq!(result.frames.len(), 1, "should decode COBS frame");
+        assert_eq!(result.frames[0].data, b"hello");
+        assert!(result.error.is_none(), "no error");
+        assert_eq!(result.frames_dropped, 0);
     }
 
     #[test]
@@ -3922,13 +4253,13 @@ mod tests {
         let mut dec = FrameDecoder::new(&cobs_rx_config(), None).unwrap();
         // Two consecutive delimiter bytes → one empty frame, then sync for
         // next frame.
-        let frames = dec.push(b"\x00\x00").unwrap();
+        let frames = dec.push(b"\x00\x00").frames;
         assert_eq!(frames.len(), 1);
         assert!(frames[0].data.is_empty());
         // Subsequent valid frame decodes correctly.
         let mode = TxFramingMode::Cobs;
         let framed = mode.encode(b"ok").unwrap();
-        let frames = dec.push(&framed).unwrap();
+        let frames = dec.push(&framed).frames;
         assert!(!frames.is_empty());
         // The last frame should be "ok".
         assert_eq!(frames.last().unwrap().data, b"ok");
@@ -3944,11 +4275,11 @@ mod tests {
         // Then push a well-formed COBS-framed NMEA sentence and confirm the
         // decoder recovers (state was reset — no stale decoded/remaining/
         // pending_zero corruption).
-        use crate::checksums::XorChecksum;
+        use crate::checksums::xor_checksum;
 
         let bad_body = b"GPGLL,3751.65,N,12226.54,W*00"; // wrong checksum (correct is 7E)
         let good_body = b"GPGLL,3751.65,N,12226.54,W";
-        let good_cs = XorChecksum.compute(good_body)[0];
+        let good_cs = xor_checksum(good_body);
         let good_sentence = format!("GPGLL,3751.65,N,12226.54,W*{good_cs:02X}");
 
         // COBS-encode each sentence via TxFramingMode::Cobs (which produces
@@ -3969,24 +4300,19 @@ mod tests {
         };
         let mut dec = FrameDecoder::new(&framing, Some(&parser)).unwrap();
 
-        // Push 1: bad-checksum frame → Err(ChecksumMismatch).
+        // Push 1: bad-checksum frame → dropped (frames_dropped=1, no error).
         let result = dec.push(&bad_framed);
         assert!(
-            result.is_err(),
-            "COBS+parser must propagate ChecksumMismatch"
+            result.frames.is_empty(),
+            "bad-checksum frame should be dropped, not emitted"
         );
-        assert!(
-            matches!(
-                result.unwrap_err(),
-                FrameDecodeError::ChecksumMismatch { .. }
-            ),
-            "expected ChecksumMismatch"
-        );
+        assert_eq!(result.frames_dropped, 1, "checksum drop should be counted");
+        assert!(result.error.is_none(), "checksum drop should not set error");
 
         // Push 2: good-checksum frame → one clean Nmea frame (state was reset
         // to BeforeFirstDelim by the error path; no stale decoded/remaining/
         // pending_zero corruption).
-        let frames = dec.push(&good_framed).unwrap();
+        let frames = dec.push(&good_framed).frames;
         assert_eq!(
             frames.len(),
             1,
@@ -4005,57 +4331,13 @@ mod tests {
         );
     }
 
-    // ── COBS preset mapping tests ────────────────────────────────────────
-
-    #[test]
-    fn preset_tx_framing_cobs_returns_cobs() {
-        let cfg = preset_tx_framing(ProtocolPreset::Cobs);
-        assert!(matches!(cfg.mode, TxFramingMode::Cobs));
-    }
-
-    #[test]
-    fn preset_rx_framing_cobs_returns_cobs() {
-        let cfg = preset_rx_framing(ProtocolPreset::Cobs);
-        assert!(matches!(cfg.mode, RxFramingMode::Cobs));
-    }
-
-    #[test]
-    fn preset_rx_parser_cobs_returns_raw() {
-        let cfg = preset_rx_parser(ProtocolPreset::Cobs);
-        assert_eq!(cfg.parser_type, ParserType::Raw);
-    }
-
-    #[test]
-    fn protocol_preset_cobs_tagged_object_roundtrip() {
-        assert_preset_roundtrip("cobs", ProtocolPreset::Cobs);
-    }
-
-    #[test]
-    fn cobs_preset_equivalent_to_bare_cobs_framing() {
-        // TX: preset must match hand-built TxFramingConfig with Cobs mode.
-        let preset_tx = preset_tx_framing(ProtocolPreset::Cobs);
-        let bare_tx = TxFramingConfig {
-            mode: TxFramingMode::Cobs,
-        };
-        assert_eq!(preset_tx, bare_tx);
-        // RX: preset must match hand-built RxFramingConfig with Cobs mode.
-        let preset_rx = preset_rx_framing(ProtocolPreset::Cobs);
-        let bare_rx = RxFramingConfig {
-            mode: RxFramingMode::Cobs,
-            max_frames: None,
-            include_terminators: false,
-            skip_empty: false,
-        };
-        assert_eq!(preset_rx, bare_rx);
-    }
-
     #[test]
     fn roundtrip_cobs_255_ones() {
         let payload = vec![1u8; 255];
         let mode = TxFramingMode::Cobs;
         let framed = mode.encode(&payload).unwrap();
         let mut dec = FrameDecoder::new(&cobs_rx_config(), None).unwrap();
-        let frames = dec.push(&framed).unwrap();
+        let frames = dec.push(&framed).frames;
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].data, payload);
     }
@@ -4070,7 +4352,7 @@ mod tests {
         let mode = TxFramingMode::Cobs;
         let framed = mode.encode(&payload).unwrap();
         let mut dec = FrameDecoder::new(&cobs_rx_config(), None).unwrap();
-        let frames = dec.push(&framed).unwrap();
+        let frames = dec.push(&framed).frames;
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].data, payload);
     }
@@ -4082,7 +4364,7 @@ mod tests {
         let mode = TxFramingMode::Cobs;
         let framed = mode.encode(&payload).unwrap();
         let mut dec = FrameDecoder::new(&cobs_rx_config(), None).unwrap();
-        let frames = dec.push(&framed).unwrap();
+        let frames = dec.push(&framed).frames;
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].data, payload);
     }
@@ -4095,7 +4377,7 @@ mod tests {
         let mode = TxFramingMode::Cobs;
         let framed = mode.encode(&payload).unwrap();
         let mut dec = FrameDecoder::new(&cobs_rx_config(), None).unwrap();
-        let frames = dec.push(&framed).unwrap();
+        let frames = dec.push(&framed).frames;
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].data, payload);
     }
@@ -4108,7 +4390,7 @@ mod tests {
         let mode = TxFramingMode::Cobs;
         let framed = mode.encode(&payload).unwrap();
         let mut dec = FrameDecoder::new(&cobs_rx_config(), None).unwrap();
-        let frames = dec.push(&framed).unwrap();
+        let frames = dec.push(&framed).frames;
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].data, payload);
     }
@@ -4121,7 +4403,7 @@ mod tests {
         let mode = TxFramingMode::Cobs;
         let framed = mode.encode(&payload).unwrap();
         let mut dec = FrameDecoder::new(&cobs_rx_config(), None).unwrap();
-        let frames = dec.push(&framed).unwrap();
+        let frames = dec.push(&framed).frames;
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].data, payload);
     }
@@ -4135,7 +4417,7 @@ mod tests {
         let mode = TxFramingMode::Cobs;
         let framed = mode.encode(&payload).unwrap();
         let mut dec = FrameDecoder::new(&cobs_rx_config(), None).unwrap();
-        let frames = dec.push(&framed).unwrap();
+        let frames = dec.push(&framed).frames;
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].data, payload);
     }
@@ -4159,7 +4441,7 @@ mod tests {
             skip_empty: true,
         };
         let mut dec = FrameDecoder::new(&config, None).unwrap();
-        let frames = dec.push(b"a\n\nb\n").unwrap();
+        let frames = dec.push(b"a\n\nb\n").frames;
         assert_eq!(frames.len(), 2);
         assert_eq!(frames[0].data, b"a");
         assert_eq!(frames[1].data, b"b");
@@ -4174,7 +4456,7 @@ mod tests {
             skip_empty: false,
         };
         let mut dec_off = FrameDecoder::new(&config_off, None).unwrap();
-        let frames_off = dec_off.push(b"a\n\nb\n").unwrap();
+        let frames_off = dec_off.push(b"a\n\nb\n").frames;
         assert_eq!(frames_off.len(), 3);
         assert_eq!(frames_off[0].data, b"a");
         assert!(frames_off[1].data.is_empty());
@@ -4194,7 +4476,7 @@ mod tests {
             skip_empty: true,
         };
         let mut dec = FrameDecoder::new(&config, None).unwrap();
-        let frames = dec.push(input).unwrap();
+        let frames = dec.push(input).frames;
         assert_eq!(frames.len(), 2);
         assert_eq!(frames[0].data, b"a");
         assert_eq!(frames[1].data, b"b");
@@ -4209,7 +4491,7 @@ mod tests {
             skip_empty: false,
         };
         let mut dec_off = FrameDecoder::new(&config_off, None).unwrap();
-        let frames_off = dec_off.push(input).unwrap();
+        let frames_off = dec_off.push(input).frames;
         assert_eq!(frames_off.len(), 3);
         assert_eq!(frames_off[0].data, b"a");
         assert_eq!(frames_off[1].data, b"   ");
@@ -4234,7 +4516,7 @@ mod tests {
             validate: false,
         };
         let mut dec = FrameDecoder::new(&config, Some(&parser)).unwrap();
-        let frames = dec.push(input).unwrap();
+        let frames = dec.push(input).frames;
         // skip_empty: true → 2 Json frames, blank lines skipped.
         assert_eq!(frames.len(), 2);
         assert!(matches!(frames[0].parsed, Some(ParsedFrame::Json(_))));
@@ -4255,7 +4537,7 @@ mod tests {
             skip_empty: true,
         };
         let mut dec = FrameDecoder::new(&config, None).unwrap();
-        let frames = dec.push(b"\na\n\nb\n").unwrap();
+        let frames = dec.push(b"\na\n\nb\n").frames;
         assert_eq!(frames.len(), 2);
         assert_eq!(frames[0].data, b"a");
         assert_eq!(frames[0].index, 0);
@@ -4273,7 +4555,7 @@ mod tests {
             skip_empty: false,
         };
         let mut dec_off = FrameDecoder::new(&config_off, None).unwrap();
-        let frames_off = dec_off.push(b"\na\n\nb\n").unwrap();
+        let frames_off = dec_off.push(b"\na\n\nb\n").frames;
         assert_eq!(frames_off.len(), 4);
         assert!(frames_off[0].data.is_empty());
         assert_eq!(frames_off[0].index, 0);
@@ -4296,11 +4578,34 @@ mod tests {
             skip_empty: true,
         };
         let mut dec = FrameDecoder::new(&config, None).unwrap();
-        let frames = dec.push(b"a\n\nb\n").unwrap();
+        let frames = dec.push(b"a\n\nb\n").frames;
         assert_eq!(frames.len(), 2);
         // The skipped blank line does NOT consume an index.
         assert_eq!(frames[0].index, 0);
         assert_eq!(frames[1].index, 1);
+    }
+
+    #[test]
+    fn push_frame_index_stays_contiguous_across_checksum_drop() {
+        // Feed two good NMEA sentences with a bad-checksum sentence between them.
+        // The surviving frames must have contiguous indices (0 and 1, no gap at 2).
+        let rx_config = preset_rx_framing(ProtocolPreset::Nmea0183);
+        let parser_config = preset_rx_parser(ProtocolPreset::Nmea0183);
+        let mut dec = FrameDecoder::new(&rx_config, Some(&parser_config)).unwrap();
+
+        let good = b"$GPGLL,3751.65,N,12226.54,W*7E\r\n";
+        let bad = b"$GPGLL,3751.65,N,12226.54,W*00\r\n";
+        let mut chunk = Vec::new();
+        chunk.extend_from_slice(good);
+        chunk.extend_from_slice(bad);
+        chunk.extend_from_slice(good);
+
+        let result = dec.push(&chunk);
+        assert_eq!(result.frames.len(), 2, "two good frames should survive");
+        // Frame indices must be contiguous — the dropped frame consumes no index.
+        assert_eq!(result.frames[0].index, 0);
+        assert_eq!(result.frames[1].index, 1);
+        assert_eq!(result.frames_dropped, 1);
     }
 
     #[test]
@@ -4315,7 +4620,7 @@ mod tests {
             skip_empty: true,
         };
         let mut dec = FrameDecoder::new(&config, None).unwrap();
-        let frames = dec.push(framed).unwrap();
+        let frames = dec.push(framed).frames;
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].data, b"a");
         assert_eq!(frames[0].index, 0);
@@ -4334,7 +4639,7 @@ mod tests {
             skip_empty: true,
         };
         let mut dec = FrameDecoder::new(&config, None).unwrap();
-        let frames = dec.push(framed).unwrap();
+        let frames = dec.push(framed).frames;
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].data, b"a");
         assert_eq!(frames[0].index, 0);
@@ -4348,73 +4653,6 @@ mod tests {
     #[test]
     fn skip_empty_on_in_preset_ndjson() {
         assert!(preset_rx_framing(ProtocolPreset::Ndjson).skip_empty);
-    }
-
-    #[test]
-    fn preset_tx_framing_ndjson_returns_line_lf() {
-        let tx = preset_tx_framing(ProtocolPreset::Ndjson);
-        assert!(matches!(
-            tx.mode,
-            TxFramingMode::Line {
-                ending: TxLineEnding::Lf
-            }
-        ));
-    }
-
-    #[test]
-    fn preset_rx_framing_ndjson_returns_line_auto_skip_empty() {
-        let rx = preset_rx_framing(ProtocolPreset::Ndjson);
-        assert!(matches!(
-            rx.mode,
-            RxFramingMode::Line {
-                ending: LineEnding::Auto
-            }
-        ));
-        assert!(rx.skip_empty);
-    }
-
-    #[test]
-    fn preset_rx_parser_ndjson_returns_json_lines() {
-        let parser = preset_rx_parser(ProtocolPreset::Ndjson);
-        assert!(matches!(parser.parser_type, ParserType::JsonLines));
-    }
-
-    #[test]
-    fn protocol_preset_ndjson_tagged_object_roundtrip() {
-        assert_preset_roundtrip("ndjson", ProtocolPreset::Ndjson);
-    }
-
-    #[test]
-    fn ndjson_preset_equivalent_to_bare_config() {
-        // TX config.
-        let preset_tx = preset_tx_framing(ProtocolPreset::Ndjson);
-        let bare_tx = TxFramingConfig {
-            mode: TxFramingMode::Line {
-                ending: TxLineEnding::Lf,
-            },
-        };
-        assert_eq!(preset_tx, bare_tx);
-
-        // RX config.
-        let preset_rx = preset_rx_framing(ProtocolPreset::Ndjson);
-        let bare_rx = RxFramingConfig {
-            mode: RxFramingMode::Line {
-                ending: LineEnding::Auto,
-            },
-            max_frames: None,
-            include_terminators: false,
-            skip_empty: true,
-        };
-        assert_eq!(preset_rx, bare_rx);
-
-        // Parser.
-        let preset_parser = preset_rx_parser(ProtocolPreset::Ndjson);
-        let bare_parser = ParserConfig {
-            parser_type: ParserType::JsonLines,
-            custom_prompt: None,
-            validate: false,
-        };
-        assert_eq!(preset_parser, bare_parser);
     }
 
     #[test]
@@ -4434,7 +4672,7 @@ mod tests {
         };
         let mut dec = FrameDecoder::new(&config, None).unwrap();
         // Push "b" without a newline — no frame emitted by push.
-        let frames = dec.push(b"b").unwrap();
+        let frames = dec.push(b"b").frames;
         assert!(frames.is_empty());
         // flush_partial emits the pending content regardless of skip_empty.
         let partial = dec.flush_partial();
@@ -4446,8 +4684,7 @@ mod tests {
 
     /// Helper: build a NMEA sentence body with a computed XOR checksum.
     fn nmea_checksum_body(body: &[u8]) -> String {
-        let cs = XorChecksum.compute(body);
-        format!("{:02X}", cs[0])
+        format!("{:02X}", xor_checksum(body))
     }
 
     #[test]
@@ -4678,13 +4915,230 @@ mod tests {
                 fields,
                 checksum_valid,
             } => {
-                // Address is "PGRMZ" (5 chars): talker = first 2 = "PG", type = rest = "RMZ"
-                assert_eq!(talker_id, "PG");
-                assert_eq!(sentence_type, "RMZ");
+                // Proprietary $PGRMZ: talker = "P", sentence_type = rest = "GRMZ"
+                assert_eq!(talker_id, "P");
+                assert_eq!(sentence_type, "GRMZ");
                 assert_eq!(fields, vec!["2010", "f", "3"]);
                 assert_eq!(checksum_valid, Some(true));
             }
             other => panic!("expected Nmea frame, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn nmea_parser_non_ascii_body_returns_raw() {
+        // Two branches: valid-UTF-8-but-non-ASCII and invalid-UTF-8.
+        //
+        // Case 1: valid UTF-8 but non-ASCII → is_ascii fails, returns Raw.
+        // b"a\xC3\xA9,x" = "aé,x" where é is U+00E9 (2-byte UTF-8, non-ASCII).
+        // This passes the contains(',') guard and from_utf8 but hits the ASCII
+        // guard — byte index 2 is not a char boundary, so slicing panicked
+        // before the ASCII guard was added.
+        let p = NmeaParser { validate: true };
+        let body1 = b"a\xC3\xA9,x";
+        let result1 = p.parse(body1).unwrap();
+        assert!(
+            matches!(result1, ParsedFrame::Raw),
+            "valid-UTF-8 non-ASCII body should return Raw, got {result1:?}"
+        );
+
+        // validate: false variant — same behavior.
+        let p2 = NmeaParser { validate: false };
+        let result1b = p2.parse(body1).unwrap();
+        assert!(
+            matches!(result1b, ParsedFrame::Raw),
+            "valid-UTF-8 non-ASCII body (validate=false) should return Raw, got {result1b:?}"
+        );
+
+        // Case 2: invalid UTF-8 → from_utf8 returns Err → Raw.
+        // b"\xFFx,y" — 0xFF is a lone byte >0x7F and not a valid UTF-8
+        // lead byte. from_utf8 returns Err immediately.
+        let body2 = b"\xFFx,y";
+        let result2 = p.parse(body2).unwrap();
+        assert!(
+            matches!(result2, ParsedFrame::Raw),
+            "invalid-UTF-8 body should return Raw, got {result2:?}"
+        );
+
+        // Sanity: a valid NMEA sentence with the same parser DOES parse to Nmea.
+        let sentence = b"GPGGA,123519,4807.038,N,01131.000,E,1,08,0.9,545.4,M,46.9,M,,";
+        let cs_hex = nmea_checksum_body(sentence);
+        let valid_sentence =
+            format!("GPGGA,123519,4807.038,N,01131.000,E,1,08,0.9,545.4,M,46.9,M,,*{cs_hex}");
+        let result_valid = p.parse(valid_sentence.as_bytes()).unwrap();
+        assert!(
+            matches!(result_valid, ParsedFrame::Nmea { .. }),
+            "valid ASCII sentence should parse to Nmea, got {result_valid:?}"
+        );
+    }
+
+    #[test]
+    fn nmea_parser_proprietary_p_prefix_split() {
+        // $PGRMM proprietary sentence: talker = "P", sentence_type = rest = "GRMM"
+        let body = b"PGRMM,W";
+        let cs_hex = nmea_checksum_body(body);
+        let sentence = format!("PGRMM,W*{cs_hex}");
+        let p = NmeaParser { validate: true };
+        let result = p.parse(sentence.as_bytes()).unwrap();
+        match result {
+            ParsedFrame::Nmea {
+                talker_id,
+                sentence_type,
+                fields,
+                checksum_valid,
+            } => {
+                assert_eq!(talker_id, "P", "proprietary talker should be 'P'");
+                assert_eq!(
+                    sentence_type, "GRMM",
+                    "proprietary sentence_type should be rest after P"
+                );
+                assert_eq!(fields, vec!["W"]);
+                assert_eq!(checksum_valid, Some(true));
+            }
+            other => panic!("expected Nmea frame, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn nmea_parser_standard_5char_address_unchanged() {
+        // GPGGA standard sentence (5-char address): confirms standard split
+        // is not accidentally swallowed by the P-branch.
+        let body = b"GPGGA,123519,4807.038,N,01131.000,E,1,08,0.9,545.4,M,46.9,M,,";
+        let cs_hex = nmea_checksum_body(body);
+        let sentence =
+            format!("GPGGA,123519,4807.038,N,01131.000,E,1,08,0.9,545.4,M,46.9,M,,*{cs_hex}");
+        let p = NmeaParser { validate: true };
+        let result = p.parse(sentence.as_bytes()).unwrap();
+        match result {
+            ParsedFrame::Nmea {
+                talker_id,
+                sentence_type,
+                fields,
+                checksum_valid,
+            } => {
+                assert_eq!(talker_id, "GP", "standard talker should be first 2 chars");
+                assert_eq!(
+                    sentence_type, "GGA",
+                    "standard sentence_type should be rest"
+                );
+                assert_eq!(
+                    fields,
+                    vec![
+                        "123519",
+                        "4807.038",
+                        "N",
+                        "01131.000",
+                        "E",
+                        "1",
+                        "08",
+                        "0.9",
+                        "545.4",
+                        "M",
+                        "46.9",
+                        "M",
+                        "",
+                        ""
+                    ]
+                );
+                assert_eq!(checksum_valid, Some(true));
+            }
+            other => panic!("expected Nmea frame, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn nmea_parser_invalid_hex_checksum_validate_false_returns_full_body() {
+        // Sentence with non-hex checksum chars (*GG), validate: false →
+        // full body parse + checksum_valid: Some(false).
+        let sentence = b"GPGGA,123519,4807.038,N,01131.000,E,1,08,0.9,545.4,M,46.9,M,,*GG";
+        let p = NmeaParser { validate: false };
+        let result = p.parse(sentence).unwrap();
+        match result {
+            ParsedFrame::Nmea {
+                talker_id,
+                sentence_type,
+                fields,
+                checksum_valid,
+            } => {
+                assert_eq!(talker_id, "GP");
+                assert_eq!(sentence_type, "GGA");
+                assert_eq!(
+                    fields,
+                    vec![
+                        "123519",
+                        "4807.038",
+                        "N",
+                        "01131.000",
+                        "E",
+                        "1",
+                        "08",
+                        "0.9",
+                        "545.4",
+                        "M",
+                        "46.9",
+                        "M",
+                        "",
+                        ""
+                    ]
+                );
+                assert_eq!(checksum_valid, Some(false));
+            }
+            other => panic!("expected Nmea frame with full body, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn nmea_parser_too_short_checksum_validate_false_returns_full_body() {
+        // Sentence with 1-hex-char checksum (*7), validate: false →
+        // full body parse + checksum_valid: Some(false).
+        let sentence = b"GPGLL,3751.65,N,12226.54,W*7";
+        let p = NmeaParser { validate: false };
+        let result = p.parse(sentence).unwrap();
+        match result {
+            ParsedFrame::Nmea {
+                talker_id,
+                sentence_type,
+                fields,
+                checksum_valid,
+            } => {
+                assert_eq!(talker_id, "GP");
+                assert_eq!(sentence_type, "GLL");
+                assert_eq!(fields, vec!["3751.65", "N", "12226.54", "W"]);
+                assert_eq!(checksum_valid, Some(false));
+            }
+            other => panic!("expected Nmea frame with full body, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn nmea_parser_invalid_hex_checksum_validate_true_returns_err() {
+        // Sentence with non-hex checksum chars (*GG), validate: true →
+        // Err(ChecksumMismatch). The received vec contains the raw hex bytes.
+        let sentence = b"GPGGA,123519,4807.038,N,01131.000,E,1,08,0.9,545.4,M,46.9,M,,*GG";
+        let p = NmeaParser { validate: true };
+        let result = p.parse(sentence);
+        match result {
+            Err(FrameDecodeError::ChecksumMismatch { expected, received }) => {
+                assert_eq!(expected.len(), 1);
+                assert_eq!(received, b"GG".to_vec());
+            }
+            other => panic!("expected ChecksumMismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn nmea_parser_too_short_checksum_validate_true_returns_err() {
+        // Sentence with 1-hex-char checksum (*7), validate: true →
+        // Err(ChecksumMismatch). The received vec contains the raw hex bytes.
+        let sentence = b"GPGLL,3751.65,N,12226.54,W*7";
+        let p = NmeaParser { validate: true };
+        let result = p.parse(sentence);
+        match result {
+            Err(FrameDecodeError::ChecksumMismatch { expected, received }) => {
+                assert_eq!(expected.len(), 1);
+                assert_eq!(received, b"7".to_vec());
+            }
+            other => panic!("expected ChecksumMismatch, got {other:?}"),
         }
     }
 
@@ -4703,11 +5157,11 @@ mod tests {
         };
         let mut dec = FrameDecoder::new(&config, None).unwrap();
         // Input with $ marker
-        let frames = dec.push(b"junk$hi\r\n").unwrap();
+        let frames = dec.push(b"junk$hi\r\n").frames;
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].data, b"hi");
         // Input with ! marker
-        let frames = dec.push(b"junk!ok\r\n").unwrap();
+        let frames = dec.push(b"junk!ok\r\n").frames;
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].data, b"ok");
     }
@@ -4757,113 +5211,168 @@ mod tests {
             ..Default::default()
         };
         let mut dec = FrameDecoder::new(&config, None).unwrap();
-        let frames = dec.push(b"noiseSTXdataETXjunkSTXmoreETX").unwrap();
+        let frames = dec.push(b"noiseSTXdataETXjunkSTXmoreETX").frames;
         assert_eq!(frames.len(), 2);
         assert_eq!(frames[0].data, b"data");
         assert_eq!(frames[1].data, b"more");
     }
 
-    // ── NMEA preset tests ──────────────────────────────────────────────
+    // ── NMEA TX auto-checksum tests ────────────────────────────────────
 
     #[test]
-    fn preset_tx_framing_nmea0183_returns_start_end_dollar() {
-        let tx = preset_tx_framing(ProtocolPreset::Nmea0183);
-        assert!(matches!(
-            tx.mode,
-            TxFramingMode::StartEnd {
-                start,
-                end,
-                marker_encoding: PatternEncoding::Utf8,
-            } if start == vec!["$".to_string()] && end == "\r\n"
-        ));
+    fn tx_nmea_appends_checksum_and_terminators() {
+        let payload = b"GPGGA,123519,4807.038,N,01131.000,E,1,08,0.9,545.4,M,46.9,M,,";
+        let cs = xor_checksum(payload);
+        let framed = TxFramingMode::Nmea.encode(payload).unwrap();
+        let expected =
+            format!("${}*{cs:02X}\r\n", std::str::from_utf8(payload).unwrap(),).into_bytes();
+        assert_eq!(framed, expected);
     }
 
     #[test]
-    fn preset_rx_framing_nmea0183_returns_start_end_dollar_bang() {
-        let rx = preset_rx_framing(ProtocolPreset::Nmea0183);
-        match &rx.mode {
-            RxFramingMode::StartEnd {
-                start,
-                end,
-                marker_encoding,
-                include_markers,
-            } => {
-                assert_eq!(start, &vec!["$".to_string(), "!".to_string()]);
-                assert_eq!(end, "\r\n");
-                assert_eq!(*marker_encoding, PatternEncoding::Utf8);
-                assert!(!include_markers);
+    fn tx_nmea_validates_existing_correct_checksum() {
+        let payload = format!(
+            "$GPGA,123519,4807.038,N,01131.000,E,1,08,0.9,545.4,M,46.9,M,,*{:02X}",
+            xor_checksum(b"GPGA,123519,4807.038,N,01131.000,E,1,08,0.9,545.4,M,46.9,M,,"),
+        )
+        .into_bytes();
+        let framed = TxFramingMode::Nmea.encode(&payload).unwrap();
+        // Payload already starts with $ and has correct checksum — should pass through.
+        assert_eq!(framed.len(), payload.len() + 2);
+        assert!(framed.starts_with(b"$"));
+        assert!(framed.ends_with(b"\r\n"));
+        // No double checksum.
+        let inner = &framed[..framed.len() - 2];
+        assert_eq!(inner, payload);
+    }
+
+    #[test]
+    fn tx_nmea_rejects_existing_wrong_checksum() {
+        let body = b"GPGGA,123519";
+        let correct_cs = xor_checksum(body);
+        let wrong_cs = correct_cs ^ 0xFF;
+        let payload = format!("$GPGA,123519*{wrong_cs:02X}",).into_bytes();
+        let err = TxFramingMode::Nmea.encode(&payload).unwrap_err();
+        assert!(
+            err.contains("TX NMEA checksum mismatch"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn tx_nmea_keeps_bang_lead_for_ais() {
+        let payload = b"!AIVDM,1,1,,A,15M_@`P00P<8:HltHUV@vThPB80,4*";
+        let framed = TxFramingMode::Nmea.encode(payload).unwrap();
+        assert!(framed.starts_with(b"!"));
+        // Should not double the leading ! (no !! prefix).
+        assert!(!framed.starts_with(b"!!"));
+        // Should end with *XX\r\n where XX is computed over body after !
+        let body = b"AIVDM,1,1,,A,15M_@`P00P<8:HltHUV@vThPB80,4*";
+        let cs = xor_checksum(body);
+        let expected_end = format!("*{cs:02X}\r\n").into_bytes();
+        assert!(framed.ends_with(&expected_end));
+    }
+
+    #[test]
+    fn tx_nmea_rejects_embedded_crlf() {
+        let err = TxFramingMode::Nmea.encode(b"GPGGA\r\n").unwrap_err();
+        assert!(
+            err.contains("must not contain \\r or \\n"),
+            "unexpected error: {err}"
+        );
+
+        let err = TxFramingMode::Nmea.encode(b"\nGPGGA").unwrap_err();
+        assert!(
+            err.contains("must not contain \\r or \\n"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn tx_nmea_rejects_non_ascii_payload() {
+        let err = TxFramingMode::Nmea.encode(&[0x80]).unwrap_err();
+        assert!(
+            err.contains("must be printable ASCII"),
+            "unexpected error: {err}"
+        );
+
+        let err = TxFramingMode::Nmea.encode(&[0x1F]).unwrap_err();
+        assert!(
+            err.contains("must be printable ASCII"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn tx_nmea_roundtrip_validates_on_rx() {
+        let payload = b"$GPGGA,123519,4807.038,N,01131.000,E,1,08,0.9,545.4,M,46.9,M,,";
+        let framed = TxFramingMode::Nmea.encode(payload).unwrap();
+
+        let rx_config = preset_rx_framing(ProtocolPreset::Nmea0183);
+        let parser_config = preset_rx_parser(ProtocolPreset::Nmea0183);
+        let mut dec = FrameDecoder::new(&rx_config, Some(&parser_config)).unwrap();
+        let result = dec.push(&framed);
+        assert!(
+            result.error.is_none(),
+            "unexpected decode error: {:?}",
+            result.error
+        );
+        assert_eq!(
+            result.frames.len(),
+            1,
+            "expected 1 frame, got {:?}",
+            result.frames
+        );
+        let parsed = result.frames.first().unwrap();
+        match &parsed.parsed {
+            Some(ParsedFrame::Nmea { checksum_valid, .. }) => {
+                assert_eq!(*checksum_valid, Some(true));
             }
-            other => panic!("expected StartEnd, got {other:?}"),
+            other => panic!("expected Nmea with checksum_valid: Some(true), got {other:?}"),
         }
-    }
-
-    #[test]
-    fn preset_rx_parser_nmea0183_returns_nmea_validate_true() {
-        let parser = preset_rx_parser(ProtocolPreset::Nmea0183);
-        assert!(matches!(parser.parser_type, ParserType::Nmea));
-        assert!(parser.validate);
-    }
-
-    #[test]
-    fn protocol_preset_nmea0183_tagged_object_roundtrip() {
-        assert_preset_roundtrip("nmea0183", ProtocolPreset::Nmea0183);
-    }
-
-    #[test]
-    fn nmea0183_preset_equivalent_to_bare_config() {
-        // TX
-        let preset_tx = preset_tx_framing(ProtocolPreset::Nmea0183);
-        let bare_tx = TxFramingConfig {
-            mode: TxFramingMode::StartEnd {
-                start: vec!["$".into()],
-                end: "\r\n".into(),
-                marker_encoding: PatternEncoding::Utf8,
-            },
-        };
-        assert_eq!(preset_tx, bare_tx);
-
-        // RX
-        let preset_rx = preset_rx_framing(ProtocolPreset::Nmea0183);
-        let bare_rx = RxFramingConfig {
-            mode: RxFramingMode::StartEnd {
-                start: vec!["$".into(), "!".into()],
-                end: "\r\n".into(),
-                marker_encoding: PatternEncoding::Utf8,
-                include_markers: false,
-            },
-            max_frames: None,
-            include_terminators: false,
-            skip_empty: false,
-        };
-        assert_eq!(preset_rx, bare_rx);
-
-        // Parser
-        let preset_parser = preset_rx_parser(ProtocolPreset::Nmea0183);
-        let bare_parser = ParserConfig {
-            parser_type: ParserType::Nmea,
-            custom_prompt: None,
-            validate: true,
-        };
-        assert_eq!(preset_parser, bare_parser);
     }
 
     // ── Checksum-failure-surfacing via push ────────────────────────────
 
     #[test]
-    fn nmea_checksum_failure_surfaces_as_framing_error_via_push() {
+    fn nmea_checksum_failure_drops_frame_and_counts() {
         // Build a FrameDecoder with nmea0183 preset framing + parser.
         let rx_config = preset_rx_framing(ProtocolPreset::Nmea0183);
         let parser_config = preset_rx_parser(ProtocolPreset::Nmea0183);
         let mut dec = FrameDecoder::new(&rx_config, Some(&parser_config)).unwrap();
         // Push a full NMEA sentence with bad checksum ($...*00\r\n)
         let result = dec.push(b"$GPGLL,3751.65,N,12226.54,W*00\r\n");
-        match result {
-            Err(FrameDecodeError::ChecksumMismatch { expected, received }) => {
-                assert_eq!(expected, vec![0x7E]);
-                assert_eq!(received, vec![0x00]);
-            }
-            other => panic!("expected ChecksumMismatch error, got {other:?}"),
-        }
+        assert!(
+            result.frames.is_empty(),
+            "bad-checksum frame should be dropped"
+        );
+        assert_eq!(result.frames_dropped, 1, "checksum drop should be counted");
+        assert!(
+            result.error.is_none(),
+            "checksum drop should not be an error"
+        );
+    }
+
+    #[test]
+    fn push_checksum_mismatch_keeps_other_frames_in_chunk() {
+        // One chunk: good bad good NMEA sentences → 2 good frames, 1 dropped.
+        let rx_config = preset_rx_framing(ProtocolPreset::Nmea0183);
+        let parser_config = preset_rx_parser(ProtocolPreset::Nmea0183);
+        let mut dec = FrameDecoder::new(&rx_config, Some(&parser_config)).unwrap();
+
+        let good = b"$GPGLL,3751.65,N,12226.54,W*7E\r\n";
+        let bad = b"$GPGLL,3751.65,N,12226.54,W*00\r\n";
+        let mut chunk = Vec::new();
+        chunk.extend_from_slice(good);
+        chunk.extend_from_slice(bad);
+        chunk.extend_from_slice(good);
+
+        let result = dec.push(&chunk);
+        assert_eq!(result.frames.len(), 2, "two good frames should survive");
+        assert_eq!(result.frames[0].index, 0);
+        assert_eq!(result.frames[1].index, 1);
+        assert_eq!(result.frames_dropped, 1, "one bad frame dropped");
+        assert!(result.error.is_none(), "no stream-fatal error");
     }
 
     #[test]
@@ -4872,7 +5381,7 @@ mod tests {
         let rx_config = preset_rx_framing(ProtocolPreset::Nmea0183);
         let parser_config = preset_rx_parser(ProtocolPreset::Nmea0183);
         let mut dec = FrameDecoder::new(&rx_config, Some(&parser_config)).unwrap();
-        let frames = dec.push(b"$GPGLL,3751.65,N,12226.54,W*7E\r\n").unwrap();
+        let frames = dec.push(b"$GPGLL,3751.65,N,12226.54,W*7E\r\n").frames;
         assert_eq!(frames.len(), 1);
         match &frames[0].parsed {
             Some(ParsedFrame::Nmea {
@@ -4902,8 +5411,7 @@ mod tests {
 
     // Helper: compute LRC over a PDU byte slice and return the 1-byte hex string.
     fn modbus_lrc(pdu: &[u8]) -> String {
-        let cs = Lrc.compute(pdu);
-        format!("{:02X}", cs[0])
+        format!("{:02X}", lrc(pdu))
     }
 
     // Helper: build a Modbus ASCII hex body from PDU and append LRC.
@@ -5121,19 +5629,15 @@ mod tests {
     }
 
     #[test]
-    fn modbus_ascii_checksum_failure_surfaces_as_framing_error_via_push() {
+    fn modbus_ascii_checksum_failure_drops_frame_and_counts() {
         let rx_config = preset_rx_framing(ProtocolPreset::ModbusAscii);
         let parser_config = preset_rx_parser(ProtocolPreset::ModbusAscii);
         let mut dec = FrameDecoder::new(&rx_config, Some(&parser_config)).unwrap();
         // Push a full frame with bad LRC: :01030000000100\r\n  (correct LRC is FB, here 00)
         let result = dec.push(b":01030000000100\r\n");
-        match result {
-            Err(FrameDecodeError::ChecksumMismatch { expected, received }) => {
-                assert_eq!(expected, vec![0xFB]);
-                assert_eq!(received, vec![0x00]);
-            }
-            other => panic!("expected ChecksumMismatch error, got {other:?}"),
-        }
+        assert!(result.frames.is_empty(), "bad-LRC frame should be dropped");
+        assert_eq!(result.frames_dropped, 1, "LRC drop should be counted");
+        assert!(result.error.is_none(), "LRC drop should not be an error");
     }
 
     #[test]
@@ -5142,7 +5646,7 @@ mod tests {
         let parser_config = preset_rx_parser(ProtocolPreset::ModbusAscii);
         let mut dec = FrameDecoder::new(&rx_config, Some(&parser_config)).unwrap();
         // :010300000001FB\r\n  (valid read holding registers)
-        let frames = dec.push(b":010300000001FB\r\n").unwrap();
+        let frames = dec.push(b":010300000001FB\r\n").frames;
         assert_eq!(frames.len(), 1);
         match &frames[0].parsed {
             Some(ParsedFrame::ModbusAscii {
@@ -5155,90 +5659,6 @@ mod tests {
             }
             other => panic!("expected ModbusAscii parsed frame, got {other:?}"),
         }
-    }
-
-    // ── Modbus ASCII preset tests ──────────────────────────────────────
-
-    #[test]
-    fn preset_tx_framing_modbus_ascii_returns_start_end_colon() {
-        let tx = preset_tx_framing(ProtocolPreset::ModbusAscii);
-        assert!(matches!(
-            tx.mode,
-            TxFramingMode::StartEnd {
-                start,
-                end,
-                marker_encoding: PatternEncoding::Utf8,
-            } if start == vec![":".to_string()] && end == "\r\n"
-        ));
-    }
-
-    #[test]
-    fn preset_rx_framing_modbus_ascii_returns_start_end_colon_crlf() {
-        let rx = preset_rx_framing(ProtocolPreset::ModbusAscii);
-        match &rx.mode {
-            RxFramingMode::StartEnd {
-                start,
-                end,
-                marker_encoding,
-                include_markers,
-            } => {
-                assert_eq!(start, &vec![":".to_string()]);
-                assert_eq!(end, "\r\n");
-                assert_eq!(*marker_encoding, PatternEncoding::Utf8);
-                assert!(!include_markers);
-            }
-            other => panic!("expected StartEnd, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn preset_rx_parser_modbus_ascii_returns_modbus_ascii_validate_true() {
-        let parser = preset_rx_parser(ProtocolPreset::ModbusAscii);
-        assert!(matches!(parser.parser_type, ParserType::ModbusAscii));
-        assert!(parser.validate);
-    }
-
-    #[test]
-    fn protocol_preset_modbus_ascii_tagged_object_roundtrip() {
-        assert_preset_roundtrip("modbus_ascii", ProtocolPreset::ModbusAscii);
-    }
-
-    #[test]
-    fn modbus_ascii_preset_equivalent_to_bare_config() {
-        // TX
-        let preset_tx = preset_tx_framing(ProtocolPreset::ModbusAscii);
-        let bare_tx = TxFramingConfig {
-            mode: TxFramingMode::StartEnd {
-                start: vec![":".into()],
-                end: "\r\n".into(),
-                marker_encoding: PatternEncoding::Utf8,
-            },
-        };
-        assert_eq!(preset_tx, bare_tx);
-
-        // RX
-        let preset_rx = preset_rx_framing(ProtocolPreset::ModbusAscii);
-        let bare_rx = RxFramingConfig {
-            mode: RxFramingMode::StartEnd {
-                start: vec![":".into()],
-                end: "\r\n".into(),
-                marker_encoding: PatternEncoding::Utf8,
-                include_markers: false,
-            },
-            max_frames: None,
-            include_terminators: false,
-            skip_empty: false,
-        };
-        assert_eq!(preset_rx, bare_rx);
-
-        // Parser
-        let preset_parser = preset_rx_parser(ProtocolPreset::ModbusAscii);
-        let bare_parser = ParserConfig {
-            parser_type: ParserType::ModbusAscii,
-            custom_prompt: None,
-            validate: true,
-        };
-        assert_eq!(preset_parser, bare_parser);
     }
 
     // ── Medium-risk gap tests (P3d) ───────────────────────────────────────
@@ -5257,7 +5677,7 @@ mod tests {
             skip_empty: true,
         };
         let mut dec = FrameDecoder::new(&config_on, None).unwrap();
-        let frames = dec.push(b"a||b|").unwrap();
+        let frames = dec.push(b"a||b|").frames;
         assert_eq!(frames.len(), 2);
         assert_eq!(frames[0].data, b"a");
         assert_eq!(frames[1].data, b"b");
@@ -5273,7 +5693,7 @@ mod tests {
             skip_empty: false,
         };
         let mut dec_off = FrameDecoder::new(&config_off, None).unwrap();
-        let frames_off = dec_off.push(b"a||b|").unwrap();
+        let frames_off = dec_off.push(b"a||b|").frames;
         assert_eq!(frames_off.len(), 3);
         assert_eq!(frames_off[0].data, b"a");
         assert!(frames_off[1].data.is_empty());
@@ -5297,7 +5717,7 @@ mod tests {
             skip_empty: true,
         };
         let mut dec = FrameDecoder::new(&config_on, None).unwrap();
-        let frames = dec.push(b"$\r\n$hi\r\n").unwrap();
+        let frames = dec.push(b"$\r\n$hi\r\n").frames;
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].data, b"hi");
 
@@ -5314,7 +5734,7 @@ mod tests {
             skip_empty: false,
         };
         let mut dec_off = FrameDecoder::new(&config_off, None).unwrap();
-        let frames_off = dec_off.push(b"$\r\n$hi\r\n").unwrap();
+        let frames_off = dec_off.push(b"$\r\n$hi\r\n").frames;
         assert_eq!(frames_off.len(), 2);
         assert!(frames_off[0].data.is_empty());
         assert_eq!(frames_off[1].data, b"hi");
@@ -5339,14 +5759,14 @@ mod tests {
             ..Default::default()
         };
         let mut dec = FrameDecoder::new(&config, None).unwrap();
-        let frames = dec.push(b"$GPGGA,x\r\n").unwrap();
+        let frames = dec.push(b"$GPGGA,x\r\n").frames;
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].data, b"PGGA,x");
     }
 
     #[test]
     fn nmea_parser_multi_fragment_ais_first_sentence() {
-        use crate::checksums::XorChecksum;
+        use crate::checksums::xor_checksum;
 
         // AIS multi-fragment messages are NOT reassembled by the parser —
         // each fragment is its own frame. This test pins the first-fragment
@@ -5354,9 +5774,9 @@ mod tests {
         //
         // Verify the XOR checksum of the body between ! and * (exclusive).
         let checksum_body = b"AIVDM,2,1,3,B,55?MbV02;H0000,0";
-        let computed = XorChecksum.compute(checksum_body);
+        let computed = xor_checksum(checksum_body);
         // The handoff documented checksum 0x5C but the correct XOR is 0x22.
-        assert_eq!(computed, [0x22], "AIS sentence checksum is 0x22, not 0x5C");
+        assert_eq!(computed, 0x22, "AIS sentence checksum is 0x22, not 0x5C");
 
         let sentence = b"!AIVDM,2,1,3,B,55?MbV02;H0000,0*22";
         let p = NmeaParser { validate: true };
@@ -5379,14 +5799,14 @@ mod tests {
 
     #[test]
     fn nmea_parser_preserves_whitespace_in_fields() {
-        use crate::checksums::XorChecksum;
+        use crate::checksums::xor_checksum;
 
         // The parser uses split(',') without per-field trimming; this test
         // pins that whitespace inside a field is preserved. A future
         // "helpful" refactor adding .trim() per field would break this.
         let body_without_star = b"GPVTG,  48.7  ,T,,,N,,K,N";
-        let cs = XorChecksum.compute(body_without_star);
-        let cs_hex = format!("{:02X}", cs[0]);
+        let cs = xor_checksum(body_without_star);
+        let cs_hex = format!("{cs:02X}");
         // cs_hex = "58" for this body.
         let sentence = format!(
             "${}*{}",
@@ -5415,8 +5835,6 @@ mod tests {
 
     #[test]
     fn modbus_ascii_parser_max_adu_length() {
-        use crate::checksums::Lrc;
-
         // A 253-byte data payload near the Modbus ADU max. Pins no-length-cap
         // behavior. The frame is routed through a full FrameDecoder (StartEnd
         // framing with ':' start and "\r\n" end) + ModbusAscii parser.
@@ -5425,8 +5843,7 @@ mod tests {
         let data: Vec<u8> = (0..253u8).collect();
         let mut pdu = vec![address, function];
         pdu.extend_from_slice(&data);
-        let lrc = Lrc.compute(&pdu);
-        let lrc_byte = lrc[0];
+        let lrc_byte = lrc(&pdu);
 
         let mut all_bytes = pdu.clone();
         all_bytes.push(lrc_byte);
@@ -5436,7 +5853,7 @@ mod tests {
         let rx_config = preset_rx_framing(ProtocolPreset::ModbusAscii);
         let parser_config = preset_rx_parser(ProtocolPreset::ModbusAscii);
         let mut dec = FrameDecoder::new(&rx_config, Some(&parser_config)).unwrap();
-        let frames = dec.push(frame.as_bytes()).unwrap();
+        let frames = dec.push(frame.as_bytes()).frames;
         assert_eq!(frames.len(), 1);
         match &frames[0].parsed {
             Some(ParsedFrame::ModbusAscii {
@@ -5482,8 +5899,8 @@ mod tests {
         // Sanity: a valid hex body with the same parser DOES parse to ModbusAscii.
         let pdu = [0x01u8, 0x03, 0x00, 0x00, 0x00, 0x01];
         let lrc_hex = {
-            let cs = Lrc.compute(&pdu);
-            format!("{:02X}", cs[0])
+            let cs = lrc(&pdu);
+            format!("{cs:02X}")
         };
         let body_valid = format!("010300000001{lrc_hex}");
         let result_valid = p.parse(body_valid.as_bytes()).unwrap();

@@ -235,6 +235,8 @@ proptest! {
                 marker_encoding: PatternEncoding::Utf8,
             },
             TxFramingMode::Slip,
+            TxFramingMode::Cobs,
+            TxFramingMode::Nmea,
         ];
         for mode in modes {
             let args = WriteArgs {
@@ -340,7 +342,7 @@ proptest! {
         stop_reason in valid_stop_reason(), truncated: bool,
         bytes_obs in any_usize(), bytes_ret in any_usize(),
     ) {
-        let r = ReadResult { connection_id: id, name: None, bytes_read: br, encoding: enc, data, timeout_ms: timeout, no_new_rx_timeout_ms: None, elapsed_ms: elapsed, stop_reason, truncated, bytes_observed: bytes_obs, bytes_returned: bytes_ret, matched: false, match_index: None, match_frame_index: None, frames: None, frames_dropped: 0 };
+        let r = ReadResult { connection_id: id, name: None, bytes_read: br, encoding: enc, data, timeout_ms: timeout, no_new_rx_timeout_ms: None, elapsed_ms: elapsed, stop_reason, truncated, bytes_observed: bytes_obs, bytes_returned: bytes_ret, matched: false, match_index: None, match_frame_index: None, frames: None, frames_dropped: 0, error: None };
         let v = serde_json::to_value(&r).unwrap();
         assert_schema_valid!(ReadResult, v);
     }
@@ -466,7 +468,7 @@ proptest! {
         };
         let mut dec =
             serial_mcp::framing::FrameDecoder::new(&cfg, None).unwrap();
-        let frames = dec.push(&framed).unwrap();
+        let frames = dec.push(&framed).frames;
         prop_assert_eq!(frames.len(), 1);
         prop_assert_eq!(&frames[0].data, &bytes);
     }
@@ -482,7 +484,7 @@ proptest! {
             ..Default::default()
         };
         let mut dec = serial_mcp::framing::FrameDecoder::new(&cfg, None).unwrap();
-        let frames = dec.push(&framed).unwrap();
+        let frames = dec.push(&framed).frames;
         prop_assert_eq!(frames.len(), 1);
         prop_assert_eq!(&frames[0].data, &bytes);
     }
@@ -530,7 +532,7 @@ proptest! {
         let mut dec = FrameDecoder::new(&cfg, Some(&parser)).unwrap();
         let mut data = sentence.into_bytes();
         data.push(b'\n');
-        let frames = dec.push(&data).unwrap();
+        let frames = dec.push(&data).frames;
         prop_assert_eq!(frames.len(), 1);
         let frame = &frames[0];
         match &frame.parsed {
@@ -540,10 +542,19 @@ proptest! {
                 fields: pf,
                 checksum_valid,
             }) => {
-                prop_assert_eq!(talker_id.as_str(), talker);
-                prop_assert_eq!(st.as_str(), sentence_type);
+                let expected_st: String;
+                if let Some(stripped) = talker.strip_prefix('P') {
+                    // Proprietary: talker_id = "P", sentence_type = rest of talker + suffix
+                    expected_st = format!("{stripped}{sentence_type}");
+                    prop_assert_eq!(talker_id.as_str(), "P");
+                    prop_assert_eq!(st.as_str(), expected_st);
+                } else {
+                    // Standard: talker_id = first 2 chars, sentence_type = the rest
+                    prop_assert_eq!(talker_id.as_str(), talker);
+                    prop_assert_eq!(st.as_str(), sentence_type);
+                }
                 prop_assert_eq!(pf.as_slice(), fields.as_slice());
-                prop_assert_eq!(*checksum_valid, Some(true));
+                prop_assert_eq!(checksum_valid, &Some(true));
             }
             other => prop_assert!(false, "expected Nmea, got {other:?}"),
         }
@@ -570,6 +581,42 @@ proptest! {
         let mut dec = FrameDecoder::new(&cfg, Some(&parser)).unwrap();
         let _ = dec.push(&bytes);
         let _ = dec.flush_partial();
+    }
+
+    #[test]
+    fn nmea_parser_never_panics_on_utf8_with_commas(
+        bytes in prop::string::string_regex("[\\x21-\\x7E\\xC0-\\xDF][\\x80-\\xBF]{0,4}(,[\\x21-\\x7E\\xC0-\\xDF][\\x80-\\xBF]{0,4})*\\*?[0-9A-Fa-f]{0,2}")
+            .expect("valid regex")
+            .prop_map(|s| s.into_bytes()),
+    ) {
+        use serial_mcp::framing::{
+            FrameDecoder, ParserConfig, ParserType, RxFramingConfig, RxFramingMode,
+        };
+        let cfg = RxFramingConfig {
+            mode: RxFramingMode::Line {
+                ending: serial_mcp::framing::LineEnding::Auto,
+            },
+            ..Default::default()
+        };
+        // validate: true
+        let parser = ParserConfig {
+            parser_type: ParserType::Nmea,
+            custom_prompt: None,
+            validate: true,
+        };
+        let mut dec = FrameDecoder::new(&cfg, Some(&parser)).unwrap();
+        let _ = dec.push(&bytes);
+        let _ = dec.flush_partial();
+
+        // validate: false
+        let parser_no_val = ParserConfig {
+            parser_type: ParserType::Nmea,
+            custom_prompt: None,
+            validate: false,
+        };
+        let mut dec2 = FrameDecoder::new(&cfg, Some(&parser_no_val)).unwrap();
+        let _ = dec2.push(&bytes);
+        let _ = dec2.flush_partial();
     }
 
     #[test]
