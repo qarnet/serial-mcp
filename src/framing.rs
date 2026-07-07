@@ -667,10 +667,11 @@ pub enum ParsedFrame {
         /// exception code.
         #[schemars(schema_with = "crate::schema_helpers::byte_array_schema")]
         data: Vec<u8>,
-        /// LRC status:
-        /// - Some(true): LRC present and valid (or present, validate=false: not enforced but reported as valid-shape).
-        /// - Some(false): LRC present and INVALID (only reachable when validate=false; when validate=true a mismatch drops the frame and increments `frames_dropped`).
-        /// - None: no LRC present (a malformed frame shorter than 2 hex chars after the data — should not happen for valid frames, but defensive).
+        /// LRC status. Same semantics as `ParsedFrame::Nmea::checksum_valid`
+        /// (`Some(true)` valid, `Some(false)` invalid with `validate=false`,
+        /// `None` absent) — see that field's doc for the full explanation.
+        /// `None` here also covers a malformed frame shorter than 2 hex chars
+        /// after the data (defensive; should not occur for valid frames).
         checksum_valid: Option<bool>,
     },
 }
@@ -796,18 +797,10 @@ fn emit_frame(
         Some(Ok(pf)) => Some(pf),
         Some(Err(FrameDecodeError::ChecksumMismatch { expected, received })) => {
             *frames_dropped += 1;
-            let exp_hex: String = expected
-                .iter()
-                .map(|b| format!("{b:02X}"))
-                .collect::<Vec<_>>()
-                .join("");
-            let rcv_hex: String = received
-                .iter()
-                .map(|b| format!("{b:02X}"))
-                .collect::<Vec<_>>()
-                .join("");
             tracing::warn!(
-                "frame dropped: checksum mismatch (expected {exp_hex}, received {rcv_hex})"
+                "frame dropped: checksum mismatch (expected {}, received {})",
+                hex_upper(&expected),
+                hex_upper(&received)
             );
             return Ok(None);
         }
@@ -1256,17 +1249,7 @@ impl FrameDecoder {
                     LineState::CrMode => self.match_line_byte(b'\r'),
                 },
                 DecoderMode::Delimiter(delim) => {
-                    let d = delim.clone();
-                    let pos = find_subsequence(&self.buf, &d);
-                    pos.map(|p| {
-                        let fb = if self.include_terminators {
-                            self.buf[..p + d.len()].to_vec()
-                        } else {
-                            self.buf[..p].to_vec()
-                        };
-                        self.buf.drain(..p + d.len());
-                        fb
-                    })
+                    extract_delimited(&mut self.buf, delim, self.include_terminators)
                 }
                 DecoderMode::LengthPrefixed {
                     prefix_size,
@@ -1774,24 +1757,28 @@ fn strip_leading_if_any(content: &mut Vec<u8>, markers: &[u8]) {
 ///
 /// Returns `Ok(Some(true))` if computed == received, `Ok(Some(false))` if
 /// validate is false and they differ, or `Err(ChecksumMismatch)` if validate is
-/// true and they differ. `expected_byte`/`received_byte` are the single-byte
-/// checksum values; the error carries them as 1-byte vecs to preserve the
-/// [`FrameDecodeError`] shape.
+/// true and they differ. `received` is `None` when the received checksum is
+/// unparseable or too short (guaranteed mismatch). The error carries the 1-byte
+/// `computed_byte` as `expected` and the raw received bytes as `received` to
+/// preserve the [`FrameDecodeError`] shape.
 fn check_checksum(
     validate: bool,
     computed_byte: u8,
-    received_byte: u8,
+    received: Option<u8>,
     received_raw: Vec<u8>,
 ) -> Result<Option<bool>, FrameDecodeError> {
-    if computed_byte == received_byte {
-        Ok(Some(true))
-    } else if validate {
-        Err(FrameDecodeError::ChecksumMismatch {
+    match received {
+        Some(r) if r == computed_byte => Ok(Some(true)),
+        Some(_) if validate => Err(FrameDecodeError::ChecksumMismatch {
             expected: vec![computed_byte],
             received: received_raw,
-        })
-    } else {
-        Ok(Some(false))
+        }),
+        Some(_) => Ok(Some(false)),
+        None if validate => Err(FrameDecodeError::ChecksumMismatch {
+            expected: vec![computed_byte],
+            received: received_raw,
+        }),
+        None => Ok(Some(false)),
     }
 }
 
@@ -1849,38 +1836,20 @@ impl FrameParser for NmeaParser {
                         check_checksum(
                             self.validate,
                             computed_byte,
-                            received_val,
+                            Some(received_val),
                             vec![received_val],
                         )?
                     }
                     None => {
-                        // Invalid hex chars — guaranteed mismatch.
-                        match check_checksum(
-                            self.validate,
-                            computed_byte,
-                            computed_byte.wrapping_add(1),
-                            hex.clone(),
-                        ) {
-                            Err(e) => return Err(e),
-                            Ok(Some(true)) => unreachable!("invalid hex never matches"),
-                            Ok(Some(false)) | Ok(None) => Some(false),
-                        }
+                        // Invalid hex chars — guaranteed mismatch (None).
+                        check_checksum(self.validate, computed_byte, None, hex.clone())?
                     }
                 }
             }
             Some(hex) => {
                 // Checksum present but too short (<2 hex chars). Guaranteed mismatch.
                 let computed_byte = xor_checksum(&body);
-                match check_checksum(
-                    self.validate,
-                    computed_byte,
-                    computed_byte.wrapping_add(1),
-                    hex.clone(),
-                ) {
-                    Err(e) => return Err(e),
-                    Ok(Some(true)) => unreachable!("too-short hex never matches"),
-                    Ok(Some(false)) | Ok(None) => Some(false),
-                }
+                check_checksum(self.validate, computed_byte, None, hex.clone())?
             }
             None => None,
         };
@@ -1991,7 +1960,7 @@ impl FrameParser for ModbusAsciiParser {
         let checksum_valid = check_checksum(
             self.validate,
             computed_val,
-            lrc_received,
+            Some(lrc_received),
             vec![lrc_received],
         )?;
 
@@ -2067,7 +2036,6 @@ pub struct PushOutcome {
     /// Per-frame drops (currently only checksum mismatches with `validate: true`).
     /// Does NOT include frames skipped by `skip_empty` (those never consume
     /// an index by design).
-    #[allow(dead_code)]
     pub frames_dropped: usize,
     /// Stream-fatal error (SLIP malformed escape, COBS invalid code).
     /// `None` for per-frame checksum drops — those are counted in
@@ -2080,6 +2048,35 @@ pub struct PushOutcome {
 /// \x0b, \x0c).
 fn is_blank_frame(data: &[u8]) -> bool {
     data.iter().all(|&b| b.is_ascii_whitespace())
+}
+
+/// Extract the next delimited frame from the buffer, returning `Some(frame)`
+/// when the delimiter byte sequence is found. Returns `None` if the delimiter
+/// has not yet appeared. The delimiter bytes are always drained from the buffer;
+/// they are included in the returned frame only when `include_terminators` is
+/// `true`.
+fn extract_delimited(
+    buf: &mut Vec<u8>,
+    delim: &[u8],
+    include_terminators: bool,
+) -> Option<Vec<u8>> {
+    let pos = find_subsequence(buf, delim)?;
+    let fb = if include_terminators {
+        buf[..pos + delim.len()].to_vec()
+    } else {
+        buf[..pos].to_vec()
+    };
+    buf.drain(..pos + delim.len());
+    Some(fb)
+}
+
+/// Format a byte slice as uppercase hex with no separator (e.g. "4F1A").
+pub(crate) fn hex_upper(bytes: &[u8]) -> String {
+    bytes
+        .iter()
+        .map(|b| format!("{b:02X}"))
+        .collect::<Vec<_>>()
+        .join("")
 }
 
 // ---- SLIP (RFC 1055) constants and codec ------------------------------------
