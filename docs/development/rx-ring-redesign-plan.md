@@ -1,13 +1,17 @@
 # RX Ring Buffer & Cursor Redesign Plan
 
 > Status: **design accepted 2026-07-07, all open items resolved; implementation
-> not started.** Source:
+> not started. Prerequisite landed:** the `feature-additions` PR (including
+> all phases of the since-completed-and-removed review-hardening plan) merged
+> as PR #32 and released as **v0.7.3** on 2026-07-07. Implement this on a
+> fresh branch off `main`. Source:
 > external-agent usage review ([../agent-review.md](../agent-review.md)) plus
 > design discussion with Thomas. Breaking changes are explicitly allowed —
-> pre-1.0, no compatibility shims; this ships as **0.8.0**. Sequencing: land
-> the `feature-additions` PR (including the PR-blocking phases of
-> [review-hardening-plan.md](review-hardening-plan.md)) first, then implement
-> this on a fresh branch off `main`.
+> pre-1.0, no compatibility shims; this ships as **0.8.0**.
+> The unified-semantics table and the "Cursor position on framing error"
+> section were revised after the 0.7.3 decode-error semantics landed
+> (partial results, `error` field, hex fallback, frames-before-error,
+> checksum drop-and-count) — the rest of the plan text predates them.
 
 ## Why
 
@@ -280,7 +284,8 @@ deliberately:
 | `bytes_returned` in match meta | accumulated len | cumulative emitted | one definition: bytes emitted by this call/subscription up to and including the match |
 | Slow consumer | n/a (blocking) | silently dropped | falls behind → `bytes_lost` gap, continues |
 | Framing construction error | tool error | degrade to raw + `warn!` | **tool error for both** — a bad config is an agent mistake and must be visible; degrading silently changed data semantics |
-| Runtime decode error (SLIP) | stops, `is_error` | stops, final notification | unchanged (stops both) — but now recoverable: the cursor stands just past the consumed bytes; the agent can `read` raw or `seek` past the corruption |
+| Runtime decode error (SLIP/COBS) | partial result: `is_error: false`, `stop_reason: framing_error`, `error` text, frames-before-error kept, hex-fallback `data`/`encoding` when the requested encoding can't represent the raw bytes (0.7.3 contract) | same, as final notification | unchanged contract, plus offset fields — and now recoverable: see "cursor position on framing error" below |
+| Checksum mismatch, `validate: true` (NMEA `*XX`, Modbus LRC) | per-frame drop-and-count: increment `frames_dropped`, `warn!`, decoder continues (0.7.3 contract) | same | unchanged — NOT stream-fatal; `frames_dropped` stays per-call decoder state, so a history replay re-decodes and recounts |
 
 The construction-error unification (subscribe hard-errors instead of
 degrading) is **decided**: the old rationale for degrading — failing the
@@ -289,6 +294,29 @@ buffering while the agent fixes its config and re-subscribes with
 `from: "cursor"`. Silently delivering raw data when framed data was
 requested misleads the client; the `warn!` it gets today is invisible over
 MCP.
+
+### Cursor position on framing error (baseline update from 0.7.3)
+
+The pre-ring architecture made framing-error recovery trivial by accident:
+when a `read` stopped on a decode error, the bytes still in the pump channel
+were discarded as the call ended, so the *next* read started from clean live
+data. The ring removes that accidental cleanup — nothing is discarded — so
+the contract must be explicit or a plain retry re-feeds the same corrupt
+bytes to a fresh decoder and errors forever:
+
+- On `stop_reason: framing_error`, the shared cursor advances past **all
+  bytes the call consumed from the ring, including the malformed sequence
+  that triggered the error** (the decoder consumed them; they are part of
+  the partial result's raw `data`). A plain retry therefore always makes
+  progress.
+- The result's `from_offset`/`next_offset` bracket the consumed window, so
+  an agent that wants to forensically re-read the corrupt region does it
+  with `seek { offset: from_offset }` + `read` raw — this is the "read raw
+  or seek past the corruption" recovery path, now with exact coordinates.
+- Subscriptions behave identically with their private cursor: the final
+  notification's offsets tell the agent where decoding died, and a
+  re-subscribe with `from: "cursor"` (or an explicit offset) resumes after
+  the corruption.
 
 Once this lands, update the `rx-read-vs-subscribe-semantics` design note —
 its "the two loops legitimately differ" guidance is superseded by this
@@ -358,12 +386,25 @@ independently shippable.
 
 1. Cursor-follower subscription task; `from` replay parameter; gap
    notifications. Delete `ConsumerRegistry`/`RxEvent` fanout and all
-   prune/join coordination.
+   prune/join coordination. **Keep `src/tools/rx_consume.rs`**
+   (`consume_frames` + `RxFrameSink`): it is per-window frame dispatch, not
+   fanout, and it owns the 0.7.3 frames-before-error contract (frames
+   decoded before a stream-fatal error are dispatched to the sink BEFORE
+   `FrameOutcome::DecodeError` is returned) plus the `frames_dropped`
+   accounting. Both loops keep routing framed windows through it.
 2. Apply the unified-semantics table: match-stop behavior, `bytes_returned`
    definition, construction-error hard-failure for subscribe.
 3. Tests: replay-from-history, lag → gap → continue (the old silent-drop
    test inverts), read+subscribe coexistence (subscribe doesn't consume),
-   framing-error recovery via seek.
+   framing-error recovery via seek. The native_sim SLIP framing-error e2es
+   (`native_read_slip_malformed_escape_returns_partial_result`,
+   `native_read_slip_recovers_after_error_on_next_call`) already assert the
+   0.7.3 partial-result contract (`stop_reason: framing_error`, `error`
+   field, hex-fallback data) — extend them with the offset fields and
+   rewrite the recovery test's premise: it currently passes because the old
+   pump channel discards the corrupt bytes between calls; under the ring it
+   must instead prove the "cursor advances past the malformed sequence"
+   contract (retry progresses without a seek).
 4. Update AGENTS.md invariants section + the superseded design note.
 
 ### Phase 3 — polish + release
@@ -374,7 +415,11 @@ independently shippable.
    is largely solved by the ring; `transact`'s remaining value is halving
    round trips — reword, keep).
 3. Version bump to **0.8.0** (auto-tags a release on merge to main — bump
-   only when the tree is release-ready, CHANGELOG rolled).
+   only when the tree is release-ready, CHANGELOG rolled). Since 0.7.4 the
+   bump touches `Cargo.toml` + the single top-level `server.json` version
+   field (server.json is a packages-less registry template; the publish
+   workflow generates package URLs + hashes, and `doc_drift` guards both
+   the version match and the packages absence).
 
 ## Resolved decisions (2026-07-07, with Thomas)
 
