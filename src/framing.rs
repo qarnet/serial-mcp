@@ -563,10 +563,12 @@ pub enum ParsedFrame {
     Raw,
     Nmea {
         /// Talker ID (e.g. "GP" for GPS, "GN" for GLONASS, "AI" for AIS).
-        /// Two characters for standard sentences; may be longer for proprietary.
+        /// Two characters for standard sentences; for proprietary sentences
+        /// (`$P...`) the talker_id is `"P"` and the rest forms the sentence_type.
         talker_id: String,
         /// Sentence type (e.g. "GGA", "RMC", "GLL", "AIVDM").
-        /// Three characters for standard; variable for proprietary ($P...).
+        /// Three characters for standard sentences; for proprietary (`$P...`)
+        /// this holds the remainder after the leading `P` (e.g. `"GRMM"`).
         sentence_type: String,
         /// Comma-separated data fields (the body after the address, before '*').
         fields: Vec<String>,
@@ -1748,6 +1750,9 @@ impl FrameParser for NmeaParser {
             Ok(s) => s,
             Err(_) => return Ok(ParsedFrame::Raw),
         };
+        if !body_str.is_ascii() {
+            return Ok(ParsedFrame::Raw);
+        }
 
         let (address_part, fields_part) = match body_str.find(',') {
             Some(comma_pos) => (
@@ -1757,12 +1762,14 @@ impl FrameParser for NmeaParser {
             None => (body_str.to_string(), String::new()),
         };
 
-        let (talker_id, sentence_type) = if address_part.len() >= 5 {
-            // Standard NMEA: talker = first 2, type = chars 3 onward
-            let tid = address_part[..2].to_string();
-            let stype = address_part[2..].to_string();
+        let (talker_id, sentence_type) = if address_part.len() >= 2 && address_part.starts_with('P')
+        {
+            // Proprietary NMEA: talker = "P", type = rest of address
+            let tid = "P".to_string();
+            let stype = address_part[1..].to_string();
             (tid, stype)
         } else if address_part.len() >= 2 {
+            // Standard NMEA: talker = first 2, type = rest
             let tid = address_part[..2].to_string();
             let stype = address_part[2..].to_string();
             (tid, stype)
@@ -4678,10 +4685,131 @@ mod tests {
                 fields,
                 checksum_valid,
             } => {
-                // Address is "PGRMZ" (5 chars): talker = first 2 = "PG", type = rest = "RMZ"
-                assert_eq!(talker_id, "PG");
-                assert_eq!(sentence_type, "RMZ");
+                // Proprietary $PGRMZ: talker = "P", sentence_type = rest = "GRMZ"
+                assert_eq!(talker_id, "P");
+                assert_eq!(sentence_type, "GRMZ");
                 assert_eq!(fields, vec!["2010", "f", "3"]);
+                assert_eq!(checksum_valid, Some(true));
+            }
+            other => panic!("expected Nmea frame, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn nmea_parser_non_ascii_body_returns_raw() {
+        // Two branches: valid-UTF-8-but-non-ASCII and invalid-UTF-8.
+        //
+        // Case 1: valid UTF-8 but non-ASCII → is_ascii fails, returns Raw.
+        // b"a\xC3\xA9,x" = "aé,x" where é is U+00E9 (2-byte UTF-8, non-ASCII).
+        // This passes the contains(',') guard and from_utf8 but hits the ASCII
+        // guard — byte index 2 is not a char boundary, so slicing panicked
+        // before the ASCII guard was added.
+        let p = NmeaParser { validate: true };
+        let body1 = b"a\xC3\xA9,x";
+        let result1 = p.parse(body1).unwrap();
+        assert!(
+            matches!(result1, ParsedFrame::Raw),
+            "valid-UTF-8 non-ASCII body should return Raw, got {result1:?}"
+        );
+
+        // validate: false variant — same behavior.
+        let p2 = NmeaParser { validate: false };
+        let result1b = p2.parse(body1).unwrap();
+        assert!(
+            matches!(result1b, ParsedFrame::Raw),
+            "valid-UTF-8 non-ASCII body (validate=false) should return Raw, got {result1b:?}"
+        );
+
+        // Case 2: invalid UTF-8 → from_utf8 returns Err → Raw.
+        // b"\xFFx,y" — 0xFF is a lone byte >0x7F and not a valid UTF-8
+        // lead byte. from_utf8 returns Err immediately.
+        let body2 = b"\xFFx,y";
+        let result2 = p.parse(body2).unwrap();
+        assert!(
+            matches!(result2, ParsedFrame::Raw),
+            "invalid-UTF-8 body should return Raw, got {result2:?}"
+        );
+
+        // Sanity: a valid NMEA sentence with the same parser DOES parse to Nmea.
+        let sentence = b"GPGGA,123519,4807.038,N,01131.000,E,1,08,0.9,545.4,M,46.9,M,,";
+        let cs_hex = nmea_checksum_body(sentence);
+        let valid_sentence =
+            format!("GPGGA,123519,4807.038,N,01131.000,E,1,08,0.9,545.4,M,46.9,M,,*{cs_hex}");
+        let result_valid = p.parse(valid_sentence.as_bytes()).unwrap();
+        assert!(
+            matches!(result_valid, ParsedFrame::Nmea { .. }),
+            "valid ASCII sentence should parse to Nmea, got {result_valid:?}"
+        );
+    }
+
+    #[test]
+    fn nmea_parser_proprietary_p_prefix_split() {
+        // $PGRMM proprietary sentence: talker = "P", sentence_type = rest = "GRMM"
+        let body = b"PGRMM,W";
+        let cs_hex = nmea_checksum_body(body);
+        let sentence = format!("PGRMM,W*{cs_hex}");
+        let p = NmeaParser { validate: true };
+        let result = p.parse(sentence.as_bytes()).unwrap();
+        match result {
+            ParsedFrame::Nmea {
+                talker_id,
+                sentence_type,
+                fields,
+                checksum_valid,
+            } => {
+                assert_eq!(talker_id, "P", "proprietary talker should be 'P'");
+                assert_eq!(
+                    sentence_type, "GRMM",
+                    "proprietary sentence_type should be rest after P"
+                );
+                assert_eq!(fields, vec!["W"]);
+                assert_eq!(checksum_valid, Some(true));
+            }
+            other => panic!("expected Nmea frame, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn nmea_parser_standard_5char_address_unchanged() {
+        // GPGGA standard sentence (5-char address): confirms standard split
+        // is not accidentally swallowed by the P-branch.
+        let body = b"GPGGA,123519,4807.038,N,01131.000,E,1,08,0.9,545.4,M,46.9,M,,";
+        let cs_hex = nmea_checksum_body(body);
+        let sentence =
+            format!("GPGGA,123519,4807.038,N,01131.000,E,1,08,0.9,545.4,M,46.9,M,,*{cs_hex}");
+        let p = NmeaParser { validate: true };
+        let result = p.parse(sentence.as_bytes()).unwrap();
+        match result {
+            ParsedFrame::Nmea {
+                talker_id,
+                sentence_type,
+                fields,
+                checksum_valid,
+            } => {
+                assert_eq!(talker_id, "GP", "standard talker should be first 2 chars");
+                assert_eq!(
+                    sentence_type, "GGA",
+                    "standard sentence_type should be rest"
+                );
+                assert_eq!(
+                    fields,
+                    vec![
+                        "123519",
+                        "4807.038",
+                        "N",
+                        "01131.000",
+                        "E",
+                        "1",
+                        "08",
+                        "0.9",
+                        "545.4",
+                        "M",
+                        "46.9",
+                        "M",
+                        "",
+                        ""
+                    ]
+                );
                 assert_eq!(checksum_valid, Some(true));
             }
             other => panic!("expected Nmea frame, got {other:?}"),

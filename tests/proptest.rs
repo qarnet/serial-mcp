@@ -540,8 +540,17 @@ proptest! {
                 fields: pf,
                 checksum_valid,
             }) => {
-                prop_assert_eq!(talker_id.as_str(), talker);
-                prop_assert_eq!(st.as_str(), sentence_type);
+                let expected_st: String;
+                if let Some(stripped) = talker.strip_prefix('P') {
+                    // Proprietary: talker_id = "P", sentence_type = rest of talker + suffix
+                    expected_st = format!("{stripped}{sentence_type}");
+                    prop_assert_eq!(talker_id.as_str(), "P");
+                    prop_assert_eq!(st.as_str(), expected_st);
+                } else {
+                    // Standard: talker_id = first 2 chars, sentence_type = the rest
+                    prop_assert_eq!(talker_id.as_str(), talker);
+                    prop_assert_eq!(st.as_str(), sentence_type);
+                }
                 prop_assert_eq!(pf.as_slice(), fields.as_slice());
                 prop_assert_eq!(*checksum_valid, Some(true));
             }
@@ -570,6 +579,42 @@ proptest! {
         let mut dec = FrameDecoder::new(&cfg, Some(&parser)).unwrap();
         let _ = dec.push(&bytes);
         let _ = dec.flush_partial();
+    }
+
+    #[test]
+    fn nmea_parser_never_panics_on_utf8_with_commas(
+        bytes in prop::string::string_regex("[\\x21-\\x7E\\xC0-\\xDF][\\x80-\\xBF]{0,4}(,[\\x21-\\x7E\\xC0-\\xDF][\\x80-\\xBF]{0,4})*\\*?[0-9A-Fa-f]{0,2}")
+            .expect("valid regex")
+            .prop_map(|s| s.into_bytes()),
+    ) {
+        use serial_mcp::framing::{
+            FrameDecoder, ParserConfig, ParserType, RxFramingConfig, RxFramingMode,
+        };
+        let cfg = RxFramingConfig {
+            mode: RxFramingMode::Line {
+                ending: serial_mcp::framing::LineEnding::Auto,
+            },
+            ..Default::default()
+        };
+        // validate: true
+        let parser = ParserConfig {
+            parser_type: ParserType::Nmea,
+            custom_prompt: None,
+            validate: true,
+        };
+        let mut dec = FrameDecoder::new(&cfg, Some(&parser)).unwrap();
+        let _ = dec.push(&bytes);
+        let _ = dec.flush_partial();
+
+        // validate: false
+        let parser_no_val = ParserConfig {
+            parser_type: ParserType::Nmea,
+            custom_prompt: None,
+            validate: false,
+        };
+        let mut dec2 = FrameDecoder::new(&cfg, Some(&parser_no_val)).unwrap();
+        let _ = dec2.push(&bytes);
+        let _ = dec2.flush_partial();
     }
 
     #[test]

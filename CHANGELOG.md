@@ -2,6 +2,7 @@
 
 | Version | Date | Highlights |
 |---|---|---|
+| Unreleased | — | NMEA parser panic fix, P-talker proprietary split |
 | [0.7.2](#072) | 2026-07-07 | `--version` flag + `version` subcommand, `BUILD_TARGET` in build.rs; removed dead `ProfileDefaults` fields; `slip` and `json_lines` protocol presets; COBS framing mode + `cobs` preset + `checksums` module; `ndjson` preset + `skip_empty` framing option; `nmea0183` preset + `Nmea` parser + `StartEnd` multi-marker + checksum validation; `modbus_ascii` preset + `ModbusAscii` parser + `Lrc` checksum; schema fix for `Frame.data` uint8 format |
 | [0.7.0](#070) | 2026-06-26 | Frame pipeline: TX framing, SLIP, protocol presets, profile defaults, parser relocation |
 | [0.6.2](#062) | 2026-06-25 | Schema fix: suppress non-standard `uint8`/`uint16` formats; expanded schema regression guards + AGENTS.md truth |
@@ -20,6 +21,23 @@
 | [0.2.1](#021) | 2026-05-24 | MCP 2025-11-25, resource change notifications, port allowlist, stdio tests |
 | [0.2.0](#020) | 2026-05-23 | Project reset: rmcp 1.7 rewrite, 6 new tools, resources, prompts, HTTP transport |
 | [0.1.0](#010) | — | Initial release (5 tools, STM32 demo) |
+
+---
+
+## Unreleased
+
+**Fixed — NMEA parser panic:**
+- NMEA parser no longer panics on non-ASCII-but-valid-UTF-8 bodies; non-ASCII
+  frames now return `Raw` (spec-conformant). The parser slices the address
+  field by byte index, but byte index 2 need not be a char boundary in
+  multi-byte UTF-8. A new `is_ascii()` guard mirrors `ModbusAsciiParser`'s
+  non-ASCII → `Raw` behavior.
+
+**Breaking (pre-1.0) — NMEA proprietary talker split:**
+- NMEA proprietary sentences (`$P...`) now split as `talker_id: "P"` +
+  `sentence_type:` the rest (e.g. `PGRMM` → `P` + `GRMM`), matching the
+  NMEA proprietary convention. Previously the first two characters were used
+  as the talker ID (`PG` + `RMM`).
 
 ---
 
