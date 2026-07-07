@@ -2,6 +2,7 @@
 
 | Version | Date | Highlights |
 |---|---|---|
+| Unreleased | — | `server.json` becomes a packages-less registry template (publish workflow generates release URLs + hashes; drift guard forbids committed `packages`) |
 | [0.7.3](#073) | 2026-07-07 | NMEA parser panic fix + P-talker proprietary split; decode-error semantics (`PushOutcome`, drop-and-count checksums, `read` partial results + `error` field + hex fallback); `docs/protocols.md` guide; framing.rs dedup (`emit_frame`/`check_checksum`/`take_frame`/`match_line_byte`/`xor_checksum`/`lrc` free functions); NMEA malformed-checksum body parse; `TxFramingMode::Nmea` auto `*XX` checksum; `--version` argv scan strictness; table-driven preset tests |
 | [0.7.2](#072) | 2026-07-07 | `--version` flag + `version` subcommand, `BUILD_TARGET` in build.rs; removed dead `ProfileDefaults` fields; `slip` and `json_lines` protocol presets; COBS framing mode + `cobs` preset + `checksums` module; `ndjson` preset + `skip_empty` framing option; `nmea0183` preset + `Nmea` parser + `StartEnd` multi-marker + checksum validation; `modbus_ascii` preset + `ModbusAscii` parser + `Lrc` checksum; schema fix for `Frame.data` uint8 format |
 | [0.7.0](#070) | 2026-06-26 | Frame pipeline: TX framing, SLIP, protocol presets, profile defaults, parser relocation |
