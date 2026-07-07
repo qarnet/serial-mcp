@@ -64,9 +64,9 @@ pub async fn consume_frames<S: RxFrameSink>(
     let outcome = decoder.push(chunk);
     *frames_dropped += outcome.frames_dropped;
     let frames = outcome.frames;
-    if let Some(e) = outcome.error {
-        return FrameOutcome::DecodeError(e);
-    }
+    // Dispatch frames decoded before the error FIRST, then return the
+    // decode error if one occurred. This preserves frames-before-error
+    // for both read (collects them) and subscribe (notifies them).
     for frame in frames {
         *frames_seen += 1;
         let match_index = match matcher.as_mut() {
@@ -85,6 +85,9 @@ pub async fn consume_frames<S: RxFrameSink>(
         {
             return FrameOutcome::SinkStop(reason);
         }
+    }
+    if let Some(e) = outcome.error {
+        return FrameOutcome::DecodeError(e);
     }
     if let Some(limit) = max_frames {
         if *frames_seen >= limit {

@@ -348,6 +348,12 @@ pub struct ReadResult {
     #[serde(default)]
     #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
     pub frames_dropped: usize,
+    /// Framing/decode error message. Set when `stop_reason` is
+    /// `framing_error` (a stream-fatal SLIP malformed escape or COBS
+    /// invalid code); `null` for all other stop reasons. Parity with
+    /// subscribe's final-notification `error` field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]

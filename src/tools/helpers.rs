@@ -253,6 +253,10 @@ pub struct ReadOutcome {
     /// mismatches with `validate: true`). Does NOT include encoding
     /// drops — those are counted separately in `build_read_result`.
     pub frames_dropped: usize,
+    /// Framing/decode error text. `Some` when the read stopped with
+    /// `stop_reason: framing_error`, else `None`. Surfaced as
+    /// `ReadResult.error` by `build_read_result`.
+    pub error: Option<String>,
 }
 
 /// `read`'s frame sink: collects every frame and records the first match so the
@@ -341,7 +345,8 @@ pub async fn read_bytes_via_session(
                         matched: bool,
                         match_index: Option<usize>,
                         match_frame_index: Option<usize>,
-                        fdropped: usize| {
+                        fdropped: usize,
+                        error: Option<String>| {
         let outcome = ReadOutcome {
             bytes,
             elapsed_ms,
@@ -351,6 +356,7 @@ pub async fn read_bytes_via_session(
             match_frame_index,
             frames,
             frames_dropped: fdropped,
+            error,
         };
         if !outcome.matched || context_amount.is_none() {
             return outcome;
@@ -372,6 +378,7 @@ pub async fn read_bytes_via_session(
             match_frame_index: outcome.match_frame_index,
             frames: outcome.frames,
             frames_dropped: outcome.frames_dropped,
+            error: outcome.error,
         }
     };
 
@@ -393,7 +400,7 @@ pub async fn read_bytes_via_session(
     // tail. Captures `decoder`, `collected_frames`, `read_start`, and
     // `make_outcome` from the enclosing scope. Valid only in return position.
     macro_rules! finish {
-        ($bytes:expr, $meta:expr, $matched:expr, $match_index:expr, $match_frame_index:expr, $dropped:expr) => {
+        ($bytes:expr, $meta:expr, $matched:expr, $match_index:expr, $match_frame_index:expr, $dropped:expr, $error:expr) => {
             return Ok(make_outcome(
                 finalize_frames(&mut decoder, &mut collected_frames),
                 $bytes,
@@ -403,6 +410,7 @@ pub async fn read_bytes_via_session(
                 $match_index,
                 $match_frame_index,
                 $dropped,
+                $error,
             ))
         };
     }
@@ -421,7 +429,8 @@ pub async fn read_bytes_via_session(
                         outcome.matched,
                         outcome.match_index,
                         None,
-                        frames_dropped
+                        frames_dropped,
+                        None
                     );
                 }
                 DisconnectState::Reconnecting => {
@@ -439,7 +448,8 @@ pub async fn read_bytes_via_session(
                 outcome.matched,
                 outcome.match_index,
                 None,
-                frames_dropped
+                frames_dropped,
+                None
             );
         }
         if let RxStopDecision::Stop(outcome) = ctrl.check_silence_timeout() {
@@ -449,7 +459,8 @@ pub async fn read_bytes_via_session(
                 outcome.matched,
                 outcome.match_index,
                 None,
-                frames_dropped
+                frames_dropped,
+                None
             );
         }
 
@@ -460,13 +471,13 @@ pub async fn read_bytes_via_session(
         let event = tokio::select! {
             _ = ct.cancelled() => {
                 let outcome = ctrl.cancelled();
-                finish!(accumulated, outcome.meta, outcome.matched, outcome.match_index, None, frames_dropped);
+                finish!(accumulated, outcome.meta, outcome.matched, outcome.match_index, None, frames_dropped, None);
             }
             msg = tokio::time::timeout(Duration::from_millis(wait), event_rx.recv()) => match msg {
                 Ok(Some(e)) => e,
                 Ok(None) => {
                     let outcome = ctrl.channel_closed();
-                    finish!(accumulated, outcome.meta, outcome.matched, outcome.match_index, None, frames_dropped);
+                    finish!(accumulated, outcome.meta, outcome.matched, outcome.match_index, None, frames_dropped, None);
                 }
                 Err(_) => {
                     if let (Some(token), Some(peer)) = (progress_token.clone(), peer) {
@@ -526,20 +537,30 @@ pub async fn read_bytes_via_session(
                             true,
                             match_index,
                             match_frame_index,
-                            frames_dropped
+                            frames_dropped,
+                            None
                         )
                     }
                     if let FrameOutcome::MaxFrames = outcome {
                         let meta =
                             RxStopMetadata::max_frames(ctrl.bytes_observed(), accumulated.len());
-                        finish!(accumulated, meta, false, None, None, frames_dropped);
+                        finish!(accumulated, meta, false, None, None, frames_dropped, None);
                     }
                     if let FrameOutcome::DecodeError(e) = outcome {
                         let meta = crate::rx_metadata::RxStopMetadata::framing_error(
                             ctrl.bytes_observed(),
                         );
                         tracing::error!("RX framing decode error: {e}");
-                        finish!(accumulated, meta, false, None, None, frames_dropped);
+                        let err_text = e.to_string();
+                        finish!(
+                            accumulated,
+                            meta,
+                            false,
+                            None,
+                            None,
+                            frames_dropped,
+                            Some(err_text)
+                        );
                     }
                 }
 
@@ -557,7 +578,8 @@ pub async fn read_bytes_via_session(
                             outcome.matched,
                             outcome.match_index,
                             None,
-                            frames_dropped
+                            frames_dropped,
+                            None
                         );
                     }
                 }
@@ -588,7 +610,8 @@ pub async fn read_bytes_via_session(
                     outcome.matched,
                     outcome.match_index,
                     None,
-                    frames_dropped
+                    frames_dropped,
+                    None
                 );
             }
             RxEvent::Error(msg) => {
@@ -619,7 +642,8 @@ pub async fn read_bytes_via_session(
                 outcome.matched,
                 outcome.match_index,
                 None,
-                frames_dropped
+                frames_dropped,
+                None
             );
         }
         if let RxStopDecision::Stop(outcome) = ctrl.check_silence_timeout() {
@@ -629,14 +653,15 @@ pub async fn read_bytes_via_session(
                 outcome.matched,
                 outcome.match_index,
                 None,
-                frames_dropped
+                frames_dropped,
+                None
             );
         }
 
         let event = tokio::select! {
             _ = ct.cancelled() => {
                 let outcome = ctrl.cancelled();
-                finish!(accumulated, outcome.meta, outcome.matched, outcome.match_index, None, frames_dropped);
+                finish!(accumulated, outcome.meta, outcome.matched, outcome.match_index, None, frames_dropped, None);
             }
             msg = tokio::time::timeout(Duration::from_millis(settle), event_rx.recv()) => match msg {
                 Ok(Some(e)) => Some(e),
@@ -689,7 +714,8 @@ pub async fn read_bytes_via_session(
             outcome.matched,
             outcome.match_index,
             None,
-            frames_dropped
+            frames_dropped,
+            None
         );
     }
     let outcome = ctrl.data_complete();
@@ -699,7 +725,8 @@ pub async fn read_bytes_via_session(
         outcome.matched,
         outcome.match_index,
         None,
-        frames_dropped
+        frames_dropped,
+        None
     );
 }
 
@@ -722,8 +749,25 @@ pub fn build_read_result(
     let timeout_ms = requested_timeout_ms.unwrap_or(DEFAULT_READ_TIMEOUT_MS);
     let bytes_read = outcome.bytes.len();
     let elapsed_ms = outcome.elapsed_ms;
-    let data = codec::encode(encoding, &outcome.bytes)
-        .map_err(|e| format!("Data encoding failed - {e}"))?;
+
+    let is_framing_error = outcome.error.is_some();
+    let (data, effective_encoding) = match codec::encode(encoding, &outcome.bytes) {
+        Ok(s) => (s, encoding),
+        Err(e) if is_framing_error => {
+            // Framing-error path: fall back to hex so the partial bytes and
+            // the framing diagnostic both survive. Lossy UTF-8 was rejected
+            // (corrupts bytes); base64 would also work but hex matches the
+            // binary-protocol context that produced the framing error.
+            tracing::warn!(
+                "read framing-error data not encodable as {encoding} ({e}); \
+                 falling back to hex"
+            );
+            let hex = codec::encode(Encoding::Hex, &outcome.bytes)
+                .map_err(|e| format!("hex fallback encoding failed - {e}"))?;
+            (hex, Encoding::Hex)
+        }
+        Err(e) => return Err(format!("Data encoding failed - {e}")),
+    };
 
     let mut frames_dropped: usize = outcome.frames_dropped;
     let frames = if outcome.frames.is_empty() {
@@ -732,19 +776,33 @@ pub fn build_read_result(
         let encoded_frames: Vec<FrameResult> = outcome
             .frames
             .iter()
-            .filter_map(|f| match codec::encode(encoding, &f.data) {
-                Ok(fdata) => Some(FrameResult {
-                    data: fdata,
-                    encoding: encoding.to_string(),
-                    frame_index: f.index,
-                    frame_type: f.frame_type.to_string(),
-                    parsed: f.parsed.clone(),
-                }),
-                Err(e) => {
-                    tracing::warn!("Frame {} encoding failed: {e}", f.index);
-                    frames_dropped += 1;
-                    None
+            .filter_map(|f| {
+                let encode = |enc: Encoding, data: &[u8]| -> Option<FrameResult> {
+                    match codec::encode(enc, data) {
+                        Ok(fdata) => Some(FrameResult {
+                            data: fdata,
+                            encoding: enc.to_string(),
+                            frame_index: f.index,
+                            frame_type: f.frame_type.to_string(),
+                            parsed: f.parsed.clone(),
+                        }),
+                        Err(err) => {
+                            tracing::warn!("Frame {} encoding failed: {err}", f.index);
+                            None
+                        }
+                    }
+                };
+                // Try the effective encoding first.
+                let mut frame = encode(effective_encoding, &f.data);
+                // On framing error, fall back to hex per-frame so partial
+                // frames survive alongside the raw bytes.
+                if frame.is_none() && is_framing_error && effective_encoding != Encoding::Hex {
+                    frame = encode(Encoding::Hex, &f.data);
                 }
+                if frame.is_none() {
+                    frames_dropped += 1;
+                }
+                frame
             })
             .collect();
         if encoded_frames.is_empty() {
@@ -758,7 +816,7 @@ pub fn build_read_result(
         connection_id,
         name,
         bytes_read,
-        encoding: encoding.to_string(),
+        encoding: effective_encoding.to_string(),
         data,
         timeout_ms,
         no_new_rx_timeout_ms: requested_no_new_rx_timeout_ms,
@@ -772,6 +830,7 @@ pub fn build_read_result(
         match_frame_index: outcome.match_frame_index,
         frames,
         frames_dropped,
+        error: outcome.error,
     }))
 }
 
@@ -890,6 +949,7 @@ mod tests {
             match_frame_index: None,
             frames: vec![],
             frames_dropped: 0,
+            error: None,
         };
         let Json(result) =
             build_read_result(outcome, "abc".into(), None, Encoding::Utf8, Some(250), None)
@@ -911,6 +971,7 @@ mod tests {
             match_frame_index: None,
             frames: vec![],
             frames_dropped: 0,
+            error: None,
         };
         let Json(result) =
             build_read_result(outcome, "abc".into(), None, Encoding::Hex, None, None)
@@ -930,6 +991,7 @@ mod tests {
             match_frame_index: None,
             frames: vec![],
             frames_dropped: 0,
+            error: None,
         };
         let Json(result) =
             build_read_result(outcome, "abc".into(), None, Encoding::Hex, Some(500), None)
@@ -957,6 +1019,7 @@ mod tests {
             match_frame_index: None,
             frames: vec![],
             frames_dropped: 0,
+            error: None,
         };
         let Json(result) = build_read_result(
             outcome,
@@ -981,6 +1044,7 @@ mod tests {
             match_frame_index: None,
             frames: vec![],
             frames_dropped: 0,
+            error: None,
         };
         let Json(result) = build_read_result(
             outcome,
@@ -1757,7 +1821,7 @@ mod tests {
             .unwrap();
         drop(tx);
 
-        let result = read_bytes_via_session(
+        let outcome = read_bytes_via_session(
             rx,
             256,
             Some(1000),
@@ -1770,15 +1834,186 @@ mod tests {
             Some(slip_framing()),
             None,
         )
-        .await;
+        .await
+        .unwrap_or_else(|msg| panic!("expected Ok outcome, got Err: {msg}"));
 
-        match result {
-            Ok(outcome) => assert_eq!(
-                outcome.meta.stop_reason,
-                crate::rx_metadata::RxStopReason::FramingError,
-                "expected framing_error stop reason"
-            ),
-            Err(msg) => panic!("expected Ok with framing_error, got Err: {msg}"),
-        }
+        assert_eq!(
+            outcome.meta.stop_reason,
+            crate::rx_metadata::RxStopReason::FramingError,
+            "expected framing_error stop reason"
+        );
+        assert!(
+            outcome.error.is_some(),
+            "expected error field to be Some, got None"
+        );
+        let err_text = outcome.error.as_ref().unwrap();
+        assert!(
+            err_text.contains("SLIP"),
+            "expected error to mention SLIP: {err_text}"
+        );
+        assert!(
+            err_text.contains("0x41"),
+            "expected error to mention violating byte 0x41: {err_text}"
+        );
+
+        // Drive through build_read_result with utf8 encoding — must fall
+        // back to hex and return Ok (not Err).
+        let result = build_read_result(
+            outcome,
+            "test".into(),
+            None,
+            Encoding::Utf8,
+            Some(1000),
+            None,
+        );
+        let Json(read_result) =
+            result.unwrap_or_else(|e| panic!("expected Ok result, got Err: {e}"));
+        assert_eq!(read_result.stop_reason, "framing_error");
+        assert_eq!(read_result.encoding, "hex");
+        assert!(
+            read_result.error.is_some(),
+            "expected ReadResult.error to be Some"
+        );
+        let re = read_result.error.unwrap();
+        assert!(re.contains("SLIP"), "error msg: {re}");
+        assert!(re.contains("0x41"), "error msg: {re}");
+        // Hex-encoded data: only hex digits and spaces.
+        assert!(
+            read_result
+                .data
+                .chars()
+                .all(|c| c.is_ascii_hexdigit() || c == ' '),
+            "data not hex-encoded: {}",
+            read_result.data
+        );
+    }
+
+    /// Read integration: SLIP malformed escape with a good frame first.
+    /// Good frames decoded before the error must survive.
+    #[tokio::test]
+    async fn char_framing_slip_frames_before_malformed_error() {
+        let (tx, rx) = mpsc::channel(8);
+        // Good SLIP frame "hi", then ESC followed by invalid escape byte
+        // (no consecutive END markers to avoid empty frames).
+        tx.send(RxEvent::Data(vec![0xC0, b'h', b'i', 0xC0, 0xDB, 0x41]))
+            .await
+            .unwrap();
+        drop(tx);
+
+        let outcome = read_bytes_via_session(
+            rx,
+            256,
+            Some(1000),
+            &fresh_ct(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(slip_framing()),
+            None,
+        )
+        .await
+        .unwrap_or_else(|msg| panic!("expected Ok outcome, got Err: {msg}"));
+
+        assert_eq!(
+            outcome.meta.stop_reason,
+            crate::rx_metadata::RxStopReason::FramingError,
+            "expected framing_error stop reason"
+        );
+        assert!(outcome.error.is_some(), "expected error field to be Some");
+        // The good frame should be collected.
+        let hi_frame = outcome.frames.iter().find(|f| f.data == b"hi");
+        assert!(
+            hi_frame.is_some(),
+            "expected a frame with data b\"hi\", got frames: {:?}",
+            outcome.frames
+        );
+        assert_eq!(
+            hi_frame.unwrap().frame_type,
+            "slip",
+            "good frame should have type slip"
+        );
+
+        // Drive through build_read_result with utf8 encoding.
+        let result = build_read_result(
+            outcome,
+            "test".into(),
+            None,
+            Encoding::Utf8,
+            Some(1000),
+            None,
+        );
+        let Json(read_result) =
+            result.unwrap_or_else(|e| panic!("expected Ok result, got Err: {e}"));
+        assert_eq!(read_result.stop_reason, "framing_error");
+        assert_eq!(read_result.encoding, "hex");
+        assert!(
+            read_result.error.is_some(),
+            "expected ReadResult.error to be Some"
+        );
+        let re = read_result.error.as_ref().unwrap();
+        assert!(re.contains("SLIP"), "error msg: {re}");
+        // The good frame should survive in the frames array.
+        let frames = read_result.frames.as_ref().expect("frames should be Some");
+        assert!(
+            frames
+                .iter()
+                .any(|f| f.data.contains("68") && f.data.contains("69")),
+            "expected a frame with hex data for \"hi\", got: {frames:?}"
+        );
+    }
+
+    /// Guard: a non-framing read with invalid-utf8 bytes hard-fails.
+    /// Normal stops keep the existing hard-fail contract — hex fallback
+    /// applies ONLY on the framing-error path.
+    #[tokio::test]
+    async fn non_framing_read_invalid_utf8_still_errors() {
+        let (tx, rx) = mpsc::channel(8);
+        tx.send(RxEvent::Data(vec![0xFF, b'X'])).await.unwrap();
+        drop(tx);
+
+        let outcome = read_bytes_via_session(
+            rx,
+            256,
+            Some(1000),
+            &fresh_ct(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None, // no framing
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_ne!(
+            outcome.meta.stop_reason,
+            crate::rx_metadata::RxStopReason::FramingError,
+            "no framing configured, must not be framing_error"
+        );
+
+        let result = build_read_result(
+            outcome,
+            "test".into(),
+            None,
+            Encoding::Utf8,
+            Some(1000),
+            None,
+        );
+        assert!(
+            result.is_err(),
+            "expected Err for invalid-utf8 data with no framing"
+        );
+        let err = match result {
+            Err(e) => e,
+            Ok(_) => panic!("expected Err, got Ok"),
+        };
+        assert!(
+            err.contains("Data encoding failed"),
+            "expected encoding error: {err}"
+        );
     }
 }
