@@ -18,16 +18,18 @@
 ## Near-term
 
 ### `transact` tool (write-then-await-response)
-- one tool call: register the RX consumer FIRST, then write, then await
-  match/frames/timeout — the request/response primitive for AT, Modbus,
-  GRBL-style traffic
-- fixes a race agents hit today: `read` returns only future bytes, so a
-  device can answer in the gap between separate write and read calls; also
-  halves round trips
-- composes existing plumbing (`tx_session` + `read_bytes_via_session`); no
-  new concepts
-- this is the minimal, safe kernel of "Expect/script automation" (§ Later) —
-  ship it first, revisit scripting after
+- one tool call: write, then await match/frames/timeout — the
+  request/response primitive for AT, Modbus, GRBL-style traffic
+- the write-then-read race that motivated this is now largely solved by
+  the RX ring (0.8.0): `read` returns buffered bytes from the cursor
+  (cat semantics), so write-then-read works without a separate consumer
+  registration. `transact`'s remaining value is halving round trips
+  (one MCP call instead of write + read) and providing a single-call
+  request/response contract for agents that don't want to manage cursors
+- composes existing plumbing (`tx_session` + the ring-based `read`);
+  no new concepts
+- this is the minimal, safe kernel of "Expect/script automation" (§
+  Later) — ship it first, revisit scripting after
 
 ### `compute_checksum` utility tool
 - pure tool: compute crc16-modbus, crc32, xor, lrc, sum8 over caller-supplied

@@ -2,6 +2,7 @@
 
 | Version | Date | Highlights |
 |---|---|---|
+| [0.8.0](#080) | 2026-07-08 | RX ring buffer redesign: always-on pump + `RxRing` capture from open to close; `read` cat semantics (buffered bytes immediately + `peek` + offset fields); `seek` tool (non-destructive cursor move); `subscribe` cursor follower with `from` history replay + `bytes_lost` gap reporting; `flush(input)` ring clear; `get_status` ring fields; `open` `rx_buffer_size` (256 KiB default); `ConsumerRegistry`/`RxEvent` fanout deleted; unified read/subscribe semantics; budget ring at open |
 | [0.7.4](#074) | 2026-07-07 | `server.json` becomes a packages-less registry template (publish workflow generates release URLs + hashes; drift guard forbids committed `packages`) |
 | [0.7.3](#073) | 2026-07-07 | NMEA parser panic fix + P-talker proprietary split; decode-error semantics (`PushOutcome`, drop-and-count checksums, `read` partial results + `error` field + hex fallback); `docs/protocols.md` guide; framing.rs dedup (`emit_frame`/`check_checksum`/`take_frame`/`match_line_byte`/`xor_checksum`/`lrc` free functions); NMEA malformed-checksum body parse; `TxFramingMode::Nmea` auto `*XX` checksum; `--version` argv scan strictness; table-driven preset tests |
 | [0.7.2](#072) | 2026-07-07 | `--version` flag + `version` subcommand, `BUILD_TARGET` in build.rs; removed dead `ProfileDefaults` fields; `slip` and `json_lines` protocol presets; COBS framing mode + `cobs` preset + `checksums` module; `ndjson` preset + `skip_empty` framing option; `nmea0183` preset + `Nmea` parser + `StartEnd` multi-marker + checksum validation; `modbus_ascii` preset + `ModbusAscii` parser + `Lrc` checksum; schema fix for `Frame.data` uint8 format |
@@ -24,6 +25,61 @@
 | [0.1.0](#010) | — | Initial release (5 tools, STM32 demo) |
 
 ---
+
+## [0.8.0]
+
+**Breaking (pre-1.0) — RX ring buffer redesign:**
+- The RX side is now an always-on ring buffer with absolute stream offsets.
+  Every byte from `open` to `close` is captured to a per-connection ring
+  (`rx_buffer_size`, default 256 KiB, configurable at open), whether or not
+  any tool call is active. The pump runs from `open` to `close` and pauses
+  on disconnect (resumes on reconnect, same ring, monotonic offsets).
+- `read` behaves like `cat`: returns buffered-but-unread bytes immediately
+  (`stop_reason: "drained"`), consuming by default. Pattern matching checks
+  buffered history first, then waits for new bytes. `peek: true` returns
+  without advancing the cursor. Results carry `from_offset`/`next_offset`/
+  `bytes_lost`/`buffered_remaining`.
+- `seek` (new tool): moves the shared read cursor non-destructively
+  (`live_edge`/`buffer_start`/`offset`/`delta`), clamps into range, returns
+  ring bounds. The non-destructive replacement for `flush`-before-read.
+- `subscribe` is a cursor follower (`tail -f`) with a new `from` parameter
+  (`"now"`/`"cursor"`/`"buffer_start"`/`{"offset": N}`) for history replay.
+  Slow consumers get `bytes_lost` gap notifications and continue — no silent
+  drops. Subscriptions do NOT move the shared read cursor; `read` and
+  `subscribe` coexist without stealing.
+- `flush(input)` now clears the ring + clamps the cursor to the live edge
+  (strictly more destructive than before). `seek` to `live_edge` is the
+  non-destructive alternative.
+- `get_status` gains `rx_buffer_size`/`rx_start_offset`/`rx_end_offset`/
+  `rx_cursor`/`rx_buffered_unread`/`rx_bytes_lost_total`.
+- `open`/`open_profile`/profiles gain `rx_buffer_size` (default 256 KiB,
+  max 16 MiB; validated against the buffer budget pool).
+- `ConsumerRegistry`/`RxEvent` fanout, `register_blocking`/
+  `register_streaming`/`prune_consumers` deleted — both tools read from the
+  ring now.
+- Construction errors hard-fail both tools (subscribe stops degrading to
+  raw mode — the old rationale is void now that the ring keeps buffering
+  while the agent fixes its config).
+- Hardware flow control loses its throttling side effect: the always-on
+  pump drains continuously, so RTS never drops and the device streams
+  freely. A setup that relied on flow control to pause a device until the
+  host reads will behave differently.
+- `bytes_returned` definition unified (one definition for read + subscribe:
+  bytes emitted up to and including the match).
+- Framing-error cursor contract: on `stop_reason: framing_error`, the
+  cursor advances past all consumed bytes including the malformed
+  sequence, so a plain retry always makes progress.
+
+**Internal:**
+- `src/rx_ring.rs` (new): `RxRing` sliding-window buffer with absolute u64
+  offsets, wrap+gap accounting, `Notify`-based wakeups, `bytes_lost_total`
+  lifetime counter. Exhaustive unit tests + proptest.
+- `src/rx_session.rs` reworked: ring ownership, always-on pump,
+  pause/resume across disconnect, budget charge at open (RAII release at
+  close), `RxSession::new` fallible.
+- `src/tools/helpers.rs`: `read_bytes_from_ring` replaces
+  `read_bytes_via_session` (deleted). 0.7.3 partial-result + `error` field
+  + hex fallback contract preserved on framing errors.
 
 ## [0.7.4]
 
