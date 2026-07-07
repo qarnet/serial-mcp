@@ -419,6 +419,7 @@ async fn stream_rx_via_session(
         None => None,
     };
     let mut frames_emitted: usize = 0;
+    let mut frames_dropped: usize = 0;
     let peer_owned = peer.clone();
 
     loop {
@@ -496,6 +497,7 @@ async fn stream_rx_via_session(
                         max_frames,
                         &mut frames_emitted,
                         &mut sink,
+                        &mut frames_dropped,
                     )
                     .await;
                     match outcome {
@@ -701,6 +703,7 @@ async fn stream_rx_via_session(
         "timeout_ms": timeout_ms,
         "no_new_rx_timeout_ms": no_new_rx_timeout_ms,
         "frames_emitted": frames_emitted,
+        "frames_dropped": frames_dropped,
     });
     if let Some(ref e) = frame_error_msg {
         stop_payload["error"] = serde_json::json!(e);

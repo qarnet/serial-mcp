@@ -249,6 +249,10 @@ pub struct ReadOutcome {
     pub match_frame_index: Option<usize>,
     /// Decoded frames, empty when framing was not configured.
     pub frames: Vec<crate::framing::Frame>,
+    /// Number of frames dropped by the decoder (currently only checksum
+    /// mismatches with `validate: true`). Does NOT include encoding
+    /// drops — those are counted separately in `build_read_result`.
+    pub frames_dropped: usize,
 }
 
 /// `read`'s frame sink: collects every frame and records the first match so the
@@ -329,13 +333,15 @@ pub async fn read_bytes_via_session(
     };
     let mut collected_frames: Vec<crate::framing::Frame> = Vec::new();
     let mut frames_seen: usize = 0;
+    let mut frames_dropped: usize = 0;
     let make_outcome = |frames: Vec<crate::framing::Frame>,
                         bytes: Vec<u8>,
                         elapsed_ms: u64,
                         meta: RxStopMetadata,
                         matched: bool,
                         match_index: Option<usize>,
-                        match_frame_index: Option<usize>| {
+                        match_frame_index: Option<usize>,
+                        fdropped: usize| {
         let outcome = ReadOutcome {
             bytes,
             elapsed_ms,
@@ -344,6 +350,7 @@ pub async fn read_bytes_via_session(
             match_index,
             match_frame_index,
             frames,
+            frames_dropped: fdropped,
         };
         if !outcome.matched || context_amount.is_none() {
             return outcome;
@@ -364,6 +371,7 @@ pub async fn read_bytes_via_session(
             match_index: Some(shaped.match_index),
             match_frame_index: outcome.match_frame_index,
             frames: outcome.frames,
+            frames_dropped: outcome.frames_dropped,
         }
     };
 
@@ -385,7 +393,7 @@ pub async fn read_bytes_via_session(
     // tail. Captures `decoder`, `collected_frames`, `read_start`, and
     // `make_outcome` from the enclosing scope. Valid only in return position.
     macro_rules! finish {
-        ($bytes:expr, $meta:expr, $matched:expr, $match_index:expr, $match_frame_index:expr) => {
+        ($bytes:expr, $meta:expr, $matched:expr, $match_index:expr, $match_frame_index:expr, $dropped:expr) => {
             return Ok(make_outcome(
                 finalize_frames(&mut decoder, &mut collected_frames),
                 $bytes,
@@ -394,6 +402,7 @@ pub async fn read_bytes_via_session(
                 $matched,
                 $match_index,
                 $match_frame_index,
+                $dropped,
             ))
         };
     }
@@ -411,7 +420,8 @@ pub async fn read_bytes_via_session(
                         outcome.meta,
                         outcome.matched,
                         outcome.match_index,
-                        None
+                        None,
+                        frames_dropped
                     );
                 }
                 DisconnectState::Reconnecting => {
@@ -428,7 +438,8 @@ pub async fn read_bytes_via_session(
                 outcome.meta,
                 outcome.matched,
                 outcome.match_index,
-                None
+                None,
+                frames_dropped
             );
         }
         if let RxStopDecision::Stop(outcome) = ctrl.check_silence_timeout() {
@@ -437,7 +448,8 @@ pub async fn read_bytes_via_session(
                 outcome.meta,
                 outcome.matched,
                 outcome.match_index,
-                None
+                None,
+                frames_dropped
             );
         }
 
@@ -448,13 +460,13 @@ pub async fn read_bytes_via_session(
         let event = tokio::select! {
             _ = ct.cancelled() => {
                 let outcome = ctrl.cancelled();
-                finish!(accumulated, outcome.meta, outcome.matched, outcome.match_index, None);
+                finish!(accumulated, outcome.meta, outcome.matched, outcome.match_index, None, frames_dropped);
             }
             msg = tokio::time::timeout(Duration::from_millis(wait), event_rx.recv()) => match msg {
                 Ok(Some(e)) => e,
                 Ok(None) => {
                     let outcome = ctrl.channel_closed();
-                    finish!(accumulated, outcome.meta, outcome.matched, outcome.match_index, None);
+                    finish!(accumulated, outcome.meta, outcome.matched, outcome.match_index, None, frames_dropped);
                 }
                 Err(_) => {
                     if let (Some(token), Some(peer)) = (progress_token.clone(), peer) {
@@ -496,6 +508,7 @@ pub async fn read_bytes_via_session(
                         max_frames,
                         &mut frames_seen,
                         &mut sink,
+                        &mut frames_dropped,
                     )
                     .await;
                     let ReadFrameSink {
@@ -507,15 +520,26 @@ pub async fn read_bytes_via_session(
                     if let Some(data) = match_data {
                         let meta =
                             RxStopMetadata::match_found(ctrl.bytes_observed(), accumulated.len());
-                        finish!(data, meta, true, match_index, match_frame_index);
+                        finish!(
+                            data,
+                            meta,
+                            true,
+                            match_index,
+                            match_frame_index,
+                            frames_dropped
+                        )
                     }
                     if let FrameOutcome::MaxFrames = outcome {
                         let meta =
                             RxStopMetadata::max_frames(ctrl.bytes_observed(), accumulated.len());
-                        finish!(accumulated, meta, false, None, None);
+                        finish!(accumulated, meta, false, None, None, frames_dropped);
                     }
                     if let FrameOutcome::DecodeError(e) = outcome {
-                        return Err(format!("{e}"));
+                        let meta = crate::rx_metadata::RxStopMetadata::framing_error(
+                            ctrl.bytes_observed(),
+                        );
+                        tracing::error!("RX framing decode error: {e}");
+                        finish!(accumulated, meta, false, None, None, frames_dropped);
                     }
                 }
 
@@ -532,7 +556,8 @@ pub async fn read_bytes_via_session(
                             outcome.meta,
                             outcome.matched,
                             outcome.match_index,
-                            None
+                            None,
+                            frames_dropped
                         );
                     }
                 }
@@ -562,7 +587,8 @@ pub async fn read_bytes_via_session(
                     outcome.meta,
                     outcome.matched,
                     outcome.match_index,
-                    None
+                    None,
+                    frames_dropped
                 );
             }
             RxEvent::Error(msg) => {
@@ -592,7 +618,8 @@ pub async fn read_bytes_via_session(
                 outcome.meta,
                 outcome.matched,
                 outcome.match_index,
-                None
+                None,
+                frames_dropped
             );
         }
         if let RxStopDecision::Stop(outcome) = ctrl.check_silence_timeout() {
@@ -601,14 +628,15 @@ pub async fn read_bytes_via_session(
                 outcome.meta,
                 outcome.matched,
                 outcome.match_index,
-                None
+                None,
+                frames_dropped
             );
         }
 
         let event = tokio::select! {
             _ = ct.cancelled() => {
                 let outcome = ctrl.cancelled();
-                finish!(accumulated, outcome.meta, outcome.matched, outcome.match_index, None);
+                finish!(accumulated, outcome.meta, outcome.matched, outcome.match_index, None, frames_dropped);
             }
             msg = tokio::time::timeout(Duration::from_millis(settle), event_rx.recv()) => match msg {
                 Ok(Some(e)) => Some(e),
@@ -660,7 +688,8 @@ pub async fn read_bytes_via_session(
             outcome.meta,
             outcome.matched,
             outcome.match_index,
-            None
+            None,
+            frames_dropped
         );
     }
     let outcome = ctrl.data_complete();
@@ -669,7 +698,8 @@ pub async fn read_bytes_via_session(
         outcome.meta,
         outcome.matched,
         outcome.match_index,
-        None
+        None,
+        frames_dropped
     );
 }
 
@@ -695,7 +725,7 @@ pub fn build_read_result(
     let data = codec::encode(encoding, &outcome.bytes)
         .map_err(|e| format!("Data encoding failed - {e}"))?;
 
-    let mut frames_dropped: usize = 0;
+    let mut frames_dropped: usize = outcome.frames_dropped;
     let frames = if outcome.frames.is_empty() {
         None
     } else {
@@ -859,6 +889,7 @@ mod tests {
             match_index: None,
             match_frame_index: None,
             frames: vec![],
+            frames_dropped: 0,
         };
         let Json(result) =
             build_read_result(outcome, "abc".into(), None, Encoding::Utf8, Some(250), None)
@@ -879,6 +910,7 @@ mod tests {
             match_index: None,
             match_frame_index: None,
             frames: vec![],
+            frames_dropped: 0,
         };
         let Json(result) =
             build_read_result(outcome, "abc".into(), None, Encoding::Hex, None, None)
@@ -897,6 +929,7 @@ mod tests {
             match_index: None,
             match_frame_index: None,
             frames: vec![],
+            frames_dropped: 0,
         };
         let Json(result) =
             build_read_result(outcome, "abc".into(), None, Encoding::Hex, Some(500), None)
@@ -923,6 +956,7 @@ mod tests {
             match_index: None,
             match_frame_index: None,
             frames: vec![],
+            frames_dropped: 0,
         };
         let Json(result) = build_read_result(
             outcome,
@@ -946,6 +980,7 @@ mod tests {
             match_index: Some(6),
             match_frame_index: None,
             frames: vec![],
+            frames_dropped: 0,
         };
         let Json(result) = build_read_result(
             outcome,
@@ -1712,7 +1747,8 @@ mod tests {
         assert_eq!(out.frames[0].frame_type, "slip");
     }
 
-    /// Read integration: SLIP malformed escape surfaces as Err.
+    /// Read integration: SLIP malformed escape returns partial result
+    /// with stop_reason=framing_error (was: surfaces as Err).
     #[tokio::test]
     async fn char_framing_slip_malformed_surfaces_error() {
         let (tx, rx) = mpsc::channel(8);
@@ -1737,11 +1773,12 @@ mod tests {
         .await;
 
         match result {
-            Ok(_) => panic!("expected error for malformed SLIP"),
-            Err(msg) => assert!(
-                msg.contains("SLIP framing error"),
-                "error message should contain 'SLIP framing error': {msg}"
+            Ok(outcome) => assert_eq!(
+                outcome.meta.stop_reason,
+                crate::rx_metadata::RxStopReason::FramingError,
+                "expected framing_error stop reason"
             ),
+            Err(msg) => panic!("expected Ok with framing_error, got Err: {msg}"),
         }
     }
 }

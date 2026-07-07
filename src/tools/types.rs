@@ -341,8 +341,10 @@ pub struct ReadResult {
     /// Decoded frames, present when the `rx_framing` option was used.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub frames: Option<Vec<FrameResult>>,
-    /// Number of frames dropped due to encoding failures.
-    /// Always 0 unless per-frame encoding fails (rare).
+    /// Number of frames dropped due to decode errors (checksum mismatches
+    /// with `validate: true`) and encoding failures. When a checksum-mismatched
+    /// frame is dropped by the decoder, it does NOT appear in `frames` and is
+    /// counted here instead.
     #[serde(default)]
     #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
     pub frames_dropped: usize,

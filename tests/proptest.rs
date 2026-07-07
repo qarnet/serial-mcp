@@ -466,7 +466,7 @@ proptest! {
         };
         let mut dec =
             serial_mcp::framing::FrameDecoder::new(&cfg, None).unwrap();
-        let frames = dec.push(&framed).unwrap();
+        let frames = dec.push(&framed).frames;
         prop_assert_eq!(frames.len(), 1);
         prop_assert_eq!(&frames[0].data, &bytes);
     }
@@ -482,7 +482,7 @@ proptest! {
             ..Default::default()
         };
         let mut dec = serial_mcp::framing::FrameDecoder::new(&cfg, None).unwrap();
-        let frames = dec.push(&framed).unwrap();
+        let frames = dec.push(&framed).frames;
         prop_assert_eq!(frames.len(), 1);
         prop_assert_eq!(&frames[0].data, &bytes);
     }
@@ -530,7 +530,7 @@ proptest! {
         let mut dec = FrameDecoder::new(&cfg, Some(&parser)).unwrap();
         let mut data = sentence.into_bytes();
         data.push(b'\n');
-        let frames = dec.push(&data).unwrap();
+        let frames = dec.push(&data).frames;
         prop_assert_eq!(frames.len(), 1);
         let frame = &frames[0];
         match &frame.parsed {
@@ -552,7 +552,7 @@ proptest! {
                     prop_assert_eq!(st.as_str(), sentence_type);
                 }
                 prop_assert_eq!(pf.as_slice(), fields.as_slice());
-                prop_assert_eq!(*checksum_valid, Some(true));
+                prop_assert_eq!(checksum_valid, &Some(true));
             }
             other => prop_assert!(false, "expected Nmea, got {other:?}"),
         }

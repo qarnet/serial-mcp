@@ -39,6 +39,16 @@
   NMEA proprietary convention. Previously the first two characters were used
   as the talker ID (`PG` + `RMM`).
 
+**Breaking (pre-1.0) — decode-error semantics:**
+- `FrameDecoder::push` no longer drops frames decoded before a stream-fatal
+  error; the frames are returned alongside the error via `PushOutcome`.
+  Checksum mismatches with `validate: true` (e.g. NMEA `nmea0183` preset,
+  Modbus ASCII `modbus_ascii` preset) are now per-frame drop-and-count
+  (counted in `frames_dropped`) instead of aborting the whole read/subscribe.
+  `read` now returns partial results with `stop_reason: framing_error` on a
+  fatal SLIP/COBS decode error, matching `subscribe`. Previously `read`
+  returned a bare tool error and discarded all collected frames.
+
 ---
 
 ## [0.7.2]

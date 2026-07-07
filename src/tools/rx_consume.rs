@@ -50,6 +50,8 @@ pub trait RxFrameSink {
 
 /// Decode frames from `chunk`, run the per-frame matcher (window reset per
 /// frame), dispatch each frame to `sink`, then check `max_frames`.
+/// `frames_dropped` accumulates the per-frame drop count from the decoder
+/// (currently only checksum mismatches with `validate: true`).
 pub async fn consume_frames<S: RxFrameSink>(
     chunk: &[u8],
     decoder: &mut FrameDecoder,
@@ -57,11 +59,14 @@ pub async fn consume_frames<S: RxFrameSink>(
     max_frames: Option<usize>,
     frames_seen: &mut usize,
     sink: &mut S,
+    frames_dropped: &mut usize,
 ) -> FrameOutcome {
-    let frames = match decoder.push(chunk) {
-        Ok(f) => f,
-        Err(e) => return FrameOutcome::DecodeError(e),
-    };
+    let outcome = decoder.push(chunk);
+    *frames_dropped += outcome.frames_dropped;
+    let frames = outcome.frames;
+    if let Some(e) = outcome.error {
+        return FrameOutcome::DecodeError(e);
+    }
     for frame in frames {
         *frames_seen += 1;
         let match_index = match matcher.as_mut() {
@@ -165,6 +170,7 @@ mod tests {
             matches: vec![],
             stop_on_match: false,
         };
+        let mut dropped = 0;
         let out = consume_frames(
             b"a\nb\nc\n",
             &mut dec,
@@ -172,6 +178,7 @@ mod tests {
             Some(2),
             &mut seen,
             &mut sink,
+            &mut dropped,
         )
         .await;
         assert!(matches!(out, FrameOutcome::MaxFrames));
@@ -190,6 +197,7 @@ mod tests {
             matches: vec![],
             stop_on_match: true,
         };
+        let mut dropped = 0;
         let out = consume_frames(
             b"a\nb\nc\n",
             &mut dec,
@@ -197,6 +205,7 @@ mod tests {
             None,
             &mut seen,
             &mut sink,
+            &mut dropped,
         )
         .await;
         assert!(matches!(
@@ -218,6 +227,7 @@ mod tests {
             matches: vec![],
             stop_on_match: false,
         };
+        let mut dropped = 0;
         let out = consume_frames(
             b"x\ny\n",
             &mut dec,
@@ -225,6 +235,7 @@ mod tests {
             None,
             &mut seen,
             &mut sink,
+            &mut dropped,
         )
         .await;
         assert!(matches!(out, FrameOutcome::Continue));
@@ -242,6 +253,7 @@ mod tests {
             matches: vec![],
             stop_on_match: true,
         };
+        let mut dropped = 0;
         let out = consume_frames(
             b"a\nb\nc\n",
             &mut dec,
@@ -249,6 +261,7 @@ mod tests {
             Some(2),
             &mut seen,
             &mut sink,
+            &mut dropped,
         )
         .await;
         assert!(matches!(
@@ -269,6 +282,7 @@ mod tests {
             matches: vec![],
             stop_on_match: false,
         };
+        let mut dropped = 0;
         let out = consume_frames(
             b"a\nb\nc\n",
             &mut dec,
@@ -276,6 +290,7 @@ mod tests {
             Some(2),
             &mut seen,
             &mut sink,
+            &mut dropped,
         )
         .await;
         assert!(matches!(out, FrameOutcome::MaxFrames));
@@ -295,6 +310,7 @@ mod tests {
             matches: vec![],
             stop_on_match: false,
         };
+        let mut dropped = 0;
         let _out = consume_frames(
             b"xA\nB\nAB\n",
             &mut dec,
@@ -302,9 +318,65 @@ mod tests {
             None,
             &mut seen,
             &mut sink,
+            &mut dropped,
         )
         .await;
         assert_eq!(sink.matches, vec![2], "only frame 2 (AB) should match");
         assert_eq!(seen, 3);
+    }
+
+    /// Checksum-mismatch frames are dropped and counted, not emitted.
+    #[tokio::test]
+    async fn consume_frames_accumulates_frames_dropped() {
+        use crate::framing::{ParserConfig, ParserType};
+
+        // Build a decoder with NMEA parser (validate=true).
+        let rx_config = crate::framing::RxFramingConfig {
+            mode: RxFramingMode::Line {
+                ending: LineEnding::Auto,
+            },
+            ..Default::default()
+        };
+        let parser_config = ParserConfig {
+            parser_type: ParserType::Nmea,
+            custom_prompt: None,
+            validate: true,
+        };
+        let mut dec = FrameDecoder::new(&rx_config, Some(&parser_config)).unwrap();
+
+        // Good sentence: $GPGLL,3751.65,N,12226.54,W*7E\r\n (correct checksum 0x7E)
+        let good = b"$GPGLL,3751.65,N,12226.54,W*7E\r\n";
+        // Bad checksum sentence: $GPGLL,3751.65,N,12226.54,W*00\r\n
+        let bad = b"$GPGLL,3751.65,N,12226.54,W*00\r\n";
+        let mut chunk = Vec::new();
+        chunk.extend_from_slice(good);
+        chunk.extend_from_slice(bad);
+        chunk.extend_from_slice(good);
+
+        let mut matcher = None;
+        let mut seen = 0;
+        let mut sink = CollectSink {
+            frames: vec![],
+            matches: vec![],
+            stop_on_match: false,
+        };
+        let mut dropped = 0;
+        let out = consume_frames(
+            &chunk,
+            &mut dec,
+            &mut matcher,
+            None,
+            &mut seen,
+            &mut sink,
+            &mut dropped,
+        )
+        .await;
+
+        assert!(matches!(out, FrameOutcome::Continue));
+        // Two good frames emitted with contiguous indices.
+        assert_eq!(sink.frames.len(), 2, "expected 2 good frames");
+        assert_eq!(sink.frames[0].index, 0);
+        assert_eq!(sink.frames[1].index, 1);
+        assert_eq!(dropped, 1, "expected 1 checksum drop");
     }
 }
