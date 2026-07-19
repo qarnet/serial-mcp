@@ -24,11 +24,13 @@ use crate::tools::helpers::{
 use crate::tools::rx_consume::{
     consume_frames, disconnect_state, DisconnectState, FrameOutcome, RxFrameSink, SinkFlow,
 };
-use crate::tools::types::{SubscribeArgs, SubscribeResult, UnsubscribeArgs, UnsubscribeResult};
+use crate::tools::types::{
+    ReadFrom, SubscribeArgs, SubscribeResult, UnsubscribeArgs, UnsubscribeResult,
+};
 
 /// RAII wrapper around a streaming task. Aborts the task on drop.
 pub struct StreamHandle {
-    join: tokio::task::JoinHandle<()>,
+    join: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl StreamHandle {
@@ -39,25 +41,25 @@ impl StreamHandle {
     /// (as in `Drop`) only schedules cancellation, leaving the consumer briefly
     /// open so the pump keeps stealing RX data.
     async fn abort_and_join(mut self) {
-        self.join.abort();
-        let _ = (&mut self.join).await;
+        if let Some(j) = self.join.take() {
+            j.abort();
+            let _ = j.await;
+        }
     }
 
     /// Wait for the streaming task to finish naturally (without aborting).
     /// Used by the close handler to let flush_partial run before cleanup.
-    pub async fn join_without_abort(self) {
-        // Move join handle out, then forget self to prevent Drop abort.
-        let me = std::mem::ManuallyDrop::new(self);
-        // Safety: ManuallyDrop prevents Drop from running. We read the
-        // JoinHandle out and await it. The StreamHandle shell is leaked.
-        let join = unsafe { std::ptr::read(&me.join) };
-        let _ = join.await;
+    /// After this call, `drop` will not abort.
+    pub fn take_join(&mut self) -> Option<tokio::task::JoinHandle<()>> {
+        self.join.take()
     }
 }
 
 impl Drop for StreamHandle {
     fn drop(&mut self) {
-        self.join.abort();
+        if let Some(j) = self.join.take() {
+            j.abort();
+        }
     }
 }
 
@@ -167,12 +169,12 @@ pub async fn subscribe(
 
     // Resolve the initial private cursor from the `from` parameter.
     let ring = session.ring();
-    let from = args.from.unwrap_or_default();
+    let from = args.from.unwrap_or(ReadFrom::Now);
     let initial_cursor = match from {
-        crate::tools::types::SubscribeFrom::Now => ring.end_offset(),
-        crate::tools::types::SubscribeFrom::Cursor => session.read_cursor(),
-        crate::tools::types::SubscribeFrom::BufferStart => ring.start_offset(),
-        crate::tools::types::SubscribeFrom::Offset { offset } => offset,
+        ReadFrom::Now => ring.end_offset(),
+        ReadFrom::Cursor => session.read_cursor(),
+        ReadFrom::BufferStart => ring.start_offset(),
+        ReadFrom::Offset { offset } => offset,
     };
 
     // Hold the reservation inside the spawned task so it lives for the
@@ -197,7 +199,9 @@ pub async fn subscribe(
     ));
 
     let mut streams = streams.lock().await;
-    let inserted_replaced = streams.insert(id.clone(), StreamHandle { join }).is_some();
+    let inserted_replaced = streams
+        .insert(id.clone(), StreamHandle { join: Some(join) })
+        .is_some();
     let was_replaced = replaced_previous || inserted_replaced;
     info!(
         "subscribed RX stream for {} (replaced={}, timeout={:?}, initial_cursor={})",

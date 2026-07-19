@@ -2073,7 +2073,7 @@ mod schema {
     use crate::tools::types::{
         ClearLogResult, CloseResult, DeleteProfileResult, ExportLogResult, FlushResult,
         GetLogResult, GetStatusResult, ListConnectionsResult, ListPortsResult, ListProfilesResult,
-        OpenResult, ReadResult, ReconfigureResult, ReconnectResult, SaveProfileResult, SeekResult,
+        OpenResult, ReadResult, ReconfigureResult, ReconnectResult, SaveProfileResult,
         SendBreakResult, SetDtrRtsResult, SetFlowControlResult, SubscribeResult, UnsubscribeResult,
         WriteResult,
     };
@@ -2179,7 +2179,6 @@ mod schema {
     check_schema!(clear_log_result_has_no_uint_formats, ClearLogResult);
     check_schema!(export_log_result_has_no_uint_formats, ExportLogResult);
     check_schema!(reconnect_result_has_no_uint_formats, ReconnectResult);
-    check_schema!(seek_result_has_no_uint_formats, SeekResult);
 
     // Framing config types (checked for uint format regressions on fields like
     // prefix_size, max_frames, and cobs delimiter).

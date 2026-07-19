@@ -3403,15 +3403,16 @@ async fn native_read_length_prefixed_framing_decodes() {
     let id = open_pty(&client, &pty_path).await;
     sync_boot(&client, &id).await;
     flush_both(&client, &id).await;
-    // Seek to live_edge so we know exactly where new data starts.
+    // Jump to live_edge so we know exactly where new data starts.
+    // read with from: "now" moves the cursor to the live edge, then times out.
     client
         .peer()
         .call_tool(tool_request(
-            "seek",
-            json!({ "connection_id": id, "to": "live_edge" }),
+            "read",
+            json!({ "connection_id": id, "from": { "type": "now" }, "timeout_ms": 500, "max_buffered_bytes": 32 }),
         ))
         .await
-        .expect("seek");
+        .expect("read from now");
 
     // Write the sendraw command. Under the ring model, the firmware's command
     // echo corrupts the length-prefixed framing decoder (the first byte of

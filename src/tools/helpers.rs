@@ -260,6 +260,8 @@ pub struct ReadOutcome {
     pub bytes_lost: u64,
     /// Unread bytes remaining in the ring after this read.
     pub buffered_remaining: u64,
+    pub start_offset: u64,
+    pub end_offset: u64,
 }
 
 /// `read`'s frame sink: collects every frame and records the first match so the
@@ -309,9 +311,21 @@ pub(crate) use crate::util::find_subsequence as find_subslice;
 // Ring-based read (Phase 1.3)
 // ------------------------------------------------------------------
 
+/// Advance the shared read cursor by `consumed` bytes from `base`,
+/// clamped to the ring's live edge.
+fn advance_cursor(
+    session: &crate::rx_session::RxSession,
+    base: u64,
+    consumed: u64,
+    ring: &crate::rx_ring::RxRing,
+) {
+    let next = base.saturating_add(consumed).min(ring.end_offset());
+    session.set_read_cursor(next);
+}
+
 /// Drive a `read` from the ring buffer, with cat semantics: buffered-but-
 /// unread bytes are returned immediately. Pattern matching checks history
-/// first, then waits for new bytes. Peek never advances the cursor.
+/// first, then waits for new bytes. Always advances the cursor.
 #[allow(clippy::too_many_arguments)]
 pub async fn read_bytes_from_ring(
     session: Arc<RxSession>,
@@ -325,7 +339,6 @@ pub async fn read_bytes_from_ring(
     conn: Option<Arc<SerialConnection>>,
     framing: Option<crate::framing::RxFramingConfig>,
     parser: Option<crate::framing::ParserConfig>,
-    peek: bool,
 ) -> Result<ReadOutcome, String> {
     let effective_timeout_ms = timeout_ms.unwrap_or(DEFAULT_READ_TIMEOUT_MS);
     let read_start = Instant::now();
@@ -355,7 +368,7 @@ pub async fn read_bytes_from_ring(
     let mut returned_bytes: Vec<u8> = Vec::with_capacity(max_bytes);
 
     // Helper: build the ReadOutcome from current state.
-    // Advances cursor unless `peek` is true.
+    // Always advances cursor.
     let make_read_outcome = |returned_bytes: Vec<u8>,
                              consumed_offset: u64,
                              _ctrl: &RxStopController,
@@ -368,19 +381,14 @@ pub async fn read_bytes_from_ring(
                              frames_dropped: usize,
                              error: Option<String>,
                              ring: &crate::rx_ring::RxRing,
-                             cursor: u64,
-                             peek: bool|
+                             cursor: u64|
      -> ReadOutcome {
         let start_off = ring.start_offset();
         let end_off = ring.end_offset();
         let clamped_from = cursor.max(start_off).min(end_off);
         let bytes_lost = start_off.saturating_sub(cursor);
         let used = consumed_offset.min(max_bytes as u64);
-        let next_off = if peek {
-            clamped_from
-        } else {
-            clamped_from + used
-        };
+        let next_off = clamped_from + used;
         let from_off = if returned_bytes.is_empty() && consumed_offset == 0 {
             None
         } else {
@@ -406,6 +414,8 @@ pub async fn read_bytes_from_ring(
             next_offset: next_off_out,
             bytes_lost,
             buffered_remaining,
+            start_offset: ring.start_offset(),
+            end_offset: ring.end_offset(),
         }
     };
 
@@ -418,14 +428,7 @@ pub async fn read_bytes_from_ring(
         let data: Vec<u8> = initial_slice.bytes[..take].to_vec();
         let consumed = data.len() as u64;
         let meta = RxStopMetadata::drained(cursor + consumed, consumed as usize, consumed as usize);
-        if !peek {
-            session.set_read_cursor(
-                initial_slice
-                    .from_offset
-                    .wrapping_add(consumed)
-                    .min(ring.end_offset()),
-            );
-        }
+        advance_cursor(&session, initial_slice.from_offset, consumed, ring);
         return Ok(make_read_outcome(
             data,
             consumed,
@@ -440,7 +443,6 @@ pub async fn read_bytes_from_ring(
             None,
             ring,
             cursor,
-            peek,
         ));
     }
 
@@ -454,14 +456,7 @@ pub async fn read_bytes_from_ring(
             let consumed = match_end as u64;
             let data = hist[..match_end].to_vec();
             let meta = RxStopMetadata::match_found(consumed as usize, consumed as usize);
-            if !peek {
-                session.set_read_cursor(
-                    initial_slice
-                        .from_offset
-                        .wrapping_add(consumed)
-                        .min(ring.end_offset()),
-                );
-            }
+            advance_cursor(&session, initial_slice.from_offset, consumed, ring);
             // Handle context shaping
             if let Some(context) = context_amount {
                 let shaped = shape_match_context(hist, idx, needle_len.unwrap_or(0), Some(context));
@@ -477,17 +472,13 @@ pub async fn read_bytes_from_ring(
                     frames_dropped: 0,
                     error: None,
                     from_offset: Some(initial_slice.from_offset),
-                    next_offset: Some(if peek {
-                        initial_slice.from_offset
-                    } else {
-                        initial_slice.from_offset + consumed
-                    }),
+                    next_offset: Some(initial_slice.from_offset + consumed),
                     bytes_lost: initial_slice.bytes_lost,
-                    buffered_remaining: ring.end_offset().saturating_sub(if peek {
-                        initial_slice.from_offset
-                    } else {
-                        initial_slice.from_offset + consumed
-                    }),
+                    buffered_remaining: ring
+                        .end_offset()
+                        .saturating_sub(initial_slice.from_offset + consumed),
+                    start_offset: ring.start_offset(),
+                    end_offset: ring.end_offset(),
                 });
             }
             return Ok(make_read_outcome(
@@ -504,7 +495,6 @@ pub async fn read_bytes_from_ring(
                 None,
                 ring,
                 cursor,
-                peek,
             ));
         }
         // Not found in history — consume what we read from the ring for the result so far.
@@ -541,14 +531,12 @@ pub async fn read_bytes_from_ring(
             } = sink;
             if let Some(data) = match_data {
                 let meta = RxStopMetadata::match_found(ctrl.bytes_observed(), returned_bytes.len());
-                if !peek {
-                    session.set_read_cursor(
-                        initial_slice
-                            .from_offset
-                            .wrapping_add(consumed_offset)
-                            .min(ring.end_offset()),
-                    );
-                }
+                session.set_read_cursor(
+                    initial_slice
+                        .from_offset
+                        .wrapping_add(consumed_offset)
+                        .min(ring.end_offset()),
+                );
                 return Ok(make_read_outcome(
                     data,
                     consumed_offset,
@@ -563,19 +551,16 @@ pub async fn read_bytes_from_ring(
                     None,
                     ring,
                     cursor,
-                    peek,
                 ));
             }
             if let FrameOutcome::MaxFrames = outcome {
                 let meta = RxStopMetadata::max_frames(ctrl.bytes_observed(), returned_bytes.len());
-                if !peek {
-                    session.set_read_cursor(
-                        initial_slice
-                            .from_offset
-                            .wrapping_add(consumed_offset)
-                            .min(ring.end_offset()),
-                    );
-                }
+                session.set_read_cursor(
+                    initial_slice
+                        .from_offset
+                        .wrapping_add(consumed_offset)
+                        .min(ring.end_offset()),
+                );
                 return Ok(make_read_outcome(
                     returned_bytes,
                     consumed_offset,
@@ -590,21 +575,18 @@ pub async fn read_bytes_from_ring(
                     None,
                     ring,
                     cursor,
-                    peek,
                 ));
             }
             if let FrameOutcome::DecodeError(e) = outcome {
                 let meta = crate::rx_metadata::RxStopMetadata::framing_error(ctrl.bytes_observed());
                 tracing::error!("RX framing decode error: {e}");
                 let err_text = e.to_string();
-                if !peek {
-                    session.set_read_cursor(
-                        initial_slice
-                            .from_offset
-                            .wrapping_add(consumed_offset)
-                            .min(ring.end_offset()),
-                    );
-                }
+                session.set_read_cursor(
+                    initial_slice
+                        .from_offset
+                        .wrapping_add(consumed_offset)
+                        .min(ring.end_offset()),
+                );
                 return Ok(make_read_outcome(
                     returned_bytes,
                     consumed_offset,
@@ -619,20 +601,17 @@ pub async fn read_bytes_from_ring(
                     Some(err_text),
                     ring,
                     cursor,
-                    peek,
                 ));
             }
             if let FrameOutcome::SinkStop(reason) = outcome {
                 let meta =
                     RxStopMetadata::new(reason, ctrl.bytes_observed(), returned_bytes.len(), false);
-                if !peek {
-                    session.set_read_cursor(
-                        initial_slice
-                            .from_offset
-                            .wrapping_add(consumed_offset)
-                            .min(ring.end_offset()),
-                    );
-                }
+                session.set_read_cursor(
+                    initial_slice
+                        .from_offset
+                        .wrapping_add(consumed_offset)
+                        .min(ring.end_offset()),
+                );
                 return Ok(make_read_outcome(
                     returned_bytes,
                     consumed_offset,
@@ -647,7 +626,6 @@ pub async fn read_bytes_from_ring(
                     None,
                     ring,
                     cursor,
-                    peek,
                 ));
             }
         }
@@ -661,11 +639,9 @@ pub async fn read_bytes_from_ring(
             match disconnect_state(conn, &mut ctrl) {
                 DisconnectState::Closed => {
                     let outcome = ctrl.connection_closed();
-                    if !peek {
-                        session.set_read_cursor(
-                            cursor.wrapping_add(consumed_offset).min(ring.end_offset()),
-                        );
-                    }
+                    session.set_read_cursor(
+                        cursor.wrapping_add(consumed_offset).min(ring.end_offset()),
+                    );
                     return Ok(make_read_outcome(
                         returned_bytes,
                         consumed_offset,
@@ -680,7 +656,6 @@ pub async fn read_bytes_from_ring(
                         None,
                         ring,
                         cursor,
-                        peek,
                     ));
                 }
                 DisconnectState::Reconnecting => {
@@ -692,10 +667,7 @@ pub async fn read_bytes_from_ring(
         }
 
         if let RxStopDecision::Stop(outcome) = ctrl.check_timeout() {
-            if !peek {
-                session
-                    .set_read_cursor(cursor.wrapping_add(consumed_offset).min(ring.end_offset()));
-            }
+            advance_cursor(&session, cursor, consumed_offset, ring);
             return Ok(make_read_outcome(
                 returned_bytes,
                 consumed_offset,
@@ -710,14 +682,10 @@ pub async fn read_bytes_from_ring(
                 None,
                 ring,
                 cursor,
-                peek,
             ));
         }
         if let RxStopDecision::Stop(outcome) = ctrl.check_silence_timeout() {
-            if !peek {
-                session
-                    .set_read_cursor(cursor.wrapping_add(consumed_offset).min(ring.end_offset()));
-            }
+            advance_cursor(&session, cursor, consumed_offset, ring);
             return Ok(make_read_outcome(
                 returned_bytes,
                 consumed_offset,
@@ -732,7 +700,6 @@ pub async fn read_bytes_from_ring(
                 None,
                 ring,
                 cursor,
-                peek,
             ));
         }
 
@@ -747,17 +714,15 @@ pub async fn read_bytes_from_ring(
         tokio::select! {
             _ = ct.cancelled() => {
                 let outcome = ctrl.cancelled();
-                if !peek {
                     session.set_read_cursor(
                         cursor.wrapping_add(consumed_offset).min(ring.end_offset()),
                     );
-                }
                 return Ok(make_read_outcome(
                     returned_bytes, consumed_offset, &ctrl,
                     read_start.elapsed().as_millis() as u64,
                     outcome.meta, outcome.matched, outcome.match_index, None,
                     std::mem::take(&mut collected_frames),
-                    frames_dropped, None, ring, cursor, peek,
+                    frames_dropped, None, ring, cursor,
                 ));
             }
             _ = ring.wait_for_data(clocked_cursor) => {}
@@ -808,14 +773,12 @@ pub async fn read_bytes_from_ring(
             } = sink;
             if let Some(data) = match_data {
                 let meta = RxStopMetadata::match_found(ctrl.bytes_observed(), returned_bytes.len());
-                if !peek {
-                    session.set_read_cursor(
-                        slice
-                            .from_offset
-                            .wrapping_add(take as u64)
-                            .min(ring.end_offset()),
-                    );
-                }
+                session.set_read_cursor(
+                    slice
+                        .from_offset
+                        .wrapping_add(take as u64)
+                        .min(ring.end_offset()),
+                );
                 return Ok(make_read_outcome(
                     data,
                     consumed_offset,
@@ -830,19 +793,16 @@ pub async fn read_bytes_from_ring(
                     None,
                     ring,
                     cursor,
-                    peek,
                 ));
             }
             if let FrameOutcome::MaxFrames = outcome {
                 let meta = RxStopMetadata::max_frames(ctrl.bytes_observed(), returned_bytes.len());
-                if !peek {
-                    session.set_read_cursor(
-                        slice
-                            .from_offset
-                            .wrapping_add(take as u64)
-                            .min(ring.end_offset()),
-                    );
-                }
+                session.set_read_cursor(
+                    slice
+                        .from_offset
+                        .wrapping_add(take as u64)
+                        .min(ring.end_offset()),
+                );
                 return Ok(make_read_outcome(
                     returned_bytes,
                     consumed_offset,
@@ -857,21 +817,18 @@ pub async fn read_bytes_from_ring(
                     None,
                     ring,
                     cursor,
-                    peek,
                 ));
             }
             if let FrameOutcome::DecodeError(e) = outcome {
                 let meta = crate::rx_metadata::RxStopMetadata::framing_error(ctrl.bytes_observed());
                 tracing::error!("RX framing decode error: {e}");
                 let err_text = e.to_string();
-                if !peek {
-                    session.set_read_cursor(
-                        slice
-                            .from_offset
-                            .wrapping_add(take as u64)
-                            .min(ring.end_offset()),
-                    );
-                }
+                session.set_read_cursor(
+                    slice
+                        .from_offset
+                        .wrapping_add(take as u64)
+                        .min(ring.end_offset()),
+                );
                 return Ok(make_read_outcome(
                     returned_bytes,
                     consumed_offset,
@@ -886,20 +843,17 @@ pub async fn read_bytes_from_ring(
                     Some(err_text),
                     ring,
                     cursor,
-                    peek,
                 ));
             }
             if let FrameOutcome::SinkStop(reason) = outcome {
                 let meta =
                     RxStopMetadata::new(reason, ctrl.bytes_observed(), returned_bytes.len(), false);
-                if !peek {
-                    session.set_read_cursor(
-                        slice
-                            .from_offset
-                            .wrapping_add(take as u64)
-                            .min(ring.end_offset()),
-                    );
-                }
+                session.set_read_cursor(
+                    slice
+                        .from_offset
+                        .wrapping_add(take as u64)
+                        .min(ring.end_offset()),
+                );
                 return Ok(make_read_outcome(
                     returned_bytes,
                     consumed_offset,
@@ -914,7 +868,6 @@ pub async fn read_bytes_from_ring(
                     None,
                     ring,
                     cursor,
-                    peek,
                 ));
             }
         }
@@ -927,14 +880,12 @@ pub async fn read_bytes_from_ring(
             if let RxStopDecision::Stop(outcome) =
                 ctrl.push_data(data_count, buffered_len, match_result)
             {
-                if !peek {
-                    session.set_read_cursor(
-                        slice
-                            .from_offset
-                            .wrapping_add(take as u64)
-                            .min(ring.end_offset()),
-                    );
-                }
+                session.set_read_cursor(
+                    slice
+                        .from_offset
+                        .wrapping_add(take as u64)
+                        .min(ring.end_offset()),
+                );
                 return Ok(make_read_outcome(
                     returned_bytes,
                     consumed_offset,
@@ -949,7 +900,6 @@ pub async fn read_bytes_from_ring(
                     None,
                     ring,
                     cursor,
-                    peek,
                 ));
             }
         }
@@ -964,10 +914,7 @@ pub async fn read_bytes_from_ring(
                 returned_bytes.len(),
                 returned_bytes.len(),
             );
-            if !peek {
-                session
-                    .set_read_cursor(cursor.wrapping_add(consumed_offset).min(ring.end_offset()));
-            }
+            advance_cursor(&session, cursor, consumed_offset, ring);
             return Ok(make_read_outcome(
                 returned_bytes,
                 consumed_offset,
@@ -982,7 +929,6 @@ pub async fn read_bytes_from_ring(
                 None,
                 ring,
                 cursor,
-                peek,
             ));
         }
     }
@@ -1089,6 +1035,8 @@ pub fn build_read_result(
         next_offset: outcome.next_offset,
         bytes_lost: outcome.bytes_lost,
         buffered_remaining: outcome.buffered_remaining,
+        start_offset: outcome.start_offset,
+        end_offset: outcome.end_offset,
     }))
 }
 
@@ -1212,6 +1160,8 @@ mod tests {
             next_offset: None,
             bytes_lost: 0,
             buffered_remaining: 0,
+            start_offset: 0,
+            end_offset: 0,
         };
         let Json(result) =
             build_read_result(outcome, "abc".into(), None, Encoding::Utf8, Some(250), None)
@@ -1238,6 +1188,8 @@ mod tests {
             next_offset: None,
             bytes_lost: 0,
             buffered_remaining: 0,
+            start_offset: 0,
+            end_offset: 0,
         };
         let Json(result) =
             build_read_result(outcome, "abc".into(), None, Encoding::Hex, None, None)
@@ -1262,6 +1214,8 @@ mod tests {
             next_offset: None,
             bytes_lost: 0,
             buffered_remaining: 0,
+            start_offset: 0,
+            end_offset: 0,
         };
         let Json(result) =
             build_read_result(outcome, "abc".into(), None, Encoding::Hex, Some(500), None)
@@ -1294,6 +1248,8 @@ mod tests {
             next_offset: None,
             bytes_lost: 0,
             buffered_remaining: 0,
+            start_offset: 0,
+            end_offset: 0,
         };
         let Json(result) = build_read_result(
             outcome,
@@ -1323,6 +1279,8 @@ mod tests {
             next_offset: None,
             bytes_lost: 0,
             buffered_remaining: 0,
+            start_offset: 0,
+            end_offset: 0,
         };
         let Json(result) = build_read_result(
             outcome,

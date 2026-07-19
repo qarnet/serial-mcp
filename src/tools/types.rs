@@ -94,6 +94,12 @@ pub struct WriteArgs {
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct ReadArgs {
     pub connection_id: String,
+    /// Where to start reading from. `"cursor"` (default) — shared read cursor,
+    /// `"now"` — live edge (skip buffered backlog), `"buffer_start"` — replay
+    /// everything retained in the ring, or `{"offset": N}` — absolute stream
+    /// offset from a prior result's `from_offset`/`next_offset`.
+    #[serde(default)]
+    pub from: Option<ReadFrom>,
     #[serde(default)]
     #[schemars(schema_with = "crate::schema_helpers::option_timeout_ms_schema")]
     pub timeout_ms: Option<u64>,
@@ -103,8 +109,10 @@ pub struct ReadArgs {
     #[serde(default)]
     #[schemars(schema_with = "crate::schema_helpers::option_positive_timeout_ms_schema")]
     pub no_new_rx_timeout_ms: Option<u64>,
-    /// Maximum bytes to buffer before the read stops. When exceeded, the operation
-    /// stops with `max_buffered_bytes` and `truncated` is `true` in the result.
+    /// Maximum bytes to buffer before the read stops. Default 32 KiB — sized so a
+    /// default read captures a full boot log or large response in one call. When
+    /// exceeded, the operation stops with `max_buffered_bytes` and `truncated` is
+    /// `true` in the result.
     #[serde(default = "default_max_buffered_bytes")]
     #[schemars(schema_with = "crate::schema_helpers::read_max_buffered_bytes_schema")]
     pub max_buffered_bytes: usize,
@@ -130,11 +138,6 @@ pub struct ReadArgs {
     /// the preset's corresponding component.
     #[serde(default)]
     pub protocol: Option<crate::framing::ProtocolPreset>,
-    /// When true, return bytes without advancing the cursor. A peek may
-    /// still wait via timeout_ms for a match; it just doesn't consume.
-    /// A repeated peek finds the same match again.
-    #[serde(default)]
-    pub peek: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -142,48 +145,6 @@ pub struct FlushArgs {
     pub connection_id: String,
     #[serde(default = "default_flush_target")]
     pub target: FlushTarget,
-}
-
-/// Move the shared RX read cursor non-destructively.
-#[derive(Debug, Serialize, Deserialize, JsonSchema)]
-pub struct SeekArgs {
-    pub connection_id: String,
-    pub to: SeekTarget,
-}
-
-/// Target position for [`SeekArgs`].
-#[derive(Debug, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum SeekTarget {
-    /// Skip past all buffered data (cursor = end_offset).
-    LiveEdge,
-    /// Re-read from the oldest retained byte (cursor = start_offset).
-    BufferStart,
-    /// Seek to an absolute stream offset.
-    Offset {
-        #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
-        offset: u64,
-    },
-    /// Seek relative to current cursor (negative = re-read).
-    Delta { delta: i64 },
-}
-
-/// Result of a seek operation.
-#[derive(Debug, Serialize, Deserialize, JsonSchema)]
-pub struct SeekResult {
-    pub connection_id: String,
-    pub name: Option<String>,
-    /// The clamped new cursor position.
-    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
-    pub cursor: u64,
-    /// Requested target before clamping (for diagnostics).
-    pub requested: String,
-    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
-    pub start_offset: u64,
-    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
-    pub end_offset: u64,
-    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
-    pub buffered_remaining: u64,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -207,14 +168,16 @@ pub struct SendBreakArgs {
     pub duration_ms: u64,
 }
 
-/// Where a subscription starts reading from. String shortcuts plus
-/// an explicit offset variant.
+/// Where to start reading from, shared by `read` and `subscribe`.
 ///
 /// Wire format: `{"type": "now"}`, `{"type": "cursor"}`,
 /// `{"type": "buffer_start"}`, or `{"type": "offset", "offset": N}`.
+/// Each tool resolves `None` to its own default: `read` defaults to
+/// `Cursor` (advances the shared cursor), `subscribe` defaults to `Now`
+/// (live edge, does not move the shared cursor).
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type")]
-pub enum SubscribeFrom {
+pub enum ReadFrom {
     /// Start at the live edge — only new data after the call.
     #[serde(rename = "now")]
     Now,
@@ -232,12 +195,6 @@ pub enum SubscribeFrom {
     },
 }
 
-impl Default for SubscribeFrom {
-    fn default() -> Self {
-        Self::Now
-    }
-}
-
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct SubscribeArgs {
     pub connection_id: String,
@@ -247,7 +204,7 @@ pub struct SubscribeArgs {
     /// Replayed history flows through the same framing/match pipeline
     /// as live data.
     #[serde(default)]
-    pub from: Option<SubscribeFrom>,
+    pub from: Option<ReadFrom>,
     #[serde(default)]
     #[schemars(schema_with = "crate::schema_helpers::option_timeout_ms_schema")]
     pub timeout_ms: Option<u64>,
@@ -478,6 +435,18 @@ pub struct ReadResult {
     #[serde(default)]
     #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
     pub buffered_remaining: u64,
+    /// Absolute stream offset of the oldest byte retained in the ring at result
+    /// time. Use with `from: {offset: start_offset}` to replay from the oldest
+    /// retained byte.
+    #[serde(default)]
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub start_offset: u64,
+    /// Absolute stream offset of the newest byte retained in the ring at result
+    /// time (the live edge). Equals the cursor position `from: "now"` would
+    /// resolve to.
+    #[serde(default)]
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub end_offset: u64,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -634,7 +603,7 @@ pub fn default_encoding() -> String {
     "utf8".into()
 }
 pub fn default_max_buffered_bytes() -> usize {
-    2048
+    32768
 }
 pub fn default_flush_target() -> FlushTarget {
     FlushTarget::Both

@@ -27,7 +27,7 @@ mod tests {
     /// per-type coverage lives in `serial::schema`.
     ///
     /// Keep this list in sync with the `#[tool]` methods in `src/server.rs`.
-    /// The list below is exhaustive (23 tools); a missing tool would skip its
+    /// The list below is exhaustive (22 tools); a missing tool would skip its
     /// `outputSchema`/`title` check and any uint-format scan.
     fn all_tool_attrs() -> Vec<(&'static str, rmcp::model::Tool)> {
         vec![
@@ -41,7 +41,6 @@ mod tests {
             ("write", SerialHandler::write_tool_attr()),
             ("read", SerialHandler::read_tool_attr()),
             ("flush", SerialHandler::flush_tool_attr()),
-            ("seek", SerialHandler::seek_tool_attr()),
             ("set_dtr_rts", SerialHandler::set_dtr_rts_tool_attr()),
             (
                 "set_flow_control",

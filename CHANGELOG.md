@@ -28,7 +28,7 @@
 
 ## [0.8.0]
 
-**Breaking (pre-1.0) — RX ring buffer redesign:**
+**Breaking (pre-1.0) — RX ring buffer redesign, seek folded into read, peek dropped:**
 - The RX side is now an always-on ring buffer with absolute stream offsets.
   Every byte from `open` to `close` is captured to a per-connection ring
   (`rx_buffer_size`, default 256 KiB, configurable at open), whether or not
@@ -36,20 +36,25 @@
   on disconnect (resumes on reconnect, same ring, monotonic offsets).
 - `read` behaves like `cat`: returns buffered-but-unread bytes immediately
   (`stop_reason: "drained"`), consuming by default. Pattern matching checks
-  buffered history first, then waits for new bytes. `peek: true` returns
-  without advancing the cursor. Results carry `from_offset`/`next_offset`/
-  `bytes_lost`/`buffered_remaining`.
-- `seek` (new tool): moves the shared read cursor non-destructively
-  (`live_edge`/`buffer_start`/`offset`/`delta`), clamps into range, returns
-  ring bounds. The non-destructive replacement for `flush`-before-read.
+  buffered history first, then waits for new bytes. Results carry
+  `from_offset`/`next_offset`/`bytes_lost`/`buffered_remaining`/
+  `start_offset`/`end_offset`.
+- `read` gains a `from` parameter (`now`/`cursor`/`buffer_start`/
+  `{"offset": N}`) for atomic seek+read. The `seek` tool is removed — `read`
+  with `from` covers every seek use case except `Delta`, which is dropped
+  (agents track absolute offsets via `next_offset`/`from_offset`).
+  Re-passing the same `from` offset re-reads the same bytes non-destructively
+  (replaces the deleted `peek` option). `max_buffered_bytes` default 2048 →
+  32768 (32 KiB) so a default read captures a full boot log.
 - `subscribe` is a cursor follower (`tail -f`) with a new `from` parameter
   (`"now"`/`"cursor"`/`"buffer_start"`/`{"offset": N}`) for history replay.
-  Slow consumers get `bytes_lost` gap notifications and continue — no silent
-  drops. Subscriptions do NOT move the shared read cursor; `read` and
-  `subscribe` coexist without stealing.
+  `SubscribeFrom` renamed `ReadFrom` (shared with `read`), wire format
+  unchanged. Slow consumers get `bytes_lost` gap notifications and continue —
+  no silent drops. Subscriptions do NOT move the shared read cursor; `read`
+  and `subscribe` coexist without stealing.
 - `flush(input)` now clears the ring + clamps the cursor to the live edge
-  (strictly more destructive than before). `seek` to `live_edge` is the
-  non-destructive alternative.
+  (strictly more destructive than before). Use `read` with `from: "now"`
+  as the non-destructive alternative.
 - `get_status` gains `rx_buffer_size`/`rx_start_offset`/`rx_end_offset`/
   `rx_cursor`/`rx_buffered_unread`/`rx_bytes_lost_total`.
 - `open`/`open_profile`/profiles gain `rx_buffer_size` (default 256 KiB,
@@ -80,6 +85,9 @@
 - `src/tools/helpers.rs`: `read_bytes_from_ring` replaces
   `read_bytes_via_session` (deleted). 0.7.3 partial-result + `error` field
   + hex fallback contract preserved on framing errors.
+- `StreamHandle` `unsafe` block replaced with `Option<JoinHandle>::take()`.
+- `advance_cursor` helper extracts the 16× cursor-clamp duplication.
+- Tool count drops from 23 → 22 (`seek` removed, folded into `read`).
 
 ## [0.7.4]
 

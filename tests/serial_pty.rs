@@ -788,119 +788,120 @@ async fn pty_read_wrap_reports_bytes_lost() {
     client.cancel().await.ok();
 }
 
-/// Peek does not advance cursor: write, peek, then read returns same bytes.
+/// read with `from: "buffer_start"` replays retained history.
 #[tokio::test]
-async fn pty_peek_does_not_advance_cursor() {
+async fn pty_read_from_buffer_start() {
+    let (_server, client, _rx, mut pty, connection_id) = setup().await;
+
+    pty.write_device(b"RETAINED").await.unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // read with from: "buffer_start" — replay everything retained.
+    let result = client
+        .peer()
+        .call_tool(tool_request(
+            "read",
+            json!({
+                "connection_id": connection_id,
+                "from": { "type": "buffer_start" },
+                "timeout_ms": 500,
+                "max_buffered_bytes": 64,
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_ne!(result.is_error, Some(true), "{result:?}");
+    let s = result.structured_content.expect("structured");
+    assert!(
+        s["data"].as_str().unwrap().contains("RETAINED"),
+        "should replay retained data: {s:?}"
+    );
+    // start_offset/end_offset should be present.
+    assert!(s["start_offset"].as_u64().is_some(), "{s:?}");
+    assert!(s["end_offset"].as_u64().is_some(), "{s:?}");
+    client.cancel().await.ok();
+}
+
+/// Re-reading with the same `from` offset is non-destructive (replaces peek).
+#[tokio::test]
+async fn pty_read_reread_same_from_offset() {
     let (_server, client, _rx, mut pty, connection_id) = setup().await;
 
     pty.write_device(b"UNIQUE").await.unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    // Peek first.
-    let peek_result = client
+    // First read from buffer_start.
+    let first = client
         .peer()
         .call_tool(tool_request(
             "read",
             json!({
                 "connection_id": connection_id,
+                "from": { "type": "buffer_start" },
                 "timeout_ms": 500,
                 "max_buffered_bytes": 32,
-                "peek": true,
             }),
         ))
         .await
         .unwrap();
-    assert_ne!(peek_result.is_error, Some(true), "{peek_result:?}");
-    let peek_s = peek_result.structured_content.expect("structured");
-    let peek_from = peek_s["from_offset"].as_u64();
-    let peek_next = peek_s["next_offset"].as_u64();
-    assert_eq!(peek_from, peek_next, "peek should not advance cursor");
+    assert_ne!(first.is_error, Some(true), "{first:?}");
+    let s1 = first.structured_content.expect("structured");
+    let from_offset = s1["from_offset"].as_u64().expect("from_offset");
+    let data1 = s1["data"].as_str().expect("data");
 
-    // Read should return the same bytes.
-    let read_result = client
+    // Re-read with the same from_offset.
+    let second = client
         .peer()
         .call_tool(tool_request(
             "read",
             json!({
                 "connection_id": connection_id,
+                "from": { "type": "offset", "offset": from_offset },
                 "timeout_ms": 500,
                 "max_buffered_bytes": 32,
             }),
         ))
         .await
         .unwrap();
-    assert_ne!(read_result.is_error, Some(true), "{read_result:?}");
-    let read_s = read_result.structured_content.expect("structured");
-    assert_eq!(read_s["data"], json!("UNIQUE"));
+    assert_ne!(second.is_error, Some(true), "{second:?}");
+    let s2 = second.structured_content.expect("structured");
+    assert_eq!(
+        s2["data"].as_str().unwrap(),
+        data1,
+        "re-read with same from_offset should return same bytes"
+    );
     client.cancel().await.ok();
 }
 
-/// Seek round-trip: write, seek live_edge, read → empty; seek buffer_start,
-/// read → returns data.
+/// `from: "now"` skips buffered data, jumping to the live edge.
 #[tokio::test]
-async fn pty_seek_round_trip() {
+async fn pty_read_from_now_skips_backlog() {
     let (_server, client, _rx, mut pty, connection_id) = setup().await;
 
-    pty.write_device(b"SEEKDATA").await.unwrap();
+    pty.write_device(b"SKIP_ME").await.unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    // Seek to live_edge — skips past buffered data.
-    let seek_result = client
-        .peer()
-        .call_tool(tool_request(
-            "seek",
-            json!({ "connection_id": connection_id, "to": "live_edge" }),
-        ))
-        .await
-        .unwrap();
-    assert_ne!(seek_result.is_error, Some(true), "{seek_result:?}");
-    let seek_s = seek_result.structured_content.expect("structured");
-    assert_eq!(seek_s["buffered_remaining"].as_u64(), Some(0));
-
-    // Read after seek should be empty.
-    let empty = client
+    // read with from: "now" — skip buffered, should get nothing (or timeout).
+    let result = client
         .peer()
         .call_tool(tool_request(
             "read",
             json!({
                 "connection_id": connection_id,
+                "from": { "type": "now" },
                 "timeout_ms": 300,
                 "max_buffered_bytes": 32,
             }),
         ))
         .await
         .unwrap();
-    let empty_s = empty.structured_content.expect("structured");
-    assert_eq!(empty_s["bytes_read"].as_u64(), Some(0));
-
-    // Seek back to buffer_start — re-reads everything retained.
-    client
-        .peer()
-        .call_tool(tool_request(
-            "seek",
-            json!({ "connection_id": connection_id, "to": "buffer_start" }),
-        ))
-        .await
-        .unwrap();
-
-    // Read returns the data again.
-    let reread = client
-        .peer()
-        .call_tool(tool_request(
-            "read",
-            json!({
-                "connection_id": connection_id,
-                "timeout_ms": 500,
-                "max_buffered_bytes": 32,
-            }),
-        ))
-        .await
-        .unwrap();
-    assert_ne!(reread.is_error, Some(true), "{reread:?}");
-    let reread_s = reread.structured_content.expect("structured");
+    assert_ne!(result.is_error, Some(true), "{result:?}");
+    let s = result.structured_content.expect("structured");
+    // Skip past SKIP_ME — data should be empty or not contain it.
+    let data = s["data"].as_str().unwrap_or("");
     assert!(
-        reread_s["data"].as_str().unwrap().contains("SEEKDATA"),
-        "should re-read SEEKDATA: {reread_s:?}"
+        !data.contains("SKIP_ME"),
+        "from: now should skip buffered data, got: {s:?}"
     );
     client.cancel().await.ok();
 }

@@ -15,8 +15,7 @@ use crate::tools::helpers::{
     MAX_READ_BYTES, MAX_WRITE_BYTES, MIN_READ_BYTES,
 };
 use crate::tools::types::{
-    FlushArgs, FlushResult, ReadArgs, ReadResult, SeekArgs, SeekResult, SeekTarget, WriteArgs,
-    WriteResult,
+    FlushArgs, FlushResult, ReadArgs, ReadFrom, ReadResult, WriteArgs, WriteResult,
 };
 
 use crate::tx_session::TxSessionManager;
@@ -137,6 +136,19 @@ pub async fn read(
         connection.protocol_default(),
     );
 
+    // Resolve the initial read cursor from the `from` parameter.
+    // Default: Cursor (shared read cursor). Writes the cursor BEFORE calling
+    // read_bytes_from_ring so the agent can re-pass the same from: {offset: N}
+    // to re-read non-destructively (cursor gets reset on each call).
+    let ring = session.ring();
+    let initial_cursor = match args.from.as_ref().unwrap_or(&ReadFrom::Cursor) {
+        ReadFrom::Now => ring.end_offset(),
+        ReadFrom::Cursor => session.read_cursor(),
+        ReadFrom::BufferStart => ring.start_offset(),
+        ReadFrom::Offset { offset } => *offset,
+    };
+    session.set_read_cursor(initial_cursor);
+
     let outcome = read_bytes_from_ring(
         session,
         max_buffered_bytes,
@@ -149,7 +161,6 @@ pub async fn read(
         Some(Arc::clone(&connection)),
         rx_framing,
         rx_parser,
-        args.peek,
     )
     .await?;
 
@@ -246,59 +257,5 @@ pub async fn flush(
         connection_id: args.connection_id,
         name: connection.name().map(str::to_string),
         target: args.target,
-    }))
-}
-
-pub async fn seek(
-    connections: &Arc<ConnectionManager>,
-    rx_sessions: &Arc<RxSessionManager>,
-    args: SeekArgs,
-) -> Result<Json<SeekResult>, String> {
-    debug!("Seek {} to={:?}", args.connection_id, args.to);
-
-    let connection = lookup_connection(connections, &args.connection_id).await?;
-    let session = rx_sessions
-        .get(&args.connection_id)
-        .await
-        .ok_or_else(|| format!("No RX session for {}", args.connection_id))?;
-
-    let ring = session.ring();
-    let start_offset = ring.start_offset();
-    let end_offset = ring.end_offset();
-    let current_cursor = session.read_cursor();
-
-    let requested = format!("{:?}", args.to);
-    let raw_target: i64 = match &args.to {
-        SeekTarget::LiveEdge => end_offset as i64,
-        SeekTarget::BufferStart => start_offset as i64,
-        SeekTarget::Offset { offset } => *offset as i64,
-        SeekTarget::Delta { delta } => current_cursor as i64 + delta,
-    };
-
-    // Clamp into [start_offset, end_offset].
-    let clamped = if raw_target < start_offset as i64 {
-        start_offset
-    } else if raw_target > end_offset as i64 {
-        end_offset
-    } else {
-        raw_target as u64
-    };
-
-    session.set_read_cursor(clamped);
-    let buffered_remaining = end_offset.saturating_sub(clamped);
-
-    info!(
-        "Seek {}: requested={} clamped={} range=[{}-{}]",
-        args.connection_id, requested, clamped, start_offset, end_offset
-    );
-
-    Ok(Json(SeekResult {
-        connection_id: args.connection_id,
-        name: connection.name().map(str::to_string),
-        cursor: clamped,
-        requested,
-        start_offset,
-        end_offset,
-        buffered_remaining,
     }))
 }
