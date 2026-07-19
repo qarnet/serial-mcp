@@ -45,7 +45,7 @@ pub(crate) struct RxRing {
     /// Wakes readers blocked in `wait_for_data` when new data arrives.
     notify: Notify,
     /// Lifetime total of bytes dropped due to ring wrap. Monotonic.
-    bytes_lost_total: AtomicU64,
+    bytes_wrapped_total: AtomicU64,
 }
 
 /// A slice of data read from the ring at a specific offset range.
@@ -98,7 +98,7 @@ impl RxRing {
                 end_offset: 0,
             }),
             notify: Notify::new(),
-            bytes_lost_total: AtomicU64::new(0),
+            bytes_wrapped_total: AtomicU64::new(0),
         }
     }
 
@@ -118,8 +118,8 @@ impl RxRing {
     }
 
     /// Return the lifetime total of bytes lost to ring wrap.
-    pub fn bytes_lost_total(&self) -> u64 {
-        self.bytes_lost_total.load(Ordering::Relaxed)
+    pub fn bytes_wrapped_total(&self) -> u64 {
+        self.bytes_wrapped_total.load(Ordering::Relaxed)
     }
 }
 
@@ -154,7 +154,7 @@ impl RxRing {
         // Track bytes lost to ring wrap (old start vs new start).
         let lost = new_start.saturating_sub(inner.start_offset);
         if lost > 0 {
-            self.bytes_lost_total.fetch_add(lost, Ordering::Relaxed);
+            self.bytes_wrapped_total.fetch_add(lost, Ordering::Relaxed);
         }
 
         // Which input bytes survive?
@@ -692,35 +692,35 @@ mod tests {
         assert_eq!(ring.end_offset(), before);
     }
 
-    /// bytes_lost_total accumulates lifetime wrap-loss across multiple wraps
+    /// bytes_wrapped_total accumulates lifetime wrap-loss across multiple wraps
     /// and is NOT reset by clear().
     #[test]
-    fn bytes_lost_total_accumulates_across_gaps_and_survives_clear() {
+    fn bytes_wrapped_total_accumulates_across_wraps_and_survives_clear() {
         let ring = RxRing::new(4);
-        assert_eq!(ring.bytes_lost_total(), 0);
+        assert_eq!(ring.bytes_wrapped_total(), 0);
 
         // Fill past capacity: 8 bytes into cap=4 → start=4, end=8, 4 lost.
         ring.append(b"abcdefgh");
-        assert_eq!(ring.bytes_lost_total(), 4);
+        assert_eq!(ring.bytes_wrapped_total(), 4);
 
         // read_from with cursor below start reports per-slice bytes_lost,
-        // but does NOT increment bytes_lost_total (which is wrap-only).
+        // but does NOT increment bytes_wrapped_total (which is wrap-only).
         let s1 = ring.read_from(2, 4);
         assert_eq!(s1.bytes_lost, 2);
-        assert_eq!(ring.bytes_lost_total(), 4); // unchanged by read
+        assert_eq!(ring.bytes_wrapped_total(), 4); // unchanged by read
 
         // Append more past capacity to trigger another wrap.
         ring.append(b"ijklmnop");
         // start 4→12, end 8→16, drop positions 4..12 (8 bytes lost on wrap).
-        assert_eq!(ring.bytes_lost_total(), 12);
+        assert_eq!(ring.bytes_wrapped_total(), 12);
 
         // clear() does NOT reset the lifetime accumulator.
         ring.clear();
-        assert_eq!(ring.bytes_lost_total(), 12);
+        assert_eq!(ring.bytes_wrapped_total(), 12);
 
         // Append without wrap — no additional loss.
         ring.append(b"qr");
-        assert_eq!(ring.bytes_lost_total(), 12);
+        assert_eq!(ring.bytes_wrapped_total(), 12);
     }
 
     // ── Proptest: modeled append/read vs reference stream ─────────────────

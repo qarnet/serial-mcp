@@ -56,7 +56,7 @@
   (strictly more destructive than before). Use `read` with `from: "now"`
   as the non-destructive alternative.
 - `get_status` gains `rx_buffer_size`/`rx_start_offset`/`rx_end_offset`/
-  `rx_cursor`/`rx_buffered_unread`/`rx_bytes_lost_total`.
+  `rx_cursor`/`rx_buffered_unread`/`rx_bytes_wrapped_total`.
 - `open`/`open_profile`/profiles gain `rx_buffer_size` (default 256 KiB,
   max 16 MiB; validated against the buffer budget pool).
 - `ConsumerRegistry`/`RxEvent` fanout, `register_blocking`/
@@ -74,10 +74,13 @@
 - Framing-error cursor contract: on `stop_reason: framing_error`, the
   cursor advances past all consumed bytes including the malformed
   sequence, so a plain retry always makes progress.
+- `get_status`: `rx_bytes_lost_total` renamed `rx_bytes_wrapped_total`
+  to disambiguate lifetime wrap-loss from per-read cursor-gap
+  (`bytes_lost` on read/subscribe results).
 
 **Internal:**
 - `src/rx_ring.rs` (new): `RxRing` sliding-window buffer with absolute u64
-  offsets, wrap+gap accounting, `Notify`-based wakeups, `bytes_lost_total`
+  offsets, wrap+gap accounting, `Notify`-based wakeups, `bytes_wrapped_total`
   lifetime counter. Exhaustive unit tests + proptest.
 - `src/rx_session.rs` reworked: ring ownership, always-on pump,
   pause/resume across disconnect, budget charge at open (RAII release at

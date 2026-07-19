@@ -665,7 +665,7 @@ pub struct GetStatusResult {
     pub rx_buffered_unread: u64,
     /// Lifetime total of bytes lost to ring wrap.
     #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
-    pub rx_bytes_lost_total: u64,
+    pub rx_bytes_wrapped_total: u64,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]

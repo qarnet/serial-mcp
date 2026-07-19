@@ -150,7 +150,7 @@ pub async fn get_status(
         rx_end_offset,
         rx_cursor,
         rx_buffered_unread,
-        rx_bytes_lost_total,
+        rx_bytes_wrapped_total,
     ) = if let Some(session) = rx_sessions.get(&args.connection_id).await {
         let ring = session.ring();
         let start = ring.start_offset();
@@ -163,7 +163,7 @@ pub async fn get_status(
             end,
             cur,
             unread,
-            ring.bytes_lost_total(),
+            ring.bytes_wrapped_total(),
         )
     } else {
         (0, 0, 0, 0, 0, 0)
@@ -195,7 +195,7 @@ pub async fn get_status(
         rx_end_offset,
         rx_cursor,
         rx_buffered_unread,
-        rx_bytes_lost_total,
+        rx_bytes_wrapped_total,
     }))
 }
 

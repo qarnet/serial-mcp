@@ -1788,6 +1788,17 @@ pub mod test_support {
     }
 }
 
+/// Test-only helpers for `SerialConnection`.
+#[cfg(test)]
+impl SerialConnection {
+    /// Set the connection state directly. Only available in tests so unit
+    /// tests can exercise `disconnect_state` classification without
+    /// driving the full reconnect state machine.
+    pub(crate) fn set_state_for_test(&mut self, state: ConnectionState) {
+        *self.state.lock().unwrap() = state;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::test_support::{loopback_connection, loopback_connection_with_config};
@@ -2024,7 +2035,7 @@ mod tests {
         use crate::tools::rx_consume::{disconnect_state, DisconnectState};
         use std::time::Instant;
 
-        let (conn, _peer) = loopback_connection("test");
+        let (mut conn, _peer) = loopback_connection("test");
         let mut ctrl = RxStopController::new(Instant::now(), Some(5000), 0, None);
 
         // Open → Active.
@@ -2034,7 +2045,7 @@ mod tests {
         ));
 
         // Set state to Closed → Closed.
-        *conn.state.lock().unwrap() = ConnectionState::Closed;
+        conn.set_state_for_test(ConnectionState::Closed);
         assert!(matches!(
             disconnect_state(&conn, &mut ctrl),
             DisconnectState::Closed
@@ -2044,7 +2055,7 @@ mod tests {
         // Note: constructing a Reconnecting state requires a real serial port
         // (the reconnect state machine drives it), so this test directly sets
         // the internal state and enable flag.
-        *conn.state.lock().unwrap() = ConnectionState::Reconnecting;
+        conn.set_state_for_test(ConnectionState::Reconnecting);
         conn.reconnect_policy.lock().unwrap().enabled = true;
         assert!(matches!(
             disconnect_state(&conn, &mut ctrl),
