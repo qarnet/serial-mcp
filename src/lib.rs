@@ -11,6 +11,7 @@ pub mod profiles;
 pub mod prompts;
 pub mod resources;
 pub mod rx_metadata;
+pub mod rx_ring;
 pub mod rx_session;
 pub mod schema_helpers;
 pub mod security;

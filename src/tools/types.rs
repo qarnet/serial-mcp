@@ -5,6 +5,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use crate::framing::ParsedFrame;
 use crate::serial::{ConnectionSummary, FlowControl, FlushTarget, PortInfo};
 
 // ---- Argument structs ------------------------------------------------------
@@ -46,8 +47,18 @@ pub struct OpenArgs {
     /// Default protocol preset. Expands to fill framing/parser gaps.
     #[serde(default)]
     pub protocol: Option<crate::framing::ProtocolPreset>,
+    /// Per-connection RX ring buffer size in bytes. The ring retains
+    /// this much RX history between reads/subscribes. Default 256 KiB
+    /// (~23s of 115200-baud traffic). Open-time only; reopen to resize.
+    /// Validated against the buffer budget pool and a 16 MiB ceiling.
+    #[serde(default = "default_rx_buffer_size")]
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub rx_buffer_size: usize,
 }
 
+fn default_rx_buffer_size() -> usize {
+    crate::limits::DEFAULT_RX_BUFFER_SIZE
+}
 fn default_log_capacity() -> usize {
     1024
 }
@@ -84,6 +95,12 @@ pub struct WriteArgs {
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct ReadArgs {
     pub connection_id: String,
+    /// Where to start reading from. `"cursor"` (default) — shared read cursor,
+    /// `"now"` — live edge (skip buffered backlog), `"buffer_start"` — replay
+    /// everything retained in the ring, or `{"offset": N}` — absolute stream
+    /// offset from a prior result's `from_offset`/`next_offset`.
+    #[serde(default)]
+    pub from: Option<ReadFrom>,
     #[serde(default)]
     #[schemars(schema_with = "crate::schema_helpers::option_timeout_ms_schema")]
     pub timeout_ms: Option<u64>,
@@ -93,8 +110,10 @@ pub struct ReadArgs {
     #[serde(default)]
     #[schemars(schema_with = "crate::schema_helpers::option_positive_timeout_ms_schema")]
     pub no_new_rx_timeout_ms: Option<u64>,
-    /// Maximum bytes to buffer before the read stops. When exceeded, the operation
-    /// stops with `max_buffered_bytes` and `truncated` is `true` in the result.
+    /// Maximum bytes to buffer before the read stops. Default 32 KiB — sized so a
+    /// default read captures a full boot log or large response in one call. When
+    /// exceeded, the operation stops with `max_buffered_bytes` and `truncated` is
+    /// `true` in the result.
     #[serde(default = "default_max_buffered_bytes")]
     #[schemars(schema_with = "crate::schema_helpers::read_max_buffered_bytes_schema")]
     pub max_buffered_bytes: usize,
@@ -150,9 +169,43 @@ pub struct SendBreakArgs {
     pub duration_ms: u64,
 }
 
+/// Where to start reading from, shared by `read` and `subscribe`.
+///
+/// Wire format: `{"type": "now"}`, `{"type": "cursor"}`,
+/// `{"type": "buffer_start"}`, or `{"type": "offset", "offset": N}`.
+/// Each tool resolves `None` to its own default: `read` defaults to
+/// `Cursor` (advances the shared cursor), `subscribe` defaults to `Now`
+/// (live edge, does not move the shared cursor).
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "type")]
+pub enum ReadFrom {
+    /// Start at the live edge — only new data after the call.
+    #[serde(rename = "now")]
+    Now,
+    /// Start at the shared read cursor — replay what `read` hasn't consumed.
+    #[serde(rename = "cursor")]
+    Cursor,
+    /// Replay everything retained in the ring, then go live.
+    #[serde(rename = "buffer_start")]
+    BufferStart,
+    /// Start at an absolute stream offset.
+    #[serde(rename = "offset")]
+    Offset {
+        #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+        offset: u64,
+    },
+}
+
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct SubscribeArgs {
     pub connection_id: String,
+    /// Where to start reading from. `"now"` (default) — live edge,
+    /// `"cursor"` — shared read cursor, `"buffer_start"` — oldest
+    /// retained byte, or `{"offset": N}` — absolute stream offset.
+    /// Replayed history flows through the same framing/match pipeline
+    /// as live data.
+    #[serde(default)]
+    pub from: Option<ReadFrom>,
     #[serde(default)]
     #[schemars(schema_with = "crate::schema_helpers::option_timeout_ms_schema")]
     pub timeout_ms: Option<u64>,
@@ -234,6 +287,11 @@ pub struct OpenProfileArgs {
     /// Whether logging is enabled. Default: true (ignored when capacity is 0).
     #[serde(default = "default_true")]
     pub log_enabled: bool,
+    /// Per-connection RX ring buffer size in bytes. Overrides the profile's
+    /// `rx_buffer_size` default. Default: 256 KiB.
+    #[serde(default = "default_rx_buffer_size")]
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub rx_buffer_size: usize,
 }
 
 // ---- Response structs ------------------------------------------------------
@@ -354,6 +412,43 @@ pub struct ReadResult {
     /// subscribe's final-notification `error` field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Absolute stream offset where this read's data starts (clamped to
+    /// ring start_offset if the cursor had fallen behind). `null` only
+    /// when the read produced no data and no cursor was consumed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "crate::schema_helpers::option_uint_schema")]
+    pub from_offset: Option<u64>,
+    /// Absolute stream offset of the cursor after this read (where the next
+    /// read starts). Equal to `from_offset + bytes_returned` for a consuming
+    /// read. To re-read the same bytes non-destructively, pass the same
+    /// `from` on the next read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "crate::schema_helpers::option_uint_schema")]
+    pub next_offset: Option<u64>,
+    /// Bytes lost to ring wrap since the cursor's original position. Non-zero
+    /// means the cursor had fallen behind `start_offset` and the read
+    /// started at `start_offset` instead. Always 0 for a healthy read.
+    #[serde(default)]
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub bytes_lost: u64,
+    /// Unread bytes remaining in the ring after this read (between
+    /// `next_offset` and `end_offset`). 0 when the read drained to the live
+    /// edge.
+    #[serde(default)]
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub buffered_remaining: u64,
+    /// Absolute stream offset of the oldest byte retained in the ring at result
+    /// time. Use with `from: {offset: start_offset}` to replay from the oldest
+    /// retained byte.
+    #[serde(default)]
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub start_offset: u64,
+    /// Absolute stream offset of the newest byte retained in the ring at result
+    /// time (the live edge). Equals the cursor position `from: "now"` would
+    /// resolve to.
+    #[serde(default)]
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub end_offset: u64,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -400,6 +495,115 @@ pub struct SubscribeResult {
     pub replaced_previous: bool,
 }
 
+/// Per-chunk notification emitted by `subscribe` while streaming. Sent
+/// as the `data` field of a `notifications/message` event with logger
+/// `"serial:<connection_id>"`.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct SubscribeChunkNotification {
+    pub connection_id: String,
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub bytes_read: usize,
+    pub encoding: String,
+    pub data: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "crate::schema_helpers::option_uint_schema")]
+    pub bytes_lost: Option<u64>,
+}
+
+/// Per-frame notification emitted by `subscribe` when framing is active.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct SubscribeFrameNotification {
+    pub connection_id: String,
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub frame_index: usize,
+    pub frame_type: String,
+    pub encoding: String,
+    pub data: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parsed: Option<ParsedFrame>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub matched: Option<bool>,
+}
+
+/// Per-chunk error notification emitted by `subscribe` when the chunk
+/// cannot be encoded in the requested encoding.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct SubscribeEncodingErrorNotification {
+    pub connection_id: String,
+    pub encoding_error: bool,
+    pub encoding: String,
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub bytes_dropped: usize,
+    pub reason: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "crate::schema_helpers::option_uint_schema")]
+    pub bytes_lost: Option<u64>,
+}
+
+/// Per-frame partial-flush notification emitted by `subscribe` at stop
+/// time when a partial frame remains in the decoder.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct SubscribePartialFrameNotification {
+    pub connection_id: String,
+    pub partial: bool,
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub frame_index: usize,
+    pub frame_type: String,
+    pub encoding: String,
+    pub data: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parsed: Option<ParsedFrame>,
+}
+
+/// Final stop notification emitted by `subscribe` when the stream ends.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct SubscribeStopNotification {
+    pub connection_id: String,
+    pub stop_reason: String,
+    pub truncated: bool,
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub bytes_observed: usize,
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub bytes_returned: usize,
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub elapsed_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "crate::schema_helpers::option_uint_schema")]
+    pub timeout_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "crate::schema_helpers::option_uint_schema")]
+    pub no_new_rx_timeout_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "crate::schema_helpers::option_uint_schema")]
+    pub from_offset: Option<u64>,
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub next_offset: u64,
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub bytes_lost: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub matched: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "crate::schema_helpers::option_uint_schema")]
+    pub match_index: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "crate::schema_helpers::option_uint_schema")]
+    pub match_frame_index: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data: Option<String>,
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub frames_emitted: usize,
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub frames_dropped: usize,
+    /// Ring start offset (new in 0.8.0 — matches ReadResult's start_offset).
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub start_offset: u64,
+    /// Ring end offset (new in 0.8.0 — matches ReadResult's end_offset).
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub end_offset: u64,
+}
+
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct UnsubscribeResult {
     pub connection_id: String,
@@ -444,6 +648,24 @@ pub struct GetStatusResult {
     pub reconnect_attempts: u64,
     /// Last fatal error message, or null.
     pub last_error: Option<String>,
+    /// RX ring buffer size in bytes.
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub rx_buffer_size: usize,
+    /// Oldest retained byte stream offset (ring start).
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub rx_start_offset: u64,
+    /// Total bytes appended since open (ring end, monotonic).
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub rx_end_offset: u64,
+    /// Shared read cursor position (where the next read starts).
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub rx_cursor: u64,
+    /// Unread bytes between cursor and end_offset.
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub rx_buffered_unread: u64,
+    /// Lifetime total of bytes lost to ring wrap.
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub rx_bytes_wrapped_total: u64,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -492,7 +714,7 @@ pub fn default_encoding() -> String {
     "utf8".into()
 }
 pub fn default_max_buffered_bytes() -> usize {
-    2048
+    32768
 }
 pub fn default_flush_target() -> FlushTarget {
     FlushTarget::Both

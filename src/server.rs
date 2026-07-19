@@ -144,7 +144,7 @@ impl SerialHandlerBuilder {
             streams,
             security,
             subscribers: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
-            rx_sessions: Arc::new(RxSessionManager::new()),
+            rx_sessions: Arc::new(RxSessionManager::new(Arc::clone(&budget))),
             tx_sessions: Arc::new(TxSessionManager::new()),
             budget,
             profiles: Arc::new(tokio::sync::RwLock::new(Vec::new())),
@@ -230,7 +230,8 @@ impl SerialHandler {
         Parameters(args): Parameters<OpenArgs>,
         ctx: RequestContext<RoleServer>,
     ) -> Result<Json<OpenResult>, String> {
-        let result = port_ops::open(&self.connections, &self.security, args).await?;
+        let result =
+            port_ops::open(&self.connections, &self.rx_sessions, &self.security, args).await?;
         let connection_id = result.0.connection_id.clone();
         self.notify_resource_changed(&connection_id, &ctx).await;
         Ok(result)
@@ -259,8 +260,10 @@ impl SerialHandler {
         self.tx_sessions.remove(&connection_id).await;
         // Wait for the subscribe task to finish naturally (flush partial,
         // emit stop notification) before cleaning up.
-        if let Some(handle) = self.streams.lock().await.remove(&connection_id) {
-            handle.join_without_abort().await;
+        if let Some(mut handle) = self.streams.lock().await.remove(&connection_id) {
+            if let Some(j) = handle.take_join() {
+                j.await.ok();
+            }
         }
         self.notify_resource_changed(&connection_id, &ctx).await;
         Ok(result)
@@ -279,7 +282,7 @@ impl SerialHandler {
     }
 
     #[tool(
-        description = "Read data from a serial port connection. Returns only future bytes — data received after the call starts, not previously buffered data. With no options, reads available bytes with timeout and burst-settle. With match, accumulates until a pattern is found. With rx_framing, splits the byte stream into structured frames (line, delimiter, length-prefixed, SLIP, COBS, start/end marker). With rx_parser, interprets frame content (AT commands, JSON lines, shell prompts). rx_parser is a sibling to rx_framing. Use protocol to select a built-in preset (at_command, slip, json_lines, cobs, ndjson, nmea0183, modbus_ascii) that fills in rx_framing and rx_parser defaults; explicit fields win. Match and rx_framing can be combined. With validate: true, checksum-mismatched frames are dropped and counted in frames_dropped instead of aborting the read. A malformed SLIP escape sequence or COBS code byte stops with stop_reason=framing_error, returning partial results. Set no_new_rx_timeout_ms to stop when no new bytes arrive within the specified silence window.",
+        description = "Read data from a serial port connection. Returns buffered-but-unread bytes from the connection's cursor (like `cat`), consuming by default. Use `from` to control where the read starts: \"cursor\" (default, the shared read cursor), \"now\" (live edge, skip buffered backlog), \"buffer_start\" (replay everything retained in the ring), or {\"offset\": N} (absolute stream offset from a prior result's next_offset/from_offset). Re-passing the same `from` on the next call re-reads the same bytes non-destructively. Pattern matching checks buffered history first, then waits for new bytes. With rx_framing, splits the byte stream into structured frames (line, delimiter, length-prefixed, SLIP, COBS, start/end marker). With rx_parser, interprets frame content (AT commands, JSON lines, shell prompts). rx_parser is a sibling to rx_framing. Use protocol to select a built-in preset (at_command, slip, json_lines, cobs, ndjson, nmea0183, modbus_ascii) that fills in rx_framing and rx_parser defaults; explicit fields win. Match and rx_framing can be combined. With validate: true, checksum-mismatched frames are dropped and counted in frames_dropped instead of aborting the read. A malformed SLIP escape sequence or COBS code byte stops with stop_reason=framing_error, returning partial results with an error field and hex fallback. Set no_new_rx_timeout_ms to stop when no new bytes arrive within the specified silence window. Results carry from_offset/next_offset/bytes_lost/buffered_remaining/start_offset/end_offset.",
         title = "Read Serial Data",
         annotations(read_only_hint = true, open_world_hint = false),
         execution(task_support = "optional")
@@ -304,7 +307,7 @@ impl SerialHandler {
     }
 
     #[tool(
-        description = "Discard buffered serial data. target=input clears OS read buffer (data the device sent that the app hasn't consumed); target=output clears the OS write queue; target=both clears both.",
+        description = "Discard buffered serial data. target=input clears OS read buffer and discards all unread buffered RX data; to skip past buffered data without destroying it, use `read` with `from: \"now\"` to jump to the live edge. target=output clears the OS write queue. target=both clears both.",
         title = "Flush Serial Buffers",
         annotations(destructive_hint = true, open_world_hint = false)
     )]
@@ -312,7 +315,13 @@ impl SerialHandler {
         &self,
         Parameters(args): Parameters<FlushArgs>,
     ) -> Result<Json<FlushResult>, String> {
-        io_ops::flush(&self.connections, &self.tx_sessions, args).await
+        io_ops::flush(
+            &self.connections,
+            &self.rx_sessions,
+            &self.tx_sessions,
+            args,
+        )
+        .await
     }
 
     #[tool(
@@ -412,7 +421,7 @@ impl SerialHandler {
     }
 
     #[tool(
-        description = "Get the current status and configuration of an open serial connection",
+        description = "Get the current status and configuration of an open serial connection, including RX ring buffer state (size, offsets, cursor, buffered unread bytes, wrap loss).",
         title = "Get Connection Status",
         annotations(read_only_hint = true, open_world_hint = false)
     )]
@@ -420,7 +429,7 @@ impl SerialHandler {
         &self,
         Parameters(args): Parameters<GetStatusArgs>,
     ) -> Result<Json<GetStatusResult>, String> {
-        port_ops::get_status(&self.connections, args).await
+        port_ops::get_status(&self.connections, &self.rx_sessions, args).await
     }
 
     #[tool(
@@ -456,8 +465,14 @@ impl SerialHandler {
         ctx: RequestContext<RoleServer>,
     ) -> Result<Json<OpenResult>, String> {
         let profiles = self.profiles.read().await;
-        let result =
-            port_ops::open_profile(&self.connections, &self.security, &profiles, args).await?;
+        let result = port_ops::open_profile(
+            &self.connections,
+            &self.rx_sessions,
+            &self.security,
+            &profiles,
+            args,
+        )
+        .await?;
         let connection_id = result.0.connection_id.clone();
         self.notify_resource_changed(&connection_id, &ctx).await;
         Ok(result)

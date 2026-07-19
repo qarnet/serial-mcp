@@ -6,7 +6,7 @@
 - MCP surface lives in `src/server.rs`; tool handlers are split under `src/tools/`, prompts under `src/prompts/`, resources under `src/resources/`.
 - `SerialHandler` is built via `SerialHandler::builder()...build()` (`src/server.rs`). The old `with_manager*` telescoping constructors are gone; `new()` is a thin wrapper over the builder. Inject `connections`, `streams`, `security`, `budget` through the builder; `with_profiles()` stays as a post-build setter.
 - Shared RX framing lives in `src/tools/rx_consume.rs` (`consume_frames` + `RxFrameSink` trait + `disconnect_state`); both `read` and `subscribe` route framing through it, but their raw (no-framing) paths stay per-tool by design (see "Invariants easy to break").
-- Connection lifecycle is in `src/serial.rs`; shared RX/TX coordination is in `src/rx_session.rs`, `src/tx_session.rs`, and `src/stop_controller.rs`.
+- Connection lifecycle is in `src/serial.rs`; shared RX/TX coordination is in `src/rx_session.rs` (always-on pump + ring buffer), `src/tx_session.rs`, and `src/stop_controller.rs`. The pump appends all received bytes to `src/rx_ring.rs`; both `read` and `subscribe` read from the ring via cursors.
 - Low-level shared primitives: `src/util.rs` (`find_subsequence`, the byte-substring search used by `framing` + `tools::helpers` via a `find_subslice` re-export alias) and `src/precedence.rs` (`resolve_field`, the four-layer framing/parser/protocol precedence helper shared by `io_ops` + `stream_ops`). Both `pub(crate)`.
 - `build.rs` injects `GIT_HASH` / `GIT_HASH_AVAILABLE`.
 
@@ -55,11 +55,14 @@ cargo test --test native_sim_connection_lifecycle -- --ignored --test-threads=1
   that slipped through because the old guard only checked uint/uint32/uint64.
 - `open` must enforce allowlist checks before `ConnectionManager::open()`.
 - Open/close changes must notify resource subscribers via `notify_resource_list_changed()`.
-- `read` and `subscribe` share stop-reason vocabulary via `RxStopController`, but their RX loops are **not** interchangeable sink swaps. Raw-path semantics differ by design: `read` is bounded and only scans `chunk[..take]` up to `max_bytes`; `subscribe` scans full chunks across the whole subscription lifetime.
-- Framing semantics also differ by design: `read` keeps later frames decoded from the same chunk after the first matching frame, while `subscribe` stops on the matching frame and does not emit later frames from that chunk.
-- Both tools already catch cross-chunk matches in raw mode because matcher state is sliding-window based. In framed mode both match per-frame, so patterns spanning frames are intentionally not matched.
-- Match metadata differs too: `read` match meta uses `accumulated.len()` for `bytes_returned`; `subscribe` uses cumulative emitted bytes (`total_returned`). Preserve these differences unless intentionally redesigning the API.
+- `read` and `subscribe` share stop-reason vocabulary via `RxStopController`. Both read from the ring via cursors: `read` advances the shared cursor (unless `from` jumps it elsewhere first); `subscribe` uses a per-call private cursor via the `from` parameter (`now`/`cursor`/`buffer_start`/`{"offset": N}`). Subscriptions do NOT move the shared read cursor. `read`'s `from` parameter resolves the start position and writes the shared cursor before reading (atomic seek+read).
+- Both tools catch cross-chunk matches in raw mode because matcher state is sliding-window based. In framed mode both match per-frame, so patterns spanning frames are intentionally not matched.
+- `bytes_returned` in both tools is cumulative emitted bytes. `read` match meta now uses the same definition as `subscribe`.
+- `from` parameter on `read` and `subscribe` shares the `ReadFrom` enum: `"now"` (default for subscribe, live edge), `"cursor"` (default for `read`, shared read cursor), `"buffer_start"` (oldest retained byte), or `{"offset": N}` (absolute). Replayed history flows through the same framing/match pipeline as live data. `read`'s `from` parameter resolves the start position and writes the shared cursor BEFORE reading (atomic seek+read). `subscribe` defaults to `"now"` and does NOT move the shared cursor.
+- Slow subscriptions observe `bytes_lost` gap in notifications — never silently die.
+- Both tools hard-fail framing construction errors (`FrameDecoder::new`). Read already did; subscribe now validates before spawning the background task.
 - Production code convention here: no `unwrap`/`expect`, no `println!`, no committed `todo!()` / `unimplemented!()`.
+- `.lock().expect("X mutex poisoned")` for std Mutex; `unwrap` in tests.
 
 ## Frame pipeline (TX + RX framing, parsers, presets, profile defaults)
 
@@ -109,9 +112,10 @@ cargo test --test native_sim_connection_lifecycle -- --ignored --test-threads=1
   data under utf8 → falls back to hex with `encoding: "hex"`); subscribe as a
   final notification with `stop_reason: "framing_error"` + `error` field.
   Both carry partial data (frames decoded before the error + raw bytes).
-- `subscribe` degrades bad framing configs (construction errors) to raw mode
-  with `warn!`; `read` propagates construction errors. This asymmetry is for
-  CONSTRUCTION errors (agent config). RUNTIME decode errors stop both.
+- Both tools hard-fail framing construction errors (`FrameDecoder::new`).
+  `subscribe` validates the decoder in the handler before spawning the
+  background task — a bad config returns `Err(String)` (tool error), not
+  a degraded raw-mode stream. This matches `read`'s behavior.
 
 ## Test map
 
@@ -126,7 +130,7 @@ cargo test --test native_sim_connection_lifecycle -- --ignored --test-threads=1
 - `tests/tx_session.rs` — cross-module TxSession wiring.
 - `tests/proptest.rs` — property-based and boundary-value tests.
 - `tests/config_schema_validation.rs` validates generated schemas against vendored examples; ignored case fetches upstream schemas.
-- `tests/native_sim_validation.rs` — native_sim firmware over PTY. 51 tests, < 13s, pure software. Env: `SERIAL_MCP_NATIVE_SIM_BIN` (default `build/native_sim/firmware/zephyr/zephyr.exe`). Thin wrapper; all tests + helpers live in `tests/native_sim_validation/unix.rs` (Unix-only via `#[cfg(unix)]` module gate), with an empty `windows.rs` stub for future Windows-specific tests.
+- `tests/native_sim_validation.rs` — native_sim firmware over PTY. 56 tests, < 13s, pure software. Env: `SERIAL_MCP_NATIVE_SIM_BIN` (default `build/native_sim/firmware/zephyr/zephyr.exe`). Thin wrapper; all tests + helpers live in `tests/native_sim_validation/unix.rs` (Unix-only via `#[cfg(unix)]` module gate), with an empty `windows.rs` stub for future Windows-specific tests.
 - `tests/native_sim_connection_lifecycle.rs` — software-only lifecycle (6 tests): named connection, `set_flow_control`, close-while-read, reopen, touch-command bootloader entry. Run with `--test-threads=1`.
 - There are no hardware-required tests in this repo. All test coverage is runnable on a normal Linux host.
 

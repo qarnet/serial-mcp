@@ -11,9 +11,10 @@ use tracing::{debug, error, info, warn};
 
 use crate::buffer_budget::BufferBudget;
 use crate::codec;
+use crate::limits::DEFAULT_RX_BUFFER_SIZE;
 use crate::match_config::{shape_match_context, Matcher};
 use crate::rx_metadata::{RxStopMetadata, RxStopReason};
-use crate::rx_session::{RxEvent, RxSessionManager};
+use crate::rx_session::RxSessionManager;
 use crate::serial::ConnectionManager;
 use crate::stop_controller::{RxStopController, RxStopDecision};
 use crate::tools::helpers::{
@@ -21,13 +22,17 @@ use crate::tools::helpers::{
     MAX_STREAM_CHUNK_BYTES, MIN_POLL_INTERVAL_MS, MIN_STREAM_CHUNK_BYTES,
 };
 use crate::tools::rx_consume::{
-    consume_frames, disconnect_state, DisconnectState, FrameOutcome, RxFrameSink, SinkFlow,
+    consume_frames, disconnect_state, frame_outcome_to_stop, DisconnectState, RxFrameSink, SinkFlow,
 };
-use crate::tools::types::{SubscribeArgs, SubscribeResult, UnsubscribeArgs, UnsubscribeResult};
+use crate::tools::types::{
+    ReadFrom, SubscribeArgs, SubscribeChunkNotification, SubscribeEncodingErrorNotification,
+    SubscribeFrameNotification, SubscribePartialFrameNotification, SubscribeResult,
+    SubscribeStopNotification, UnsubscribeArgs, UnsubscribeResult,
+};
 
 /// RAII wrapper around a streaming task. Aborts the task on drop.
 pub struct StreamHandle {
-    join: tokio::task::JoinHandle<()>,
+    join: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl StreamHandle {
@@ -38,25 +43,25 @@ impl StreamHandle {
     /// (as in `Drop`) only schedules cancellation, leaving the consumer briefly
     /// open so the pump keeps stealing RX data.
     async fn abort_and_join(mut self) {
-        self.join.abort();
-        let _ = (&mut self.join).await;
+        if let Some(j) = self.join.take() {
+            j.abort();
+            let _ = j.await;
+        }
     }
 
     /// Wait for the streaming task to finish naturally (without aborting).
     /// Used by the close handler to let flush_partial run before cleanup.
-    pub async fn join_without_abort(self) {
-        // Move join handle out, then forget self to prevent Drop abort.
-        let me = std::mem::ManuallyDrop::new(self);
-        // Safety: ManuallyDrop prevents Drop from running. We read the
-        // JoinHandle out and await it. The StreamHandle shell is leaked.
-        let join = unsafe { std::ptr::read(&me.join) };
-        let _ = join.await;
+    /// After this call, `drop` will not abort.
+    pub fn take_join(&mut self) -> Option<tokio::task::JoinHandle<()>> {
+        self.join.take()
     }
 }
 
 impl Drop for StreamHandle {
     fn drop(&mut self) {
-        self.join.abort();
+        if let Some(j) = self.join.take() {
+            j.abort();
+        }
     }
 }
 
@@ -73,13 +78,14 @@ pub async fn subscribe(
     _ctx: RequestContext<RoleServer>,
 ) -> Result<Json<SubscribeResult>, String> {
     debug!(
-        "subscribe {} encoding={} max_buffered_bytes={} poll={} timeout={:?} no_new_rx_timeout={:?}",
+        "subscribe {} encoding={} max_buffered_bytes={} poll={} timeout={:?} no_new_rx_timeout={:?} from={:?}",
         args.connection_id,
         args.encoding,
         args.max_buffered_bytes,
         args.poll_interval_ms,
         args.timeout_ms,
-        args.no_new_rx_timeout_ms
+        args.no_new_rx_timeout_ms,
+        args.from,
     );
 
     let ResolvedRxArgs {
@@ -104,17 +110,39 @@ pub async fn subscribe(
         MIN_POLL_INTERVAL_MS,
     )?;
 
+    // Resolve rx_framing + rx_parser via the shared 4-layer precedence helper.
+    let rx_framing = crate::precedence::resolve_field(
+        args.rx_framing,
+        args.protocol,
+        crate::framing::preset_rx_framing,
+        connection.rx_framing_default(),
+        connection.protocol_default(),
+    );
+    let rx_parser = crate::precedence::resolve_field(
+        args.rx_parser,
+        args.protocol,
+        crate::framing::preset_rx_parser,
+        connection.rx_parser_default(),
+        connection.protocol_default(),
+    );
+
+    // Validate framing decoder construction BEFORE spawning the task.
+    // This ensures construction errors hard-fail the tool call rather than
+    // silently degrading to raw mode (the old fanout-era behavior).
+    let decoder: Option<crate::framing::FrameDecoder> = match rx_framing.as_ref() {
+        Some(cfg) => Some(
+            crate::framing::FrameDecoder::new(cfg, rx_parser.as_ref())
+                .map_err(|e| format!("subscribe.rx_framing: {e}"))?,
+        ),
+        None => None,
+    };
+
     // Drop any existing subscription on this connection FIRST.
     // This aborts the old task and releases its budget reservation
-    // before we attempt to reserve for the new subscription. This
-    // avoids spurious budget-exhaustion errors when replacing a
-    // subscription on the same connection.
+    // before we attempt to reserve for the new subscription.
     let replaced_previous = {
         let mut streams = streams.lock().await;
         if let Some(old_handle) = streams.remove(&args.connection_id) {
-            // Drop the old handle synchronously; its task aborts and
-            // the reservation will release once the task finishes aborting.
-            // We yield once to let the abort start, then proceed.
             drop(old_handle);
             true
         } else {
@@ -133,40 +161,32 @@ pub async fn subscribe(
     let timeout_ms = args.timeout_ms;
     let no_new_rx_timeout_ms = args.no_new_rx_timeout_ms;
 
-    // Resolve rx_framing + rx_parser via the shared 4-layer precedence helper.
-    let rx_framing = crate::precedence::resolve_field(
-        args.rx_framing,
-        args.protocol,
-        crate::framing::preset_rx_framing,
-        connection.rx_framing_default(),
-        connection.protocol_default(),
-    );
-    let rx_parser = crate::precedence::resolve_field(
-        args.rx_parser,
-        args.protocol,
-        crate::framing::preset_rx_parser,
-        connection.rx_parser_default(),
-        connection.protocol_default(),
-    );
-
-    // Get or create the RX session for this connection, then register a
-    // streaming consumer. The pump in the session is the *only* code that
-    // reads from the serial port. This subscribe worker consumes from the
-    // mpsc channel fed by the pump.
+    // Get or create the RX session for this connection.
     let conn = Arc::clone(&connection);
     connection.record_read_op();
-    let session = rx_sessions.get_or_create(connection).await;
-    let event_rx = session.register_streaming();
+    let session = rx_sessions
+        .get_or_create(connection, DEFAULT_RX_BUFFER_SIZE)
+        .await
+        .map_err(|e| format!("subscribe: {e}"))?;
+
+    // Resolve the initial private cursor from the `from` parameter.
+    let ring = session.ring();
+    let from = args.from.unwrap_or(ReadFrom::Now);
+    let initial_cursor = match from {
+        ReadFrom::Now => ring.end_offset(),
+        ReadFrom::Cursor => session.read_cursor(),
+        ReadFrom::BufferStart => ring.start_offset(),
+        ReadFrom::Offset { offset } => offset,
+    };
 
     // Hold the reservation inside the spawned task so it lives for the
     // entire streaming lifetime and is released when the task finishes.
     let reservation = _reservation;
 
-    let join = tokio::spawn(stream_rx_via_session(
+    let join = tokio::spawn(stream_rx_from_ring(
         peer,
         conn,
         session,
-        event_rx,
         encoding,
         max_buffered_bytes,
         poll_ms,
@@ -174,18 +194,20 @@ pub async fn subscribe(
         no_new_rx_timeout_ms,
         reservation,
         matcher,
+        decoder,
         rx_framing,
         rx_parser,
+        initial_cursor,
     ));
 
     let mut streams = streams.lock().await;
-    // We already removed the old handle above; just insert the new one.
-    // If another subscribe sneaked in between, its handle is replaced here.
-    let inserted_replaced = streams.insert(id.clone(), StreamHandle { join }).is_some();
+    let inserted_replaced = streams
+        .insert(id.clone(), StreamHandle { join: Some(join) })
+        .is_some();
     let was_replaced = replaced_previous || inserted_replaced;
     info!(
-        "subscribed RX stream for {} (replaced={}, timeout={:?})",
-        id, was_replaced, timeout_ms
+        "subscribed RX stream for {} (replaced={}, timeout={:?}, initial_cursor={})",
+        id, was_replaced, timeout_ms, initial_cursor
     );
 
     Ok(Json(SubscribeResult {
@@ -200,7 +222,7 @@ pub async fn subscribe(
 
 pub async fn unsubscribe(
     connections: &Arc<ConnectionManager>,
-    rx_sessions: &Arc<RxSessionManager>,
+    _rx_sessions: &Arc<RxSessionManager>,
     streams: &Arc<tokio::sync::Mutex<HashMap<String, StreamHandle>>>,
     args: UnsubscribeArgs,
 ) -> Result<Json<UnsubscribeResult>, String> {
@@ -217,10 +239,8 @@ pub async fn unsubscribe(
     };
     let was_active = handle.is_some();
 
-    // Wait for the streaming task to fully stop before pruning. Aborting alone
-    // leaves its consumer receiver open, so prune_consumers below would not see
-    // it as closed and the pump would keep stealing RX data that subsequent
-    // read/wait_for tools need.
+    // Wait for the streaming task to fully stop. The subscription task
+    // reads from the ring independently — no need to prune consumers.
     if let Some(handle) = handle {
         handle.abort_and_join().await;
     }
@@ -228,16 +248,6 @@ pub async fn unsubscribe(
         "unsubscribed {} (was_active={})",
         args.connection_id, was_active
     );
-
-    // Prune closed consumers from the RX session so the pump can exit if no
-    // consumers remain. When prune cancels the pump, await its exit so the
-    // serial port is quiescent before we return — otherwise a pump mid-read
-    // can grab and discard bytes a following read/wait_for is waiting for.
-    if let Some(session) = rx_sessions.get(&args.connection_id).await {
-        if session.prune_consumers() {
-            session.join_pump().await;
-        }
-    }
 
     Ok(Json(UnsubscribeResult {
         connection_id: args.connection_id,
@@ -280,27 +290,22 @@ impl RxFrameSink for SubscribeFrameSink<'_> {
             }
         };
 
-        let mut payload = serde_json::json!({
-            "connection_id": self.conn_id,
-            "frame_index": frame.index,
-            "frame_type": frame.frame_type,
-            "encoding": self.encoding.to_string(),
-            "data": encoded,
+        let notification = SubscribeFrameNotification {
+            connection_id: self.conn_id.to_string(),
+            frame_index: frame.index,
+            frame_type: frame.frame_type.to_string(),
+            encoding: self.encoding.to_string(),
+            data: encoded,
+            parsed: frame.parsed,
+            matched: if matched { Some(true) } else { None },
+        };
+        let payload = serde_json::to_value(&notification).unwrap_or_else(|e| {
+            warn!(
+                "RX frame notification serialization error on {}: {e}",
+                self.conn_id
+            );
+            serde_json::json!({})
         });
-        if let Some(ref parsed) = frame.parsed {
-            match serde_json::to_value(parsed) {
-                Ok(v) => payload["parsed"] = v,
-                Err(e) => {
-                    warn!(
-                        "RX frame parsed serialization error on {}: {e}",
-                        self.conn_id
-                    )
-                }
-            }
-        }
-        if matched {
-            payload["matched"] = serde_json::json!(true);
-        }
 
         let param = LoggingMessageNotificationParam {
             level: LoggingLevel::Info,
@@ -339,33 +344,33 @@ impl RxFrameSink for SubscribeFrameSink<'_> {
     }
 }
 
-/// Stream RX data sourced from an [`RxSession`] consumer channel.
+/// Stream RX data from the ring buffer with a private cursor.
 ///
-/// Replaces the old `stream_rx` helper that read directly from
-/// `SerialConnection`. Both timed and untimed subscribe share this one
-/// background path; the only difference is whether a deadline is set.
-///
-/// Stop reasons are communicated via a final logging notification at `Info`
-/// level with a `stop_reason` field so clients can distinguish normal
-/// timeout from error or cancellation.
+/// Each subscription owns a private cursor — it does NOT move the shared
+/// read cursor. Both framed and raw paths emit per-chunk/frame notifications
+/// and a final stop notification with stop_reason + offset fields.
 ///
 /// When `matcher` is `Some`, the stream detects the first match and emits
 /// a final stop notification with `matched=true` and `match_index`, then
 /// terminates.
 ///
-/// When `framing` is `Some`, data notifications are emitted per-frame
+/// When `decoder` is `Some`, data notifications are emitted per-frame
 /// rather than per-chunk. Frame payloads include `frame_index`, `frame_type`,
 /// `data`, and optional `parsed` fields. Raw chunk notifications are
 /// suppressed when framing is active.
 ///
+/// Gap reporting: if the private cursor falls behind the ring's
+/// `start_offset`, the next notification includes `bytes_lost` and continues
+/// from the clamped position (`start_offset`). The subscription never
+/// silently dies — gaps are always observable.
+///
 /// Uses [`RxStopController`] for all stop-condition evaluation so that
 /// `subscribe` and `read` produce identical stop reasons for the same inputs.
 #[allow(clippy::too_many_arguments)]
-async fn stream_rx_via_session(
+async fn stream_rx_from_ring(
     peer: Peer<RoleServer>,
     conn: Arc<crate::serial::SerialConnection>,
     session: Arc<crate::rx_session::RxSession>,
-    mut event_rx: tokio::sync::mpsc::Receiver<RxEvent>,
     encoding: crate::codec::Encoding,
     _max_buffered_bytes: usize,
     poll_interval_ms: u64,
@@ -374,53 +379,55 @@ async fn stream_rx_via_session(
     // Held for RAII: dropping releases the budget reservation.
     _reservation: Box<dyn crate::buffer_budget::BufferReservation>,
     mut matcher: Option<Matcher>,
+    // Pre-constructed frame decoder (validated in the subscribe handler).
+    // None when no framing was requested.
+    decoder: Option<crate::framing::FrameDecoder>,
+    // Framing config (for metadata like max_frames; decoder is already built).
     framing: Option<crate::framing::RxFramingConfig>,
-    parser: Option<crate::framing::ParserConfig>,
+    // Parser config (passed for reference; decoder already incorporated it).
+    _parser: Option<crate::framing::ParserConfig>,
+    // The initial private cursor position, resolved from the `from` parameter.
+    initial_cursor: u64,
 ) {
     let conn_id = session.connection_id().to_string();
     let logger = format!("serial:{conn_id}");
     let start = Instant::now();
+    let ring = session.ring();
+
+    // Private cursor — subscriptions do NOT move the shared read cursor.
+    let mut private_cursor = initial_cursor;
+
     // Subscribe does not use max_buffered_bytes as a stop condition (it
     // streams each chunk immediately). We pass 0 so the controller never
-    // stops on MaxBufferedBytes; instead we rely on timeout, match_found,
-    // connection_closed, channel_closed, and read_error.
+    // stops on MaxBufferedBytes.
     let mut ctrl = RxStopController::new(start, timeout_ms, 0, no_new_rx_timeout_ms);
-    let deadline = ctrl.deadline();
     let mut stop_outcome: Option<crate::stop_controller::RxStopOutcome> = None;
     let mut match_frame_index: Option<usize> = None;
     let mut match_offset: Option<usize> = None;
     let mut frame_error_msg: Option<String> = None;
 
-    // Track total bytes sent via per-chunk data notifications, so
-    // bytes_returned in the stop payload reflects cumulative delivered
-    // bytes rather than the last chunk size.
+    // Track total bytes sent via per-chunk data notifications.
     let mut total_returned: usize = 0;
 
-    // Accumulated buffer for context shaping on match. Capped by
-    // _max_buffered_bytes so memory stays bounded.
+    // Accumulated buffer for context shaping on match.
     let context_amount = matcher.as_ref().and_then(|m| m.context_amount());
     let needle_len = matcher.as_ref().and_then(|m| m.needle_len());
     let mut accumulated: Vec<u8> = Vec::new();
 
     // Frame decoder state.
     let max_frames = framing.as_ref().and_then(|f| f.max_frames);
-    let mut decoder = match framing.as_ref() {
-        // subscribe is a background task that already returned Ok(SubscribeResult);
-        // it cannot surface a sync error, so a bad framing config degrades to raw
-        // chunk mode rather than failing. (read propagates the error instead — see
-        // helpers.rs.)
-        Some(cfg) => match crate::framing::FrameDecoder::new(cfg, parser.as_ref()) {
-            Ok(d) => Some(d),
-            Err(e) => {
-                warn!("RX subscribe framing init error on {conn_id}: {e}");
-                None
-            }
-        },
-        None => None,
-    };
+    let mut decoder = decoder;
     let mut frames_emitted: usize = 0;
     let mut frames_dropped: usize = 0;
     let peer_owned = peer.clone();
+
+    // Total bytes lost to ring wrap over the subscription lifetime.
+    let mut total_bytes_lost: u64 = 0;
+
+    // Track raw byte offset within the stream for from_offset/next_offset.
+    // The first chunk's from_offset is the clamped initial_cursor.
+    let mut from_offset: Option<u64> = None;
+    let mut next_offset: u64 = private_cursor;
 
     loop {
         // Pause timeouts while the connection is disconnected or reconnecting.
@@ -447,221 +454,212 @@ async fn stream_rx_via_session(
             break;
         }
 
-        let recv_deadline = match deadline {
-            Some(dl) => tokio::time::Instant::from_std(dl),
-            None => tokio::time::Instant::now() + Duration::from_millis(poll_interval_ms),
-        };
+        // Read next data from the ring at the private cursor.
+        let slice = ring.read_from(private_cursor, _max_buffered_bytes);
 
-        let event = tokio::select! {
-            msg = tokio::time::timeout_at(recv_deadline, event_rx.recv()) => match msg {
-                Ok(Some(e)) => e,
-                Ok(None) => {
-                    stop_outcome = Some(ctrl.channel_closed());
-                    break;
+        // Gap reporting: if bytes_lost > 0, include it and continue.
+        if slice.bytes_lost > 0 {
+            total_bytes_lost += slice.bytes_lost;
+        }
+        // If from_offset hasn't been set yet, record it from the first slice.
+        if from_offset.is_none() && !slice.bytes.is_empty() {
+            from_offset = Some(slice.from_offset);
+        }
+
+        if slice.bytes.is_empty() {
+            // No data available yet. Wait for new data or poll interval.
+            let poll_duration = Duration::from_millis(poll_interval_ms);
+            tokio::select! {
+                _ = ring.wait_for_data(private_cursor) => {
+                    // Data arrived — loop back to read it.
+                    continue;
                 }
-                Err(_) => continue,
-            },
-        };
-
-        match event {
-            RxEvent::Data(chunk) => {
-                let n = chunk.len();
-                ctrl.notify_data_received();
-
-                // Accumulate for context shaping if a matcher with context is
-                // active. Cap at _max_buffered_bytes to keep memory bounded.
-                if context_amount.is_some() {
-                    let room = _max_buffered_bytes.saturating_sub(accumulated.len());
-                    let take = chunk.len().min(room);
-                    accumulated.extend_from_slice(&chunk[..take]);
+                _ = tokio::time::sleep(poll_duration) => {
+                    // Poll wakeup: check timeouts and stop conditions.
+                    continue;
                 }
+            }
+        }
 
-                // Feed to frame decoder.
-                let mut suppress_chunk_notification = false;
-                if let Some(ref mut dec) = decoder {
-                    suppress_chunk_notification = true;
-                    let mut sink = SubscribeFrameSink {
-                        peer: peer_owned.clone(),
-                        conn: &conn,
-                        logger: logger.as_str(),
-                        conn_id: conn_id.as_str(),
-                        encoding,
-                        total_returned: &mut total_returned,
-                        match_offset: &mut match_offset,
-                        match_frame_index: &mut match_frame_index,
+        let chunk = slice.bytes;
+        let n = chunk.len();
+        ctrl.notify_data_received();
+
+        // Update offset tracking.
+        if from_offset.is_none() {
+            from_offset = Some(slice.from_offset);
+        }
+        next_offset = slice.next_offset;
+
+        // Accumulate for context shaping if a matcher with context is active.
+        if context_amount.is_some() {
+            let room = _max_buffered_bytes.saturating_sub(accumulated.len());
+            let take = chunk.len().min(room);
+            accumulated.extend_from_slice(&chunk[..take]);
+        }
+
+        // Feed to frame decoder.
+        let mut suppress_chunk_notification = false;
+        if let Some(ref mut dec) = decoder {
+            suppress_chunk_notification = true;
+            let mut sink = SubscribeFrameSink {
+                peer: peer_owned.clone(),
+                conn: &conn,
+                logger: logger.as_str(),
+                conn_id: conn_id.as_str(),
+                encoding,
+                total_returned: &mut total_returned,
+                match_offset: &mut match_offset,
+                match_frame_index: &mut match_frame_index,
+            };
+            let outcome = consume_frames(
+                &chunk,
+                dec,
+                &mut matcher,
+                max_frames,
+                &mut frames_emitted,
+                &mut sink,
+                &mut frames_dropped,
+            )
+            .await;
+            stop_outcome = frame_outcome_to_stop(
+                outcome,
+                &ctrl,
+                total_returned,
+                match_offset,
+                &mut frame_error_msg,
+                &conn_id,
+            );
+        }
+        if stop_outcome.is_some() {
+            break;
+        }
+
+        // When framing is NOT active, match on raw chunk bytes.
+        if !suppress_chunk_notification {
+            let match_result = matcher.as_mut().map(|m| m.push(&chunk));
+            if let Some(m) = matcher.as_mut() {
+                let keep = m
+                    .needle_len()
+                    .map(|n| n.max(1).saturating_add(1))
+                    .unwrap_or(256);
+                let cap = _max_buffered_bytes.max(keep);
+                if m.len() > cap {
+                    m.truncate_front(cap);
+                }
+            }
+            if let RxStopDecision::Stop(outcome) = ctrl.push_data(n, total_returned, match_result) {
+                stop_outcome = Some(outcome);
+            }
+
+            // Emit data notification (including gap info).
+            let encoded = match codec::encode(encoding, &chunk) {
+                Ok(s) => s,
+                Err(e) => {
+                    warn!(
+                        "RX encoding error on {conn_id}: {encoding} cannot encode {n} bytes — dropped"
+                    );
+                    conn.record_notification_drop();
+                    conn.log().notification_dropped(&format!(
+                        "encoding error: {encoding} cannot encode {n} bytes"
+                    ));
+                    let notification = SubscribeEncodingErrorNotification {
+                        connection_id: conn_id.to_string(),
+                        encoding_error: true,
+                        encoding: encoding.to_string(),
+                        bytes_dropped: n,
+                        reason: e.to_string(),
+                        bytes_lost: if slice.bytes_lost > 0 {
+                            Some(slice.bytes_lost)
+                        } else {
+                            None
+                        },
                     };
-                    let outcome = consume_frames(
-                        &chunk,
-                        dec,
-                        &mut matcher,
-                        max_frames,
-                        &mut frames_emitted,
-                        &mut sink,
-                        &mut frames_dropped,
-                    )
-                    .await;
-                    match outcome {
-                        FrameOutcome::SinkStop(RxStopReason::MatchFound) => {
-                            stop_outcome = Some(crate::stop_controller::RxStopOutcome {
-                                meta: RxStopMetadata::match_found(
-                                    ctrl.bytes_observed(),
-                                    total_returned,
-                                ),
-                                matched: true,
-                                match_index: match_offset,
-                            });
-                        }
-                        FrameOutcome::SinkStop(RxStopReason::PeerDisconnected) => {
-                            // peer disconnected while emitting a non-matching frame
-                            stop_outcome = Some(ctrl.peer_disconnected());
-                        }
-                        FrameOutcome::SinkStop(reason) => {
-                            // Unexpected: a new sink stop reason was added to
-                            // RxFrameSink. Map to a generic stop rather than
-                            // silently mis-categorizing.
-                            warn!(
-                                "unexpected sink stop reason {reason:?} on {conn_id}; treating as connection_closed"
-                            );
-                            stop_outcome = Some(ctrl.connection_closed());
-                        }
-                        FrameOutcome::MaxFrames => {
-                            stop_outcome = Some(crate::stop_controller::RxStopOutcome {
-                                meta: RxStopMetadata::max_frames(
-                                    ctrl.bytes_observed(),
-                                    total_returned,
-                                ),
-                                matched: false,
-                                match_index: None,
-                            });
-                        }
-                        FrameOutcome::Continue => {}
-                        FrameOutcome::DecodeError(e) => {
-                            error!("RX framing decode error on {conn_id}: {e}");
-                            frame_error_msg = Some(e.to_string());
-                            stop_outcome = Some(ctrl.framing_error(e));
-                        }
-                    }
-                }
-                if stop_outcome.is_some() {
-                    break;
-                }
-
-                // When framing is NOT active, match on raw chunk bytes.
-                if !suppress_chunk_notification {
-                    let match_result = matcher.as_mut().map(|m| m.push(&chunk));
-                    // Prune matcher window to keep memory bounded.
-                    if let Some(m) = matcher.as_mut() {
-                        let keep = m
-                            .needle_len()
-                            .map(|n| n.max(1).saturating_add(1))
-                            .unwrap_or(256);
-                        let cap = _max_buffered_bytes.max(keep);
-                        if m.len() > cap {
-                            m.truncate_front(cap);
-                        }
-                    }
-                    if let RxStopDecision::Stop(outcome) =
-                        ctrl.push_data(n, total_returned, match_result)
-                    {
-                        stop_outcome = Some(outcome);
-                    }
-
-                    // Emit data notification regardless (including on match).
-                    let encoded = match codec::encode(encoding, &chunk) {
-                        Ok(s) => s,
-                        Err(e) => {
-                            warn!(
-                            "RX encoding error on {conn_id}: {encoding} cannot encode {n} bytes — dropped"
+                    let payload = serde_json::to_value(&notification).unwrap_or_else(|e| {
+                        warn!(
+                            "SubscribeEncodingErrorNotification serialization error on {conn_id}: {e}"
                         );
-                            conn.record_notification_drop();
-                            conn.log().notification_dropped(&format!(
-                                "encoding error: {encoding} cannot encode {n} bytes"
-                            ));
-                            let payload = serde_json::json!({
-                                "connection_id": conn_id,
-                                "encoding_error": true,
-                                "encoding": encoding.to_string(),
-                                "bytes_dropped": n,
-                                "reason": e.to_string(),
-                            });
-                            let param = LoggingMessageNotificationParam {
-                                level: LoggingLevel::Warning,
-                                logger: Some(logger.clone()),
-                                data: payload,
-                            };
-                            if let Err(e) = peer.notify_logging_message(param).await {
-                                error!("RX stream peer disconnected: {e}");
-                                stop_outcome = Some(ctrl.peer_disconnected());
-                            }
-                            if stop_outcome.is_some() {
-                                break;
-                            }
-                            continue;
-                        }
-                    };
-
-                    let payload = serde_json::json!({
-                        "connection_id": conn_id,
-                        "bytes_read": n,
-                        "encoding": encoding.to_string(),
-                        "data": encoded,
+                        serde_json::json!({})
                     });
                     let param = LoggingMessageNotificationParam {
-                        level: LoggingLevel::Info,
+                        level: LoggingLevel::Warning,
                         logger: Some(logger.clone()),
                         data: payload,
                     };
                     if let Err(e) = peer.notify_logging_message(param).await {
                         error!("RX stream peer disconnected: {e}");
-                        conn.record_notification_drop();
-                        conn.log()
-                            .notification_dropped(&format!("peer disconnected: {e}"));
                         stop_outcome = Some(ctrl.peer_disconnected());
-                        break;
                     }
-                    total_returned += n;
-
                     if stop_outcome.is_some() {
                         break;
                     }
-                } // end if !suppress_chunk_notification
-            }
-            RxEvent::Closed => {
-                stop_outcome = Some(ctrl.connection_closed());
+                    continue;
+                }
+            };
+
+            let notification = SubscribeChunkNotification {
+                connection_id: conn_id.to_string(),
+                bytes_read: n,
+                encoding: encoding.to_string(),
+                data: encoded,
+                bytes_lost: if slice.bytes_lost > 0 {
+                    Some(slice.bytes_lost)
+                } else {
+                    None
+                },
+            };
+            let payload = serde_json::to_value(&notification).unwrap_or_else(|e| {
+                warn!("SubscribeChunkNotification serialization error on {conn_id}: {e}");
+                serde_json::json!({})
+            });
+            let param = LoggingMessageNotificationParam {
+                level: LoggingLevel::Info,
+                logger: Some(logger.clone()),
+                data: payload,
+            };
+            if let Err(e) = peer.notify_logging_message(param).await {
+                error!("RX stream peer disconnected: {e}");
+                conn.record_notification_drop();
+                conn.log()
+                    .notification_dropped(&format!("peer disconnected: {e}"));
+                stop_outcome = Some(ctrl.peer_disconnected());
                 break;
             }
-            RxEvent::Error(msg) => {
-                error!("RX stream read error on {conn_id}: {msg}");
-                stop_outcome = Some(ctrl.read_error());
+            total_returned += n;
+
+            if stop_outcome.is_some() {
                 break;
             }
-        }
+        } // end if !suppress_chunk_notification
+
+        // Advance private cursor past consumed bytes.
+        private_cursor = next_offset;
     }
 
+    // Advance private cursor past consumed bytes on framing error
+    // (same contract as read — the decoder consumed the malformed bytes).
+    private_cursor = next_offset;
+
     // Flush partial frame from decoder before building stop payload.
-    // Only needed when framing is active and the decoder has buffered data
-    // (e.g. connection closed mid-frame, timeout with incomplete boundary).
     if let Some(ref mut dec) = decoder {
         if let Some(partial) = dec.flush_partial() {
             frames_emitted += 1;
-            // Emit a final frame notification for the partial data (best-effort).
             if let Ok(encoded) = codec::encode(encoding, &partial.data) {
-                let mut payload = serde_json::json!({
-                    "connection_id": conn_id,
-                    "frame_index": partial.index,
-                    "frame_type": partial.frame_type,
-                    "encoding": encoding.to_string(),
-                    "data": encoded,
-                    "partial": true,
+                let notification = SubscribePartialFrameNotification {
+                    connection_id: conn_id.to_string(),
+                    partial: true,
+                    frame_index: partial.index,
+                    frame_type: partial.frame_type.to_string(),
+                    encoding: encoding.to_string(),
+                    data: encoded,
+                    parsed: partial.parsed,
+                };
+                let payload = serde_json::to_value(&notification).unwrap_or_else(|e| {
+                    warn!(
+                        "SubscribePartialFrameNotification serialization error on {conn_id}: {e}"
+                    );
+                    serde_json::json!({})
                 });
-                if let Some(ref parsed) = partial.parsed {
-                    match serde_json::to_value(parsed) {
-                        Ok(v) => payload["parsed"] = v,
-                        Err(e) => {
-                            warn!("RX partial frame parsed serialization error on {conn_id}: {e}")
-                        }
-                    }
-                }
                 let param = LoggingMessageNotificationParam {
                     level: LoggingLevel::Info,
                     logger: Some(logger.clone()),
@@ -693,46 +691,65 @@ async fn stream_rx_via_session(
         bytes_returned: total_returned,
     };
 
-    let mut stop_payload = serde_json::json!({
-        "connection_id": conn_id,
-        "stop_reason": stop_meta.stop_reason.to_string(),
-        "truncated": stop_meta.truncated,
-        "bytes_observed": stop_meta.bytes_observed,
-        "bytes_returned": stop_meta.bytes_returned,
-        "elapsed_ms": elapsed_ms,
-        "timeout_ms": timeout_ms,
-        "no_new_rx_timeout_ms": no_new_rx_timeout_ms,
-        "frames_emitted": frames_emitted,
-        "frames_dropped": frames_dropped,
-    });
-    if let Some(ref e) = frame_error_msg {
-        stop_payload["error"] = serde_json::json!(e);
-    }
-    if outcome.matched {
-        stop_payload["matched"] = serde_json::json!(true);
-        stop_payload["match_frame_index"] = serde_json::json!(match_frame_index);
-
-        // Apply context shaping if configured.
-        let (shaped_match_index, shaped_data) = if let (Some(midx), Some(ca), Some(nlen)) =
-            (outcome.match_index, context_amount, needle_len)
-        {
-            let shaped = shape_match_context(&accumulated, midx, nlen, Some(ca));
-            (Some(shaped.match_index), Some(shaped.data))
-        } else {
-            (outcome.match_index, None)
-        };
-        stop_payload["match_index"] = serde_json::json!(shaped_match_index);
-        if let Some(ref data) = shaped_data {
-            match codec::encode(encoding, data) {
-                Ok(encoded) => {
-                    stop_payload["data"] = serde_json::json!(encoded);
-                }
-                Err(e) => {
-                    warn!("RX stream match context encoding error on {conn_id}: {e}");
-                }
+    // Apply context shaping if configured (must be done before building the
+    // struct since the shaped values differ from the raw outcome).
+    let (shaped_match_index, shaped_data) = if let (Some(midx), Some(ca), Some(nlen)) =
+        (outcome.match_index, context_amount, needle_len)
+    {
+        let shaped = shape_match_context(&accumulated, midx, nlen, Some(ca));
+        (Some(shaped.match_index), Some(shaped.data))
+    } else {
+        (outcome.match_index, None)
+    };
+    let match_data_encoded = match shaped_data.as_ref() {
+        Some(data) => match codec::encode(encoding, data) {
+            Ok(encoded) => Some(encoded),
+            Err(e) => {
+                warn!("RX stream match context encoding error on {conn_id}: {e}");
+                None
             }
-        }
-    }
+        },
+        None => None,
+    };
+
+    let stop_notification = SubscribeStopNotification {
+        connection_id: conn_id.to_string(),
+        stop_reason: stop_meta.stop_reason.to_string(),
+        truncated: stop_meta.truncated,
+        bytes_observed: stop_meta.bytes_observed,
+        bytes_returned: stop_meta.bytes_returned,
+        elapsed_ms,
+        timeout_ms,
+        no_new_rx_timeout_ms,
+        from_offset,
+        next_offset: private_cursor,
+        bytes_lost: total_bytes_lost,
+        error: frame_error_msg,
+        matched: if outcome.matched { Some(true) } else { None },
+        match_index: if outcome.matched {
+            shaped_match_index
+        } else {
+            None
+        },
+        match_frame_index: if outcome.matched {
+            match_frame_index
+        } else {
+            None
+        },
+        data: if outcome.matched {
+            match_data_encoded
+        } else {
+            None
+        },
+        frames_emitted,
+        frames_dropped,
+        start_offset: ring.start_offset(),
+        end_offset: ring.end_offset(),
+    };
+    let stop_payload = serde_json::to_value(&stop_notification).unwrap_or_else(|e| {
+        warn!("SubscribeStopNotification serialization error on {conn_id}: {e}");
+        serde_json::json!({})
+    });
     let stop_param = LoggingMessageNotificationParam {
         level: LoggingLevel::Info,
         logger: Some(logger.clone()),
@@ -751,6 +768,10 @@ async fn stream_rx_via_session(
 #[cfg(test)]
 mod tests {
     use crate::framing::ParsedFrame;
+    use crate::tools::types::{
+        SubscribeChunkNotification, SubscribeEncodingErrorNotification, SubscribeFrameNotification,
+        SubscribePartialFrameNotification, SubscribeStopNotification,
+    };
 
     #[test]
     fn parsed_frame_serializes_with_inlined_object_shape() {
@@ -789,5 +810,187 @@ mod tests {
             serde_json::to_value(&ParsedFrame::Raw).unwrap()["parser"],
             "raw"
         );
+    }
+
+    #[test]
+    fn subscribe_chunk_notification_serializes_with_expected_shape() {
+        let n = SubscribeChunkNotification {
+            connection_id: "c1".into(),
+            bytes_read: 5,
+            encoding: "utf8".into(),
+            data: "hello".into(),
+            bytes_lost: None,
+        };
+        let v = serde_json::to_value(&n).unwrap();
+        assert_eq!(v["connection_id"], "c1");
+        assert_eq!(v["bytes_read"], 5);
+        assert_eq!(v["encoding"], "utf8");
+        assert_eq!(v["data"], "hello");
+        assert!(v.get("bytes_lost").is_none());
+
+        // With bytes_lost.
+        let n_lost = SubscribeChunkNotification {
+            connection_id: "c2".into(),
+            bytes_read: 3,
+            encoding: "hex".into(),
+            data: "abc".into(),
+            bytes_lost: Some(10),
+        };
+        let v = serde_json::to_value(&n_lost).unwrap();
+        assert_eq!(v["bytes_lost"], 10);
+    }
+
+    #[test]
+    fn subscribe_frame_notification_serializes_with_expected_shape() {
+        // Basic frame — no parsed, no matched.
+        let n = SubscribeFrameNotification {
+            connection_id: "c1".into(),
+            frame_index: 3,
+            frame_type: "line".into(),
+            encoding: "utf8".into(),
+            data: "hello".into(),
+            parsed: None,
+            matched: None,
+        };
+        let v = serde_json::to_value(&n).unwrap();
+        assert_eq!(v["connection_id"], "c1");
+        assert_eq!(v["frame_index"], 3);
+        assert_eq!(v["frame_type"], "line");
+        assert_eq!(v["encoding"], "utf8");
+        assert_eq!(v["data"], "hello");
+        assert!(v.get("parsed").is_none());
+        assert!(v.get("matched").is_none());
+
+        // With matched.
+        let n_m = SubscribeFrameNotification {
+            connection_id: "c2".into(),
+            frame_index: 0,
+            frame_type: "line2".into(),
+            encoding: "hex".into(),
+            data: "ff".into(),
+            parsed: None,
+            matched: Some(true),
+        };
+        let v = serde_json::to_value(&n_m).unwrap();
+        assert_eq!(v["matched"], true);
+    }
+
+    #[test]
+    fn subscribe_encoding_error_notification_serializes_with_expected_shape() {
+        let n = SubscribeEncodingErrorNotification {
+            connection_id: "c1".into(),
+            encoding_error: true,
+            encoding: "utf8".into(),
+            bytes_dropped: 42,
+            reason: "invalid utf-8".into(),
+            bytes_lost: None,
+        };
+        let v = serde_json::to_value(&n).unwrap();
+        assert_eq!(v["connection_id"], "c1");
+        assert_eq!(v["encoding_error"], true);
+        assert_eq!(v["encoding"], "utf8");
+        assert_eq!(v["bytes_dropped"], 42);
+        assert_eq!(v["reason"], "invalid utf-8");
+        assert!(v.get("bytes_lost").is_none());
+
+        // With bytes_lost.
+        let n_loss = SubscribeEncodingErrorNotification {
+            connection_id: "c2".into(),
+            encoding_error: true,
+            encoding: "hex".into(),
+            bytes_dropped: 1,
+            reason: "bad".into(),
+            bytes_lost: Some(5),
+        };
+        let v = serde_json::to_value(&n_loss).unwrap();
+        assert_eq!(v["bytes_lost"], 5);
+    }
+
+    #[test]
+    fn subscribe_partial_frame_notification_serializes_with_expected_shape() {
+        let n = SubscribePartialFrameNotification {
+            connection_id: "c1".into(),
+            partial: true,
+            frame_index: 7,
+            frame_type: "cobs".into(),
+            encoding: "hex".into(),
+            data: "deadbeef".into(),
+            parsed: None,
+        };
+        let v = serde_json::to_value(&n).unwrap();
+        assert_eq!(v["connection_id"], "c1");
+        assert_eq!(v["partial"], true);
+        assert_eq!(v["frame_index"], 7);
+        assert_eq!(v["frame_type"], "cobs");
+        assert_eq!(v["encoding"], "hex");
+        assert_eq!(v["data"], "deadbeef");
+        assert!(v.get("parsed").is_none());
+    }
+
+    #[test]
+    fn subscribe_stop_notification_serializes_with_expected_shape() {
+        let n = SubscribeStopNotification {
+            connection_id: "c1".into(),
+            stop_reason: "timeout".into(),
+            truncated: false,
+            bytes_observed: 10,
+            bytes_returned: 10,
+            elapsed_ms: 100,
+            timeout_ms: Some(1000),
+            no_new_rx_timeout_ms: None,
+            from_offset: Some(0),
+            next_offset: 10,
+            bytes_lost: 0,
+            error: None,
+            matched: None,
+            match_index: None,
+            match_frame_index: None,
+            data: None,
+            frames_emitted: 0,
+            frames_dropped: 0,
+            start_offset: 0,
+            end_offset: 10,
+        };
+        let v = serde_json::to_value(&n).unwrap();
+        assert_eq!(v["stop_reason"], "timeout");
+        assert_eq!(v["truncated"], false);
+        assert_eq!(v["next_offset"], 10);
+        assert_eq!(v["start_offset"], 0);
+        assert_eq!(v["end_offset"], 10);
+        assert!(v.get("error").is_none());
+        assert!(v.get("matched").is_none());
+        assert!(v.get("no_new_rx_timeout_ms").is_none());
+        assert!(v.get("match_index").is_none());
+        assert!(v.get("match_frame_index").is_none());
+        assert!(v.get("data").is_none());
+
+        // With match.
+        let n_m = SubscribeStopNotification {
+            connection_id: "c2".into(),
+            stop_reason: "match_found".into(),
+            truncated: false,
+            bytes_observed: 20,
+            bytes_returned: 20,
+            elapsed_ms: 50,
+            timeout_ms: Some(500),
+            no_new_rx_timeout_ms: None,
+            from_offset: Some(0),
+            next_offset: 20,
+            bytes_lost: 0,
+            error: None,
+            matched: Some(true),
+            match_index: Some(5),
+            match_frame_index: Some(2),
+            data: Some("TARGET".into()),
+            frames_emitted: 3,
+            frames_dropped: 0,
+            start_offset: 0,
+            end_offset: 20,
+        };
+        let v = serde_json::to_value(&n_m).unwrap();
+        assert_eq!(v["matched"], true);
+        assert_eq!(v["match_index"], 5);
+        assert_eq!(v["match_frame_index"], 2);
+        assert_eq!(v["data"], "TARGET");
     }
 }

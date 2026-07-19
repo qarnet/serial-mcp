@@ -44,8 +44,15 @@ async fn flush_tool_handler_sequences_through_tx_session() {
     }
 
     // Flush output through the tool handler path.
+    let rx_sessions = std::sync::Arc::new(serial_mcp::rx_session::RxSessionManager::new(
+        std::sync::Arc::new(serial_mcp::buffer_budget::AtomicBudget::new(
+            1024 * 1024,
+            1024 * 1024,
+        )),
+    ));
     let result = serial_mcp::tools::io_ops::flush(
         &connections,
+        &rx_sessions,
         &tx_sessions,
         FlushArgs {
             connection_id: connection_id.clone(),

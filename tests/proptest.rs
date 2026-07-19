@@ -180,6 +180,7 @@ proptest! {
             rx_framing: None,
             rx_parser: None,
             protocol: None,
+            rx_buffer_size: serial_mcp::limits::DEFAULT_RX_BUFFER_SIZE,
         };
         assert_roundtrip!(args);
 
@@ -257,7 +258,7 @@ proptest! {
         max_buffered_bytes in any_usize(),
         enc in valid_encoding(),
     ) {
-        let args = ReadArgs { connection_id: id, timeout_ms: timeout, max_buffered_bytes, encoding: enc, r#match: None, no_new_rx_timeout_ms: None, rx_framing: None, rx_parser: None, protocol: None };
+        let args = ReadArgs { connection_id: id, from: None, timeout_ms: timeout, max_buffered_bytes, encoding: enc, r#match: None, no_new_rx_timeout_ms: None, rx_framing: None, rx_parser: None, protocol: None };
         assert_roundtrip!(args);
     }
 
@@ -294,6 +295,7 @@ proptest! {
             encoding: enc,
             max_buffered_bytes,
             poll_interval_ms: poll,
+            from: None,
             r#match: None,
             rx_framing: None,
             rx_parser: None,
@@ -342,7 +344,7 @@ proptest! {
         stop_reason in valid_stop_reason(), truncated: bool,
         bytes_obs in any_usize(), bytes_ret in any_usize(),
     ) {
-        let r = ReadResult { connection_id: id, name: None, bytes_read: br, encoding: enc, data, timeout_ms: timeout, no_new_rx_timeout_ms: None, elapsed_ms: elapsed, stop_reason, truncated, bytes_observed: bytes_obs, bytes_returned: bytes_ret, matched: false, match_index: None, match_frame_index: None, frames: None, frames_dropped: 0, error: None };
+        let r = ReadResult { connection_id: id, name: None, bytes_read: br, encoding: enc, data, timeout_ms: timeout, no_new_rx_timeout_ms: None, elapsed_ms: elapsed, stop_reason, truncated, bytes_observed: bytes_obs, bytes_returned: bytes_ret, matched: false, match_index: None, match_frame_index: None, frames: None, frames_dropped: 0, error: None, from_offset: None, next_offset: None, bytes_lost: 0, buffered_remaining: 0, start_offset: 0, end_offset: 0 };
         let v = serde_json::to_value(&r).unwrap();
         assert_schema_valid!(ReadResult, v);
     }
@@ -749,6 +751,7 @@ proptest! {
             rx_framing: None,
             rx_parser: None,
             protocol: None,
+            rx_buffer_size: serial_mcp::limits::DEFAULT_RX_BUFFER_SIZE,
         };
         assert_roundtrip!(args);
     }

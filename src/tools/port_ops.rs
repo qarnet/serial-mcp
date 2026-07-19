@@ -3,6 +3,8 @@ use std::sync::Arc;
 use rmcp::Json;
 use tracing::{debug, info};
 
+use crate::limits::{DEFAULT_RX_BUFFER_SIZE, MAX_RX_BUFFER_SIZE};
+use crate::rx_session::RxSessionManager;
 use crate::security::SecurityManager;
 use crate::serial::{ConnectionManager, PortInfo};
 use crate::tools::helpers::log_tool_err;
@@ -39,6 +41,7 @@ pub async fn list_connections(
 
 pub async fn open(
     connections: &Arc<ConnectionManager>,
+    rx_sessions: &Arc<RxSessionManager>,
     security: &SecurityManager,
     args: OpenArgs,
 ) -> Result<Json<OpenResult>, String> {
@@ -61,6 +64,7 @@ pub async fn open(
         .and_then(|ports| ports.into_iter().find(|p| p.name == port));
 
     let reconnect_policy = args.reconnect_policy.clone();
+    let rx_buffer_size = validate_rx_buffer_size(args.rx_buffer_size)?;
     let mut config = parse_open_args(args)?;
     config.port_info = port_info;
 
@@ -72,6 +76,21 @@ pub async fn open(
     // Set reconnect policy on the newly opened connection.
     if let Ok(conn) = connections.get(&connection_id).await {
         *conn.reconnect_policy.lock().expect("poisoned") = reconnect_policy;
+    }
+
+    // Create the RX session and start the always-on pump with a budgeted ring.
+    // The session is idempotent — if another code path created one first, this
+    // returns the existing session.
+    if let Ok(conn) = connections.get(&connection_id).await {
+        let session = rx_sessions
+            .get_or_create(conn, rx_buffer_size)
+            .await
+            .map_err(|e| log_tool_err("open", "Failed to create RX session", e))?;
+        debug!(
+            "rx_session: pump started for {} (ring={} bytes)",
+            session.connection_id(),
+            session.ring_capacity()
+        );
     }
 
     info!("Opened connection {} -> {}", connection_id, port);
@@ -112,6 +131,7 @@ pub async fn close(
 
 pub async fn get_status(
     connections: &Arc<ConnectionManager>,
+    rx_sessions: &Arc<RxSessionManager>,
     args: GetStatusArgs,
 ) -> Result<Json<GetStatusResult>, String> {
     debug!("Getting status for {}", args.connection_id);
@@ -122,6 +142,32 @@ pub async fn get_status(
         "Status {}: open={} tx={} rx={}",
         args.connection_id, !status.is_closed, status.tx_bytes, status.rx_bytes
     );
+
+    // Gather ring fields if a session exists.
+    let (
+        rx_buffer_size,
+        rx_start_offset,
+        rx_end_offset,
+        rx_cursor,
+        rx_buffered_unread,
+        rx_bytes_wrapped_total,
+    ) = if let Some(session) = rx_sessions.get(&args.connection_id).await {
+        let ring = session.ring();
+        let start = ring.start_offset();
+        let end = ring.end_offset();
+        let cur = session.read_cursor();
+        let unread = end.saturating_sub(cur);
+        (
+            session.ring_capacity(),
+            start,
+            end,
+            cur,
+            unread,
+            ring.bytes_wrapped_total(),
+        )
+    } else {
+        (0, 0, 0, 0, 0, 0)
+    };
 
     Ok(Json(GetStatusResult {
         connection_id: status.connection_id,
@@ -144,6 +190,12 @@ pub async fn get_status(
         state: status.state,
         reconnect_attempts: status.reconnect_attempts,
         last_error: status.last_error,
+        rx_buffer_size,
+        rx_start_offset,
+        rx_end_offset,
+        rx_cursor,
+        rx_buffered_unread,
+        rx_bytes_wrapped_total,
     }))
 }
 
@@ -224,6 +276,7 @@ pub fn list_profiles(
 
 pub async fn open_profile(
     connections: &Arc<ConnectionManager>,
+    rx_sessions: &Arc<RxSessionManager>,
     security: &SecurityManager,
     profiles: &[crate::profiles::Profile],
     args: OpenProfileArgs,
@@ -243,8 +296,15 @@ pub async fn open_profile(
         )
     })?;
 
+    let rx_buffer_size = if args.rx_buffer_size != DEFAULT_RX_BUFFER_SIZE {
+        args.rx_buffer_size
+    } else {
+        profile.defaults.rx_buffer_size
+    };
+
     open(
         connections,
+        rx_sessions,
         security,
         OpenArgs {
             port: matched.name.clone(),
@@ -269,6 +329,7 @@ pub async fn open_profile(
             rx_framing: profile.defaults.rx_framing.clone(),
             rx_parser: profile.defaults.rx_parser.clone(),
             protocol: profile.defaults.protocol,
+            rx_buffer_size,
         },
     )
     .await
@@ -299,6 +360,7 @@ pub async fn save_profile(
         rx_framing: conn.rx_framing_default().cloned(),
         rx_parser: conn.rx_parser_default().cloned(),
         protocol: conn.protocol_default(),
+        rx_buffer_size: DEFAULT_RX_BUFFER_SIZE,
     };
 
     let selector = crate::profiles::ProfileSelector {
@@ -443,4 +505,11 @@ pub async fn export_log(
         path: args.path,
         events_written: count,
     }))
+}
+
+fn validate_rx_buffer_size(size: usize) -> Result<usize, String> {
+    use crate::tools::helpers::clamp_or_err;
+    use crate::tools::helpers::require_min_or_err;
+    let size = require_min_or_err("open.rx_buffer_size", size, 1)?;
+    clamp_or_err("open.rx_buffer_size", size, MAX_RX_BUFFER_SIZE)
 }

@@ -78,6 +78,10 @@ pub struct ProfileDefaults {
     /// framing/parser fields that are themselves `None`.
     #[serde(default)]
     pub protocol: Option<crate::framing::ProtocolPreset>,
+    /// Default RX ring buffer size in bytes. Overridable at open time.
+    #[serde(default = "default_rx_buffer_size_profile")]
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub rx_buffer_size: usize,
 }
 
 fn default_baud() -> u32 {
@@ -95,6 +99,9 @@ fn default_parity() -> String {
 fn default_flow_control() -> String {
     "none".into()
 }
+fn default_rx_buffer_size_profile() -> usize {
+    crate::limits::DEFAULT_RX_BUFFER_SIZE
+}
 
 impl Default for ProfileDefaults {
     fn default() -> Self {
@@ -109,6 +116,7 @@ impl Default for ProfileDefaults {
             rx_framing: None,
             rx_parser: None,
             protocol: None,
+            rx_buffer_size: default_rx_buffer_size_profile(),
         }
     }
 }

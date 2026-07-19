@@ -17,17 +17,73 @@
 
 ## Near-term
 
+### `configure` tool + option-surface trim
+- sequenced after the 0.8.0 polish that folded `seek` into `read`,
+  dropped `peek`, unified `ReadFrom`, bumped `max_buffered_bytes` to
+  32 KiB, added ring bounds to `ReadResult`, extracted
+  `frame_outcome_to_stop` + `advance_cursor` helpers, replaced the
+  subscribe `serde_json::json!` payloads with typed
+  `Subscribe*Notification` structs, removed the `StreamHandle` `unsafe`
+  block, renamed `bytes_lost_total` → `bytes_wrapped_total`, and filled
+  the test gaps in ring/subscribe/disconnect-state coverage
+- the read/subscribe/open arg lists still carry power-user knobs
+  (`poll_interval_ms`, `max_buffered_bytes`, `rx_framing`, `rx_parser`)
+  that agents never tune and that add noise to the tool schemas; today
+  every read call ships 10 optional fields, of which the agent typically
+  uses 2-3 (`connection_id`, maybe `match`, maybe `timeout_ms`)
+- introduce a `configure` tool that sets default values for opening
+  connections (and potentially mutates defaults on a currently-open
+  connection): `max_buffered_bytes`, `rx_buffer_size`, framing/parser/
+  protocol defaults, `poll_interval_ms`, etc. — the values that today
+  live as per-call options or connection-default fields on `open`
+- the configure tool persists settings to the profiles TOML (or a
+  dedicated defaults file) so a host's preferred defaults survive
+  restarts
+- once defaults flow through `configure`, drop the corresponding
+  per-call fields from `read`/`subscribe` and keep only the ones that
+  genuinely vary per call: `connection_id`, `from`, `timeout_ms`,
+  `no_new_rx_timeout_ms`, `encoding`, `match`, and the `data`/`target`
+  fields on write/flush. Framing and parser stay reachable via the
+  `protocol` preset and via connection-level `configure` defaults; the
+  deep `rx_framing`/`rx_parser` objects stop appearing on every
+  read/subscribe call
+- reduces agent decision fatigue: the default read becomes the powerful
+  first call (large buffer, sensible timeout, connection-default
+  framing), and the surface a caller sees is the small set that actually
+  changes between calls
+
+### Local-only usage statistics for development
+- collect local metadata on tool-call frequency, stop-reason
+  distribution, option-usage frequency (which `from` variants agents
+  actually pick, how often `match`/`framing` options get used, average
+  `max_buffered_bytes` actually requested, etc.) to drive evidence-based
+  decisions on which options to keep, trim, or default differently
+- strictly local: write to a file on the host (e.g. under
+  `~/.local/share/serial-mcp/` or a configured path), never transmit
+  over the network, no telemetry, no remote endpoint, opt-out by
+  default with an explicit enable
+- the goal is development insight (which tools/options are dead weight,
+  which defaults are wrong), not user tracking — design the schema
+  around questions we actually want to answer ("is `from: now` used
+  enough to justify keeping it?", "do agents ever set
+  `poll_interval_ms`?")
+- pairs with the `configure` tool + option-surface trim above: the
+  stats inform which fields to cut, and cutting fields makes the
+  remaining stats cleaner
+
 ### `transact` tool (write-then-await-response)
-- one tool call: register the RX consumer FIRST, then write, then await
-  match/frames/timeout — the request/response primitive for AT, Modbus,
-  GRBL-style traffic
-- fixes a race agents hit today: `read` returns only future bytes, so a
-  device can answer in the gap between separate write and read calls; also
-  halves round trips
-- composes existing plumbing (`tx_session` + `read_bytes_via_session`); no
-  new concepts
-- this is the minimal, safe kernel of "Expect/script automation" (§ Later) —
-  ship it first, revisit scripting after
+- one tool call: write, then await match/frames/timeout — the
+  request/response primitive for AT, Modbus, GRBL-style traffic
+- the write-then-read race that motivated this is now largely solved by
+  the RX ring (0.8.0): `read` returns buffered bytes from the cursor
+  (cat semantics), so write-then-read works without a separate consumer
+  registration. `transact`'s remaining value is halving round trips
+  (one MCP call instead of write + read) and providing a single-call
+  request/response contract for agents that don't want to manage cursors
+- composes existing plumbing (`tx_session` + the ring-based `read`);
+  no new concepts
+- this is the minimal, safe kernel of "Expect/script automation" (§
+  Later) — ship it first, revisit scripting after
 
 ### `compute_checksum` utility tool
 - pure tool: compute crc16-modbus, crc32, xor, lrc, sum8 over caller-supplied
@@ -43,8 +99,7 @@
 - covers the long tail of proprietary vendor protocols without building the
   full plugin API (see "External decoder/plugin API" below — this is the
   lighter first step)
-- natural follow-on to the checksum-helper refactor in
-  [review-hardening-plan.md](review-hardening-plan.md) § 2F
+- natural follow-on to the checksum-helper refactor that landed in 0.7.3
 
 ### TX pacing / throttling
 - inter-chunk or inter-line delay on `write` (per-call field + connection
@@ -56,9 +111,9 @@
 ### Modbus ASCII TX auto-LRC
 - TX-side counterpart to the shipped RX LRC validation: hex-encode a binary
   PDU and append the LRC on write (`:` + hex + LRC + `\r\n`)
-- deliberately split out of the NMEA TX auto-checksum work
-  ([review-hardening-plan.md](review-hardening-plan.md) § 3B) — needs
-  hex-encoding of a binary payload, not just a checksum append
+- deliberately split out of the NMEA TX auto-checksum work that landed
+  in 0.7.3 — needs hex-encoding of a binary payload, not just a
+  checksum append
 - **refactor trigger (one-consumer rule):** when this lands, extract a shared
   TX checksum-append layer instead of growing `TxFramingMode` variant-by-
   variant. The `TxFramingMode::Nmea` encode arm (shipped) is the first
@@ -98,8 +153,7 @@
 ## Later
 
 ### Flow-control-aware ring backpressure (pause-on-full)
-- follow-up to the RX ring redesign
-  ([rx-ring-redesign-plan.md](rx-ring-redesign-plan.md)): the always-on pump
+- follow-up to the 0.8.0 RX ring redesign: the always-on pump
   drains the kernel buffer continuously, so with RTS/CTS enabled the kernel
   never deasserts RTS and the device is never throttled — sustained unread
   traffic wraps the ring (oldest bytes lost, observably via `bytes_lost`)
@@ -113,8 +167,7 @@
   just moves the loss from our ring to the kernel buffer/UART FIFO
 
 ### Persistent per-connection framing decoder
-- deferred from the RX ring redesign
-  ([rx-ring-redesign-plan.md](rx-ring-redesign-plan.md)): framing is per-call
+- deferred from the 0.8.0 RX ring redesign: framing is per-call
   and applied to the drained ring window, so a frame torn at a call boundary
   (partial drain, ring wrap) decodes as garbage or a SLIP error
 - carrying decoder state across `read` calls fixes that, but requires
@@ -122,8 +175,7 @@
   rethinking its place in the 4-layer precedence model — needs design
 
 ### Per-client RX cursors
-- deferred from the RX ring redesign
-  ([rx-ring-redesign-plan.md](rx-ring-redesign-plan.md)): multiple HTTP
+- deferred from the 0.8.0 RX ring redesign: multiple HTTP
   clients share the one consuming read cursor, so concurrent consuming reads
   interleave their drains
 - offsets in every result already make this diagnosable; the fix, if shared
@@ -236,10 +288,53 @@ Non-feature work, roughly in suggested order. From the 2026-07-05 repo review.
   machine, ~3.4k lines of tests) the single file is past its scaling limit
 - target shape: `framing/` with `config.rs`, `decoder.rs`, `codecs.rs`,
   `parsers/`, tests alongside their subjects
-- **major rework — sequence AFTER
-  [review-hardening-plan.md](review-hardening-plan.md) Phases 1–2 land**;
-  those rewrite chunks of the same file and a split first would create
-  painful conflicts
+- major rework — sequence AFTER the review-hardening work that rewrites
+  chunks of the same file; a split first would create painful conflicts
+
+### Split `src/serial.rs` and `src/tools/helpers.rs`
+- `src/serial.rs` (~2.2k lines) holds `SerialConnection` (29 fields),
+  `ConnectionManager`, `ConnectionConfig`, six enums, `PortInfo`, the
+  `SerialIo` trait, and a `test_support` module — god-file; split into
+  `serial/config.rs`, `serial/connection.rs`, `serial/manager.rs`,
+  `serial/port_info.rs`, `serial/test_support.rs`
+- `src/tools/helpers.rs` (~1.5k lines) mixes validation, ring driving,
+  result building, sinks, encoding fallback, and open-arg parsing —
+  split into `tools/rx_validate.rs`, `tools/read_loop.rs`,
+  `tools/result_builders.rs`; the 0.8.0 `frame_outcome_to_stop` and
+  `advance_cursor` helpers are the first step in that direction
+- `read_bytes_from_ring` (~674 lines pre-polish, now leaner) and
+  `stream_rx_from_ring` (~395 lines) are the longest functions in the
+  codebase; further decompose into `read_initial_slice` /
+  `read_wait_loop` / `handle_frame_outcome` once the god-file split
+  unblocks finer module boundaries
+
+### `UInt` newtype to kill schemars `uint_schema` boilerplate
+- 112 `#[schemars(schema_with = "crate::schema_helpers::uint_schema")]`
+  annotations are sprinkled across the tree, with a documented
+  regression history (b12b09fd, bc37a0b0, PortInfo miss) — missing one
+  is a known bug vector
+- schemars 1.x emits non-standard `"format": "uintN"` for unsigned
+  integer fields; the per-field attribute is the workaround
+- a `UInt` (and `OptionUInt`) newtype that derives `JsonSchema` natively
+  without the format keyword, OR a schemars visitor that strips the
+  format globally, would collapse the entire class of bug and remove
+  the per-struct `check_schema!` maintenance burden
+- coordinate with any schemars 2.x migration if one is on the roadmap;
+  the upstream fix may make the newtype redundant
+
+### Hex fallback + matcher-truncation parity between read and subscribe
+- `read` falls back to hex encoding when framing-error bytes can't be
+  represented in the requested encoding; `subscribe` drops the
+  notification and emits a warning — binary SLIP/COBS data under utf8
+  subscribe is just lost (documented asymmetry in AGENTS.md, not
+  abstracted)
+- `subscribe` bounds matcher memory with `truncate_front` when the
+  buffered window exceeds `max_buffered_bytes`; `read` does not —
+  asymmetric and undocumented
+- decide: unify on hex fallback (subscribe learns it) or drop it (read
+  stops falling back and surfaces the error like subscribe); unify
+  matcher truncation (read learns it) or document why read is unbounded
+- small behavior change, needs a design call before implementing
 
 ### Proper dependabot / renovate setup
 - dependency updates (cargo crates + pinned GitHub Actions) are currently

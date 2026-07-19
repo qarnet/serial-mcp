@@ -230,13 +230,15 @@ mod tests {
 
     #[tokio::test]
     async fn tx_write_during_active_pump_returns_quickly() {
+        use crate::buffer_budget::AtomicBudget;
         use crate::rx_session::RxSessionManager;
 
         let (conn, _peer) = loopback_connection("test-write-fast");
         let conn = Arc::new(conn);
-        let rx_mgr = RxSessionManager::new();
-        let rx_session = rx_mgr.get_or_create(Arc::clone(&conn)).await;
-        let _rx = rx_session.register_blocking();
+        let budget: Arc<dyn crate::buffer_budget::BufferBudget> =
+            Arc::new(AtomicBudget::new(1024 * 1024, 1024 * 1024));
+        let rx_mgr = RxSessionManager::new(budget);
+        let _rx_session = rx_mgr.get_or_create(Arc::clone(&conn), 1024).await.unwrap();
 
         let tx_session = TxSession::new(Arc::clone(&conn));
 
@@ -306,10 +308,13 @@ mod tests {
         let mgr = TxSessionManager::new();
         assert_eq!(mgr.count().await, 0);
 
+        use crate::buffer_budget::AtomicBudget;
         use crate::rx_session::RxSessionManager;
-        let rx_mgr = RxSessionManager::new();
-        let rx_session = rx_mgr.get_or_create(Arc::clone(&conn)).await;
-        let _rx = rx_session.register_blocking();
+        let budget: Arc<dyn crate::buffer_budget::BufferBudget> =
+            Arc::new(AtomicBudget::new(1024 * 1024, 1024 * 1024));
+        let rx_mgr = RxSessionManager::new(budget);
+        let rx_session = rx_mgr.get_or_create(Arc::clone(&conn), 1024).await.unwrap();
+        drop(rx_session); // pump is running, no need to hold a consumer
 
         assert_eq!(mgr.count().await, 0);
 

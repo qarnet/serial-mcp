@@ -1,19 +1,22 @@
 use std::sync::Arc;
 
 use rmcp::{model::Meta, Json, Peer, RoleServer};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::buffer_budget::BufferBudget;
 use crate::codec;
+use crate::limits::DEFAULT_RX_BUFFER_SIZE;
 use crate::rx_session::RxSessionManager;
 use crate::serial::ConnectionManager;
 use crate::serial::FlushTarget;
 use crate::tools::helpers::{
     build_read_result, clamp_or_err, log_tool_err, lookup_connection, map_budget_err,
-    parse_encoding, read_bytes_via_session, validate_rx_request, ResolvedRxArgs, RxLimits,
+    parse_encoding, read_bytes_from_ring, validate_rx_request, ResolvedRxArgs, RxLimits,
     MAX_READ_BYTES, MAX_WRITE_BYTES, MIN_READ_BYTES,
 };
-use crate::tools::types::{FlushArgs, FlushResult, ReadArgs, ReadResult, WriteArgs, WriteResult};
+use crate::tools::types::{
+    FlushArgs, FlushResult, ReadArgs, ReadFrom, ReadResult, WriteArgs, WriteResult,
+};
 
 use crate::tx_session::TxSessionManager;
 pub async fn write(
@@ -105,15 +108,17 @@ pub async fn read(
     )
     .await?;
 
-    // Reserve budget before registering consumer.
+    // Reserve budget before reading.
     let _reservation = budget
         .try_reserve(max_buffered_bytes)
         .map_err(|e| map_budget_err("read.max_buffered_bytes", e))?;
 
     let progress_token = meta.get_progress_token();
 
-    let session = rx_sessions.get_or_create(Arc::clone(&connection)).await;
-    let event_rx = session.register_blocking();
+    let session = rx_sessions
+        .get_or_create(Arc::clone(&connection), DEFAULT_RX_BUFFER_SIZE)
+        .await
+        .map_err(|e| format!("read: {e}"))?;
 
     // Resolve rx_framing + rx_parser via the shared 4-layer precedence helper.
     let rx_framing = crate::precedence::resolve_field(
@@ -131,8 +136,21 @@ pub async fn read(
         connection.protocol_default(),
     );
 
-    let outcome = read_bytes_via_session(
-        event_rx,
+    // Resolve the initial read cursor from the `from` parameter.
+    // Default: Cursor (shared read cursor). Writes the cursor BEFORE calling
+    // read_bytes_from_ring so the agent can re-pass the same from: {offset: N}
+    // to re-read non-destructively (cursor gets reset on each call).
+    let ring = session.ring();
+    let initial_cursor = match args.from.as_ref().unwrap_or(&ReadFrom::Cursor) {
+        ReadFrom::Now => ring.end_offset(),
+        ReadFrom::Cursor => session.read_cursor(),
+        ReadFrom::BufferStart => ring.start_offset(),
+        ReadFrom::Offset { offset } => *offset,
+    };
+    session.set_read_cursor(initial_cursor);
+
+    let outcome = read_bytes_from_ring(
+        session,
         max_buffered_bytes,
         args.timeout_ms,
         &ct,
@@ -145,8 +163,6 @@ pub async fn read(
         rx_parser,
     )
     .await?;
-
-    session.prune_consumers();
 
     let result = build_read_result(
         outcome,
@@ -164,7 +180,6 @@ pub async fn read(
         log.truncated(result.0.bytes_observed, result.0.bytes_returned);
     }
     if result.0.matched {
-        // Extract pattern info from the result
         if let Some(ref m) = args.r#match {
             log.match_found(&m.pattern, &m.config.mode.to_string());
         }
@@ -174,6 +189,7 @@ pub async fn read(
 
 pub async fn flush(
     connections: &Arc<ConnectionManager>,
+    rx_sessions: &Arc<RxSessionManager>,
     tx_sessions: &Arc<TxSessionManager>,
     args: FlushArgs,
 ) -> Result<Json<FlushResult>, String> {
@@ -192,6 +208,18 @@ pub async fn flush(
                         e,
                     )
                 })?;
+            // Clear the ring and clamp the shared read cursor to live edge.
+            // This discards all unread buffered RX data. To skip past data
+            // without destroying it, use `read` with `from: "now"` and discard
+            // the result.
+            if let Some(session) = rx_sessions.get(&args.connection_id).await {
+                session.ring().clear();
+                session.set_read_cursor(session.ring().end_offset());
+                warn!(
+                    "flush(input): ring cleared for {}; all unread RX data discarded",
+                    args.connection_id
+                );
+            }
         }
         FlushTarget::Output => {
             let session = tx_sessions.get_or_create(Arc::clone(&connection)).await;

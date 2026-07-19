@@ -9,3 +9,7 @@ pub const MAX_WRITE_BYTES: usize = 1024 * 1024; // 1 MiB
 // Buffer budget defaults
 pub const DEFAULT_MAX_PROGRAM_BUFFERED_BYTES: usize = 1024 * 1024 * 1024; // 1 GiB
 pub const DEFAULT_MAX_TOOL_BUFFERED_BYTES: usize = 1024 * 1024; // 1 MiB
+
+// RX ring buffer defaults (per-connection capture ring)
+pub const DEFAULT_RX_BUFFER_SIZE: usize = 256 * 1024; // 256 KiB
+pub const MAX_RX_BUFFER_SIZE: usize = 16 * 1024 * 1024; // 16 MiB per-connection ceiling

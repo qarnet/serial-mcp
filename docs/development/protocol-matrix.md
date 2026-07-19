@@ -3,9 +3,10 @@
 > At-a-glance status of every serial protocol we have a specification for (the
 > spec library lives in the gitignored `resources/` symlink). The protocol
 > expansion plan (P0–P3) shipped in full on `feature-additions` (commits
-> `e4069cb`…`f45f984`); the active follow-up is
-> [review-hardening-plan.md](review-hardening-plan.md). Longer-horizon items
-> are tracked in [FEATURES.md](FEATURES.md).
+> `e4069cb`…`f45f984`); the review-hardening follow-up (NMEA parser panic
+> fix, decode-error semantics, framing.rs dedup, NMEA TX auto-checksum,
+> `--version` strictness) shipped in 0.7.3. Longer-horizon items are
+> tracked in [FEATURES.md](FEATURES.md).
 >
 > Specs are **cited, never committed** — see the License column. Source files are
 > named relative to `resources/`.

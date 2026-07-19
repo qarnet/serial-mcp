@@ -122,6 +122,8 @@ async fn emulator_task(mut master: File) {
 // Full agent workflow test
 // ------------------------------------------------------------------
 
+// Ignored: the read stages (3-6, 8, 10-13) now work with ring-based read.
+// The subscribe stages (2, 7, 9) use ring-based subscribe (Phase 2).
 #[tokio::test]
 async fn protocol_emulator_workflow() {
     // ---- Stage 0: Open PTY, spawn emulator, start server, open port ----
@@ -200,6 +202,8 @@ async fn protocol_emulator_workflow() {
 
     // Subscribe is always background after PLAN 1b. Data arrives as
     // notifications rather than inline in the tool result.
+    // Use from: "buffer_start" to replay the emulator's response that
+    // was already captured in the ring after the write.
     let sub_result = client
         .peer()
         .call_tool(tool_request(
@@ -209,6 +213,7 @@ async fn protocol_emulator_workflow() {
                 "timeout_ms": 3000,
                 "encoding": "utf8",
                 "poll_interval_ms": 50,
+                "from": {"type": "buffer_start"},
             }),
         ))
         .await
@@ -279,6 +284,7 @@ async fn protocol_emulator_workflow() {
         ))
         .await
         .unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
 
     let read_result = client
         .peer()
@@ -369,7 +375,10 @@ async fn protocol_emulator_workflow() {
         .unwrap();
 
     // Write the command; the emulator responds synchronously so data
-    // will be waiting in the serial buffer when read starts.
+    // will be waiting in the serial buffer when read starts. Under the
+    // ring model, give the always-on pump a moment to capture the full
+    // response before the read checks buffered history (otherwise the
+    // match may fire on a partial "T=" before "26.75" arrives).
     client
         .peer()
         .call_tool(tool_request(
@@ -382,6 +391,7 @@ async fn protocol_emulator_workflow() {
         ))
         .await
         .unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
 
     let match_result = client
         .peer()
@@ -392,7 +402,7 @@ async fn protocol_emulator_workflow() {
                 "timeout_ms": 5000,
                 "max_buffered_bytes": 1024,
                 "encoding": "utf8",
-                "match": { "pattern": "T=" },
+                "match": { "pattern": "T=26.75" },
             }),
         ))
         .await
@@ -404,7 +414,7 @@ async fn protocol_emulator_workflow() {
     let match_data = match_structured["data"].as_str().unwrap();
     assert!(
         match_data.contains("T=26.75"),
-        "read with match result must contain temp"
+        "read with match result must contain temp: {match_data}"
     );
 
     // ---- Stage 6: read with match timeout ----
