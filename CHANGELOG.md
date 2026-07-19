@@ -2,7 +2,7 @@
 
 | Version | Date | Highlights |
 |---|---|---|
-| [Unreleased](#unreleased) | — | `configure` tool (profile + live-connection modes), `compute_checksum` tool (xor + lrc), `transact` tool (write-then-read); `max_buffered_bytes` and `poll_interval_ms` moved from per-call to connection defaults (via `ProfileDefaults` + `configure`); `save_profile` `rx_buffer_size` snapshot bug fixed; tool count 22 → 24 |
+| [Unreleased](#unreleased) | — | `configure` tool (profile + live-connection modes), `compute_checksum` tool (xor + lrc), `transact` tool (write-then-read); `max_buffered_bytes` and `poll_interval_ms` moved from per-call to connection defaults (via `ProfileDefaults` + `configure`); `save_profile` `rx_buffer_size` snapshot bug fixed; tool count 22 → 25 |
 | [0.8.0](#080) | 2026-07-08 | RX ring buffer redesign: always-on pump + `RxRing` capture from open to close; `read` cat semantics (buffered bytes immediately + `peek` + offset fields); `seek` tool (non-destructive cursor move); `subscribe` cursor follower with `from` history replay + `bytes_lost` gap reporting; `flush(input)` ring clear; `get_status` ring fields; `open` `rx_buffer_size` (256 KiB default); `ConsumerRegistry`/`RxEvent` fanout deleted; unified read/subscribe semantics; budget ring at open |
 | [0.7.4](#074) | 2026-07-07 | `server.json` becomes a packages-less registry template (publish workflow generates release URLs + hashes; drift guard forbids committed `packages`) |
 | [0.7.3](#073) | 2026-07-07 | NMEA parser panic fix + P-talker proprietary split; decode-error semantics (`PushOutcome`, drop-and-count checksums, `read` partial results + `error` field + hex fallback); `docs/protocols.md` guide; framing.rs dedup (`emit_frame`/`check_checksum`/`take_frame`/`match_line_byte`/`xor_checksum`/`lrc` free functions); NMEA malformed-checksum body parse; `TxFramingMode::Nmea` auto `*XX` checksum; `--version` argv scan strictness; table-driven preset tests |
@@ -96,7 +96,7 @@
 ## [Unreleased]
 
 ### Added
-- **`configure` tool** (24 → 24 total): two modes — profile (persist defaults to TOML) and connection (mutate live connection defaults for framing/parser/protocol, reconnect_policy, max_buffered_bytes, and poll_interval_ms). `log_capacity`/`log_enabled`/`rx_buffer_size`/serial-line params are profile-only (LogBuffer has no live setter).
+- **`configure` tool** (22 → 25 total): two modes — profile (persist defaults to TOML) and connection (mutate live connection defaults for framing/parser/protocol, reconnect_policy, max_buffered_bytes, and poll_interval_ms). `log_capacity`/`log_enabled`/`rx_buffer_size`/serial-line params are profile-only (LogBuffer has no live setter).
 - **`compute_checksum` tool**: pure utility — compute xor (NMEA-0183) and lrc (Modbus ASCII) checksums over caller-supplied bytes.
 - **`transact` tool**: write-then-await-response in one call, default `from: "now"` to skip pre-write backlog.
 - `ProfileDefaults` now carries `max_buffered_bytes` (32768), `poll_interval_ms` (200), `reconnect_policy`, `log_capacity` (1024), and `log_enabled` (true). These flow through `OpenArgs` → `ConnectionConfig` → `SerialConnection`.
