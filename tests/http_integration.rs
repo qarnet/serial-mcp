@@ -281,9 +281,330 @@ async fn call_tool_open_with_bad_data_bits_returns_is_error() {
         .await
         .unwrap();
     assert_eq!(result.is_error, Some(true), "{result:?}");
+
     client.cancel().await.ok();
 }
 
+// ── configure tool: profile mode ─────────────────────────────────────────────
+
+#[tokio::test]
+async fn configure_profile_creates_new_profile() {
+    let server = TestServer::start().await;
+    let (client, _rx) = connect_client(&server).await.unwrap();
+    let name = "test-configure-create";
+    let result = client
+        .peer()
+        .call_tool(tool_request(
+            "configure",
+            json!({
+                "profile": name,
+                "defaults": { "baud_rate": 9600, "rx_framing": {"type": "line"} }
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_ne!(result.is_error, Some(true), "{result:?}");
+    let s = result.structured_content.expect("structured");
+    assert_eq!(s["mode"], "profile");
+    assert_eq!(s["created"], true);
+    assert_eq!(s["defaults"]["baud_rate"], 9600);
+    // Verify it shows up in list_profiles.
+    let listed = client
+        .peer()
+        .call_tool(tool_request("list_profiles", json!({})))
+        .await
+        .unwrap();
+    let ls = listed.structured_content.expect("structured");
+    let names = ls["profiles"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p["name"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert!(names.contains(&name), "profile should be listed: {names:?}");
+    // Cleanup.
+    let _ = client
+        .peer()
+        .call_tool(tool_request(
+            "delete_profile",
+            json!({"profile_name": name}),
+        ))
+        .await;
+    client.cancel().await.ok();
+}
+
+#[tokio::test]
+async fn configure_profile_overwrites_existing() {
+    let server = TestServer::start().await;
+    let (client, _rx) = connect_client(&server).await.unwrap();
+    let name = "test-configure-ow";
+    // Create initial profile.
+    let _ = client
+        .peer()
+        .call_tool(tool_request(
+            "configure",
+            json!({
+                "profile": name,
+                "defaults": { "baud_rate": 9600 }
+            }),
+        ))
+        .await
+        .unwrap();
+    // Overwrite via configure with overwrite: true, higher baud.
+    let result = client
+        .peer()
+        .call_tool(tool_request(
+            "configure",
+            json!({
+                "profile": name,
+                "overwrite": true,
+                "defaults": { "baud_rate": 19200 }
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_ne!(result.is_error, Some(true), "{result:?}");
+    let s = result.structured_content.expect("structured");
+    assert_eq!(s["mode"], "profile");
+    assert_eq!(s["created"], false);
+    assert_eq!(s["defaults"]["baud_rate"], 19200);
+    // Cleanup.
+    let _ = client
+        .peer()
+        .call_tool(tool_request(
+            "delete_profile",
+            json!({"profile_name": name}),
+        ))
+        .await;
+    client.cancel().await.ok();
+}
+
+#[tokio::test]
+async fn configure_profile_rejects_existing_without_overwrite() {
+    let server = TestServer::start().await;
+    let (client, _rx) = connect_client(&server).await.unwrap();
+    let name = "test-configure-rej";
+    // Create initial profile.
+    let _ = client
+        .peer()
+        .call_tool(tool_request(
+            "configure",
+            json!({
+                "profile": name,
+                "defaults": { "baud_rate": 9600 }
+            }),
+        ))
+        .await
+        .unwrap();
+    // Attempt overwrite without overwrite flag.
+    let result = client
+        .peer()
+        .call_tool(tool_request(
+            "configure",
+            json!({
+                "profile": name,
+                "defaults": { "baud_rate": 19200 }
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        result.is_error,
+        Some(true),
+        "should reject existing profile without overwrite: {result:?}"
+    );
+    // Cleanup.
+    let _ = client
+        .peer()
+        .call_tool(tool_request(
+            "delete_profile",
+            json!({"profile_name": name}),
+        ))
+        .await;
+    client.cancel().await.ok();
+}
+
+// ── configure tool: validation errors ────────────────────────────────────────
+
+#[tokio::test]
+async fn configure_rejects_both_profile_and_connection_id() {
+    let server = TestServer::start().await;
+    let (client, _rx) = connect_client(&server).await.unwrap();
+    let result = client
+        .peer()
+        .call_tool(tool_request(
+            "configure",
+            json!({
+                "profile": "x",
+                "connection_id": "y"
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        result.is_error,
+        Some(true),
+        "should reject both profile and connection_id: {result:?}"
+    );
+    client.cancel().await.ok();
+}
+
+#[tokio::test]
+async fn configure_rejects_neither() {
+    let server = TestServer::start().await;
+    let (client, _rx) = connect_client(&server).await.unwrap();
+    let result = client
+        .peer()
+        .call_tool(tool_request("configure", json!({})))
+        .await
+        .unwrap();
+    assert_eq!(
+        result.is_error,
+        Some(true),
+        "should reject neither profile nor connection_id: {result:?}"
+    );
+    client.cancel().await.ok();
+}
+
+// ── compute_checksum: known vectors ──────────────────────────────────────────
+
+#[tokio::test]
+async fn compute_checksum_xor_known_vector() {
+    let server = TestServer::start().await;
+    let (client, _rx) = connect_client(&server).await.unwrap();
+    let r = client
+        .peer()
+        .call_tool(tool_request(
+            "compute_checksum",
+            json!({
+                "data": "hello",
+                "algorithm": "xor"
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_ne!(r.is_error, Some(true), "{r:?}");
+    let s = r.structured_content.expect("structured");
+    assert_eq!(s["algorithm"], "xor");
+    assert_eq!(s["checksum_hex"], "62");
+    assert_eq!(s["checksum"], 98);
+    assert_eq!(s["byte_count"], 5);
+    client.cancel().await.ok();
+}
+
+#[tokio::test]
+async fn compute_checksum_lrc_known_vector() {
+    let server = TestServer::start().await;
+    let (client, _rx) = connect_client(&server).await.unwrap();
+    let r = client
+        .peer()
+        .call_tool(tool_request(
+            "compute_checksum",
+            json!({
+                "data": "010203",
+                "encoding": "hex",
+                "algorithm": "lrc"
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_ne!(r.is_error, Some(true), "{r:?}");
+    let s = r.structured_content.expect("structured");
+    assert_eq!(s["algorithm"], "lrc");
+    assert_eq!(s["checksum_hex"], "FA");
+    assert_eq!(s["checksum"], 250);
+    assert_eq!(s["byte_count"], 3);
+    client.cancel().await.ok();
+}
+
+#[tokio::test]
+async fn compute_checksum_hex_input() {
+    let server = TestServer::start().await;
+    let (client, _rx) = connect_client(&server).await.unwrap();
+    let r = client
+        .peer()
+        .call_tool(tool_request(
+            "compute_checksum",
+            json!({
+                "data": "48656c6c6f",
+                "encoding": "hex",
+                "algorithm": "xor"
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_ne!(r.is_error, Some(true), "{r:?}");
+    let s = r.structured_content.expect("structured");
+    assert_eq!(s["checksum_hex"], "42");
+    assert_eq!(s["byte_count"], 5);
+    client.cancel().await.ok();
+}
+
+#[tokio::test]
+async fn compute_checksum_base64_input() {
+    let server = TestServer::start().await;
+    let (client, _rx) = connect_client(&server).await.unwrap();
+    let r = client
+        .peer()
+        .call_tool(tool_request(
+            "compute_checksum",
+            json!({
+                "data": "SGVsbG8=",
+                "encoding": "base64",
+                "algorithm": "xor"
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_ne!(r.is_error, Some(true), "{r:?}");
+    let s = r.structured_content.expect("structured");
+    assert_eq!(s["checksum_hex"], "42");
+    client.cancel().await.ok();
+}
+
+#[tokio::test]
+async fn compute_checksum_rejects_bad_encoding() {
+    let server = TestServer::start().await;
+    let (client, _rx) = connect_client(&server).await.unwrap();
+    let r = client
+        .peer()
+        .call_tool(tool_request(
+            "compute_checksum",
+            json!({
+                "data": "hello",
+                "encoding": "garbage",
+                "algorithm": "xor"
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r.is_error, Some(true), "should reject bad encoding: {r:?}");
+    client.cancel().await.ok();
+}
+
+#[tokio::test]
+async fn compute_checksum_rejects_bad_hex() {
+    let server = TestServer::start().await;
+    let (client, _rx) = connect_client(&server).await.unwrap();
+    let r = client
+        .peer()
+        .call_tool(tool_request(
+            "compute_checksum",
+            json!({
+                "data": "ZZ",
+                "encoding": "hex",
+                "algorithm": "xor"
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        r.is_error,
+        Some(true),
+        "should reject invalid hex data: {r:?}"
+    );
+    client.cancel().await.ok();
+}
 #[tokio::test]
 async fn call_tool_list_ports_returns_structured_result() {
     let server = common::spawned::SpawnedServer::start().await;
