@@ -846,6 +846,19 @@ async fn native_read_buffer_budget_stops_under_flood() {
     // either "drained" or "max_buffered_bytes" depending on timing.
     tokio::time::sleep(Duration::from_millis(1000)).await;
 
+    // Configure max_buffered_bytes=256 on the connection.
+    client
+        .peer()
+        .call_tool(tool_request(
+            "configure",
+            json!({
+                "connection_id": id,
+                "defaults": { "max_buffered_bytes": 256 },
+            }),
+        ))
+        .await
+        .expect("configure call");
+
     let result = client
         .peer()
         .call_tool(tool_request(
@@ -2417,6 +2430,19 @@ async fn native_subscribe_line_framing_emits_per_frame() {
     let (client, mut rx) = connect_client(&server).await.unwrap();
     let id = open_pty(&client, &pty_path).await;
     sync_boot(&client, &id).await;
+
+    // Configure poll_interval_ms=50 and max_buffered_bytes=8192 for the subscribe.
+    client
+        .peer()
+        .call_tool(tool_request(
+            "configure",
+            json!({
+                "connection_id": id,
+                "defaults": { "poll_interval_ms": 50, "max_buffered_bytes": 8192 },
+            }),
+        ))
+        .await
+        .unwrap();
 
     // Subscribe with line framing, auto-stop after 2 seconds.
     client

@@ -101,6 +101,61 @@ impl TestServer {
             handle,
         }
     }
+
+    /// Start a server with a custom profiles path (for tests that exercise
+    /// `configure`/`save_profile`/`delete_profile` without polluting the
+    /// user's real `$XDG_CONFIG_HOME/serial-mcp/profiles.toml`). The caller
+    /// owns the tempdir and must keep it alive for the test's duration.
+    pub async fn start_with_profiles_path(
+        manager: Arc<ConnectionManager>,
+        profiles_path: std::path::PathBuf,
+    ) -> Self {
+        let security = SecurityManager::from_patterns::<[&str; 0]>([]);
+        Self::start_with_profiles_path_and_security(manager, profiles_path, security).await
+    }
+
+    /// Start a server with a custom [`ConnectionManager`], [`SecurityManager`],
+    /// and profiles path (for tests that exercise multiple concerns at once).
+    pub async fn start_with_profiles_path_and_security(
+        manager: Arc<ConnectionManager>,
+        profiles_path: std::path::PathBuf,
+        security: SecurityManager,
+    ) -> Self {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let url = format!("http://{addr}/mcp");
+        let shutdown = CancellationToken::new();
+
+        let streams: StreamRegistry = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+        let manager_for_service = Arc::clone(&manager);
+        let streams_for_service = Arc::clone(&streams);
+        let shutdown_for_service = shutdown.child_token();
+        let profiles_path_for_service = profiles_path.clone();
+        let service = StreamableHttpService::new(
+            move || {
+                Ok(SerialHandler::builder()
+                    .connections(Arc::clone(&manager_for_service))
+                    .streams(Arc::clone(&streams_for_service))
+                    .security(security.clone())
+                    .build()
+                    .with_profiles(profiles_path_for_service.clone(), Vec::new()))
+            },
+            LocalSessionManager::default().into(),
+            StreamableHttpServerConfig::default().with_cancellation_token(shutdown_for_service),
+        );
+        let router = axum::Router::new().nest_service("/mcp", service);
+
+        let handle = tokio::spawn(async move {
+            let _ = axum::serve(listener, router).await;
+        });
+
+        TestServer {
+            url,
+            manager,
+            shutdown,
+            handle,
+        }
+    }
 }
 
 impl Drop for TestServer {

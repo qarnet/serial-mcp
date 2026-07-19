@@ -54,6 +54,16 @@ pub struct OpenArgs {
     #[serde(default = "default_rx_buffer_size")]
     #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
     pub rx_buffer_size: usize,
+    /// Default max buffered bytes for `read` on this connection.
+    /// Default 32768 (32 KiB).
+    #[serde(default = "default_max_buffered_bytes")]
+    #[schemars(schema_with = "crate::schema_helpers::read_max_buffered_bytes_schema")]
+    pub max_buffered_bytes: usize,
+    /// Default poll interval for `subscribe` in milliseconds.
+    /// Default 200.
+    #[serde(default = "default_subscribe_poll_ms")]
+    #[schemars(schema_with = "crate::schema_helpers::poll_interval_ms_schema")]
+    pub poll_interval_ms: u64,
 }
 
 fn default_rx_buffer_size() -> usize {
@@ -64,6 +74,9 @@ fn default_log_capacity() -> usize {
 }
 fn default_true() -> bool {
     true
+}
+fn default_subscribe_poll_ms() -> u64 {
+    200
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -110,13 +123,6 @@ pub struct ReadArgs {
     #[serde(default)]
     #[schemars(schema_with = "crate::schema_helpers::option_positive_timeout_ms_schema")]
     pub no_new_rx_timeout_ms: Option<u64>,
-    /// Maximum bytes to buffer before the read stops. Default 32 KiB — sized so a
-    /// default read captures a full boot log or large response in one call. When
-    /// exceeded, the operation stops with `max_buffered_bytes` and `truncated` is
-    /// `true` in the result.
-    #[serde(default = "default_max_buffered_bytes")]
-    #[schemars(schema_with = "crate::schema_helpers::read_max_buffered_bytes_schema")]
-    pub max_buffered_bytes: usize,
     #[serde(default = "default_encoding")]
     pub encoding: String,
     /// Optional match configuration. When present, the read accumulates bytes
@@ -218,12 +224,6 @@ pub struct SubscribeArgs {
     pub no_new_rx_timeout_ms: Option<u64>,
     #[serde(default = "default_encoding")]
     pub encoding: String,
-    #[serde(default = "default_subscribe_buffered_bytes")]
-    #[schemars(schema_with = "crate::schema_helpers::stream_buffered_bytes_schema")]
-    pub max_buffered_bytes: usize,
-    #[serde(default = "default_subscribe_poll_ms")]
-    #[schemars(schema_with = "crate::schema_helpers::poll_interval_ms_schema")]
-    pub poll_interval_ms: u64,
     /// Optional match configuration. When present, the stream detects the
     /// first match and emits a final stop notification with `matched=true`
     /// and `match_index`, then terminates.
@@ -725,11 +725,46 @@ pub fn default_break_duration_ms() -> u64 {
 pub fn default_subscribe_buffered_bytes() -> usize {
     2048
 }
-pub fn default_subscribe_poll_ms() -> u64 {
-    200
-}
 
 // ---- Profile management tools ----------------------------------------------
+
+/// Configure connection defaults. Two modes:
+/// - `profile` mode: write defaults to a named profile in the profiles TOML.
+///   Applies to future `open_profile` calls. Does NOT touch live connections.
+/// - `connection` mode: mutate defaults on a live connection (the four
+///   framing defaults + reconnect_policy + max_buffered_bytes +
+///   poll_interval_ms). Does NOT persist to disk. `rx_buffer_size`,
+///   serial-line params, `log_capacity`, and `log_enabled` only apply via
+///   profile + reopen (LogBuffer has no live setter for capacity/enabled).
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ConfigureArgs {
+    /// Profile name to write (profile mode), or connection name to mutate
+    /// (connection mode). Exactly one of `profile` or `connection_id` must be set.
+    #[serde(default)]
+    pub profile: Option<String>,
+    #[serde(default)]
+    pub connection_id: Option<String>,
+    /// If true (profile mode), replace an existing profile with the same name.
+    /// If false (default), return an error when the name already exists.
+    #[serde(default)]
+    pub overwrite: bool,
+    /// Defaults to apply. All fields optional — omit a field to leave it
+    /// unchanged on the profile / connection.
+    #[serde(default)]
+    pub defaults: crate::profiles::ProfileDefaults,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct ConfigureResult {
+    /// Which mode was applied: "profile" or "connection".
+    pub mode: String,
+    /// The effective defaults after applying the change.
+    pub defaults: crate::profiles::ProfileDefaults,
+    /// For profile mode: true if newly created, false if overwritten.
+    /// For connection mode: always null.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created: Option<bool>,
+}
 
 /// Save a profile by snapshotting an open connection's identity and config.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -830,4 +865,78 @@ pub struct ReconnectResult {
     pub name: Option<String>,
     pub port: String,
     pub state: crate::serial::ConnectionState,
+}
+
+/// Algorithm for `compute_checksum`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ChecksumAlgorithm {
+    /// NMEA-0183 XOR checksum (single byte, XOR of all bytes).
+    Xor,
+    /// Modbus ASCII LRC (single byte, two's complement of byte sum).
+    Lrc,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct ComputeChecksumArgs {
+    /// Input data encoded as `encoding`. Decoded before checksumming.
+    pub data: String,
+    /// Encoding of `data`: "utf8", "hex", or "base64". Default "utf8".
+    #[serde(default = "default_encoding")]
+    pub encoding: String,
+    pub algorithm: ChecksumAlgorithm,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct ComputeChecksumResult {
+    pub algorithm: String,
+    /// Checksum value as a 2-char uppercase hex string (e.g. "5A").
+    pub checksum_hex: String,
+    /// Raw checksum byte as an integer (0-255).
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub checksum: u8,
+    /// Number of bytes checksummed.
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub byte_count: usize,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct TransactArgs {
+    pub connection_id: String,
+    pub data: String,
+    #[serde(default = "default_encoding")]
+    pub encoding: String,
+    /// Where the read half starts. "now" (default) — live edge, skip
+    /// pre-write buffered backlog; "cursor" — shared read cursor;
+    /// "buffer_start" — replay everything retained; or {"offset": N}.
+    #[serde(default)]
+    pub from: Option<ReadFrom>,
+    #[serde(default)]
+    #[schemars(schema_with = "crate::schema_helpers::option_timeout_ms_schema")]
+    pub timeout_ms: Option<u64>,
+    #[serde(default)]
+    #[schemars(schema_with = "crate::schema_helpers::option_positive_timeout_ms_schema")]
+    pub no_new_rx_timeout_ms: Option<u64>,
+    #[serde(default)]
+    pub r#match: Option<crate::match_config::MatchRequest>,
+    /// Optional TX framing for the write half.
+    #[serde(default)]
+    pub tx_framing: Option<crate::framing::TxFramingConfig>,
+    /// Optional RX framing for the read half.
+    #[serde(default)]
+    pub rx_framing: Option<crate::framing::RxFramingConfig>,
+    /// Optional RX parser for the read half.
+    #[serde(default)]
+    pub rx_parser: Option<crate::framing::ParserConfig>,
+    /// Optional protocol preset (applies to both write and read halves).
+    #[serde(default)]
+    pub protocol: Option<crate::framing::ProtocolPreset>,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct TransactResult {
+    pub connection_id: String,
+    pub name: Option<String>,
+    pub write: WriteResult,
+    pub read: ReadResult,
 }

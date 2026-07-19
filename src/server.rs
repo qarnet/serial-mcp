@@ -26,7 +26,7 @@ use crate::tx_session::TxSessionManager;
 use crate::prompts::types::*;
 use crate::prompts::{diagnose, interactive};
 use crate::tools::types::*;
-use crate::tools::{control_ops, io_ops, port_ops, stream_ops};
+use crate::tools::{control_ops, io_ops, port_ops, stream_ops, utility_ops};
 
 /// Helper for cursor-based pagination over a vector of items.
 ///
@@ -282,6 +282,32 @@ impl SerialHandler {
     }
 
     #[tool(
+        description = "Write data, then await a read response, in one call. The write completes (bytes on wire) before the read starts. The read half defaults `from` to \"now\" (live edge) so it only awaits post-write bytes — the response to THIS write, not stale buffered data. Use protocol to fill framing defaults for both directions; explicit tx_framing/rx_framing/rx_parser override per direction. Match, rx_framing, no_new_rx_timeout_ms, timeout_ms apply to the read half. Halves the round trips of write-then-read for AT/Modbus/GRBL-style request/response traffic.",
+        title = "Transact (Write + Read)",
+        annotations(destructive_hint = true, open_world_hint = false),
+        execution(task_support = "optional")
+    )]
+    async fn transact(
+        &self,
+        meta: Meta,
+        ct: tokio_util::sync::CancellationToken,
+        peer: rmcp::Peer<RoleServer>,
+        Parameters(args): Parameters<TransactArgs>,
+    ) -> Result<Json<TransactResult>, String> {
+        io_ops::transact(
+            &self.connections,
+            &self.tx_sessions,
+            &self.rx_sessions,
+            &self.budget,
+            meta,
+            ct,
+            peer,
+            args,
+        )
+        .await
+    }
+
+    #[tool(
         description = "Read data from a serial port connection. Returns buffered-but-unread bytes from the connection's cursor (like `cat`), consuming by default. Use `from` to control where the read starts: \"cursor\" (default, the shared read cursor), \"now\" (live edge, skip buffered backlog), \"buffer_start\" (replay everything retained in the ring), or {\"offset\": N} (absolute stream offset from a prior result's next_offset/from_offset). Re-passing the same `from` on the next call re-reads the same bytes non-destructively. Pattern matching checks buffered history first, then waits for new bytes. With rx_framing, splits the byte stream into structured frames (line, delimiter, length-prefixed, SLIP, COBS, start/end marker). With rx_parser, interprets frame content (AT commands, JSON lines, shell prompts). rx_parser is a sibling to rx_framing. Use protocol to select a built-in preset (at_command, slip, json_lines, cobs, ndjson, nmea0183, modbus_ascii) that fills in rx_framing and rx_parser defaults; explicit fields win. Match and rx_framing can be combined. With validate: true, checksum-mismatched frames are dropped and counted in frames_dropped instead of aborting the read. A malformed SLIP escape sequence or COBS code byte stops with stop_reason=framing_error, returning partial results with an error field and hex fallback. Set no_new_rx_timeout_ms to stop when no new bytes arrive within the specified silence window. Results carry from_offset/next_offset/bytes_lost/buffered_remaining/start_offset/end_offset.",
         title = "Read Serial Data",
         annotations(read_only_hint = true, open_world_hint = false),
@@ -487,7 +513,14 @@ impl SerialHandler {
         &self,
         Parameters(args): Parameters<SaveProfileArgs>,
     ) -> Result<Json<SaveProfileResult>, String> {
-        port_ops::save_profile(&self.connections, &self.profiles, &self.profiles_path, args).await
+        port_ops::save_profile(
+            &self.connections,
+            &self.rx_sessions,
+            &self.profiles,
+            &self.profiles_path,
+            args,
+        )
+        .await
     }
 
     #[tool(
@@ -500,6 +533,25 @@ impl SerialHandler {
         Parameters(args): Parameters<DeleteProfileArgs>,
     ) -> Result<Json<DeleteProfileResult>, String> {
         port_ops::delete_profile(&self.profiles, &self.profiles_path, args).await
+    }
+
+    #[tool(
+        description = "Configure connection defaults. Two modes: (1) profile mode — write defaults to a named profile in the profiles TOML, applied on future open_profile calls; (2) connection mode — mutate the framing/parser/protocol/reconnect_policy/max_buffered_bytes/poll_interval_ms defaults on a live connection (does NOT persist to disk; reopen to apply rx_buffer_size, serial-line params, log_capacity, and log_enabled — the LogBuffer has no live setter for capacity/enabled). Provide exactly one of `profile` or `connection_id`. Profile mode with overwrite=true replaces an existing profile. The `defaults` object carries the full desired state — omit individual fields to use their defaults.",
+        title = "Configure Defaults",
+        annotations(destructive_hint = true, open_world_hint = false)
+    )]
+    async fn configure(
+        &self,
+        Parameters(args): Parameters<ConfigureArgs>,
+    ) -> Result<Json<ConfigureResult>, String> {
+        port_ops::configure(
+            &self.connections,
+            &self.rx_sessions,
+            &self.profiles,
+            &self.profiles_path,
+            args,
+        )
+        .await
     }
 
     #[tool(
@@ -548,6 +600,18 @@ impl SerialHandler {
         Parameters(args): Parameters<ReconnectArgs>,
     ) -> Result<Json<ReconnectResult>, String> {
         port_ops::reconnect(&self.connections, args).await
+    }
+
+    #[tool(
+        description = "Compute a checksum over caller-supplied bytes. Algorithms: xor (NMEA-0183 *XX), lrc (Modbus ASCII). Input data is decoded from the given encoding (utf8/hex/base64) before checksumming. Returns the checksum as a hex string and a raw integer. LLMs cannot reliably compute checksums by hand — use this when hand-crafting binary frames for a protocol without a preset.",
+        title = "Compute Checksum",
+        annotations(read_only_hint = true, open_world_hint = false)
+    )]
+    async fn compute_checksum(
+        &self,
+        Parameters(args): Parameters<ComputeChecksumArgs>,
+    ) -> Result<Json<ComputeChecksumResult>, String> {
+        utility_ops::compute_checksum(args).await
     }
 }
 

@@ -181,5 +181,16 @@ cargo run --manifest-path xtask/Cargo.toml -- print-paths
 - `print-paths` — emits resolved test-asset paths for debugging.
 - Both `test` and `test-all` pass `--test-threads=1` unless overridden.
 - The native_sim firmware suites are run with `--ignored` because their tests carry `#[ignore = "requires native_sim firmware binary"]`.
-- Non-firmware suites (stdio, blob, http) run without `--ignored` — their hardware-required tests remain skipped automatically.
+- Non-firmware suites (stdio, blob, http) run without `--ignored`. The only non-firmware `#[ignore]` is `config_schema_validation::example_configs_match_latest_upstream_schemas` (network fetch; run via `cargo test --test config_schema_validation -- --ignored`).
 - All test helpers (`tests/common/binaries.rs`, `tests/common/firmware.rs`, `tests/common/spawned.rs`) auto-build missing test assets on first use.
+
+## v0.8.1 additions
+
+- **Tool count: 25** (added `configure`, `transact`, `compute_checksum`). Update all references when adding/removing tools.
+- **`configure` tool** — two modes: profile (persist defaults to TOML) and connection (mutate live connection defaults). Live mutation covers the four framing defaults (StdMutex<Option<T>> wrappers on `SerialConnection`), `reconnect_policy` (existing StdMutex), `max_buffered_bytes_default` (AtomicUsize), and `poll_interval_ms_default` (AtomicU64). `log_capacity`/`log_enabled` are profile-only — LogBuffer has no live setter.
+- **`ProfileDefaults` got five new fields:** `max_buffered_bytes`, `poll_interval_ms`, `reconnect_policy`, `log_capacity`, `log_enabled`. These flow from profiles through `OpenArgs` → `ConnectionConfig` → `SerialConnection`.
+- **Per-call `max_buffered_bytes` removed** from `ReadArgs` and `SubscribeArgs`. Per-call `poll_interval_ms` removed from `SubscribeArgs`. Both now come from connection defaults (mutable via `configure`).
+- **`precedence::resolve_field`** changed signature: `conn_default` is now `Option<T>` (by value) instead of `Option<&T>` (borrowed). The framing-default accessors on `SerialConnection` return by value (cloned from StdMutex).
+- **`compute_checksum` tool** — pure utility, no connection required. Algorithms: xor (NMEA) and lrc (Modbus ASCII). Lives in `src/tools/utility_ops.rs`.
+- **`transact` tool** — write-then-await-response in one call. Default `from: "now"` to skip pre-write backlog. Composes existing write + read plumbing in `src/tools/io_ops.rs`.
+- **`save_profile` `rx_buffer_size` bug fixed** — now snapshots from the live `RxSession` ring capacity instead of hardcoding `DEFAULT_RX_BUFFER_SIZE`. Signature changed: takes `rx_sessions: &Arc<RxSessionManager>`.

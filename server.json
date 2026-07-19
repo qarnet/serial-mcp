@@ -2,10 +2,10 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.qarnet/serial-mcp",
   "title": "Serial MCP",
-  "description": "MCP server for serial port communication. 22 tools, resources, prompts, and stdio/HTTP transports.",
+  "description": "MCP server for serial port communication. 25 tools, resources, prompts, and stdio/HTTP transports.",
   "repository": {
     "url": "https://github.com/qarnet/serial-mcp",
     "source": "github"
   },
-  "version": "0.8.0"
+  "version": "0.8.1"
 }

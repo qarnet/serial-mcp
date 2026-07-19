@@ -20,18 +20,17 @@ use crate::framing::ProtocolPreset;
 /// 1. `explicit` — the per-call field.
 /// 2. `call_protocol` — the per-call `protocol` preset, mapped through
 ///    `apply_preset`.
-/// 3. `conn_default` — the connection default for this field.
+/// 3. `conn_default` — the connection default for this field (taken by value).
 /// 4. `conn_protocol` — the connection `protocol` preset, mapped through
 ///    `apply_preset`.
 ///
 /// `apply_preset` is the matching `preset_*` function from `crate::framing`
-/// for the field being resolved. `conn_default` is borrowed and cloned only
-/// if reached.
+/// for the field being resolved.
 pub(crate) fn resolve_field<T: Clone>(
     explicit: Option<T>,
     call_protocol: Option<ProtocolPreset>,
     apply_preset: impl Fn(ProtocolPreset) -> T,
-    conn_default: Option<&T>,
+    conn_default: Option<T>,
     conn_protocol: Option<ProtocolPreset>,
 ) -> Option<T> {
     if let Some(explicit) = explicit {
@@ -41,7 +40,7 @@ pub(crate) fn resolve_field<T: Clone>(
         return Some(apply_preset(p));
     }
     if let Some(def) = conn_default {
-        return Some(def.clone());
+        return Some(def);
     }
     conn_protocol.map(apply_preset)
 }
@@ -129,8 +128,13 @@ mod tests {
     #[test]
     fn call_protocol_beats_conn_default() {
         let conn_def = conn_default_tx();
-        let result =
-            resolve_field::<TxFramingConfig>(None, PROTO, preset_tx_framing, Some(&conn_def), None);
+        let result = resolve_field::<TxFramingConfig>(
+            None,
+            PROTO,
+            preset_tx_framing,
+            Some(conn_def.clone()),
+            None,
+        );
         assert_eq!(result, Some(preset_tx_framing(ProtocolPreset::AtCommand)));
         assert_ne!(result, Some(conn_def));
     }
@@ -138,8 +142,13 @@ mod tests {
     #[test]
     fn conn_default_beats_conn_protocol() {
         let conn_def = conn_default_tx();
-        let result =
-            resolve_field::<TxFramingConfig>(None, None, preset_tx_framing, Some(&conn_def), PROTO);
+        let result = resolve_field::<TxFramingConfig>(
+            None,
+            None,
+            preset_tx_framing,
+            Some(conn_def.clone()),
+            PROTO,
+        );
         assert_eq!(result, Some(conn_def));
         assert_ne!(result, Some(preset_tx_framing(ProtocolPreset::AtCommand)));
     }
@@ -182,10 +191,15 @@ mod tests {
     #[test]
     fn rx_framing_call_protocol_beats_conn_default() {
         let conn_def = conn_default_rx();
-        let result =
-            resolve_field::<RxFramingConfig>(None, PROTO, preset_rx_framing, Some(&conn_def), None);
+        let result = resolve_field::<RxFramingConfig>(
+            None,
+            PROTO,
+            preset_rx_framing,
+            Some(conn_def.clone()),
+            None,
+        );
         assert_eq!(result, Some(preset_rx_framing(ProtocolPreset::AtCommand)));
-        assert_ne!(result, Some(conn_def));
+        assert_ne!(result, Some(conn_def.clone()));
     }
 
     // --- ParserConfig generic boundary test ---
@@ -193,10 +207,15 @@ mod tests {
     #[test]
     fn parser_call_protocol_beats_conn_default() {
         let conn_def = conn_default_parser();
-        let result =
-            resolve_field::<ParserConfig>(None, PROTO, preset_rx_parser, Some(&conn_def), None);
+        let result = resolve_field::<ParserConfig>(
+            None,
+            PROTO,
+            preset_rx_parser,
+            Some(conn_def.clone()),
+            None,
+        );
         assert_eq!(result, Some(preset_rx_parser(ProtocolPreset::AtCommand)));
-        assert_ne!(result, Some(conn_def));
+        assert_ne!(result, Some(conn_def.clone()));
     }
 
     // --- Slip + JsonLines preset precedence tests ---
@@ -359,7 +378,7 @@ mod tests {
             Some(explicit.clone()),
             Some(ProtocolPreset::Nmea0183),
             preset_rx_framing,
-            Some(&conn_default_nmea),
+            Some(conn_default_nmea.clone()),
             Some(ProtocolPreset::ModbusAscii),
         );
         assert_eq!(result, Some(explicit));
@@ -382,7 +401,7 @@ mod tests {
             None,
             None,
             preset_rx_framing,
-            Some(&conn_default_delim),
+            Some(conn_default_delim.clone()),
             Some(ProtocolPreset::Nmea0183),
         );
         assert_eq!(result, Some(conn_default_delim));

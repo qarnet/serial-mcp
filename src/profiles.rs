@@ -82,6 +82,26 @@ pub struct ProfileDefaults {
     #[serde(default = "default_rx_buffer_size_profile")]
     #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
     pub rx_buffer_size: usize,
+    /// Default max buffered bytes for `read` (was per-call, now profile-level).
+    /// Default 32768 (32 KiB).
+    #[serde(default = "default_max_buffered_bytes_profile")]
+    #[schemars(schema_with = "crate::schema_helpers::read_max_buffered_bytes_schema")]
+    pub max_buffered_bytes: usize,
+    /// Default poll interval for `subscribe` in milliseconds (was per-call on
+    /// SubscribeArgs, now profile-level). Default 200.
+    #[serde(default = "default_subscribe_poll_ms_profile")]
+    #[schemars(schema_with = "crate::schema_helpers::poll_interval_ms_schema")]
+    pub poll_interval_ms: u64,
+    /// Default reconnect policy. Open-time only; reopen to apply. Default: disabled.
+    #[serde(default)]
+    pub reconnect_policy: crate::serial::ReconnectPolicy,
+    /// Default log buffer capacity in events. 0 disables logging. Default 1024.
+    #[serde(default = "default_log_capacity_profile")]
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub log_capacity: usize,
+    /// Default logging enabled flag. Default true (ignored when capacity is 0).
+    #[serde(default = "default_true_profile")]
+    pub log_enabled: bool,
 }
 
 fn default_baud() -> u32 {
@@ -102,6 +122,18 @@ fn default_flow_control() -> String {
 fn default_rx_buffer_size_profile() -> usize {
     crate::limits::DEFAULT_RX_BUFFER_SIZE
 }
+fn default_max_buffered_bytes_profile() -> usize {
+    32768
+}
+fn default_subscribe_poll_ms_profile() -> u64 {
+    200
+}
+fn default_log_capacity_profile() -> usize {
+    1024
+}
+fn default_true_profile() -> bool {
+    true
+}
 
 impl Default for ProfileDefaults {
     fn default() -> Self {
@@ -117,6 +149,11 @@ impl Default for ProfileDefaults {
             rx_parser: None,
             protocol: None,
             rx_buffer_size: default_rx_buffer_size_profile(),
+            max_buffered_bytes: default_max_buffered_bytes_profile(),
+            poll_interval_ms: default_subscribe_poll_ms_profile(),
+            reconnect_policy: crate::serial::ReconnectPolicy::default(),
+            log_capacity: default_log_capacity_profile(),
+            log_enabled: default_true_profile(),
         }
     }
 }
@@ -719,10 +756,9 @@ baud_rate = 9600
 
     #[test]
     fn profile_defaults_has_no_dead_fields() {
-        // Deserializing a JSON object with ONLY the three removed field names
+        // Deserializing a JSON object with ONLY the two removed field names
         // must succeed (fields silently ignored — no deny_unknown_fields).
         let json = serde_json::json!({
-            "reconnect_policy": "x",
             "decoder": "y",
             "safety_policy": "z"
         });
@@ -730,13 +766,13 @@ baud_rate = 9600
             serde_json::from_value(json).expect("dead fields must be silently ignored");
 
         // Serializing ProfileDefaults::default() must NOT contain the
-        // removed field names.
+        // removed field names. (reconnect_policy is now a real field in
+        // v0.8.1 so it IS expected to appear.)
         let value = serde_json::to_value(ProfileDefaults::default())
             .expect("ProfileDefaults must serialize");
         let obj = value
             .as_object()
             .expect("serialized ProfileDefaults must be an object");
-        assert!(!obj.contains_key("reconnect_policy"));
         assert!(!obj.contains_key("decoder"));
         assert!(!obj.contains_key("safety_policy"));
     }

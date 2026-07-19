@@ -11,11 +11,11 @@ use crate::tools::helpers::log_tool_err;
 use crate::tools::helpers::lookup_connection;
 use crate::tools::helpers::parse_open_args;
 use crate::tools::types::{
-    ClearLogArgs, ClearLogResult, CloseArgs, CloseResult, DeleteProfileArgs, DeleteProfileResult,
-    ExportLogArgs, ExportLogResult, GetLogArgs, GetLogResult, GetStatusArgs, GetStatusResult,
-    ListConnectionsResult, ListPortsResult, ListProfilesResult, OpenArgs, OpenProfileArgs,
-    OpenResult, ProfileSummary, ReconfigureArgs, ReconfigureResult, ReconnectArgs, ReconnectResult,
-    SaveProfileArgs, SaveProfileResult,
+    ClearLogArgs, ClearLogResult, CloseArgs, CloseResult, ConfigureArgs, ConfigureResult,
+    DeleteProfileArgs, DeleteProfileResult, ExportLogArgs, ExportLogResult, GetLogArgs,
+    GetLogResult, GetStatusArgs, GetStatusResult, ListConnectionsResult, ListPortsResult,
+    ListProfilesResult, OpenArgs, OpenProfileArgs, OpenResult, ProfileSummary, ReconfigureArgs,
+    ReconfigureResult, ReconnectArgs, ReconnectResult, SaveProfileArgs, SaveProfileResult,
 };
 
 pub async fn list_ports() -> Result<Json<ListPortsResult>, String> {
@@ -324,21 +324,95 @@ pub async fn open_profile(
             flow_control: profile.defaults.flow_control.clone(),
             log_capacity: args.log_capacity,
             log_enabled: args.log_enabled,
-            reconnect_policy: crate::serial::ReconnectPolicy::default(),
+            reconnect_policy: profile.defaults.reconnect_policy.clone(),
             tx_framing: profile.defaults.tx_framing.clone(),
             rx_framing: profile.defaults.rx_framing.clone(),
             rx_parser: profile.defaults.rx_parser.clone(),
             protocol: profile.defaults.protocol,
             rx_buffer_size,
+            max_buffered_bytes: profile.defaults.max_buffered_bytes,
+            poll_interval_ms: profile.defaults.poll_interval_ms,
         },
     )
     .await
+}
+
+/// Configure connection defaults. Two modes: profile (persist to TOML) and
+/// connection (mutate live connection defaults).
+pub async fn configure(
+    connections: &Arc<ConnectionManager>,
+    _rx_sessions: &Arc<RxSessionManager>,
+    profiles: &Arc<tokio::sync::RwLock<Vec<crate::profiles::Profile>>>,
+    profiles_path: &std::path::PathBuf,
+    args: ConfigureArgs,
+) -> Result<Json<ConfigureResult>, String> {
+    // Validate: exactly one of profile / connection_id.
+    match (args.profile.as_ref(), args.connection_id.as_ref()) {
+        (Some(_), Some(_)) => {
+            return Err(
+                "configure: provide exactly one of `profile` or `connection_id`, not both".into(),
+            )
+        }
+        (None, None) => {
+            return Err("configure: provide exactly one of `profile` or `connection_id`".into())
+        }
+        _ => {}
+    }
+
+    if let Some(profile_name) = args.profile.as_ref() {
+        // Profile mode: build a Profile, save to TOML, reload.
+        let existing = profiles
+            .read()
+            .await
+            .iter()
+            .find(|p| &p.name == profile_name)
+            .cloned();
+        let selector = existing.map(|p| p.selector).unwrap_or_default();
+        let profile = crate::profiles::Profile {
+            name: profile_name.clone(),
+            selector,
+            defaults: args.defaults.clone(),
+        };
+        let created = crate::profiles::save_profile(profiles_path, &profile, args.overwrite)?;
+        let reloaded = crate::profiles::load_profiles(profiles_path);
+        {
+            let mut lock = profiles.write().await;
+            *lock = reloaded;
+        }
+        Ok(Json(ConfigureResult {
+            mode: "profile".into(),
+            defaults: profile.defaults,
+            created: Some(created),
+        }))
+    } else {
+        // Connection mode: mutate the live connection's defaults.
+        let conn_id = args.connection_id.as_ref().unwrap();
+        let conn = lookup_connection(connections, conn_id).await?;
+        // Apply framing defaults.
+        conn.set_tx_framing_default(args.defaults.tx_framing.clone());
+        conn.set_rx_framing_default(args.defaults.rx_framing.clone());
+        conn.set_rx_parser_default(args.defaults.rx_parser.clone());
+        conn.set_protocol_default(args.defaults.protocol);
+        // Apply reconnect_policy (already StdMutex).
+        *conn.reconnect_policy.lock().expect("poisoned") = args.defaults.reconnect_policy.clone();
+        // Apply scalar defaults (Atomic).
+        conn.set_max_buffered_bytes_default(args.defaults.max_buffered_bytes);
+        conn.set_poll_interval_ms_default(args.defaults.poll_interval_ms);
+        // log_capacity/log_enabled: LogBuffer has NO live setters. Documented as
+        // profile-only. rx_buffer_size: ring is fixed at open. Also profile-only.
+        Ok(Json(ConfigureResult {
+            mode: "connection".into(),
+            defaults: args.defaults,
+            created: None,
+        }))
+    }
 }
 
 /// Save a new profile by snapshotting an open connection's identity
 /// and current configuration.
 pub async fn save_profile(
     connections: &Arc<ConnectionManager>,
+    rx_sessions: &Arc<RxSessionManager>,
     profiles: &Arc<tokio::sync::RwLock<Vec<crate::profiles::Profile>>>,
     profiles_path: &std::path::PathBuf,
     args: SaveProfileArgs,
@@ -349,6 +423,14 @@ pub async fn save_profile(
         .port_info()
         .ok_or_else(|| format!("No port identity available for {}", args.connection_id))?;
 
+    // Snapshot rx_buffer_size from the live session if available; fall back
+    // to DEFAULT_RX_BUFFER_SIZE (A7 fix).
+    let rx_buffer_size = rx_sessions
+        .get(&args.connection_id)
+        .await
+        .map(|s| s.ring_capacity())
+        .unwrap_or(DEFAULT_RX_BUFFER_SIZE);
+
     let defaults = crate::profiles::ProfileDefaults {
         baud_rate: conn.baud_rate(),
         data_bits: crate::serial::data_bits_to_str(conn.data_bits()),
@@ -356,11 +438,16 @@ pub async fn save_profile(
         parity: crate::serial::parity_to_str(conn.parity()),
         flow_control: crate::serial::flow_control_to_str(conn.flow_control()),
         name: conn.name().map(str::to_string),
-        tx_framing: conn.tx_framing_default().cloned(),
-        rx_framing: conn.rx_framing_default().cloned(),
-        rx_parser: conn.rx_parser_default().cloned(),
+        tx_framing: conn.tx_framing_default(),
+        rx_framing: conn.rx_framing_default(),
+        rx_parser: conn.rx_parser_default(),
         protocol: conn.protocol_default(),
-        rx_buffer_size: DEFAULT_RX_BUFFER_SIZE,
+        rx_buffer_size,
+        max_buffered_bytes: conn.max_buffered_bytes_default(),
+        poll_interval_ms: conn.poll_interval_ms_default(),
+        reconnect_policy: conn.reconnect_policy.lock().expect("poisoned").clone(),
+        log_capacity: conn.log().capacity(),
+        log_enabled: conn.log().is_enabled(),
     };
 
     let selector = crate::profiles::ProfileSelector {
