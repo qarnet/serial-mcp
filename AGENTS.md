@@ -181,7 +181,7 @@ cargo run --manifest-path xtask/Cargo.toml -- print-paths
 - `print-paths` — emits resolved test-asset paths for debugging.
 - Both `test` and `test-all` pass `--test-threads=1` unless overridden.
 - The native_sim firmware suites are run with `--ignored` because their tests carry `#[ignore = "requires native_sim firmware binary"]`.
-- Non-firmware suites (stdio, blob, http) run without `--ignored` — their hardware-required tests remain skipped automatically.
+- Non-firmware suites (stdio, blob, http) run without `--ignored`. The only non-firmware `#[ignore]` is `config_schema_validation::example_configs_match_latest_upstream_schemas` (network fetch; run via `cargo test --test config_schema_validation -- --ignored`).
 - All test helpers (`tests/common/binaries.rs`, `tests/common/firmware.rs`, `tests/common/spawned.rs`) auto-build missing test assets on first use.
 
 ## v0.8.1 additions
