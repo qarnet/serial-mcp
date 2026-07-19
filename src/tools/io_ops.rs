@@ -210,7 +210,8 @@ pub async fn flush(
                 })?;
             // Clear the ring and clamp the shared read cursor to live edge.
             // This discards all unread buffered RX data. To skip past data
-            // without destroying it, use `seek` to `live_edge` instead.
+            // without destroying it, use `read` with `from: "now"` and discard
+            // the result.
             if let Some(session) = rx_sessions.get(&args.connection_id).await {
                 session.ring().clear();
                 session.set_read_cursor(session.ring().end_offset());

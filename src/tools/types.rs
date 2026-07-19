@@ -5,6 +5,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use crate::framing::ParsedFrame;
 use crate::serial::{ConnectionSummary, FlowControl, FlushTarget, PortInfo};
 
 // ---- Argument structs ------------------------------------------------------
@@ -419,7 +420,8 @@ pub struct ReadResult {
     pub from_offset: Option<u64>,
     /// Absolute stream offset of the cursor after this read (where the next
     /// read starts). Equal to `from_offset + bytes_returned` for a consuming
-    /// read; equal to `from_offset` for a peek.
+    /// read. To re-read the same bytes non-destructively, pass the same
+    /// `from` on the next read.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(schema_with = "crate::schema_helpers::option_uint_schema")]
     pub next_offset: Option<u64>,
@@ -491,6 +493,115 @@ pub struct SubscribeResult {
     #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
     pub poll_interval_ms: u64,
     pub replaced_previous: bool,
+}
+
+/// Per-chunk notification emitted by `subscribe` while streaming. Sent
+/// as the `data` field of a `notifications/message` event with logger
+/// `"serial:<connection_id>"`.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct SubscribeChunkNotification {
+    pub connection_id: String,
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub bytes_read: usize,
+    pub encoding: String,
+    pub data: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "crate::schema_helpers::option_uint_schema")]
+    pub bytes_lost: Option<u64>,
+}
+
+/// Per-frame notification emitted by `subscribe` when framing is active.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct SubscribeFrameNotification {
+    pub connection_id: String,
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub frame_index: usize,
+    pub frame_type: String,
+    pub encoding: String,
+    pub data: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parsed: Option<ParsedFrame>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub matched: Option<bool>,
+}
+
+/// Per-chunk error notification emitted by `subscribe` when the chunk
+/// cannot be encoded in the requested encoding.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct SubscribeEncodingErrorNotification {
+    pub connection_id: String,
+    pub encoding_error: bool,
+    pub encoding: String,
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub bytes_dropped: usize,
+    pub reason: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "crate::schema_helpers::option_uint_schema")]
+    pub bytes_lost: Option<u64>,
+}
+
+/// Per-frame partial-flush notification emitted by `subscribe` at stop
+/// time when a partial frame remains in the decoder.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct SubscribePartialFrameNotification {
+    pub connection_id: String,
+    pub partial: bool,
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub frame_index: usize,
+    pub frame_type: String,
+    pub encoding: String,
+    pub data: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parsed: Option<ParsedFrame>,
+}
+
+/// Final stop notification emitted by `subscribe` when the stream ends.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct SubscribeStopNotification {
+    pub connection_id: String,
+    pub stop_reason: String,
+    pub truncated: bool,
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub bytes_observed: usize,
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub bytes_returned: usize,
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub elapsed_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "crate::schema_helpers::option_uint_schema")]
+    pub timeout_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "crate::schema_helpers::option_uint_schema")]
+    pub no_new_rx_timeout_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "crate::schema_helpers::option_uint_schema")]
+    pub from_offset: Option<u64>,
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub next_offset: u64,
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub bytes_lost: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub matched: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "crate::schema_helpers::option_uint_schema")]
+    pub match_index: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "crate::schema_helpers::option_uint_schema")]
+    pub match_frame_index: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data: Option<String>,
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub frames_emitted: usize,
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub frames_dropped: usize,
+    /// Ring start offset (new in 0.8.0 — matches ReadResult's start_offset).
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub start_offset: u64,
+    /// Ring end offset (new in 0.8.0 — matches ReadResult's end_offset).
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub end_offset: u64,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]

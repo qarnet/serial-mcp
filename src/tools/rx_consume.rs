@@ -11,6 +11,7 @@ use crate::match_config::{MatchResult, Matcher};
 use crate::rx_metadata::RxStopReason;
 use crate::serial::{ConnectionState, SerialConnection};
 use crate::stop_controller::RxStopController;
+use tracing;
 
 /// What the frame loop should do after a sink handled a frame.
 pub enum SinkFlow {
@@ -126,6 +127,60 @@ pub fn disconnect_state(conn: &SerialConnection, ctrl: &mut RxStopController) ->
         _ => {}
     }
     DisconnectState::Active
+}
+
+/// Map a `FrameOutcome` from `consume_frames` into an optional
+/// `RxStopOutcome`. Returns `None` for `FrameOutcome::Continue`. For
+/// `MaxFrames`, `DecodeError`, and `SinkStop(reason)`, returns the
+/// corresponding `RxStopOutcome`. For `DecodeError`, records the error
+/// text in `frame_error_msg` and emits the `error!` log line.
+///
+/// Shared by `read_bytes_from_ring` (helpers.rs) and
+/// `stream_rx_from_ring` (stream_ops.rs) so the FrameOutcome dispatch
+/// lives in one place.
+pub(crate) fn frame_outcome_to_stop(
+    outcome: FrameOutcome,
+    ctrl: &crate::stop_controller::RxStopController,
+    total_returned: usize,
+    match_offset: Option<usize>,
+    frame_error_msg: &mut Option<String>,
+    conn_id: &str,
+) -> Option<crate::stop_controller::RxStopOutcome> {
+    match outcome {
+        FrameOutcome::Continue => None,
+        FrameOutcome::MaxFrames => Some(crate::stop_controller::RxStopOutcome {
+            meta: crate::rx_metadata::RxStopMetadata::max_frames(
+                ctrl.bytes_observed(),
+                total_returned,
+            ),
+            matched: false,
+            match_index: None,
+        }),
+        FrameOutcome::DecodeError(e) => {
+            tracing::error!("RX framing decode error on {conn_id}: {e}");
+            *frame_error_msg = Some(e.to_string());
+            Some(ctrl.framing_error(e))
+        }
+        FrameOutcome::SinkStop(reason) => match reason {
+            crate::rx_metadata::RxStopReason::MatchFound => {
+                Some(crate::stop_controller::RxStopOutcome {
+                    meta: crate::rx_metadata::RxStopMetadata::match_found(
+                        ctrl.bytes_observed(),
+                        total_returned,
+                    ),
+                    matched: true,
+                    match_index: match_offset,
+                })
+            }
+            crate::rx_metadata::RxStopReason::PeerDisconnected => Some(ctrl.peer_disconnected()),
+            other => {
+                tracing::warn!(
+                    "unexpected sink stop reason {other:?} on {conn_id}; treating as connection_closed"
+                );
+                Some(ctrl.connection_closed())
+            }
+        },
+    }
 }
 
 #[cfg(test)]
@@ -385,5 +440,66 @@ mod tests {
         assert_eq!(sink.frames[0].index, 0);
         assert_eq!(sink.frames[1].index, 1);
         assert_eq!(dropped, 1, "expected 1 checksum drop");
+    }
+
+    /// Valid frames decoded before a stream-fatal error are dispatched first,
+    /// then the DecodeError is returned. The malformed bytes are NOT counted
+    /// as frames_dropped (they're a stream-fatal error, not a per-frame drop).
+    #[tokio::test]
+    async fn consume_frames_decodes_frames_before_slip_decode_error() {
+        // SLIP constants from RFC 1055 (private; use literal bytes).
+        const END: u8 = 0xC0;
+        const ESC: u8 = 0xDB;
+
+        let rx_config = RxFramingConfig {
+            mode: RxFramingMode::Slip,
+            ..Default::default()
+        };
+        let mut dec = FrameDecoder::new(&rx_config, None).unwrap();
+
+        // One valid SLIP frame (END OK END) followed by a malformed escape
+        // (ESC 0xFF — invalid escape code).
+        let mut chunk = Vec::new();
+        chunk.push(END);
+        chunk.extend_from_slice(b"OK");
+        chunk.push(END);
+        chunk.push(ESC);
+        chunk.push(0xFF);
+
+        let mut matcher = None;
+        let mut seen = 0;
+        let mut sink = CollectSink {
+            frames: vec![],
+            matches: vec![],
+            stop_on_match: false,
+        };
+        let mut dropped = 0;
+        let out = consume_frames(
+            &chunk,
+            &mut dec,
+            &mut matcher,
+            None,
+            &mut seen,
+            &mut sink,
+            &mut dropped,
+        )
+        .await;
+
+        // The valid frame is dispatched before the error.
+        assert_eq!(
+            sink.frames.len(),
+            1,
+            "the valid SLIP frame should be emitted"
+        );
+        assert_eq!(sink.frames[0].data, b"OK");
+        // Stream-fatal error, not a per-frame drop.
+        assert_eq!(dropped, 0);
+        assert!(matches!(out, FrameOutcome::DecodeError(_)));
+        // The error carries text.
+        if let FrameOutcome::DecodeError(ref e) = out {
+            assert!(!e.to_string().is_empty(), "decode error should have text");
+        } else {
+            panic!("expected DecodeError");
+        }
     }
 }

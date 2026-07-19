@@ -12,7 +12,7 @@ use crate::rx_session::RxSession;
 use crate::serial::{ConnectionConfig, ConnectionManager, SerialConnection};
 use crate::stop_controller::{RxStopController, RxStopDecision};
 use crate::tools::rx_consume::{
-    consume_frames, disconnect_state, DisconnectState, FrameOutcome, RxFrameSink, SinkFlow,
+    consume_frames, disconnect_state, frame_outcome_to_stop, DisconnectState, RxFrameSink, SinkFlow,
 };
 use crate::tools::types::*;
 
@@ -361,6 +361,8 @@ pub async fn read_bytes_from_ring(
     let mut collected_frames: Vec<crate::framing::Frame> = Vec::new();
     let mut frames_seen: usize = 0;
     let mut frames_dropped: usize = 0;
+    let mut frame_error_msg: Option<String> = None;
+    let conn_id = session.connection_id().to_string();
 
     // We track how many raw bytes we consumed from the ring (for cursor advancement)
     // and how many we return in the result.
@@ -553,8 +555,14 @@ pub async fn read_bytes_from_ring(
                     cursor,
                 ));
             }
-            if let FrameOutcome::MaxFrames = outcome {
-                let meta = RxStopMetadata::max_frames(ctrl.bytes_observed(), returned_bytes.len());
+            if let Some(stop) = frame_outcome_to_stop(
+                outcome,
+                &ctrl,
+                returned_bytes.len(),
+                match_index,
+                &mut frame_error_msg,
+                &conn_id,
+            ) {
                 session.set_read_cursor(
                     initial_slice
                         .from_offset
@@ -566,64 +574,13 @@ pub async fn read_bytes_from_ring(
                     consumed_offset,
                     &ctrl,
                     read_start.elapsed().as_millis() as u64,
-                    meta,
-                    false,
-                    None,
-                    None,
+                    stop.meta,
+                    stop.matched,
+                    stop.match_index,
+                    match_frame_index,
                     std::mem::take(&mut collected_frames),
                     frames_dropped,
-                    None,
-                    ring,
-                    cursor,
-                ));
-            }
-            if let FrameOutcome::DecodeError(e) = outcome {
-                let meta = crate::rx_metadata::RxStopMetadata::framing_error(ctrl.bytes_observed());
-                tracing::error!("RX framing decode error: {e}");
-                let err_text = e.to_string();
-                session.set_read_cursor(
-                    initial_slice
-                        .from_offset
-                        .wrapping_add(consumed_offset)
-                        .min(ring.end_offset()),
-                );
-                return Ok(make_read_outcome(
-                    returned_bytes,
-                    consumed_offset,
-                    &ctrl,
-                    read_start.elapsed().as_millis() as u64,
-                    meta,
-                    false,
-                    None,
-                    None,
-                    std::mem::take(&mut collected_frames),
-                    frames_dropped,
-                    Some(err_text),
-                    ring,
-                    cursor,
-                ));
-            }
-            if let FrameOutcome::SinkStop(reason) = outcome {
-                let meta =
-                    RxStopMetadata::new(reason, ctrl.bytes_observed(), returned_bytes.len(), false);
-                session.set_read_cursor(
-                    initial_slice
-                        .from_offset
-                        .wrapping_add(consumed_offset)
-                        .min(ring.end_offset()),
-                );
-                return Ok(make_read_outcome(
-                    returned_bytes,
-                    consumed_offset,
-                    &ctrl,
-                    read_start.elapsed().as_millis() as u64,
-                    meta,
-                    false,
-                    None,
-                    None,
-                    std::mem::take(&mut collected_frames),
-                    frames_dropped,
-                    None,
+                    frame_error_msg,
                     ring,
                     cursor,
                 ));
@@ -795,8 +752,14 @@ pub async fn read_bytes_from_ring(
                     cursor,
                 ));
             }
-            if let FrameOutcome::MaxFrames = outcome {
-                let meta = RxStopMetadata::max_frames(ctrl.bytes_observed(), returned_bytes.len());
+            if let Some(stop) = frame_outcome_to_stop(
+                outcome,
+                &ctrl,
+                returned_bytes.len(),
+                match_index,
+                &mut frame_error_msg,
+                &conn_id,
+            ) {
                 session.set_read_cursor(
                     slice
                         .from_offset
@@ -808,64 +771,13 @@ pub async fn read_bytes_from_ring(
                     consumed_offset,
                     &ctrl,
                     read_start.elapsed().as_millis() as u64,
-                    meta,
-                    false,
-                    None,
-                    None,
+                    stop.meta,
+                    stop.matched,
+                    stop.match_index,
+                    match_frame_index,
                     std::mem::take(&mut collected_frames),
                     frames_dropped,
-                    None,
-                    ring,
-                    cursor,
-                ));
-            }
-            if let FrameOutcome::DecodeError(e) = outcome {
-                let meta = crate::rx_metadata::RxStopMetadata::framing_error(ctrl.bytes_observed());
-                tracing::error!("RX framing decode error: {e}");
-                let err_text = e.to_string();
-                session.set_read_cursor(
-                    slice
-                        .from_offset
-                        .wrapping_add(take as u64)
-                        .min(ring.end_offset()),
-                );
-                return Ok(make_read_outcome(
-                    returned_bytes,
-                    consumed_offset,
-                    &ctrl,
-                    read_start.elapsed().as_millis() as u64,
-                    meta,
-                    false,
-                    None,
-                    None,
-                    std::mem::take(&mut collected_frames),
-                    frames_dropped,
-                    Some(err_text),
-                    ring,
-                    cursor,
-                ));
-            }
-            if let FrameOutcome::SinkStop(reason) = outcome {
-                let meta =
-                    RxStopMetadata::new(reason, ctrl.bytes_observed(), returned_bytes.len(), false);
-                session.set_read_cursor(
-                    slice
-                        .from_offset
-                        .wrapping_add(take as u64)
-                        .min(ring.end_offset()),
-                );
-                return Ok(make_read_outcome(
-                    returned_bytes,
-                    consumed_offset,
-                    &ctrl,
-                    read_start.elapsed().as_millis() as u64,
-                    meta,
-                    false,
-                    None,
-                    None,
-                    std::mem::take(&mut collected_frames),
-                    frames_dropped,
-                    None,
+                    frame_error_msg,
                     ring,
                     cursor,
                 ));

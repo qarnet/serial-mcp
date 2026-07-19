@@ -44,7 +44,7 @@ pub struct RxSession {
     pump_token: StdMutex<CancellationToken>,
     /// Per-connection ring buffer capturing all RX bytes from open to close.
     ring: Arc<RxRing>,
-    /// Shared read cursor for `read`/`seek`/`flush`. Absolute u64 offset.
+    /// Shared read cursor for `read`/`flush`. Absolute u64 offset.
     read_cursor: StdMutex<u64>,
     /// Stored ring capacity so close can release the correct byte count.
     ring_capacity: usize,

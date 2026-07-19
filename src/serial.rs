@@ -1792,6 +1792,7 @@ pub mod test_support {
 mod tests {
     use super::test_support::{loopback_connection, loopback_connection_with_config};
     use super::*;
+    use crate::stop_controller::RxStopController;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     #[test]
@@ -2017,6 +2018,46 @@ mod tests {
             .unwrap_err()
             .contains("expected none/software/hardware"));
     }
+
+    #[test]
+    fn disconnect_state_maps_connection_state_correctly() {
+        use crate::tools::rx_consume::{disconnect_state, DisconnectState};
+        use std::time::Instant;
+
+        let (conn, _peer) = loopback_connection("test");
+        let mut ctrl = RxStopController::new(Instant::now(), Some(5000), 0, None);
+
+        // Open → Active.
+        assert!(matches!(
+            disconnect_state(&conn, &mut ctrl),
+            DisconnectState::Active
+        ));
+
+        // Set state to Closed → Closed.
+        *conn.state.lock().unwrap() = ConnectionState::Closed;
+        assert!(matches!(
+            disconnect_state(&conn, &mut ctrl),
+            DisconnectState::Closed
+        ));
+
+        // Set state to Reconnecting with reconnect enabled → Reconnecting.
+        // Note: constructing a Reconnecting state requires a real serial port
+        // (the reconnect state machine drives it), so this test directly sets
+        // the internal state and enable flag.
+        *conn.state.lock().unwrap() = ConnectionState::Reconnecting;
+        conn.reconnect_policy.lock().unwrap().enabled = true;
+        assert!(matches!(
+            disconnect_state(&conn, &mut ctrl),
+            DisconnectState::Reconnecting
+        ));
+
+        // Reconnecting with reconnect disabled → Closed.
+        conn.reconnect_policy.lock().unwrap().enabled = false;
+        assert!(matches!(
+            disconnect_state(&conn, &mut ctrl),
+            DisconnectState::Closed
+        ));
+    }
 }
 
 // =============================================================================
@@ -2074,8 +2115,10 @@ mod schema {
         ClearLogResult, CloseResult, DeleteProfileResult, ExportLogResult, FlushResult,
         GetLogResult, GetStatusResult, ListConnectionsResult, ListPortsResult, ListProfilesResult,
         OpenResult, ReadResult, ReconfigureResult, ReconnectResult, SaveProfileResult,
-        SendBreakResult, SetDtrRtsResult, SetFlowControlResult, SubscribeResult, UnsubscribeResult,
-        WriteResult,
+        SendBreakResult, SetDtrRtsResult, SetFlowControlResult, SubscribeChunkNotification,
+        SubscribeEncodingErrorNotification, SubscribeFrameNotification,
+        SubscribePartialFrameNotification, SubscribeResult, SubscribeStopNotification,
+        UnsubscribeResult, WriteResult,
     };
 
     /// Walk a JSON Schema `Value` and collect every `"format"` whose value
@@ -2166,6 +2209,26 @@ mod schema {
     );
     check_schema!(send_break_result_has_no_uint_formats, SendBreakResult);
     check_schema!(subscribe_result_has_no_uint_formats, SubscribeResult);
+    check_schema!(
+        subscribe_chunk_notification_has_no_uint_formats,
+        SubscribeChunkNotification
+    );
+    check_schema!(
+        subscribe_frame_notification_has_no_uint_formats,
+        SubscribeFrameNotification
+    );
+    check_schema!(
+        subscribe_encoding_error_notification_has_no_uint_formats,
+        SubscribeEncodingErrorNotification
+    );
+    check_schema!(
+        subscribe_partial_frame_notification_has_no_uint_formats,
+        SubscribePartialFrameNotification
+    );
+    check_schema!(
+        subscribe_stop_notification_has_no_uint_formats,
+        SubscribeStopNotification
+    );
     check_schema!(unsubscribe_result_has_no_uint_formats, UnsubscribeResult);
     check_schema!(get_status_result_has_no_uint_formats, GetStatusResult);
     check_schema!(reconfigure_result_has_no_uint_formats, ReconfigureResult);

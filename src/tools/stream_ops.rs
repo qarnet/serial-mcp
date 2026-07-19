@@ -22,10 +22,12 @@ use crate::tools::helpers::{
     MAX_STREAM_CHUNK_BYTES, MIN_POLL_INTERVAL_MS, MIN_STREAM_CHUNK_BYTES,
 };
 use crate::tools::rx_consume::{
-    consume_frames, disconnect_state, DisconnectState, FrameOutcome, RxFrameSink, SinkFlow,
+    consume_frames, disconnect_state, frame_outcome_to_stop, DisconnectState, RxFrameSink, SinkFlow,
 };
 use crate::tools::types::{
-    ReadFrom, SubscribeArgs, SubscribeResult, UnsubscribeArgs, UnsubscribeResult,
+    ReadFrom, SubscribeArgs, SubscribeChunkNotification, SubscribeEncodingErrorNotification,
+    SubscribeFrameNotification, SubscribePartialFrameNotification, SubscribeResult,
+    SubscribeStopNotification, UnsubscribeArgs, UnsubscribeResult,
 };
 
 /// RAII wrapper around a streaming task. Aborts the task on drop.
@@ -288,27 +290,22 @@ impl RxFrameSink for SubscribeFrameSink<'_> {
             }
         };
 
-        let mut payload = serde_json::json!({
-            "connection_id": self.conn_id,
-            "frame_index": frame.index,
-            "frame_type": frame.frame_type,
-            "encoding": self.encoding.to_string(),
-            "data": encoded,
+        let notification = SubscribeFrameNotification {
+            connection_id: self.conn_id.to_string(),
+            frame_index: frame.index,
+            frame_type: frame.frame_type.to_string(),
+            encoding: self.encoding.to_string(),
+            data: encoded,
+            parsed: frame.parsed,
+            matched: if matched { Some(true) } else { None },
+        };
+        let payload = serde_json::to_value(&notification).unwrap_or_else(|e| {
+            warn!(
+                "RX frame notification serialization error on {}: {e}",
+                self.conn_id
+            );
+            serde_json::json!({})
         });
-        if let Some(ref parsed) = frame.parsed {
-            match serde_json::to_value(parsed) {
-                Ok(v) => payload["parsed"] = v,
-                Err(e) => {
-                    warn!(
-                        "RX frame parsed serialization error on {}: {e}",
-                        self.conn_id
-                    )
-                }
-            }
-        }
-        if matched {
-            payload["matched"] = serde_json::json!(true);
-        }
 
         let param = LoggingMessageNotificationParam {
             level: LoggingLevel::Info,
@@ -525,37 +522,14 @@ async fn stream_rx_from_ring(
                 &mut frames_dropped,
             )
             .await;
-            match outcome {
-                FrameOutcome::SinkStop(RxStopReason::MatchFound) => {
-                    stop_outcome = Some(crate::stop_controller::RxStopOutcome {
-                        meta: RxStopMetadata::match_found(ctrl.bytes_observed(), total_returned),
-                        matched: true,
-                        match_index: match_offset,
-                    });
-                }
-                FrameOutcome::SinkStop(RxStopReason::PeerDisconnected) => {
-                    stop_outcome = Some(ctrl.peer_disconnected());
-                }
-                FrameOutcome::SinkStop(reason) => {
-                    warn!(
-                        "unexpected sink stop reason {reason:?} on {conn_id}; treating as connection_closed"
-                    );
-                    stop_outcome = Some(ctrl.connection_closed());
-                }
-                FrameOutcome::MaxFrames => {
-                    stop_outcome = Some(crate::stop_controller::RxStopOutcome {
-                        meta: RxStopMetadata::max_frames(ctrl.bytes_observed(), total_returned),
-                        matched: false,
-                        match_index: None,
-                    });
-                }
-                FrameOutcome::Continue => {}
-                FrameOutcome::DecodeError(e) => {
-                    error!("RX framing decode error on {conn_id}: {e}");
-                    frame_error_msg = Some(e.to_string());
-                    stop_outcome = Some(ctrl.framing_error(e));
-                }
-            }
+            stop_outcome = frame_outcome_to_stop(
+                outcome,
+                &ctrl,
+                total_returned,
+                match_offset,
+                &mut frame_error_msg,
+                &conn_id,
+            );
         }
         if stop_outcome.is_some() {
             break;
@@ -589,16 +563,24 @@ async fn stream_rx_from_ring(
                     conn.log().notification_dropped(&format!(
                         "encoding error: {encoding} cannot encode {n} bytes"
                     ));
-                    let mut payload = serde_json::json!({
-                        "connection_id": conn_id,
-                        "encoding_error": true,
-                        "encoding": encoding.to_string(),
-                        "bytes_dropped": n,
-                        "reason": e.to_string(),
+                    let notification = SubscribeEncodingErrorNotification {
+                        connection_id: conn_id.to_string(),
+                        encoding_error: true,
+                        encoding: encoding.to_string(),
+                        bytes_dropped: n,
+                        reason: e.to_string(),
+                        bytes_lost: if slice.bytes_lost > 0 {
+                            Some(slice.bytes_lost)
+                        } else {
+                            None
+                        },
+                    };
+                    let payload = serde_json::to_value(&notification).unwrap_or_else(|e| {
+                        warn!(
+                            "SubscribeEncodingErrorNotification serialization error on {conn_id}: {e}"
+                        );
+                        serde_json::json!({})
                     });
-                    if slice.bytes_lost > 0 {
-                        payload["bytes_lost"] = serde_json::json!(slice.bytes_lost);
-                    }
                     let param = LoggingMessageNotificationParam {
                         level: LoggingLevel::Warning,
                         logger: Some(logger.clone()),
@@ -615,16 +597,21 @@ async fn stream_rx_from_ring(
                 }
             };
 
-            let mut payload = serde_json::json!({
-                "connection_id": conn_id,
-                "bytes_read": n,
-                "encoding": encoding.to_string(),
-                "data": encoded,
+            let notification = SubscribeChunkNotification {
+                connection_id: conn_id.to_string(),
+                bytes_read: n,
+                encoding: encoding.to_string(),
+                data: encoded,
+                bytes_lost: if slice.bytes_lost > 0 {
+                    Some(slice.bytes_lost)
+                } else {
+                    None
+                },
+            };
+            let payload = serde_json::to_value(&notification).unwrap_or_else(|e| {
+                warn!("SubscribeChunkNotification serialization error on {conn_id}: {e}");
+                serde_json::json!({})
             });
-            // Include gap reporting if bytes were lost.
-            if slice.bytes_lost > 0 {
-                payload["bytes_lost"] = serde_json::json!(slice.bytes_lost);
-            }
             let param = LoggingMessageNotificationParam {
                 level: LoggingLevel::Info,
                 logger: Some(logger.clone()),
@@ -658,22 +645,21 @@ async fn stream_rx_from_ring(
         if let Some(partial) = dec.flush_partial() {
             frames_emitted += 1;
             if let Ok(encoded) = codec::encode(encoding, &partial.data) {
-                let mut payload = serde_json::json!({
-                    "connection_id": conn_id,
-                    "frame_index": partial.index,
-                    "frame_type": partial.frame_type,
-                    "encoding": encoding.to_string(),
-                    "data": encoded,
-                    "partial": true,
+                let notification = SubscribePartialFrameNotification {
+                    connection_id: conn_id.to_string(),
+                    partial: true,
+                    frame_index: partial.index,
+                    frame_type: partial.frame_type.to_string(),
+                    encoding: encoding.to_string(),
+                    data: encoded,
+                    parsed: partial.parsed,
+                };
+                let payload = serde_json::to_value(&notification).unwrap_or_else(|e| {
+                    warn!(
+                        "SubscribePartialFrameNotification serialization error on {conn_id}: {e}"
+                    );
+                    serde_json::json!({})
                 });
-                if let Some(ref parsed) = partial.parsed {
-                    match serde_json::to_value(parsed) {
-                        Ok(v) => payload["parsed"] = v,
-                        Err(e) => {
-                            warn!("RX partial frame parsed serialization error on {conn_id}: {e}")
-                        }
-                    }
-                }
                 let param = LoggingMessageNotificationParam {
                     level: LoggingLevel::Info,
                     logger: Some(logger.clone()),
@@ -705,52 +691,65 @@ async fn stream_rx_from_ring(
         bytes_returned: total_returned,
     };
 
-    let mut stop_payload = serde_json::json!({
-        "connection_id": conn_id,
-        "stop_reason": stop_meta.stop_reason.to_string(),
-        "truncated": stop_meta.truncated,
-        "bytes_observed": stop_meta.bytes_observed,
-        "bytes_returned": stop_meta.bytes_returned,
-        "elapsed_ms": elapsed_ms,
-        "timeout_ms": timeout_ms,
-        "no_new_rx_timeout_ms": no_new_rx_timeout_ms,
-        "frames_emitted": frames_emitted,
-        "frames_dropped": frames_dropped,
-    });
-    // Add offset fields.
-    if let Some(from) = from_offset {
-        stop_payload["from_offset"] = serde_json::json!(from);
-    }
-    stop_payload["next_offset"] = serde_json::json!(private_cursor);
-    stop_payload["bytes_lost"] = serde_json::json!(total_bytes_lost);
-    if let Some(ref e) = frame_error_msg {
-        stop_payload["error"] = serde_json::json!(e);
-    }
-    if outcome.matched {
-        stop_payload["matched"] = serde_json::json!(true);
-        stop_payload["match_frame_index"] = serde_json::json!(match_frame_index);
-
-        // Apply context shaping if configured.
-        let (shaped_match_index, shaped_data) = if let (Some(midx), Some(ca), Some(nlen)) =
-            (outcome.match_index, context_amount, needle_len)
-        {
-            let shaped = shape_match_context(&accumulated, midx, nlen, Some(ca));
-            (Some(shaped.match_index), Some(shaped.data))
-        } else {
-            (outcome.match_index, None)
-        };
-        stop_payload["match_index"] = serde_json::json!(shaped_match_index);
-        if let Some(ref data) = shaped_data {
-            match codec::encode(encoding, data) {
-                Ok(encoded) => {
-                    stop_payload["data"] = serde_json::json!(encoded);
-                }
-                Err(e) => {
-                    warn!("RX stream match context encoding error on {conn_id}: {e}");
-                }
+    // Apply context shaping if configured (must be done before building the
+    // struct since the shaped values differ from the raw outcome).
+    let (shaped_match_index, shaped_data) = if let (Some(midx), Some(ca), Some(nlen)) =
+        (outcome.match_index, context_amount, needle_len)
+    {
+        let shaped = shape_match_context(&accumulated, midx, nlen, Some(ca));
+        (Some(shaped.match_index), Some(shaped.data))
+    } else {
+        (outcome.match_index, None)
+    };
+    let match_data_encoded = match shaped_data.as_ref() {
+        Some(data) => match codec::encode(encoding, data) {
+            Ok(encoded) => Some(encoded),
+            Err(e) => {
+                warn!("RX stream match context encoding error on {conn_id}: {e}");
+                None
             }
-        }
-    }
+        },
+        None => None,
+    };
+
+    let stop_notification = SubscribeStopNotification {
+        connection_id: conn_id.to_string(),
+        stop_reason: stop_meta.stop_reason.to_string(),
+        truncated: stop_meta.truncated,
+        bytes_observed: stop_meta.bytes_observed,
+        bytes_returned: stop_meta.bytes_returned,
+        elapsed_ms,
+        timeout_ms,
+        no_new_rx_timeout_ms,
+        from_offset,
+        next_offset: private_cursor,
+        bytes_lost: total_bytes_lost,
+        error: frame_error_msg,
+        matched: if outcome.matched { Some(true) } else { None },
+        match_index: if outcome.matched {
+            shaped_match_index
+        } else {
+            None
+        },
+        match_frame_index: if outcome.matched {
+            match_frame_index
+        } else {
+            None
+        },
+        data: if outcome.matched {
+            match_data_encoded
+        } else {
+            None
+        },
+        frames_emitted,
+        frames_dropped,
+        start_offset: ring.start_offset(),
+        end_offset: ring.end_offset(),
+    };
+    let stop_payload = serde_json::to_value(&stop_notification).unwrap_or_else(|e| {
+        warn!("SubscribeStopNotification serialization error on {conn_id}: {e}");
+        serde_json::json!({})
+    });
     let stop_param = LoggingMessageNotificationParam {
         level: LoggingLevel::Info,
         logger: Some(logger.clone()),
@@ -769,6 +768,10 @@ async fn stream_rx_from_ring(
 #[cfg(test)]
 mod tests {
     use crate::framing::ParsedFrame;
+    use crate::tools::types::{
+        SubscribeChunkNotification, SubscribeEncodingErrorNotification, SubscribeFrameNotification,
+        SubscribePartialFrameNotification, SubscribeStopNotification,
+    };
 
     #[test]
     fn parsed_frame_serializes_with_inlined_object_shape() {
@@ -807,5 +810,187 @@ mod tests {
             serde_json::to_value(&ParsedFrame::Raw).unwrap()["parser"],
             "raw"
         );
+    }
+
+    #[test]
+    fn subscribe_chunk_notification_serializes_with_expected_shape() {
+        let n = SubscribeChunkNotification {
+            connection_id: "c1".into(),
+            bytes_read: 5,
+            encoding: "utf8".into(),
+            data: "hello".into(),
+            bytes_lost: None,
+        };
+        let v = serde_json::to_value(&n).unwrap();
+        assert_eq!(v["connection_id"], "c1");
+        assert_eq!(v["bytes_read"], 5);
+        assert_eq!(v["encoding"], "utf8");
+        assert_eq!(v["data"], "hello");
+        assert!(v.get("bytes_lost").is_none());
+
+        // With bytes_lost.
+        let n_lost = SubscribeChunkNotification {
+            connection_id: "c2".into(),
+            bytes_read: 3,
+            encoding: "hex".into(),
+            data: "abc".into(),
+            bytes_lost: Some(10),
+        };
+        let v = serde_json::to_value(&n_lost).unwrap();
+        assert_eq!(v["bytes_lost"], 10);
+    }
+
+    #[test]
+    fn subscribe_frame_notification_serializes_with_expected_shape() {
+        // Basic frame — no parsed, no matched.
+        let n = SubscribeFrameNotification {
+            connection_id: "c1".into(),
+            frame_index: 3,
+            frame_type: "line".into(),
+            encoding: "utf8".into(),
+            data: "hello".into(),
+            parsed: None,
+            matched: None,
+        };
+        let v = serde_json::to_value(&n).unwrap();
+        assert_eq!(v["connection_id"], "c1");
+        assert_eq!(v["frame_index"], 3);
+        assert_eq!(v["frame_type"], "line");
+        assert_eq!(v["encoding"], "utf8");
+        assert_eq!(v["data"], "hello");
+        assert!(v.get("parsed").is_none());
+        assert!(v.get("matched").is_none());
+
+        // With matched.
+        let n_m = SubscribeFrameNotification {
+            connection_id: "c2".into(),
+            frame_index: 0,
+            frame_type: "line2".into(),
+            encoding: "hex".into(),
+            data: "ff".into(),
+            parsed: None,
+            matched: Some(true),
+        };
+        let v = serde_json::to_value(&n_m).unwrap();
+        assert_eq!(v["matched"], true);
+    }
+
+    #[test]
+    fn subscribe_encoding_error_notification_serializes_with_expected_shape() {
+        let n = SubscribeEncodingErrorNotification {
+            connection_id: "c1".into(),
+            encoding_error: true,
+            encoding: "utf8".into(),
+            bytes_dropped: 42,
+            reason: "invalid utf-8".into(),
+            bytes_lost: None,
+        };
+        let v = serde_json::to_value(&n).unwrap();
+        assert_eq!(v["connection_id"], "c1");
+        assert_eq!(v["encoding_error"], true);
+        assert_eq!(v["encoding"], "utf8");
+        assert_eq!(v["bytes_dropped"], 42);
+        assert_eq!(v["reason"], "invalid utf-8");
+        assert!(v.get("bytes_lost").is_none());
+
+        // With bytes_lost.
+        let n_loss = SubscribeEncodingErrorNotification {
+            connection_id: "c2".into(),
+            encoding_error: true,
+            encoding: "hex".into(),
+            bytes_dropped: 1,
+            reason: "bad".into(),
+            bytes_lost: Some(5),
+        };
+        let v = serde_json::to_value(&n_loss).unwrap();
+        assert_eq!(v["bytes_lost"], 5);
+    }
+
+    #[test]
+    fn subscribe_partial_frame_notification_serializes_with_expected_shape() {
+        let n = SubscribePartialFrameNotification {
+            connection_id: "c1".into(),
+            partial: true,
+            frame_index: 7,
+            frame_type: "cobs".into(),
+            encoding: "hex".into(),
+            data: "deadbeef".into(),
+            parsed: None,
+        };
+        let v = serde_json::to_value(&n).unwrap();
+        assert_eq!(v["connection_id"], "c1");
+        assert_eq!(v["partial"], true);
+        assert_eq!(v["frame_index"], 7);
+        assert_eq!(v["frame_type"], "cobs");
+        assert_eq!(v["encoding"], "hex");
+        assert_eq!(v["data"], "deadbeef");
+        assert!(v.get("parsed").is_none());
+    }
+
+    #[test]
+    fn subscribe_stop_notification_serializes_with_expected_shape() {
+        let n = SubscribeStopNotification {
+            connection_id: "c1".into(),
+            stop_reason: "timeout".into(),
+            truncated: false,
+            bytes_observed: 10,
+            bytes_returned: 10,
+            elapsed_ms: 100,
+            timeout_ms: Some(1000),
+            no_new_rx_timeout_ms: None,
+            from_offset: Some(0),
+            next_offset: 10,
+            bytes_lost: 0,
+            error: None,
+            matched: None,
+            match_index: None,
+            match_frame_index: None,
+            data: None,
+            frames_emitted: 0,
+            frames_dropped: 0,
+            start_offset: 0,
+            end_offset: 10,
+        };
+        let v = serde_json::to_value(&n).unwrap();
+        assert_eq!(v["stop_reason"], "timeout");
+        assert_eq!(v["truncated"], false);
+        assert_eq!(v["next_offset"], 10);
+        assert_eq!(v["start_offset"], 0);
+        assert_eq!(v["end_offset"], 10);
+        assert!(v.get("error").is_none());
+        assert!(v.get("matched").is_none());
+        assert!(v.get("no_new_rx_timeout_ms").is_none());
+        assert!(v.get("match_index").is_none());
+        assert!(v.get("match_frame_index").is_none());
+        assert!(v.get("data").is_none());
+
+        // With match.
+        let n_m = SubscribeStopNotification {
+            connection_id: "c2".into(),
+            stop_reason: "match_found".into(),
+            truncated: false,
+            bytes_observed: 20,
+            bytes_returned: 20,
+            elapsed_ms: 50,
+            timeout_ms: Some(500),
+            no_new_rx_timeout_ms: None,
+            from_offset: Some(0),
+            next_offset: 20,
+            bytes_lost: 0,
+            error: None,
+            matched: Some(true),
+            match_index: Some(5),
+            match_frame_index: Some(2),
+            data: Some("TARGET".into()),
+            frames_emitted: 3,
+            frames_dropped: 0,
+            start_offset: 0,
+            end_offset: 20,
+        };
+        let v = serde_json::to_value(&n_m).unwrap();
+        assert_eq!(v["matched"], true);
+        assert_eq!(v["match_index"], 5);
+        assert_eq!(v["match_frame_index"], 2);
+        assert_eq!(v["data"], "TARGET");
     }
 }
