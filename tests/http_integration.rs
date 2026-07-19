@@ -16,6 +16,7 @@ use rmcp::model::{
     ReadResourceRequestParams,
 };
 use serde_json::json;
+use tempfile::TempDir;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use serial_mcp::limits::{MAX_TIMEOUT_MS, MAX_WRITE_BYTES};
@@ -289,7 +290,10 @@ async fn call_tool_open_with_bad_data_bits_returns_is_error() {
 
 #[tokio::test]
 async fn configure_profile_creates_new_profile() {
-    let server = TestServer::start().await;
+    let profiles_dir = TempDir::new().unwrap();
+    let profiles_path = profiles_dir.path().join("profiles.toml");
+    let manager = Arc::new(ConnectionManager::new());
+    let server = TestServer::start_with_profiles_path(manager, profiles_path.clone()).await;
     let (client, _rx) = connect_client(&server).await.unwrap();
     let name = "test-configure-create";
     let result = client
@@ -322,20 +326,16 @@ async fn configure_profile_creates_new_profile() {
         .map(|p| p["name"].as_str().unwrap())
         .collect::<Vec<_>>();
     assert!(names.contains(&name), "profile should be listed: {names:?}");
-    // Cleanup.
-    let _ = client
-        .peer()
-        .call_tool(tool_request(
-            "delete_profile",
-            json!({"profile_name": name}),
-        ))
-        .await;
     client.cancel().await.ok();
+    // TempDir cleanup: profiles_dir dropped here, deletes profiles.toml.
 }
 
 #[tokio::test]
 async fn configure_profile_overwrites_existing() {
-    let server = TestServer::start().await;
+    let profiles_dir = TempDir::new().unwrap();
+    let profiles_path = profiles_dir.path().join("profiles.toml");
+    let manager = Arc::new(ConnectionManager::new());
+    let server = TestServer::start_with_profiles_path(manager, profiles_path.clone()).await;
     let (client, _rx) = connect_client(&server).await.unwrap();
     let name = "test-configure-ow";
     // Create initial profile.
@@ -368,20 +368,16 @@ async fn configure_profile_overwrites_existing() {
     assert_eq!(s["mode"], "profile");
     assert_eq!(s["created"], false);
     assert_eq!(s["defaults"]["baud_rate"], 19200);
-    // Cleanup.
-    let _ = client
-        .peer()
-        .call_tool(tool_request(
-            "delete_profile",
-            json!({"profile_name": name}),
-        ))
-        .await;
     client.cancel().await.ok();
+    // TempDir cleanup: profiles_dir dropped here, deletes profiles.toml.
 }
 
 #[tokio::test]
 async fn configure_profile_rejects_existing_without_overwrite() {
-    let server = TestServer::start().await;
+    let profiles_dir = TempDir::new().unwrap();
+    let profiles_path = profiles_dir.path().join("profiles.toml");
+    let manager = Arc::new(ConnectionManager::new());
+    let server = TestServer::start_with_profiles_path(manager, profiles_path.clone()).await;
     let (client, _rx) = connect_client(&server).await.unwrap();
     let name = "test-configure-rej";
     // Create initial profile.
@@ -413,15 +409,8 @@ async fn configure_profile_rejects_existing_without_overwrite() {
         Some(true),
         "should reject existing profile without overwrite: {result:?}"
     );
-    // Cleanup.
-    let _ = client
-        .peer()
-        .call_tool(tool_request(
-            "delete_profile",
-            json!({"profile_name": name}),
-        ))
-        .await;
     client.cancel().await.ok();
+    // TempDir cleanup: profiles_dir dropped here, deletes profiles.toml.
 }
 
 // ── configure tool: validation errors ────────────────────────────────────────
@@ -686,7 +675,6 @@ async fn subscribe_then_peer_write_pushes_notification() {
             "subscribe",
             json!({
                 "connection_id": connection_id,
-                "poll_interval_ms": 50,
             }),
         ))
         .await
@@ -733,7 +721,6 @@ async fn subscribe_with_timeout_auto_stops_in_background() {
                 "connection_id": connection_id,
                 "timeout_ms": 500,
                 "encoding": "utf8",
-                "poll_interval_ms": 50,
             }),
         ))
         .await
@@ -770,7 +757,6 @@ async fn subscribe_without_timeout_is_fire_and_forget() {
             "subscribe",
             json!({
                 "connection_id": connection_id,
-                "poll_interval_ms": 50,
             }),
         ))
         .await
@@ -806,7 +792,6 @@ async fn subscribe_closed_from_other_session_stops_streaming_task() {
             "subscribe",
             json!({
                 "connection_id": connection_id,
-                "poll_interval_ms": 50,
             }),
         ))
         .await
@@ -908,7 +893,6 @@ async fn read_with_no_data_times_out_with_is_error() {
             json!({
                 "connection_id": connection_id,
                 "timeout_ms": 50,
-                "max_buffered_bytes": 64,
             }),
         ))
         .await
@@ -951,7 +935,6 @@ async fn read_result_contains_elapsed_ms() {
             json!({
                 "connection_id": connection_id,
                 "timeout_ms": 1000,
-                "max_buffered_bytes": 64,
             }),
         ))
         .await
@@ -1207,7 +1190,6 @@ async fn read_silence_timeout_stops_with_no_new_rx_timeout() {
                 "connection_id": connection_id,
                 "timeout_ms": 1000,
                 "no_new_rx_timeout_ms": 50,
-                "max_buffered_bytes": 64,
             }),
         ))
         .await
@@ -1247,8 +1229,6 @@ async fn subscribe_replaced_previous_field_is_correct() {
             "subscribe",
             json!({
                 "connection_id": connection_id,
-                "poll_interval_ms": 50,
-                "max_buffered_bytes": 64,
             }),
         ))
         .await
@@ -1270,8 +1250,6 @@ async fn subscribe_replaced_previous_field_is_correct() {
             "subscribe",
             json!({
                 "connection_id": connection_id,
-                "poll_interval_ms": 50,
-                "max_buffered_bytes": 64,
             }),
         ))
         .await
@@ -1514,7 +1492,6 @@ async fn get_status_returns_config_and_counters() {
             json!({
                 "connection_id": connection_id,
                 "timeout_ms": 100,
-                "max_buffered_bytes": 64,
             }),
         ))
         .await
