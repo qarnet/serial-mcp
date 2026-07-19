@@ -181,6 +181,8 @@ proptest! {
             rx_parser: None,
             protocol: None,
             rx_buffer_size: serial_mcp::limits::DEFAULT_RX_BUFFER_SIZE,
+            max_buffered_bytes: 32768,
+            poll_interval_ms: 200,
         };
         assert_roundtrip!(args);
 
@@ -255,10 +257,9 @@ proptest! {
     fn read_args_roundtrip(
         id in opaque_id(),
         timeout in optional_u64(),
-        max_buffered_bytes in any_usize(),
         enc in valid_encoding(),
     ) {
-        let args = ReadArgs { connection_id: id, from: None, timeout_ms: timeout, max_buffered_bytes, encoding: enc, r#match: None, no_new_rx_timeout_ms: None, rx_framing: None, rx_parser: None, protocol: None };
+        let args = ReadArgs { connection_id: id, from: None, timeout_ms: timeout, encoding: enc, r#match: None, no_new_rx_timeout_ms: None, rx_framing: None, rx_parser: None, protocol: None };
         assert_roundtrip!(args);
     }
 
@@ -285,16 +286,12 @@ proptest! {
         id in opaque_id(),
         timeout in optional_u64(),
         enc in valid_encoding(),
-        max_buffered_bytes in any_usize(),
-        poll in any_u64(),
     ) {
         let args = SubscribeArgs {
             connection_id: id,
             timeout_ms: timeout,
             no_new_rx_timeout_ms: None,
             encoding: enc,
-            max_buffered_bytes,
-            poll_interval_ms: poll,
             from: None,
             r#match: None,
             rx_framing: None,
@@ -752,6 +749,8 @@ proptest! {
             rx_parser: None,
             protocol: None,
             rx_buffer_size: serial_mcp::limits::DEFAULT_RX_BUFFER_SIZE,
+            max_buffered_bytes: 32768,
+            poll_interval_ms: 200,
         };
         assert_roundtrip!(args);
     }

@@ -22,6 +22,7 @@ const EXPECTED_TOOLS: &[&str] = &[
     "open",
     "close",
     "write",
+    "transact",
     "read",
     "flush",
     "set_dtr_rts",
@@ -35,10 +36,12 @@ const EXPECTED_TOOLS: &[&str] = &[
     "open_profile",
     "save_profile",
     "delete_profile",
+    "configure",
     "get_log",
     "clear_log",
     "export_log",
     "reconnect",
+    "compute_checksum",
 ];
 
 fn build_stdio_server() {
@@ -67,7 +70,7 @@ async fn stdio_initialize_handshake_succeeds() {
 }
 
 #[tokio::test]
-async fn stdio_list_tools_returns_all_twenty_two_tools() {
+async fn stdio_list_tools_returns_all_twenty_five_tools() {
     let client = start_stdio_client().await;
 
     let result = client

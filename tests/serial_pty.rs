@@ -97,8 +97,8 @@ async fn pty_device_write_then_client_read() {
             "read",
             json!({
                 "connection_id": connection_id,
-                "timeout_ms": 1500,
-                "max_buffered_bytes": 64,
+                "max_buffered_bytes": 3,
+                "timeout_ms": 500,
             }),
         ))
         .await
@@ -917,6 +917,19 @@ async fn pty_subscribe_from_cursor_replays_after_read() {
 
     pty.write_device(b"ABCDEF").await.unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Configure max_buffered_bytes=3 so the read only returns 3 bytes.
+    client
+        .peer()
+        .call_tool(tool_request(
+            "configure",
+            json!({
+                "connection_id": connection_id,
+                "defaults": { "max_buffered_bytes": 3 },
+            }),
+        ))
+        .await
+        .unwrap();
 
     // Read first 3 bytes — cursor advances to 3.
     let result = client

@@ -8,7 +8,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use std::time::{Duration, Instant};
@@ -228,6 +228,14 @@ pub struct ConnectionConfig {
     #[serde(default = "default_rx_buffer_size")]
     #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
     pub rx_buffer_size: usize,
+    /// Default max buffered bytes for `read` operations.
+    #[serde(default = "default_max_buffered_bytes")]
+    #[schemars(schema_with = "crate::schema_helpers::read_max_buffered_bytes_schema")]
+    pub max_buffered_bytes: usize,
+    /// Default poll interval for `subscribe` in milliseconds.
+    #[serde(default = "default_poll_interval_ms")]
+    #[schemars(schema_with = "crate::schema_helpers::poll_interval_ms_schema")]
+    pub poll_interval_ms: u64,
 }
 
 fn default_rx_buffer_size() -> usize {
@@ -239,6 +247,14 @@ fn default_log_capacity() -> usize {
 
 fn default_true() -> bool {
     true
+}
+
+fn default_max_buffered_bytes() -> usize {
+    32768
+}
+
+fn default_poll_interval_ms() -> u64 {
+    200
 }
 
 // ---- Connection state -------------------------------------------------------
@@ -629,13 +645,17 @@ pub struct SerialConnection {
     /// Last fatal I/O error message and timestamp.
     last_error: StdMutex<Option<(std::time::SystemTime, String)>>,
     /// Default TX framing from profile/open call.
-    tx_framing_default: Option<crate::framing::TxFramingConfig>,
+    tx_framing_default: StdMutex<Option<crate::framing::TxFramingConfig>>,
     /// Default RX framing from profile/open call.
-    rx_framing_default: Option<crate::framing::RxFramingConfig>,
+    rx_framing_default: StdMutex<Option<crate::framing::RxFramingConfig>>,
     /// Default RX parser from profile/open call.
-    rx_parser_default: Option<crate::framing::ParserConfig>,
+    rx_parser_default: StdMutex<Option<crate::framing::ParserConfig>>,
     /// Default protocol preset from profile/open call.
-    protocol_default: Option<crate::framing::ProtocolPreset>,
+    protocol_default: StdMutex<Option<crate::framing::ProtocolPreset>>,
+    /// Default max buffered bytes for `read` (from profile/open, mutable live).
+    max_buffered_bytes_default: AtomicUsize,
+    /// Default poll interval for `subscribe` in ms (from profile/open, mutable live).
+    poll_interval_ms_default: AtomicU64,
 }
 
 impl fmt::Debug for SerialConnection {
@@ -676,6 +696,8 @@ impl SerialConnection {
                 rx_parser: None,
                 protocol: None,
                 rx_buffer_size: crate::limits::DEFAULT_RX_BUFFER_SIZE,
+                max_buffered_bytes: 32768,
+                poll_interval_ms: 200,
             },
             io,
         )
@@ -709,10 +731,12 @@ impl SerialConnection {
             reconnect_policy: StdMutex::new(ReconnectPolicy::default()),
             reconnect_attempts: AtomicU64::new(0),
             last_error: StdMutex::new(None),
-            tx_framing_default: config.tx_framing,
-            rx_framing_default: config.rx_framing,
-            rx_parser_default: config.rx_parser,
-            protocol_default: config.protocol,
+            tx_framing_default: StdMutex::new(config.tx_framing),
+            rx_framing_default: StdMutex::new(config.rx_framing),
+            rx_parser_default: StdMutex::new(config.rx_parser),
+            protocol_default: StdMutex::new(config.protocol),
+            max_buffered_bytes_default: AtomicUsize::new(config.max_buffered_bytes),
+            poll_interval_ms_default: AtomicU64::new(config.poll_interval_ms),
         }
     }
 
@@ -762,23 +786,74 @@ impl SerialConnection {
     }
 
     /// Default TX framing stored on the connection (from profile or `open`).
-    pub fn tx_framing_default(&self) -> Option<&crate::framing::TxFramingConfig> {
-        self.tx_framing_default.as_ref()
+    /// Returns by value (cloned from interior mutex for live mutation).
+    pub fn tx_framing_default(&self) -> Option<crate::framing::TxFramingConfig> {
+        self.tx_framing_default.lock().expect("poisoned").clone()
     }
 
     /// Default RX framing stored on the connection.
-    pub fn rx_framing_default(&self) -> Option<&crate::framing::RxFramingConfig> {
-        self.rx_framing_default.as_ref()
+    pub fn rx_framing_default(&self) -> Option<crate::framing::RxFramingConfig> {
+        self.rx_framing_default.lock().expect("poisoned").clone()
     }
 
     /// Default RX parser stored on the connection.
-    pub fn rx_parser_default(&self) -> Option<&crate::framing::ParserConfig> {
-        self.rx_parser_default.as_ref()
+    pub fn rx_parser_default(&self) -> Option<crate::framing::ParserConfig> {
+        self.rx_parser_default.lock().expect("poisoned").clone()
     }
 
     /// Default protocol preset stored on the connection. `Copy`, so returned by value.
+    /// Lock internal mutex for live mutation via `configure`.
     pub fn protocol_default(&self) -> Option<crate::framing::ProtocolPreset> {
-        self.protocol_default
+        *self
+            .protocol_default
+            .lock()
+            .expect("protocol_default mutex poisoned")
+    }
+
+    /// Default max buffered bytes for `read` operations. Mutable live.
+    pub fn max_buffered_bytes_default(&self) -> usize {
+        self.max_buffered_bytes_default
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Default poll interval for `subscribe` in milliseconds. Mutable live.
+    pub fn poll_interval_ms_default(&self) -> u64 {
+        self.poll_interval_ms_default
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    // ── Live mutators (pub(crate); exposed via `configure` tool) ──────────
+
+    /// Set the default TX framing on a live connection.
+    pub(crate) fn set_tx_framing_default(&self, v: Option<crate::framing::TxFramingConfig>) {
+        *self.tx_framing_default.lock().expect("poisoned") = v;
+    }
+
+    /// Set the default RX framing on a live connection.
+    pub(crate) fn set_rx_framing_default(&self, v: Option<crate::framing::RxFramingConfig>) {
+        *self.rx_framing_default.lock().expect("poisoned") = v;
+    }
+
+    /// Set the default RX parser on a live connection.
+    pub(crate) fn set_rx_parser_default(&self, v: Option<crate::framing::ParserConfig>) {
+        *self.rx_parser_default.lock().expect("poisoned") = v;
+    }
+
+    /// Set the default protocol preset on a live connection.
+    pub(crate) fn set_protocol_default(&self, v: Option<crate::framing::ProtocolPreset>) {
+        *self.protocol_default.lock().expect("poisoned") = v;
+    }
+
+    /// Set the default max buffered bytes on a live connection.
+    pub(crate) fn set_max_buffered_bytes_default(&self, v: usize) {
+        self.max_buffered_bytes_default
+            .store(v, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Set the default poll interval on a live connection.
+    pub(crate) fn set_poll_interval_ms_default(&self, v: u64) {
+        self.poll_interval_ms_default
+            .store(v, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Return the current connection health state.
@@ -887,11 +962,13 @@ impl SerialConnection {
             port_info: self.port_info.clone(),
             log_capacity: 1024, // preserve log config
             log_enabled: self.log.is_enabled(),
-            tx_framing: self.tx_framing_default().cloned(),
-            rx_framing: self.rx_framing_default().cloned(),
-            rx_parser: self.rx_parser_default().cloned(),
+            tx_framing: self.tx_framing_default(),
+            rx_framing: self.rx_framing_default(),
+            rx_parser: self.rx_parser_default(),
             protocol: self.protocol_default(),
             rx_buffer_size: crate::limits::DEFAULT_RX_BUFFER_SIZE,
+            max_buffered_bytes: self.max_buffered_bytes_default(),
+            poll_interval_ms: self.poll_interval_ms_default(),
         }
     }
 
@@ -1894,6 +1971,8 @@ mod tests {
             rx_parser: None,
             protocol: None,
             rx_buffer_size: crate::limits::DEFAULT_RX_BUFFER_SIZE,
+            max_buffered_bytes: 32768,
+            poll_interval_ms: 200,
         });
         let owner_id = mgr.insert(c1).await.unwrap();
 
@@ -2123,13 +2202,13 @@ mod schema {
     use crate::profiles::{Profile, ProfileSelector};
     use crate::serial::{ConnectionStatus, PortInfo};
     use crate::tools::types::{
-        ClearLogResult, CloseResult, DeleteProfileResult, ExportLogResult, FlushResult,
-        GetLogResult, GetStatusResult, ListConnectionsResult, ListPortsResult, ListProfilesResult,
-        OpenResult, ReadResult, ReconfigureResult, ReconnectResult, SaveProfileResult,
-        SendBreakResult, SetDtrRtsResult, SetFlowControlResult, SubscribeChunkNotification,
-        SubscribeEncodingErrorNotification, SubscribeFrameNotification,
+        ClearLogResult, CloseResult, ComputeChecksumResult, ConfigureResult, DeleteProfileResult,
+        ExportLogResult, FlushResult, GetLogResult, GetStatusResult, ListConnectionsResult,
+        ListPortsResult, ListProfilesResult, OpenResult, ReadResult, ReconfigureResult,
+        ReconnectResult, SaveProfileResult, SendBreakResult, SetDtrRtsResult, SetFlowControlResult,
+        SubscribeChunkNotification, SubscribeEncodingErrorNotification, SubscribeFrameNotification,
         SubscribePartialFrameNotification, SubscribeResult, SubscribeStopNotification,
-        UnsubscribeResult, WriteResult,
+        TransactResult, UnsubscribeResult, WriteResult,
     };
 
     /// Walk a JSON Schema `Value` and collect every `"format"` whose value
@@ -2253,6 +2332,12 @@ mod schema {
     check_schema!(clear_log_result_has_no_uint_formats, ClearLogResult);
     check_schema!(export_log_result_has_no_uint_formats, ExportLogResult);
     check_schema!(reconnect_result_has_no_uint_formats, ReconnectResult);
+    check_schema!(configure_result_has_no_uint_formats, ConfigureResult);
+    check_schema!(
+        compute_checksum_result_has_no_uint_formats,
+        ComputeChecksumResult
+    );
+    check_schema!(transact_result_has_no_uint_formats, TransactResult);
 
     // Framing config types (checked for uint format regressions on fields like
     // prefix_size, max_frames, and cobs delimiter).

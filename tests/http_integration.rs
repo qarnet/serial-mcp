@@ -18,7 +18,7 @@ use rmcp::model::{
 use serde_json::json;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use serial_mcp::limits::{MAX_READ_BYTES, MAX_STREAM_CHUNK_BYTES, MAX_TIMEOUT_MS, MAX_WRITE_BYTES};
+use serial_mcp::limits::{MAX_TIMEOUT_MS, MAX_WRITE_BYTES};
 use serial_mcp::serial::{test_support::loopback_connection, ConnectionManager};
 
 mod common;
@@ -30,6 +30,7 @@ const EXPECTED_TOOLS: &[&str] = &[
     "open",
     "close",
     "write",
+    "transact",
     "read",
     "flush",
     "set_dtr_rts",
@@ -43,10 +44,12 @@ const EXPECTED_TOOLS: &[&str] = &[
     "open_profile",
     "save_profile",
     "delete_profile",
+    "configure",
     "get_log",
     "clear_log",
     "export_log",
     "reconnect",
+    "compute_checksum",
 ];
 
 #[tokio::test]
@@ -59,7 +62,7 @@ async fn initialize_handshake_succeeds() {
 }
 
 #[tokio::test]
-async fn list_tools_returns_all_twenty_two_tools() {
+async fn list_tools_returns_all_twenty_five_tools() {
     let server = common::spawned::SpawnedServer::start().await;
     let (client, _rx) = common::spawned::spawn_client(&server).await.unwrap();
 
@@ -531,26 +534,6 @@ async fn validation_limits_return_tool_errors_over_http() {
     let (client, _rx) = connect_client(&server).await.unwrap();
 
     let cases = [
-        tool_request(
-            "read",
-            json!({ "connection_id": connection_id, "max_buffered_bytes": 0 }),
-        ),
-        tool_request(
-            "read",
-            json!({ "connection_id": connection_id, "max_buffered_bytes": MAX_READ_BYTES + 1 }),
-        ),
-        tool_request(
-            "subscribe",
-            json!({ "connection_id": connection_id, "max_buffered_bytes": 0 }),
-        ),
-        tool_request(
-            "subscribe",
-            json!({ "connection_id": connection_id, "max_buffered_bytes": MAX_STREAM_CHUNK_BYTES + 1 }),
-        ),
-        tool_request(
-            "subscribe",
-            json!({ "connection_id": connection_id, "poll_interval_ms": 0 }),
-        ),
         tool_request(
             "send_break",
             json!({ "connection_id": connection_id, "duration_ms": MAX_TIMEOUT_MS + 1 }),

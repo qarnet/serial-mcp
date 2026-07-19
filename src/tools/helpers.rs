@@ -120,7 +120,6 @@ pub struct ResolvedRxArgs {
 pub trait RxRequestArgs {
     fn connection_id(&self) -> &str;
     fn encoding(&self) -> &str;
-    fn max_buffered_bytes(&self) -> usize;
     fn timeout_ms(&self) -> Option<u64>;
     fn no_new_rx_timeout_ms(&self) -> Option<u64>;
     fn match_request(&self) -> Option<&MatchRequest>;
@@ -132,9 +131,6 @@ impl RxRequestArgs for ReadArgs {
     }
     fn encoding(&self) -> &str {
         &self.encoding
-    }
-    fn max_buffered_bytes(&self) -> usize {
-        self.max_buffered_bytes
     }
     fn timeout_ms(&self) -> Option<u64> {
         self.timeout_ms
@@ -154,9 +150,6 @@ impl RxRequestArgs for SubscribeArgs {
     fn encoding(&self) -> &str {
         &self.encoding
     }
-    fn max_buffered_bytes(&self) -> usize {
-        self.max_buffered_bytes
-    }
     fn timeout_ms(&self) -> Option<u64> {
         self.timeout_ms
     }
@@ -173,19 +166,22 @@ impl RxRequestArgs for SubscribeArgs {
 /// timeout, and matcher resolution. Error messages are prefixed with
 /// `limits.tool` to match each tool's existing wording.
 ///
+/// `max_buffered_bytes` is passed explicitly (resolved from the connection
+/// default by the handler).
 /// Does NOT reserve the buffer budget — the caller does that (subscribe must
 /// drop any prior subscription before reserving).
 pub async fn validate_rx_request<A: RxRequestArgs>(
     connections: &Arc<ConnectionManager>,
     args: &A,
     limits: RxLimits,
+    max_buffered_bytes: usize,
 ) -> Result<ResolvedRxArgs, String> {
     let encoding = parse_encoding(args.encoding())?;
     let connection = lookup_connection(connections, args.connection_id()).await?;
 
     let max_buffered_bytes = require_min_or_err(
         &format!("{}.max_buffered_bytes", limits.tool),
-        args.max_buffered_bytes(),
+        max_buffered_bytes,
         limits.min_buffered,
     )?;
     let max_buffered_bytes = clamp_or_err(
@@ -978,6 +974,8 @@ pub fn parse_open_args(args: OpenArgs) -> Result<ConnectionConfig, String> {
         rx_parser: args.rx_parser,
         protocol: args.protocol,
         rx_buffer_size: args.rx_buffer_size,
+        max_buffered_bytes: args.max_buffered_bytes,
+        poll_interval_ms: args.poll_interval_ms,
     })
 }
 
@@ -1012,6 +1010,8 @@ mod tests {
             rx_parser: None,
             protocol: None,
             rx_buffer_size: crate::limits::DEFAULT_RX_BUFFER_SIZE,
+            max_buffered_bytes: 32768,
+            poll_interval_ms: 200,
         };
         let config = parse_open_args(args).unwrap();
         assert_eq!(config.port, "/dev/ttyUSB0");
@@ -1037,6 +1037,8 @@ mod tests {
             rx_parser: None,
             protocol: None,
             rx_buffer_size: crate::limits::DEFAULT_RX_BUFFER_SIZE,
+            max_buffered_bytes: 32768,
+            poll_interval_ms: 200,
         };
         let err = parse_open_args(args).unwrap_err();
         assert!(err.contains("data_bits"));
@@ -1270,7 +1272,6 @@ mod tests {
     struct TestRxArgs {
         connection_id: String,
         encoding: String,
-        max_buffered_bytes: usize,
         timeout_ms: Option<u64>,
         no_new_rx_timeout_ms: Option<u64>,
         match_request: Option<MatchRequest>,
@@ -1282,9 +1283,6 @@ mod tests {
         }
         fn encoding(&self) -> &str {
             &self.encoding
-        }
-        fn max_buffered_bytes(&self) -> usize {
-            self.max_buffered_bytes
         }
         fn timeout_ms(&self) -> Option<u64> {
             self.timeout_ms
@@ -1301,7 +1299,6 @@ mod tests {
         TestRxArgs {
             connection_id: id.into(),
             encoding: "utf-8".into(),
-            max_buffered_bytes: 256,
             timeout_ms: Some(1000),
             no_new_rx_timeout_ms: None,
             match_request: None,
@@ -1326,7 +1323,7 @@ mod tests {
     #[tokio::test]
     async fn validate_rx_request_ok() {
         let (connections, id, _peer) = fake_conn().await;
-        let resolved = validate_rx_request(&connections, &valid_args(&id), read_limits())
+        let resolved = validate_rx_request(&connections, &valid_args(&id), read_limits(), 256)
             .await
             .unwrap();
         assert_eq!(resolved.max_buffered_bytes, 256);
@@ -1339,7 +1336,7 @@ mod tests {
         let (connections, id, _peer) = fake_conn().await;
         let mut a = valid_args(&id);
         a.encoding = "rot13".into();
-        let err = validate_rx_request(&connections, &a, read_limits())
+        let err = validate_rx_request(&connections, &a, read_limits(), 256)
             .await
             .unwrap_err();
         assert!(err.to_lowercase().contains("encoding"), "got: {err}");
@@ -1348,7 +1345,7 @@ mod tests {
     #[tokio::test]
     async fn validate_rx_request_rejects_unknown_connection() {
         let connections = Arc::new(ConnectionManager::new());
-        let err = validate_rx_request(&connections, &valid_args("nope"), read_limits())
+        let err = validate_rx_request(&connections, &valid_args("nope"), read_limits(), 256)
             .await
             .unwrap_err();
         assert!(err.contains("Connection ID nope not found"), "got: {err}");
@@ -1357,9 +1354,8 @@ mod tests {
     #[tokio::test]
     async fn validate_rx_request_rejects_buffered_below_min() {
         let (connections, id, _peer) = fake_conn().await;
-        let mut a = valid_args(&id);
-        a.max_buffered_bytes = 0;
-        let err = validate_rx_request(&connections, &a, read_limits())
+        let a = valid_args(&id);
+        let err = validate_rx_request(&connections, &a, read_limits(), 0)
             .await
             .unwrap_err();
         assert!(err.contains("read.max_buffered_bytes"), "got: {err}");
@@ -1369,9 +1365,8 @@ mod tests {
     #[tokio::test]
     async fn validate_rx_request_rejects_buffered_above_max() {
         let (connections, id, _peer) = fake_conn().await;
-        let mut a = valid_args(&id);
-        a.max_buffered_bytes = MAX_READ_BYTES + 1;
-        let err = validate_rx_request(&connections, &a, read_limits())
+        let a = valid_args(&id);
+        let err = validate_rx_request(&connections, &a, read_limits(), MAX_READ_BYTES + 1)
             .await
             .unwrap_err();
         assert!(err.contains("exceeds maximum"), "got: {err}");
@@ -1387,7 +1382,7 @@ mod tests {
             min_buffered: MIN_STREAM_CHUNK_BYTES,
             max_buffered: MAX_STREAM_CHUNK_BYTES,
         };
-        let err = validate_rx_request(&connections, &a, subscribe_limits)
+        let err = validate_rx_request(&connections, &a, subscribe_limits, 256)
             .await
             .unwrap_err();
         assert_eq!(err, "subscribe.no_new_rx_timeout_ms must be > 0");
@@ -1398,7 +1393,7 @@ mod tests {
         let (connections, id, _peer) = fake_conn().await;
         let mut a = valid_args(&id);
         a.timeout_ms = Some(MAX_TIMEOUT_MS + 1);
-        let err = validate_rx_request(&connections, &a, read_limits())
+        let err = validate_rx_request(&connections, &a, read_limits(), 256)
             .await
             .unwrap_err();
         assert!(err.contains("read.timeout_ms"), "got: {err}");

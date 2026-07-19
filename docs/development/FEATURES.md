@@ -17,40 +17,12 @@
 
 ## Near-term
 
-### `configure` tool + option-surface trim
-- sequenced after the 0.8.0 polish that folded `seek` into `read`,
-  dropped `peek`, unified `ReadFrom`, bumped `max_buffered_bytes` to
-  32 KiB, added ring bounds to `ReadResult`, extracted
-  `frame_outcome_to_stop` + `advance_cursor` helpers, replaced the
-  subscribe `serde_json::json!` payloads with typed
-  `Subscribe*Notification` structs, removed the `StreamHandle` `unsafe`
-  block, renamed `bytes_lost_total` → `bytes_wrapped_total`, and filled
-  the test gaps in ring/subscribe/disconnect-state coverage
-- the read/subscribe/open arg lists still carry power-user knobs
-  (`poll_interval_ms`, `max_buffered_bytes`, `rx_framing`, `rx_parser`)
-  that agents never tune and that add noise to the tool schemas; today
-  every read call ships 10 optional fields, of which the agent typically
-  uses 2-3 (`connection_id`, maybe `match`, maybe `timeout_ms`)
-- introduce a `configure` tool that sets default values for opening
-  connections (and potentially mutates defaults on a currently-open
-  connection): `max_buffered_bytes`, `rx_buffer_size`, framing/parser/
-  protocol defaults, `poll_interval_ms`, etc. — the values that today
-  live as per-call options or connection-default fields on `open`
-- the configure tool persists settings to the profiles TOML (or a
-  dedicated defaults file) so a host's preferred defaults survive
-  restarts
-- once defaults flow through `configure`, drop the corresponding
-  per-call fields from `read`/`subscribe` and keep only the ones that
-  genuinely vary per call: `connection_id`, `from`, `timeout_ms`,
-  `no_new_rx_timeout_ms`, `encoding`, `match`, and the `data`/`target`
-  fields on write/flush. Framing and parser stay reachable via the
-  `protocol` preset and via connection-level `configure` defaults; the
-  deep `rx_framing`/`rx_parser` objects stop appearing on every
-  read/subscribe call
-- reduces agent decision fatigue: the default read becomes the powerful
-  first call (large buffer, sensible timeout, connection-default
-  framing), and the surface a caller sees is the small set that actually
-  changes between calls
+### `configure` tool + option-surface trim ✅ **Shipped in v0.8.1**
+- The `configure` tool landed with two modes: profile (persist to TOML) and connection (live mutation of framing/parser/protocol/reconnect_policy/max_buffered_bytes/poll_interval_ms defaults). `log_capacity`/`log_enabled`/`rx_buffer_size`/serial-line params are profile-only (LogBuffer has no live setters; ring is fixed at open).
+- `max_buffered_bytes` (read) and `poll_interval_ms` (subscribe) are now connection defaults, removed from per-call `ReadArgs`/`SubscribeArgs`.
+- `ProfileDefaults` extended with `max_buffered_bytes` (32768), `poll_interval_ms` (200), `reconnect_policy`, `log_capacity` (1024), `log_enabled` (true).
+- `rx_framing`/`rx_parser`/`protocol` remain per-call on `ReadArgs`/`SubscribeArgs` (can still override per call).
+- `save_profile` `rx_buffer_size` snapshot bug fixed — now reads from live `RxSession` ring capacity.
 
 ### Local-only usage statistics for development
 - collect local metadata on tool-call frequency, stop-reason
@@ -71,26 +43,16 @@
   stats inform which fields to cut, and cutting fields makes the
   remaining stats cleaner
 
-### `transact` tool (write-then-await-response)
+### `transact` tool (write-then-await-response) ✅ **Shipped in v0.8.1**
 - one tool call: write, then await match/frames/timeout — the
   request/response primitive for AT, Modbus, GRBL-style traffic
-- the write-then-read race that motivated this is now largely solved by
-  the RX ring (0.8.0): `read` returns buffered bytes from the cursor
-  (cat semantics), so write-then-read works without a separate consumer
-  registration. `transact`'s remaining value is halving round trips
-  (one MCP call instead of write + read) and providing a single-call
-  request/response contract for agents that don't want to manage cursors
-- composes existing plumbing (`tx_session` + the ring-based `read`);
-  no new concepts
-- this is the minimal, safe kernel of "Expect/script automation" (§
-  Later) — ship it first, revisit scripting after
+- default `from: "now"` skips pre-write buffered backlog; composes existing
+  write + read plumbing in `src/tools/io_ops.rs`
 
-### `compute_checksum` utility tool
-- pure tool: compute crc16-modbus, crc32, xor, lrc, sum8 over caller-supplied
-  bytes (hex/base64 in, value out)
-- LLMs cannot reliably compute checksums by hand; any agent hand-crafting
-  binary frames for a protocol without a preset needs this immediately
-- `src/checksums.rs` is the natural home; nearly free to implement
+### `compute_checksum` utility tool ✅ **Shipped in v0.8.1**
+- pure tool: compute xor (NMEA-0183) and lrc (Modbus ASCII) checksums over
+  caller-supplied bytes (utf8/hex/base64 in, hex + integer out)
+- lives in `src/tools/utility_ops.rs`; uses `crate::checksums::` primitives
 
 ### Declarative checksums on generic framing
 - a `checksum: { algorithm, ... }` option on `Delimiter` / `LengthPrefixed` /

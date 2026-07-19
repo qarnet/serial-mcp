@@ -18,8 +18,8 @@ use crate::rx_session::RxSessionManager;
 use crate::serial::ConnectionManager;
 use crate::stop_controller::{RxStopController, RxStopDecision};
 use crate::tools::helpers::{
-    clamp_poll_interval_or_err, map_budget_err, validate_rx_request, ResolvedRxArgs, RxLimits,
-    MAX_STREAM_CHUNK_BYTES, MIN_POLL_INTERVAL_MS, MIN_STREAM_CHUNK_BYTES,
+    clamp_poll_interval_or_err, lookup_connection, map_budget_err, validate_rx_request,
+    ResolvedRxArgs, RxLimits, MAX_STREAM_CHUNK_BYTES, MIN_POLL_INTERVAL_MS, MIN_STREAM_CHUNK_BYTES,
 };
 use crate::tools::rx_consume::{
     consume_frames, disconnect_state, frame_outcome_to_stop, DisconnectState, RxFrameSink, SinkFlow,
@@ -78,15 +78,15 @@ pub async fn subscribe(
     _ctx: RequestContext<RoleServer>,
 ) -> Result<Json<SubscribeResult>, String> {
     debug!(
-        "subscribe {} encoding={} max_buffered_bytes={} poll={} timeout={:?} no_new_rx_timeout={:?} from={:?}",
-        args.connection_id,
-        args.encoding,
-        args.max_buffered_bytes,
-        args.poll_interval_ms,
-        args.timeout_ms,
-        args.no_new_rx_timeout_ms,
-        args.from,
+        "subscribe {} encoding={} timeout={:?} no_new_rx_timeout={:?} from={:?}",
+        args.connection_id, args.encoding, args.timeout_ms, args.no_new_rx_timeout_ms, args.from,
     );
+
+    // Look up connection early to get defaults for max_buffered_bytes and poll_interval_ms.
+    let connection_pre = lookup_connection(connections, &args.connection_id).await?;
+    let max_buffered_bytes_default = connection_pre.max_buffered_bytes_default();
+    let poll_interval_ms_default = connection_pre.poll_interval_ms_default();
+    drop(connection_pre); // validate_rx_request will re-lookup
 
     let ResolvedRxArgs {
         encoding,
@@ -101,12 +101,13 @@ pub async fn subscribe(
             min_buffered: MIN_STREAM_CHUNK_BYTES,
             max_buffered: MAX_STREAM_CHUNK_BYTES,
         },
+        max_buffered_bytes_default,
     )
     .await?;
     // poll_interval_ms is subscribe-specific; validated after the shared preamble.
     let poll_ms = clamp_poll_interval_or_err(
         "subscribe.poll_interval_ms",
-        args.poll_interval_ms,
+        poll_interval_ms_default,
         MIN_POLL_INTERVAL_MS,
     )?;
 

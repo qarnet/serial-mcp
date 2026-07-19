@@ -15,7 +15,8 @@ use crate::tools::helpers::{
     MAX_READ_BYTES, MAX_WRITE_BYTES, MIN_READ_BYTES,
 };
 use crate::tools::types::{
-    FlushArgs, FlushResult, ReadArgs, ReadFrom, ReadResult, WriteArgs, WriteResult,
+    FlushArgs, FlushResult, ReadArgs, ReadFrom, ReadResult, TransactArgs, TransactResult,
+    WriteArgs, WriteResult,
 };
 
 use crate::tx_session::TxSessionManager;
@@ -92,6 +93,12 @@ pub async fn read(
         args.connection_id, args.timeout_ms, args.no_new_rx_timeout_ms
     );
 
+    // Look up connection early to get max_buffered_bytes default.
+    let max_buffered_bytes_default = lookup_connection(connections, &args.connection_id)
+        .await
+        .map(|c| c.max_buffered_bytes_default())
+        .unwrap_or(32768);
+
     let ResolvedRxArgs {
         encoding,
         connection,
@@ -105,6 +112,7 @@ pub async fn read(
             min_buffered: MIN_READ_BYTES,
             max_buffered: MAX_READ_BYTES,
         },
+        max_buffered_bytes_default,
     )
     .await?;
 
@@ -185,6 +193,149 @@ pub async fn read(
         }
     }
     Ok(result)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn transact(
+    connections: &Arc<ConnectionManager>,
+    tx_sessions: &Arc<TxSessionManager>,
+    rx_sessions: &Arc<RxSessionManager>,
+    budget: &Arc<dyn BufferBudget>,
+    meta: Meta,
+    ct: tokio_util::sync::CancellationToken,
+    peer: Peer<RoleServer>,
+    args: TransactArgs,
+) -> Result<Json<TransactResult>, String> {
+    let encoding = parse_encoding(&args.encoding)?;
+    let connection = lookup_connection(connections, &args.connection_id).await?;
+
+    // --- Write half (inlined from write handler) ---
+    let decoded_bytes_ref =
+        codec::decode(encoding, &args.data).map_err(|e| format!("Data decoding failed - {e}"))?;
+    let decoded_len = decoded_bytes_ref.len();
+    clamp_or_err("transact.data.len()", decoded_len, MAX_WRITE_BYTES)?;
+
+    let tx_framing = crate::precedence::resolve_field(
+        args.tx_framing,
+        args.protocol,
+        crate::framing::preset_tx_framing,
+        connection.tx_framing_default(),
+        connection.protocol_default(),
+    );
+
+    let bytes_to_send: Vec<u8> = if let Some(ref tx_cfg) = tx_framing {
+        let framed = tx_cfg
+            .mode
+            .encode(&decoded_bytes_ref)
+            .map_err(|e| format!("TX framing failed: {e}"))?;
+        clamp_or_err("transact.framed_len()", framed.len(), MAX_WRITE_BYTES)?;
+        framed
+    } else {
+        decoded_bytes_ref
+    };
+
+    let data: Arc<[u8]> = Arc::from(bytes_to_send.as_slice());
+    let tx_session = tx_sessions.get_or_create(Arc::clone(&connection)).await;
+    let bytes_written = tx_session
+        .write(data)
+        .await
+        .map_err(|e| format!("Write failed: {e}"))?;
+    connection.record_write_op();
+    let write_result = WriteResult {
+        connection_id: args.connection_id.clone(),
+        name: connection.name().map(str::to_string),
+        bytes_written,
+        decoded_bytes: decoded_len,
+        encoding: encoding.to_string(),
+    };
+
+    // --- Read half (inlined from read handler, default from="now") ---
+    let max_buffered_bytes = connection.max_buffered_bytes_default();
+    let _reservation = budget
+        .try_reserve(max_buffered_bytes)
+        .map_err(|e| map_budget_err("transact.max_buffered_bytes", e))?;
+
+    let progress_token = meta.get_progress_token();
+    let session = rx_sessions
+        .get_or_create(Arc::clone(&connection), DEFAULT_RX_BUFFER_SIZE)
+        .await
+        .map_err(|e| format!("transact: {e}"))?;
+
+    let rx_framing = crate::precedence::resolve_field(
+        args.rx_framing,
+        args.protocol,
+        crate::framing::preset_rx_framing,
+        connection.rx_framing_default(),
+        connection.protocol_default(),
+    );
+    let rx_parser = crate::precedence::resolve_field(
+        args.rx_parser,
+        args.protocol,
+        crate::framing::preset_rx_parser,
+        connection.rx_parser_default(),
+        connection.protocol_default(),
+    );
+
+    let ring = session.ring();
+    let initial_cursor = match args.from.as_ref().unwrap_or(&ReadFrom::Now) {
+        ReadFrom::Now => ring.end_offset(),
+        ReadFrom::Cursor => session.read_cursor(),
+        ReadFrom::BufferStart => ring.start_offset(),
+        ReadFrom::Offset { offset } => *offset,
+    };
+    session.set_read_cursor(initial_cursor);
+
+    // Resolve the matcher from the match config (inline the matcher-building).
+    let matcher = match args.r#match {
+        Some(ref m) => Some(
+            crate::match_config::validate_match_request(m)
+                .map_err(|e| format!("transact.match: {e}"))?,
+        ),
+        None => None,
+    };
+
+    let outcome = read_bytes_from_ring(
+        session,
+        max_buffered_bytes,
+        args.timeout_ms,
+        &ct,
+        progress_token,
+        Some(&peer),
+        matcher,
+        args.no_new_rx_timeout_ms,
+        Some(Arc::clone(&connection)),
+        rx_framing.clone(),
+        rx_parser.clone(),
+    )
+    .await?;
+
+    let result = build_read_result(
+        outcome,
+        args.connection_id.clone(),
+        connection.name().map(str::to_string),
+        encoding,
+        args.timeout_ms,
+        args.no_new_rx_timeout_ms,
+    )?;
+    connection.record_read_op();
+    let log = connection.log();
+    log.rx_data(result.0.bytes_read);
+    if result.0.truncated {
+        connection.record_truncation();
+        log.truncated(result.0.bytes_observed, result.0.bytes_returned);
+    }
+    if result.0.matched {
+        if let Some(ref m) = args.r#match {
+            log.match_found(&m.pattern, &m.config.mode.to_string());
+        }
+    }
+
+    Ok(Json(TransactResult {
+        connection_id: args.connection_id,
+        name: connection.name().map(str::to_string),
+        write: write_result,
+        read: result.0,
+    }))
 }
 
 pub async fn flush(

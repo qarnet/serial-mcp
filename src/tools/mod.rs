@@ -5,6 +5,7 @@ pub mod port_ops;
 pub mod rx_consume;
 pub mod stream_ops;
 pub mod types;
+pub mod utility_ops;
 
 #[cfg(test)]
 mod tests {
@@ -27,7 +28,7 @@ mod tests {
     /// per-type coverage lives in `serial::schema`.
     ///
     /// Keep this list in sync with the `#[tool]` methods in `src/server.rs`.
-    /// The list below is exhaustive (22 tools); a missing tool would skip its
+    /// The list below is exhaustive (25 tools); a missing tool would skip its
     /// `outputSchema`/`title` check and any uint-format scan.
     fn all_tool_attrs() -> Vec<(&'static str, rmcp::model::Tool)> {
         vec![
@@ -39,6 +40,7 @@ mod tests {
             ("open", SerialHandler::open_tool_attr()),
             ("close", SerialHandler::close_tool_attr()),
             ("write", SerialHandler::write_tool_attr()),
+            ("transact", SerialHandler::transact_tool_attr()),
             ("read", SerialHandler::read_tool_attr()),
             ("flush", SerialHandler::flush_tool_attr()),
             ("set_dtr_rts", SerialHandler::set_dtr_rts_tool_attr()),
@@ -55,10 +57,15 @@ mod tests {
             ("open_profile", SerialHandler::open_profile_tool_attr()),
             ("save_profile", SerialHandler::save_profile_tool_attr()),
             ("delete_profile", SerialHandler::delete_profile_tool_attr()),
+            ("configure", SerialHandler::configure_tool_attr()),
             ("get_log", SerialHandler::get_log_tool_attr()),
             ("clear_log", SerialHandler::clear_log_tool_attr()),
             ("export_log", SerialHandler::export_log_tool_attr()),
             ("reconnect", SerialHandler::reconnect_tool_attr()),
+            (
+                "compute_checksum",
+                SerialHandler::compute_checksum_tool_attr(),
+            ),
         ]
     }
 
