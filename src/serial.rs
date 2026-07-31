@@ -521,7 +521,7 @@ fn describe_port(port: &SerialPortInfo) -> String {
 ///
 /// The production backend ([`SerialStream`]) talks to a real OS-level
 /// serial port. Tests substitute an in-memory implementation backed by
-/// [`tokio::io::duplex`] so that read/write/wait_for can be exercised
+/// [`tokio::io::duplex`] so that read/write/transact can be exercised
 /// without any hardware.
 ///
 /// Control-line operations (`clear_os_buffers`, `set_dtr_rts`,
@@ -1090,7 +1090,7 @@ impl SerialConnection {
     /// most `POLL_MS` milliseconds at a time and released between polls.  This
     /// lets concurrent `write` calls on the same connection proceed without
     /// waiting for the full read timeout — which is essential for the
-    /// request/response pattern (`wait_for` + `write`) on CDC-ACM devices.
+    /// request/response pattern (`transact`) on CDC-ACM devices.
     pub async fn read(&self, dst: &mut [u8], timeout_ms: Option<u64>) -> Result<usize> {
         const POLL_MS: u64 = 50;
         self.ensure_open()?;

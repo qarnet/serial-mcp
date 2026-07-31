@@ -46,7 +46,7 @@
 ### `transact` tool (write-then-await-response) ✅ **Shipped in v0.8.1**
 - one tool call: write, then await match/frames/timeout — the
   request/response primitive for AT, Modbus, GRBL-style traffic
-- default `from: "now"` skips pre-write buffered backlog; composes existing
+- default `from: {"type":"now"}` skips pre-write buffered backlog; composes existing
   write + read plumbing in `src/tools/io_ops.rs`
 
 ### `compute_checksum` utility tool ✅ **Shipped in v0.8.1**

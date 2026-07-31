@@ -634,6 +634,106 @@ async fn get_prompt_diagnose_port_returns_user_message() {
     client.cancel().await.ok();
 }
 
+/// The rendered `diagnose_port` prompt must use current tool shapes: a valid
+/// `read` flow, no removed per-call `max_buffered_bytes`, and no removed
+/// `wait_for` tool.
+#[tokio::test]
+async fn get_prompt_diagnose_port_uses_current_read_flow() {
+    let server = common::spawned::SpawnedServer::start().await;
+    let (client, _rx) = common::spawned::spawn_client(&server).await.unwrap();
+
+    let result = client
+        .peer()
+        .get_prompt(
+            GetPromptRequestParams::new("diagnose_port")
+                .with_arguments(args_object(json!({ "port": "/dev/ttyUSB7" }))),
+        )
+        .await
+        .unwrap();
+    assert!(!result.messages.is_empty());
+    let rendered = serde_json::to_string(&result.messages[0].content).unwrap();
+    assert!(rendered.contains("/dev/ttyUSB7"));
+    // Uses the current read flow (read with timeout / match).
+    assert!(
+        rendered.contains("read(connection_id"),
+        "prompt must drive the current read flow: {rendered}"
+    );
+    // The per-call max_buffered_bytes argument was removed in v0.8.1.
+    assert!(
+        !rendered.contains("max_buffered_bytes"),
+        "prompt must not use the removed per-call max_buffered_bytes: {rendered}"
+    );
+    // The wait_for tool was removed; read(match=...) is the pattern-wait flow.
+    assert!(
+        !rendered.contains("wait_for"),
+        "prompt must not reference the removed wait_for tool: {rendered}"
+    );
+    client.cancel().await.ok();
+}
+
+/// `tools/list` descriptions for `read`/`transact`/`flush` must advertise the
+/// actual tagged-object `ReadFrom` wire shape, not string shorthand.
+#[tokio::test]
+async fn read_tool_description_uses_tagged_readfrom_examples() {
+    let server = common::spawned::SpawnedServer::start().await;
+    let (client, _rx) = common::spawned::spawn_client(&server).await.unwrap();
+
+    let result = client
+        .peer()
+        .list_tools(Some(PaginatedRequestParams::default()))
+        .await
+        .unwrap();
+
+    let desc = |name: &str| -> String {
+        result
+            .tools
+            .iter()
+            .find(|t| t.name.as_ref() == name)
+            .unwrap_or_else(|| panic!("tool {name} missing from tools/list"))
+            .description
+            .as_deref()
+            .unwrap_or("")
+            .to_string()
+    };
+
+    for name in ["read", "transact", "flush"] {
+        let d = desc(name);
+        assert!(
+            d.contains(r#"{"type":"now"}"#),
+            "{name} description must show the tagged from example: {d}"
+        );
+    }
+    // The read description must carry the complete tagged set, including the
+    // absolute offset object.
+    let read = desc("read");
+    for tagged in [
+        r#"{"type":"cursor"}"#,
+        r#"{"type":"now"}"#,
+        r#"{"type":"buffer_start"}"#,
+        r#"{"type":"offset","offset":N}"#,
+    ] {
+        assert!(
+            read.contains(tagged),
+            "read description must contain {tagged}: {read}"
+        );
+    }
+    // No bare string shorthand survives in the examples.
+    for name in ["read", "transact", "flush"] {
+        let d = desc(name);
+        for shorthand in [
+            r#"from: "now""#,
+            r#"from: "cursor""#,
+            r#"from: "buffer_start""#,
+        ] {
+            assert!(
+                !d.contains(shorthand),
+                "{name} description must not advertise {shorthand}: {d}"
+            );
+        }
+    }
+    client.cancel().await.ok();
+}
+
 // ---- With an injected loopback connection -----------------------------------
 
 #[tokio::test]

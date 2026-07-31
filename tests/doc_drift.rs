@@ -143,6 +143,39 @@ fn readme_mentions_every_protocol_preset() {
 }
 
 #[test]
+fn readme_readfrom_examples_use_tagged_wire_form() {
+    // The `ReadFrom` wire format is a tagged object (`{"type":"now"}`), not a
+    // bare string. README prose that teaches the `from` parameter must not
+    // regress to string shorthand — agents copy these examples verbatim.
+    let readme = repo_file("README.md");
+    let line = readme
+        .lines()
+        .find(|l| l.contains("`from` parameter"))
+        .expect("README.md must describe the `from` parameter");
+    for tagged in [
+        r#"{"type":"cursor"}"#,
+        r#"{"type":"now"}"#,
+        r#"{"type":"buffer_start"}"#,
+        r#"{"type":"offset","offset":N}"#,
+    ] {
+        assert!(
+            line.contains(tagged),
+            "README `from` line must contain {tagged}: {line}"
+        );
+    }
+    for shorthand in [
+        "from: \"now\"",
+        "from: \"cursor\"",
+        "from: \"buffer_start\"",
+    ] {
+        assert!(
+            !line.contains(shorthand),
+            "README `from` line must not advertise {shorthand}: {line}"
+        );
+    }
+}
+
+#[test]
 fn server_json_versions_match_cargo_toml() {
     let cargo_version = cargo_toml_version();
     let server_json = repo_file("server.json");

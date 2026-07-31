@@ -329,7 +329,7 @@ impl RxStopController {
 ///
 /// Normal stop reasons are returned as successful results from `read` and
 /// as informational notifications from `subscribe`. Error stop reasons
-/// are returned as `Err` from `read`/`wait_for` and surfaced differently
+/// are returned as `Err` from `read` and surfaced differently
 /// in `subscribe` final notifications.
 pub fn is_normal_stop(reason: RxStopReason) -> bool {
     matches!(

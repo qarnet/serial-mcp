@@ -889,6 +889,79 @@ async fn pty_read_from_now_skips_backlog() {
     client.cancel().await.ok();
 }
 
+/// flush(target="both") discards the retained RX backlog: stale pre-flush
+/// bytes must never come back on a later read, while post-flush bytes remain
+/// readable. Proves the fix via public tools only — the connection must stay
+/// usable, so the read's success cannot be explained by a dead stream.
+#[tokio::test]
+async fn pty_flush_both_discards_retained_rx_backlog() {
+    let (_server, client, _rx, mut pty, connection_id) = setup().await;
+
+    // 1. Device writes a unique old marker.
+    pty.write_device(b"OLD-MARKER-4711").await.unwrap();
+
+    // 2. Poll public get_status until the backlog reached the ring (bounded).
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let mut saw_backlog = false;
+    while tokio::time::Instant::now() < deadline {
+        let status = client
+            .peer()
+            .call_tool(tool_request(
+                "get_status",
+                json!({ "connection_id": connection_id }),
+            ))
+            .await
+            .unwrap();
+        assert_ne!(status.is_error, Some(true), "{status:?}");
+        let s = status.structured_content.expect("structured");
+        if s["rx_buffered_unread"].as_u64().unwrap_or(0) >= 15 {
+            saw_backlog = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(saw_backlog, "OLD marker never reached the RX ring");
+
+    // 3. Flush with target="both" — must discard the retained backlog.
+    let flush = client
+        .peer()
+        .call_tool(tool_request(
+            "flush",
+            json!({ "connection_id": connection_id, "target": "both" }),
+        ))
+        .await
+        .unwrap();
+    assert_ne!(flush.is_error, Some(true), "{flush:?}");
+
+    // 4. Device sends a unique new marker after the flush returned.
+    pty.write_device(b"NEW-MARKER-2299").await.unwrap();
+
+    // 5. Ordinary read (shared cursor, which flush clamped to the live edge).
+    let read = client
+        .peer()
+        .call_tool(tool_request(
+            "read",
+            json!({
+                "connection_id": connection_id,
+                "timeout_ms": 2000,
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_ne!(read.is_error, Some(true), "read failed: {read:?}");
+    let s = read.structured_content.expect("structured");
+    let data = s["data"].as_str().unwrap_or("");
+    assert!(
+        data.contains("NEW-MARKER-2299"),
+        "post-flush bytes must remain readable: {s:?}"
+    );
+    assert!(
+        !data.contains("OLD-MARKER-4711"),
+        "stale pre-flush bytes must be discarded by flush(target=both): {s:?}"
+    );
+    client.cancel().await.ok();
+}
+
 // ── Step 7 (12e): subscribe from variants ─────────────────────────────────────
 
 /// subscribe with `from: "cursor"` replays bytes after the last read.

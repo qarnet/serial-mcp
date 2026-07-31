@@ -359,18 +359,10 @@ pub async fn flush(
                         e,
                     )
                 })?;
-            // Clear the ring and clamp the shared read cursor to live edge.
-            // This discards all unread buffered RX data. To skip past data
-            // without destroying it, use `read` with `from: "now"` and discard
-            // the result.
-            if let Some(session) = rx_sessions.get(&args.connection_id).await {
-                session.ring().clear();
-                session.set_read_cursor(session.ring().end_offset());
-                warn!(
-                    "flush(input): ring cleared for {}; all unread RX data discarded",
-                    args.connection_id
-                );
-            }
+            // Discard all unread buffered RX data. To skip past data without
+            // destroying it, use `read` with `from: {"type": "now"}` and
+            // discard the result.
+            discard_rx_backlog(rx_sessions, &args.connection_id).await;
         }
         FlushTarget::Output => {
             let session = tx_sessions.get_or_create(Arc::clone(&connection)).await;
@@ -383,6 +375,9 @@ pub async fn flush(
             })?;
         }
         FlushTarget::Both => {
+            // Output-first ordering: flush queued/OS output, then clear OS
+            // input, then discard the retained ring and clamp the shared
+            // cursor — the same RX semantics as target=input.
             let session = tx_sessions.get_or_create(Arc::clone(&connection)).await;
             session.flush_output().await.map_err(|e| {
                 log_tool_err(
@@ -401,6 +396,7 @@ pub async fn flush(
                         e,
                     )
                 })?;
+            discard_rx_backlog(rx_sessions, &args.connection_id).await;
         }
     }
     info!("Flushed {} ({:?})", args.connection_id, args.target);
@@ -410,4 +406,19 @@ pub async fn flush(
         name: connection.name().map(str::to_string),
         target: args.target,
     }))
+}
+
+/// Shared RX-discard path for `flush(target="input")` and
+/// `flush(target="both")`: clear the retained RX ring and clamp the shared
+/// read cursor to the ring live edge. Both targets route through this one
+/// helper so their RX semantics cannot drift.
+async fn discard_rx_backlog(rx_sessions: &Arc<RxSessionManager>, connection_id: &str) {
+    if let Some(session) = rx_sessions.get(connection_id).await {
+        session.ring().clear();
+        session.set_read_cursor(session.ring().end_offset());
+        warn!(
+            "flush: ring cleared for {}; all unread RX data discarded",
+            connection_id
+        );
+    }
 }
