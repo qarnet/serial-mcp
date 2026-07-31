@@ -137,7 +137,7 @@ cargo test --test native_sim_connection_lifecycle -- --ignored --test-threads=1
 ## Firmware / NCS
 
 - Read `firmware/AGENTS.md` before touching Zephyr code; root file only keeps top-level gotchas.
-- `nix develop` now auto-loads Nordic toolchain env via `nrfutil sdk-manager toolchain env --ncs-version v3.3.0 --as-script sh`, sets `ZEPHYR_BASE`, and exposes firmware helpers on `PATH`.
+- Nordic toolchain env is owned by the `nix-nrf-dev` flake input (`mkNrfShell`): the dev shell itself stays clean (no `LD_LIBRARY_PATH`/`PYTHONHOME`/`PYTHONPATH`/`GIT_EXEC_PATH` pollution from the sdk-manager); the `west` wrapper loads `nrfutil sdk-manager toolchain env --ncs-version v3.3.0 --as-script sh` per command. The shell hook derives `ZEPHYR_BASE` and exposes firmware helpers on `PATH`.
 - Use helpers instead of retyping wrappers:
 
 ```bash
@@ -145,7 +145,7 @@ fw-build-native
 fw-run-native
 ```
 
-- `native_sim` is a 32-bit host build (`-m32`). Repo flake now supplies multilib GCC; do not reintroduce "NixOS unsupported" guidance.
+- `native_sim` is a 32-bit host build (`-m32`). `nix-nrf-dev`'s `mkNrfShell` supplies multilib GCC; do not reintroduce "NixOS unsupported" guidance.
 - The XIAO BLE nRF52840 target was removed. The test firmware now targets `native_sim` only.
 - Do not switch firmware command channel away from `DT_CHOSEN(zephyr_console)`.
 - native_sim tests need firmware built first: `fw-build-native`. Firmware lives in dedicated build tree `build/native_sim`.
