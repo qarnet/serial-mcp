@@ -10,7 +10,7 @@ remains; record results without touching `le-audio-receiver`'s pinned lock.
 | Repository | Revision | Note |
 |---|---|---|
 | nix-nrf-dev (reviewed) | `70b469320c8785b7b86ec25410e797e2ac3b0333` | local `main` == `origin/main`, 0 ahead / 0 behind |
-| serial-mcp (migration commit) | `e43ff05` "fix(nix): scope Nordic toolchain environment" | 1 commit ahead of `origin/main` (unpushed) |
+| serial-mcp (migration commit) | `e43ff05` "fix(nix): scope Nordic toolchain environment" | unpushed; acceptance documentation follows in subsequent commit(s) |
 | le-audio-receiver (pinned) | `e9d77367e334213417c10fa7a7ded3e9195f78c0` | unchanged; new revision exercised via `--override-input` only |
 
 No tracked file or lock file in `le-audio-receiver` was modified.
@@ -119,7 +119,7 @@ variables scoped to the west wrapper"). No compatibility workaround remains.
 ## Final worktree status
 
 - **nix-nrf-dev**: clean tracked files; untracked `goals.md` preserved; `main` == `origin/main` == `70b4693`.
-- **serial-mcp**: clean tracked files; 1 commit ahead of `origin/main` (`e43ff05`); staged for this record: handoff + this document (commit `docs(nix): record scoped shell acceptance`).
+- **serial-mcp**: clean tracked worktree; the migration commit (`e43ff05`) and the acceptance documentation commit(s) remain unpushed.
 - **le-audio-receiver**: clean; `flake.lock` pins `e9d7736` (unchanged); generated `build/` outputs ignored.
 
 ## Hardware
@@ -132,5 +132,5 @@ No hardware was flashed, probed, or interacted with. Build-only acceptance.
   sdk-manager pollution in the parent environment; assertions unchanged.
 - `nix flake check` emitted non-fatal eval warnings (app `meta` missing,
   crane cross-compile splice) — no failure.
-- Follow-up: `serial-mcp` `main` carries two unpushed commits (`e43ff05`,
-  this record). Recommend push once the migration record is reviewed.
+- Follow-up: recommend pushing the scoped migration/acceptance commit series
+  after review.
