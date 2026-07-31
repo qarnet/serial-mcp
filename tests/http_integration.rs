@@ -734,6 +734,62 @@ async fn read_tool_description_uses_tagged_readfrom_examples() {
     client.cancel().await.ok();
 }
 
+/// The generated input schemas for `read`/`subscribe`/`transact` carry the
+/// agent-visible `from` guidance in the property description. It must
+/// advertise the tagged `ReadFrom` wire form, never bare string shorthand —
+/// agents copy these descriptions when constructing calls.
+#[tokio::test]
+async fn read_tool_input_schema_uses_tagged_readfrom_examples() {
+    let server = common::spawned::SpawnedServer::start().await;
+    let (client, _rx) = common::spawned::spawn_client(&server).await.unwrap();
+
+    let result = client
+        .peer()
+        .list_tools(Some(PaginatedRequestParams::default()))
+        .await
+        .unwrap();
+
+    for name in ["read", "subscribe", "transact"] {
+        let tool = result
+            .tools
+            .iter()
+            .find(|t| t.name.as_ref() == name)
+            .unwrap_or_else(|| panic!("tool {name} missing from tools/list"));
+        let from_desc = tool
+            .input_schema
+            .get("properties")
+            .and_then(|p| p.get("from"))
+            .and_then(|f| f.get("description"))
+            .and_then(|d| d.as_str())
+            .unwrap_or_else(|| {
+                panic!("{name}.inputSchema.properties.from.description must be present")
+            });
+        for tagged in [
+            r#"{"type":"cursor"}"#,
+            r#"{"type":"now"}"#,
+            r#"{"type":"buffer_start"}"#,
+            r#"{"type":"offset","offset":N}"#,
+        ] {
+            assert!(
+                from_desc.contains(tagged),
+                "{name}.from description must contain {tagged}: {from_desc}"
+            );
+        }
+        for shorthand in [
+            r#"{"offset": N}"#,
+            r#""now" (default)"#,
+            r#""cursor" (default)"#,
+            r#"from: "now""#,
+        ] {
+            assert!(
+                !from_desc.contains(shorthand),
+                "{name}.from description must not advertise {shorthand}: {from_desc}"
+            );
+        }
+    }
+    client.cancel().await.ok();
+}
+
 // ---- With an injected loopback connection -----------------------------------
 
 #[tokio::test]

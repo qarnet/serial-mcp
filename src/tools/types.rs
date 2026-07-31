@@ -108,10 +108,11 @@ pub struct WriteArgs {
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct ReadArgs {
     pub connection_id: String,
-    /// Where to start reading from. `"cursor"` (default) — shared read cursor,
-    /// `"now"` — live edge (skip buffered backlog), `"buffer_start"` — replay
-    /// everything retained in the ring, or `{"offset": N}` — absolute stream
-    /// offset from a prior result's `from_offset`/`next_offset`.
+    /// Where to start reading from. `{"type":"cursor"}` (default) — shared
+    /// read cursor, `{"type":"now"}` — live edge (skip buffered backlog),
+    /// `{"type":"buffer_start"}` — replay everything retained in the ring,
+    /// or `{"type":"offset","offset":N}` — absolute stream offset from a
+    /// prior result's `from_offset`/`next_offset`.
     #[serde(default)]
     pub from: Option<ReadFrom>,
     #[serde(default)]
@@ -205,11 +206,11 @@ pub enum ReadFrom {
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct SubscribeArgs {
     pub connection_id: String,
-    /// Where to start reading from. `"now"` (default) — live edge,
-    /// `"cursor"` — shared read cursor, `"buffer_start"` — oldest
-    /// retained byte, or `{"offset": N}` — absolute stream offset.
-    /// Replayed history flows through the same framing/match pipeline
-    /// as live data.
+    /// Where to start reading from. `{"type":"now"}` (default) — live edge,
+    /// `{"type":"cursor"}` — shared read cursor, `{"type":"buffer_start"}` —
+    /// oldest retained byte, or `{"type":"offset","offset":N}` — absolute
+    /// stream offset. Replayed history flows through the same framing/match
+    /// pipeline as live data.
     #[serde(default)]
     pub from: Option<ReadFrom>,
     #[serde(default)]
@@ -438,14 +439,14 @@ pub struct ReadResult {
     #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
     pub buffered_remaining: u64,
     /// Absolute stream offset of the oldest byte retained in the ring at result
-    /// time. Use with `from: {offset: start_offset}` to replay from the oldest
-    /// retained byte.
+    /// time. Use with `from: {"type":"offset","offset":start_offset}` to replay
+    /// from the oldest retained byte.
     #[serde(default)]
     #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
     pub start_offset: u64,
     /// Absolute stream offset of the newest byte retained in the ring at result
-    /// time (the live edge). Equals the cursor position `from: "now"` would
-    /// resolve to.
+    /// time (the live edge). Equals the cursor position `from: {"type":"now"}`
+    /// would resolve to.
     #[serde(default)]
     #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
     pub end_offset: u64,
@@ -906,9 +907,10 @@ pub struct TransactArgs {
     pub data: String,
     #[serde(default = "default_encoding")]
     pub encoding: String,
-    /// Where the read half starts. "now" (default) — live edge, skip
-    /// pre-write buffered backlog; "cursor" — shared read cursor;
-    /// "buffer_start" — replay everything retained; or {"offset": N}.
+    /// Where the read half starts. `{"type":"now"}` (default) — live edge,
+    /// skip pre-write buffered backlog; `{"type":"cursor"}` — shared read
+    /// cursor; `{"type":"buffer_start"}` — replay everything retained; or
+    /// `{"type":"offset","offset":N}`.
     #[serde(default)]
     pub from: Option<ReadFrom>,
     #[serde(default)]

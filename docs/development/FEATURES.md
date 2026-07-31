@@ -36,7 +36,7 @@
   default with an explicit enable
 - the goal is development insight (which tools/options are dead weight,
   which defaults are wrong), not user tracking — design the schema
-  around questions we actually want to answer ("is `from: now` used
+  around questions we actually want to answer ("is `from: {"type":"now"}` used
   enough to justify keeping it?", "do agents ever set
   `poll_interval_ms`?")
 - pairs with the `configure` tool + option-surface trim above: the

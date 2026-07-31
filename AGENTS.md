@@ -192,5 +192,5 @@ cargo run --manifest-path xtask/Cargo.toml -- print-paths
 - **Per-call `max_buffered_bytes` removed** from `ReadArgs` and `SubscribeArgs`. Per-call `poll_interval_ms` removed from `SubscribeArgs`. Both now come from connection defaults (mutable via `configure`).
 - **`precedence::resolve_field`** changed signature: `conn_default` is now `Option<T>` (by value) instead of `Option<&T>` (borrowed). The framing-default accessors on `SerialConnection` return by value (cloned from StdMutex).
 - **`compute_checksum` tool** — pure utility, no connection required. Algorithms: xor (NMEA) and lrc (Modbus ASCII). Lives in `src/tools/utility_ops.rs`.
-- **`transact` tool** — write-then-await-response in one call. Default `from: "now"` to skip pre-write backlog. Composes existing write + read plumbing in `src/tools/io_ops.rs`.
+- **`transact` tool** — write-then-await-response in one call. Default `from: {"type":"now"}` to skip pre-write backlog. Composes existing write + read plumbing in `src/tools/io_ops.rs`.
 - **`save_profile` `rx_buffer_size` bug fixed** — now snapshots from the live `RxSession` ring capacity instead of hardcoding `DEFAULT_RX_BUFFER_SIZE`. Signature changed: takes `rx_sessions: &Arc<RxSessionManager>`.

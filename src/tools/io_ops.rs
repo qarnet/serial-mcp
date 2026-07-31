@@ -146,8 +146,9 @@ pub async fn read(
 
     // Resolve the initial read cursor from the `from` parameter.
     // Default: Cursor (shared read cursor). Writes the cursor BEFORE calling
-    // read_bytes_from_ring so the agent can re-pass the same from: {offset: N}
-    // to re-read non-destructively (cursor gets reset on each call).
+    // read_bytes_from_ring so the agent can re-pass the same
+    // from: {"type":"offset","offset":N} to re-read non-destructively
+    // (cursor gets reset on each call).
     let ring = session.ring();
     let initial_cursor = match args.from.as_ref().unwrap_or(&ReadFrom::Cursor) {
         ReadFrom::Now => ring.end_offset(),
