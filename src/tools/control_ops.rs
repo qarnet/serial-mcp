@@ -27,8 +27,12 @@ const DEFAULT_CAPTURE_BOOT_TIMEOUT_MS: u64 = 5000;
 /// Armed with the configured RELEASE state BEFORE the assertion (production
 /// `set_dtr_rts` sets DTR then RTS, so an RTS failure can leave DTR changed).
 /// On drop while armed, spawns a best-effort release using the configured
-/// release state. Every explicit path attempts the release and disarms the
-/// guard only after success.
+/// release state THROUGH THE PUBLIC [`SerialConnection::set_dtr_rts`], so the
+/// cleanup queues on the per-connection control lock like any other
+/// line-control caller (the capture's own pulse guard drops right after this
+/// task is spawned — the task is independent, so there is no deadlock).
+/// Every explicit path attempts the release and disarms the guard only after
+/// success; an armed guard's drop is the ONLY retry path.
 struct ResetReleaseGuard {
     connection: Arc<SerialConnection>,
     release_dtr: bool,
@@ -52,10 +56,7 @@ impl Drop for ResetReleaseGuard {
         let release_rts = self.release_rts;
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             handle.spawn(async move {
-                if let Err(e) = connection
-                    .set_dtr_rts_unlocked(release_dtr, release_rts)
-                    .await
-                {
+                if let Err(e) = connection.set_dtr_rts(release_dtr, release_rts).await {
                     warn!("capture_boot: best-effort reset-line release failed: {e}");
                 }
             });
@@ -206,8 +207,12 @@ pub async fn capture_boot(
 
     let has_reset = args.reset.is_some();
 
-    // ── 3. Serialize line control when a reset is configured ──────────────
-    let _control_guard = if has_reset {
+    // ── 3. Serialize line control when a reset is configured. The lock is
+    //        scoped to the ASSERT/HOLD/RELEASE pulse only (handoff spec) —
+    //        it is dropped below, before the settle and read phases, so
+    //        other line-control callers are not blocked for the whole
+    //        capture duration. ─────────────────────────────────────────────
+    let _pulse_control_guard = if has_reset {
         Some(connection.control_lock().lock().await)
     } else {
         None
@@ -283,7 +288,15 @@ pub async fn capture_boot(
         }
     }
 
-    // ── 10. Optional settle delay while the pump keeps appending ─────────
+    // ── 10. The control lock covered only the pulse; release it before the
+    //        settle and read phases. The release guard stays alive: on the
+    //        abrupt paths (assert/release failure, cancellation with a
+    //        failed release) it remains armed and its drop — which runs
+    //        AFTER this guard in the unwind order — queues the cleanup
+    //        through the public `set_dtr_rts` (control-lock serialized).
+    drop(_pulse_control_guard);
+
+    // ── 11. Optional settle delay while the pump keeps appending ─────────
     if let Some(ms) = args.settle_ms {
         if ms > 0 {
             let settle = tokio::time::sleep(Duration::from_millis(ms));
@@ -297,7 +310,7 @@ pub async fn capture_boot(
         }
     }
 
-    // ── 11. Consume from the mark with a PRIVATE cursor ──────────────────
+    // ── 12. Consume from the mark with a PRIVATE cursor ──────────────────
     let (outcome, _final_private_cursor) = read_from_private_cursor(
         &session,
         mark_offset,
@@ -314,12 +327,13 @@ pub async fn capture_boot(
     )
     .await?;
 
-    // Lines were released explicitly above; disarm the drop-time cleanup.
-    if let Some(guard) = release_guard.as_ref() {
-        guard.disarm();
-    }
+    // NOTE: no unconditional disarm here. The release guard is disarmed ONLY
+    // by a successful (or ConnectionClosed) `release_reset_lines`; if the
+    // cancellation path had to swallow a release failure, the guard remains
+    // armed so its drop retries the configured release state. That retry is
+    // the only guarantee for cleanup on that path.
 
-    // ── 12. Build the nested ReadResult and record read logs like `read` ─
+    // ── 13. Build the nested ReadResult and record read logs like `read` ─
     let result = build_read_result(
         outcome,
         args.connection_id.clone(),

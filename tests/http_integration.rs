@@ -2880,6 +2880,90 @@ async fn capture_boot_cancellation_releases_lines_request_scoped() {
     client.cancel().await.ok();
 }
 
+/// Cancellation during hold where the FIRST release attempt fails: the
+/// capture must NOT disarm the guard (the old unconditional disarm disabled
+/// the drop retry), the drop-time retry must apply the configured release
+/// state through the control lock, and the control lock must become usable
+/// again afterwards. The transition ordering in the line log proves the
+/// retry: assert, failed release attempt, then a second release-state
+/// transition from the drop cleanup.
+#[tokio::test]
+async fn capture_boot_cancellation_with_failed_release_retries_cleanup_via_control_lock() {
+    let (_server, client, cid, state) =
+        controlled_server("loop-capture-cancel-rel-fail", 65536).await;
+
+    let handle = client
+        .peer()
+        .send_cancellable_request(
+            ClientRequest::CallToolRequest(CallToolRequest::new(
+                CallToolRequestParams::new("capture_boot").with_arguments(args_object(json!({
+                    "connection_id": cid,
+                    "reset": {
+                        "assert_dtr": false,
+                        "assert_rts": false,
+                        "release_dtr": true,
+                        "release_rts": true,
+                        "hold_ms": 30000,
+                    },
+                }))),
+            )),
+            PeerRequestOptions::no_options(),
+        )
+        .await
+        .unwrap();
+
+    // Wait for the assertion (hold phase), then arm a failure for the
+    // release attempt the cancellation will trigger.
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while state.line_log().is_empty() && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(state.line_log(), vec![(false, false)]);
+    state.set_fail_next_set(1);
+
+    // Request-scoped cancellation: the release attempt records the release
+    // state and FAILS; the guard must stay armed.
+    handle
+        .peer
+        .notify_cancelled(CancelledNotificationParam {
+            request_id: handle.id.clone(),
+            reason: Some("release-failure cancel".into()),
+        })
+        .await
+        .unwrap();
+
+    // The failed attempt recorded (true,true) inside the capture; the
+    // drop-time retry — queued through the control lock after the capture's
+    // pulse guard drops — records (true,true) again. Exactly three
+    // transitions, in order.
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while state.line_log().len() < 3 && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(
+        state.line_log(),
+        vec![(false, false), (true, true), (true, true)],
+        "assert, failed release attempt, then drop-time retry in order: {:?}",
+        state.line_log()
+    );
+
+    // The control lock became usable after the capture and its cleanup: a
+    // fresh line-control call completes promptly (nothing stuck holding it).
+    let r = tokio::time::timeout(
+        Duration::from_secs(2),
+        client.peer().call_tool(tool_request(
+            "set_dtr_rts",
+            json!({ "connection_id": cid, "dtr": true, "rts": true }),
+        )),
+    )
+    .await
+    .expect("set_dtr_rts must not block after cleanup")
+    .unwrap();
+    assert_ne!(r.is_error, Some(true), "{r:?}");
+
+    client.cancel().await.ok();
+}
+
 // ── 5. Assertion failure and release failure attempt configured cleanup ──
 
 #[tokio::test]
