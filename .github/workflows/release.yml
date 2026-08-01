@@ -160,9 +160,12 @@ jobs:
         run: ${{ matrix.install }}
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.88.0
         with:
           targets: ${{ matrix.target }}
+
+      - name: Report Rust toolchain
+        run: rustc --version --verbose
 
       - name: Cache cargo registry + build
         if: matrix.os != 'windows-latest'
@@ -239,7 +242,10 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libudev-dev pkg-config
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.88.0
+
+      - name: Report Rust toolchain
+        run: rustc --version --verbose
 
       - name: Skip if version already on crates.io
         id: crate_check

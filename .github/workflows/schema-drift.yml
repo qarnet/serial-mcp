@@ -22,7 +22,10 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libudev-dev pkg-config
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.88.0
+
+      - name: Report Rust toolchain
+        run: rustc --version --verbose
 
       - name: Cache cargo registry + build
         uses: Swatinem/rust-cache@v2

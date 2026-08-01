@@ -281,12 +281,6 @@ Non-feature work, roughly in suggested order. From the 2026-07-05 repo review.
   matcher truncation (read learns it) or document why read is unbounded
 - small behavior change, needs a design call before implementing
 
-### Proper dependabot / renovate setup
-- dependency updates (cargo crates + pinned GitHub Actions) are currently
-  manual; some dependabot experimentation happened but nothing landed
-- monthly cadence, cargo + github-actions ecosystems; the 4-OS CI matrix is
-  strong enough to catch bad bumps automatically
-
 ### Scheduled mutation testing + fuzz smoke in CI
 - `cargo-mutants` and the `fuzz/` targets exist but run only on demand — the
   NMEA parser panic found in review is exactly the class a scheduled fuzz
@@ -324,14 +318,6 @@ Non-feature work, roughly in suggested order. From the 2026-07-05 repo review.
 - follow-up: vendor `model-schema.json` under `schemas/`, rewrite the four
   `$ref`s to a local resource, and register it in the validator so the test
   is hermetic on every runner (see the filter comment in `flake.nix`)
-
-### Toolchain single source of truth
-- `rust-toolchain.toml` pins 1.88.0 while workflows install
-  `dtolnay/rust-toolchain@stable`; rustup resolves the pin correctly but the
-  intent is ambiguous and the two can silently diverge (schema-drift job
-  runs whatever stable is that day)
-- pick one source (recommend: the toolchain file) and make the workflows
-  honor it explicitly
 
 ### Windows e2e test path — investigate
 - CI builds and unit-tests Windows, but the native_sim e2e suite is

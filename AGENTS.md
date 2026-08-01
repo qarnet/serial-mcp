@@ -165,6 +165,7 @@ fw-run-native
 
 ## Repo workflow
 
+- Rust toolchain policy: CI, release, and schema-drift workflows install Rust 1.88.0 (`dtolnay/rust-toolchain@1.88.0`, each followed by a `rustc --version --verbose` report step); Nix derives the same version from `rust-toolchain.toml`. Bump both together.
 - Conventional commits used here: `feat:`, `fix:`, `docs:`, `test:`, `refactor:`.
 - Never add attribution footers or co-author lines.
 
