@@ -23,15 +23,26 @@ compact `tools/list` payload **258964 bytes**) and the then-modeled,
 hypothetical `capture_boot`. It is NOT the current catalog — the evaluator
 compares the live catalog against it.
 
-## Current catalog (27 tools, 286285 bytes)
+## Current catalog (27 tools, 288177 bytes)
 
 - tool count: **27**
-- aggregate compact `tools/list` payload: **286285 bytes** — +27321 vs the
-  Phase 4 baseline, split: `capture_boot` +25338 (new tool), `export_log`
-  +1982 (754 → 2736 contract hardening), and +1 from the aggregate
-  wrapper/comma effect
-- `capture_boot` (added Phase 5): 25338 bytes total (description 725, input
-  schema 13991, output schema 10421)
+- aggregate compact `tools/list` payload: **288177 bytes** — +29213 vs the
+  Phase 4 baseline (26 tools / 258964 bytes, +11.3%; the new tool plus
+  `export_log` contract hardening account for the bulk)
+- post-refinement snapshot: the 27-tool catalog measured **after** the RX
+  encoding/hex-fallback documentation refresh is **+1892 bytes** vs the
+  pre-refinement 27-tool snapshot (286285). The growth is output-schema
+  description growth only, in the shared result types (`data` + `encoding`
+  pairs and their lossless-hex-fallback semantics are now documented on the
+  wire):
+  - `capture_boot`: 25338 → **25905** (+567), output 10421 → 10988
+  - `read`: 23555 → **24122** (+567), output 8220 → 8787
+  - `transact`: 26394 → **26961** (+567), output 8914 → 9481
+  - `subscribe`: 15461 → **15652** (+191), output 427 → 618
+- descriptions and input schemas are byte-identical to the pre-refinement
+  snapshot; no tool, input field, or result data field was added or removed
+- every other tool is byte-identical to the pre-refinement snapshot (and,
+  for pre-Phase-5 tools, to the Phase 4 baseline)
 - `export_log` (Phase 6 contract hardening): 754 → **2736 bytes** (description
   931, input schema 542, output schema 1111) — the description now states the
   disabled-by-default store, the `--capture-dir` requirement, the portable
@@ -41,15 +52,15 @@ compares the live catalog against it.
   `durability_warning` (`skip_serializing_if`-omitted on success, so the
   committed-wire result shape is unchanged unless a warning occurs). Input
   schema still requires only `connection_id` + `path`.
-- every other pre-existing tool is byte-identical to the Phase 4 baseline
-- largest tools: `configure` 39117, `transact` 26394, `capture_boot` 25338,
-  `open` 24010, `read` 23555
+- largest tools: `configure` 39117, `transact` 26961, `capture_boot` 25905,
+  `read` 24122, `open` 24010
 
 The evaluator's regression rule flags aggregate growth `>=5%` and reports
 status `warning` — the growth is the deliberate Phase 5/6 scope (a new tool
-plus contract hardening), not schema bloat on existing tools. The tool-count
-guard (`tool_catalog_has_exactly_twenty_seven_tools`) and the uint-format
-schema guards (`serial::schema::export_log_result_has_no_uint_formats`,
+plus contract hardening) plus the approved +1892 output-schema description
+growth, not schema bloat on existing tools. The tool-count guard
+(`tool_catalog_has_exactly_twenty_seven_tools`) and the uint-format schema
+guards (`serial::schema::export_log_result_has_no_uint_formats`,
 `tools::mod::tool_schemas_have_no_nonstandard_uint_formats`) pin the shape.
 
 ## Decisions (fixed thresholds, evaluated after measurement)
