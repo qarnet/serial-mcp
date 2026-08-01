@@ -2699,7 +2699,14 @@ async fn capture_boot_immediate_bytes_captured_and_match_stops_at_pattern() {
 async fn capture_boot_pump_barrier_appends_inflight_read_before_mark() {
     let (_server, client, cid, state) = controlled_server("loop-capture-barrier", 65536).await;
 
-    // Establish the session + pump, then consume the first bytes.
+    // Establish the session + pump, then consume the first bytes. The pump's
+    // read has a 100ms budget: while parked, the gate is released (read
+    // timeout) and immediately re-acquired every ~105ms, so `is_parked`
+    // alone does not bound the gate-hold window. The STALE-A consumption
+    // below acts as the phase reset: the pump's read returns with data
+    // BEFORE its budget elapses, appends, and starts a fresh read cycle with
+    // a full 100ms budget. The capture below queues on the gate well inside
+    // that window.
     state.inject_rx(b"STALE-A");
     let r = client
         .peer()
@@ -2711,20 +2718,16 @@ async fn capture_boot_pump_barrier_appends_inflight_read_before_mark() {
         .unwrap();
     assert_eq!(r.structured_content.unwrap()["data"], json!("STALE-A"));
 
-    // Wait for the pump to be parked (no data — it holds the pump gate for
-    // the whole read), then wait for a FRESH poll event: right after a poll,
-    // the pump's read is guaranteed to hold the gate for >=45ms (its read
-    // budget is 100ms, polls are ~55ms apart).
+    // Block reads now: INFLIGHT can be queued but stays unread until the
+    // test releases the block. The pump is parked mid-read with ~100ms of
+    // its fresh budget left, so the gate is provably held for the whole
+    // sequence below — no poll/fresh-read timing loops needed.
+    state.set_block_reads(true);
     let deadline = Instant::now() + Duration::from_secs(2);
     while !state.is_parked() && Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
     assert!(state.is_parked(), "pump must be parked inside a read");
-    let base_polls = state.poll_count();
-    while state.poll_count() <= base_polls && Instant::now() < deadline {
-        tokio::time::sleep(Duration::from_millis(2)).await;
-    }
-    // The pump now holds the gate with >=45ms of read budget left.
 
     // Boot bytes appear at assertion time.
     state.set_on_line_change(Some(Arc::new({
@@ -2737,8 +2740,9 @@ async fn capture_boot_pump_barrier_appends_inflight_read_before_mark() {
     })));
 
     // Start the capture and keep polling it so the request is transmitted.
-    // While the pump holds the gate (it has >=45ms of budget left), the
-    // capture must NOT proceed: no line assertion, no completion.
+    // The pump is parked mid-read holding the gate with ~100ms of fresh
+    // budget left, so the capture must NOT proceed: no line assertion, no
+    // completion.
     let call = client.peer().call_tool(tool_request(
         "capture_boot",
         json!({
@@ -2749,7 +2753,7 @@ async fn capture_boot_pump_barrier_appends_inflight_read_before_mark() {
     ));
     let mut call = Box::pin(call);
     let polled = tokio::select! {
-        _ = tokio::time::sleep(Duration::from_millis(30)) => "pending",
+        _ = tokio::time::sleep(Duration::from_millis(20)) => "pending",
         _res = &mut call => "done",
     };
     assert_eq!(
@@ -2762,10 +2766,12 @@ async fn capture_boot_pump_barrier_appends_inflight_read_before_mark() {
         state.line_log()
     );
 
-    // Now the pre-reset bytes arrive while the pump is mid-read: the pump
-    // reads INFLIGHT, appends it, and only then releases the gate. The
-    // capture's mark must therefore include those bytes.
+    // Now the pre-reset bytes arrive while the pump is parked: with reads
+    // still blocked they stay queued; releasing the block wakes the pump,
+    // which reads INFLIGHT, appends it, and only then releases the gate.
+    // The capture's mark must therefore include those bytes.
     state.inject_rx(b"INFLIGHT");
+    state.set_block_reads(false);
     let r = call.await.unwrap();
     assert_ne!(r.is_error, Some(true), "{r:?}");
     let s = r.structured_content.expect("structured capture result");

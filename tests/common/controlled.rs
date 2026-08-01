@@ -10,10 +10,15 @@
 //! - `on_line_change` fires SYNCHRONOUSLY inside the line-change call, so a
 //!   test can inject RX bytes at the exact instant the reset line is
 //!   asserted/released (the "immediate boot bytes" case).
-//! - `block_reads` makes `poll_read` always return `Pending`, holding the RX
-//!   pump inside a read; the pump gate then blocks `capture_boot` until the
-//!   test releases the read — proving an in-flight pre-reset read appends
-//!   before the mark.
+//! - `block_reads` makes `poll_read` always return `Pending`, parking the RX
+//!   pump inside a read while it holds the pump gate. CAVEAT: the pump's read
+//!   has a 100ms budget, so a blocked read still ends with `ReadTimeout`; the
+//!   gate is then released and immediately re-acquired (no yield between),
+//!   and the pump keeps cycling. `is_parked` therefore proves the pump is
+//!   inside a read, NOT that the gate will stay held. To get a deterministic
+//!   hold window, reset the pump phase: let it consume an injected byte (its
+//!   read returns with data before the budget), which starts a fresh read
+//!   cycle with a full 100ms budget.
 //! - `fail_next_set` makes the next `set_dtr_rts` fail (assert or release
 //!   failure injection).
 //! - `os_input_flush_count` counts `clear_os_buffers(Input)` calls so tests
@@ -39,11 +44,16 @@ pub struct ControlledState {
     rx_queue: StdMutex<VecDeque<u8>>,
     rx_waker: StdMutex<Option<Waker>>,
     /// When true, `poll_read` always returns `Pending` (pump parks inside a
-    /// read while holding the pump gate).
+    /// read while holding the pump gate). The pump's 100ms read budget still
+    /// elapses while blocked: the read times out, the gate is released and
+    /// immediately re-acquired, and the pump keeps cycling. Blocking parks
+    /// the pump but does NOT pin the gate indefinitely.
     block_reads: AtomicBool,
     /// 1 while the most recent `poll_read` returned `Pending`, else 0.
-    /// Lets a test wait until the pump is provably parked before starting
-    /// `capture_boot`.
+    /// Lets a test wait until the pump is provably parked inside a read
+    /// before starting `capture_boot`. Note the `block_reads` caveat: parked
+    /// alone does not bound how long the gate stays held — reset the pump
+    /// phase (let it consume an injected byte) for a deterministic window.
     parked: AtomicUsize,
     /// Every `set_dtr_rts` call, in order: `(dtr, rts)`.
     line_log: StdMutex<Vec<(bool, bool)>>,
@@ -56,10 +66,6 @@ pub struct ControlledState {
     on_line_change: StdMutex<Option<Arc<dyn Fn(bool, bool) + Send + Sync>>>,
     /// Count of `clear_os_buffers(Input)` calls.
     os_input_flush_count: AtomicUsize,
-    /// Number of `poll_read` invocations — lets tests detect a FRESH pump
-    /// read (the pump holds the pump gate for the whole read, so right after
-    /// a poll event the gate is guaranteed held for >=45ms).
-    poll_count: AtomicUsize,
 }
 
 impl ControlledState {
@@ -73,7 +79,6 @@ impl ControlledState {
             fail_next_set: AtomicUsize::new(0),
             on_line_change: StdMutex::new(None),
             os_input_flush_count: AtomicUsize::new(0),
-            poll_count: AtomicUsize::new(0),
         }
     }
 
@@ -93,13 +98,18 @@ impl ControlledState {
         }
     }
 
-    /// Park/unpark the pump inside `poll_read`.
+    /// Park/unpark the pump inside `poll_read`. While parked, the pump stays
+    /// inside its read (holding the pump gate) until the read's 100ms budget
+    /// elapses. For a deterministic gate-hold window, reset the pump phase
+    /// afterwards by letting it consume an injected byte.
     pub fn set_block_reads(&self, block: bool) {
         self.block_reads.store(block, Ordering::SeqCst);
         self.wake_reader();
     }
 
-    /// 1 while the pump is parked in `poll_read` (holding the pump gate).
+    /// 1 while the pump is parked in `poll_read` (inside a read, holding the
+    /// pump gate at that instant). The pump's 100ms read budget still expires
+    /// while parked, so this does NOT bound how long the gate stays held.
     pub fn is_parked(&self) -> bool {
         self.parked.load(Ordering::SeqCst) == 1
     }
@@ -124,11 +134,6 @@ impl ControlledState {
     /// Count of `clear_os_buffers(Input)` calls.
     pub fn os_input_flush_count(&self) -> usize {
         self.os_input_flush_count.load(Ordering::SeqCst)
-    }
-
-    /// Number of `poll_read` invocations so far.
-    pub fn poll_count(&self) -> usize {
-        self.poll_count.load(Ordering::SeqCst)
     }
 
     /// Bytes currently queued for the host to read (unpurged OS input).
@@ -185,7 +190,6 @@ impl AsyncRead for ControlledIo {
         buf: &mut ReadBuf<'_>,
     ) -> Poll<std::io::Result<()>> {
         let mut queue = self.state.rx_queue.lock().expect("rx queue poisoned");
-        self.state.poll_count.fetch_add(1, Ordering::SeqCst);
         if self.state.block_reads.load(Ordering::SeqCst) || queue.is_empty() {
             *self.state.rx_waker.lock().expect("waker poisoned") = Some(cx.waker().clone());
             self.state.parked.store(1, Ordering::SeqCst);
