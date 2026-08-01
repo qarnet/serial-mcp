@@ -22,6 +22,11 @@ serial E2E be added, e.g. with a com0com-style virtual port pair?
   may require test-signing/security configuration, administrator privileges,
   or a reboot.
   - Project: <https://sourceforge.net/projects/com0com/>
+  - README (test-signing note, 2017-07-13):
+    <https://sourceforge.net/projects/com0com/files/com0com/3.0.0.0/README.txt/download>
+    states the x64 build is unsigned (test-signed) and "will not load by
+    default on x64 Windows" without `bcdedit -set TESTSIGNING ON` plus a
+    reboot, and warns that enabling test signing impairs computer security.
 - GitHub-hosted runners are ephemeral VMs recreated per job
   (<https://docs.github.com/en/actions/using-github-hosted-runners/about-github-hosted-runners>).
   Installing and signing a kernel driver there would need to happen on every
@@ -45,9 +50,14 @@ serial E2E be added, e.g. with a com0com-style virtual port pair?
 ## Notes on sourcing
 
 com0com is a community project; its builds are not an official,
-Microsoft-signed package. Do not treat third-party/community distributions as
-vendor-signed. The GitHub-hosted-runner behavior is cited from official
-GitHub documentation.
+Microsoft-signed package. The project's own README distinguishes a
+"test-signed" (unsigned) x64 build from a signed one, and the "signed"
+3.0.0.0 build carries the project's certificate — not a WHQL/Microsoft
+signature (project discussion:
+<https://sourceforge.net/p/com0com/discussion/440109/thread/c4d52f1b/>). Do not treat third-party/community distributions, including
+community re-signed builds, as vendor-signed or as official Microsoft
+support. The GitHub-hosted-runner behavior is cited from official GitHub
+documentation.
 
 ## Status
 
