@@ -52,9 +52,18 @@
             craneLib.filterCargoSources path type
             || pkgs.lib.hasPrefix "schemas" relPath
             || pkgs.lib.hasPrefix "example-configs" relPath
-            # doc_drift tests read these via CARGO_MANIFEST_DIR
+            # doc_drift tests read non-cargo fixtures via CARGO_MANIFEST_DIR
+            # (README.md, server.json, docs/agent-config.md,
+            # docs/development/FEATURES.md), and crane runs `cargo test`
+            # during `nix flake check` — every fixture must survive the
+            # source filter or the build fails on the missing file. docs/
+            # is included as a whole tree (the dir itself must match or
+            # cleanSource prunes the subtree) so future doc-drift fixtures
+            # under docs/ land without another filter edit. relPath keeps a
+            # leading "/", hence the "/docs" prefix below.
             || pkgs.lib.hasSuffix "README.md" relPath
-            || pkgs.lib.hasSuffix "server.json" relPath;
+            || pkgs.lib.hasSuffix "server.json" relPath
+            || pkgs.lib.hasPrefix "/docs" relPath;
         };
 
         # Common args shared by both the deps-only and final derivations.
