@@ -2984,6 +2984,43 @@ async fn non_learning_operations_do_not_alter_profile() {
         .unwrap();
     assert_ne!(rd.is_error, Some(true), "{rd:?}");
 
+    // Per-call transact with a protocol override + match: the device must
+    // actually answer the request, proving the transaction worked end to
+    // end (not merely that the request was accepted).
+    let peer = client.peer().clone();
+    let tx_task = tokio::spawn(async move {
+        peer.call_tool(tool_request(
+            "transact",
+            json!({
+                "connection_id": connection_id,
+                "data": "TXN",
+                "timeout_ms": 2000,
+                "protocol": { "type": "at_command" },
+                "match": { "pattern": "ACK" },
+            }),
+        ))
+        .await
+        .unwrap()
+    });
+    // Device side: read the AT request (protocol appends \r), then answer.
+    let mut req_buf = [0u8; 16];
+    let n = pty.read_device(&mut req_buf).await.unwrap();
+    assert_eq!(&req_buf[..n], b"TXN\r", "at_command preset appends CR");
+    pty.write_device(b"ACK\r\n").await.unwrap();
+    let tx = tx_task.await.unwrap();
+    assert_ne!(tx.is_error, Some(true), "{tx:?}");
+    let tr = tx.structured_content.as_ref().unwrap();
+    assert_eq!(
+        tr["read"]["matched"],
+        json!(true),
+        "transaction matched the device response: {tr:?}"
+    );
+    assert_eq!(tr["read"]["data"], json!("ACK"));
+    let frames = tr["read"]["frames"]
+        .as_array()
+        .expect("framed transact read");
+    assert_eq!(frames[0]["data"], json!("ACK"));
+
     let after = session_profile_snapshot(client, &profile_name).await;
     assert_eq!(after.0, before.0, "non-durable ops must not bump use_count");
     assert_eq!(after.1, before.1, "non-durable ops must not bump revision");
@@ -3535,6 +3572,64 @@ async fn delete_profile_bound_to_open_connection_errors_and_succeeds_after_close
     assert_eq!(
         listed.structured_content.as_ref().unwrap()["count"],
         json!(0)
+    );
+
+    harness._client.cancel().await.ok();
+}
+
+/// 12. Rollback with no active bound connections reports zero and the
+///     reopened device applies the restored defaults.
+#[tokio::test]
+async fn rollback_with_no_active_connections_reports_zero() {
+    let pty = PtyPair::open().expect("openpty");
+    let slave = pty.slave_path.to_string_lossy().into_owned();
+    let provider = StaticPortProvider::new(vec![StaticPortProvider::usb_port(
+        &slave,
+        VID,
+        PID,
+        "SN-1",
+        Some("Fake USB Serial"),
+        None,
+    )]);
+    let harness = session_harness(provider).await;
+    let client = &harness._client;
+
+    let opened = open_port(client, &slave, json!({})).await;
+    let connection_id = opened["connection_id"].as_str().unwrap().to_string();
+    let profile_name = opened["profile"]["profile_name"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    reconfigure_baud(client, &connection_id, 9600).await; // rev 2
+    close_port(client, &connection_id).await; // no active bindings left
+
+    let rb = client
+        .peer()
+        .call_tool(tool_request(
+            "rollback_profile",
+            json!({
+                "profile_name": profile_name,
+                "expected_revision": 2,
+                "revision": 1,
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_ne!(rb.is_error, Some(true), "{rb:?}");
+    let rb_r = rb.structured_content.as_ref().unwrap();
+    assert_eq!(rb_r["revision"], json!(3));
+    assert_eq!(rb_r["defaults"]["baud_rate"], json!(115200));
+    assert_eq!(
+        rb_r["active_connections_unchanged"],
+        json!(0),
+        "no open connection bound at rollback time"
+    );
+
+    let reopened = open_port(client, &slave, json!({})).await;
+    assert_eq!(
+        reopened["baud_rate"],
+        json!(115200),
+        "restored defaults applied"
     );
 
     harness._client.cancel().await.ok();

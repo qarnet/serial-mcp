@@ -343,8 +343,10 @@ pub struct CloseResult {
     /// any dirty/stale state after the close snapshot/retry).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile: Option<crate::profiles::ProfileSessionResult>,
-    /// Close-snapshot persistence outcome. `null` when the connection had
-    /// no durable binding.
+    /// Close-snapshot persistence outcome. Always present on a successful
+    /// close: a connection without a durable binding reports
+    /// `state = "transient"`; dirty/differing persistent bindings are
+    /// retried and report `persisted`/`not_needed`/`failed`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile_persistence: Option<crate::profiles::ProfilePersistenceResult>,
 }

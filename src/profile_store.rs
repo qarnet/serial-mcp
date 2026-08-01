@@ -529,12 +529,24 @@ impl ProfileStore {
                     let outcome: Result<T, String> = (|| {
                         let current = load_validated(&path)?;
                         let (value, next) = apply(current.clone(), now)?;
-                        if let Some(next) = next {
-                            write_atomic(&path, &next)?;
-                            // Durable write succeeded: publish the full
-                            // resulting vector to the shared cache before
-                            // releasing the advisory lock.
-                            *cache.blocking_write() = next;
+                        match next {
+                            Some(next) => {
+                                write_atomic(&path, &next)?;
+                                // Durable write succeeded: publish the full
+                                // resulting vector to the shared cache before
+                                // releasing the advisory lock.
+                                *cache.blocking_write() = next;
+                            }
+                            None => {
+                                // No-op (no file write): the transaction
+                                // already loaded the fresh disk state under
+                                // the advisory lock, so publish it to the
+                                // shared cache — a concurrent external
+                                // writer's metadata changes must become
+                                // visible to later cache reads without this
+                                // transaction rewriting the file.
+                                *cache.blocking_write() = current;
+                            }
                         }
                         Ok(value)
                     })()
@@ -1608,6 +1620,71 @@ use_count = 4
         let reloaded = ProfileStore::open(path).unwrap();
         let p = reloaded.get("gen-device").await.unwrap();
         assert_eq!(p.metadata.revision, 2, "durable on disk");
+        assert_eq!(p.defaults.baud_rate, 9600);
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn learned_noop_publishes_fresh_metadata_from_other_writer_without_rewriting_file() {
+        use std::os::unix::fs::MetadataExt;
+        let (_dir, path) = temp_path();
+        // Store A is opened FIRST — its cache predates everything the
+        // writer (store B, simulating another process) does on disk.
+        let store_a = ProfileStore::open(path.clone()).unwrap();
+        let store_b = ProfileStore::open(path.clone()).unwrap();
+
+        // Writer creates the profile and bumps usage metadata on disk.
+        store_b
+            .update_defaults_preserving_selector(
+                "dev".into(),
+                ProfileDefaults {
+                    baud_rate: 9600,
+                    ..Default::default()
+                },
+                true,
+            )
+            .await
+            .unwrap();
+        store_b.mark_used("dev").await.unwrap();
+        let inode_before = std::fs::metadata(&path).unwrap().ino();
+        assert!(
+            store_a.get("dev").await.is_none(),
+            "store A cache is stale: it predates the writer's changes"
+        );
+
+        // Store A performs a learned no-op (defaults already equal). The
+        // CAS must succeed against the fresh disk revision and the cache
+        // must be republished from the fresh read — WITHOUT rewriting the
+        // file.
+        let learned = store_a
+            .update_learned_defaults(
+                "dev".into(),
+                1,
+                ProfileDefaults {
+                    baud_rate: 9600,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert!(!learned.changed, "identical defaults are a no-op");
+        assert_eq!(learned.profile.metadata.revision, 1);
+
+        let inode_after = std::fs::metadata(&path).unwrap().ino();
+        assert_eq!(
+            inode_before, inode_after,
+            "no-op must not rewrite the profiles file"
+        );
+
+        // The stale store's cache now reflects the writer's fresh
+        // metadata (usage bump + last-used timestamp) from the no-op's
+        // fresh read.
+        let p = store_a.get("dev").await.unwrap();
+        assert_eq!(p.metadata.use_count, 1, "fresh usage metadata visible");
+        assert!(
+            p.metadata.last_used_at_ms.is_some(),
+            "fresh last-used metadata visible"
+        );
         assert_eq!(p.defaults.baud_rate, 9600);
     }
 

@@ -817,6 +817,11 @@ pub async fn save_profile(
 ) -> Result<Json<SaveProfileResult>, String> {
     let conn = lookup_connection(connections, &args.connection_id).await?;
 
+    // Hold the learning lock across the effective-defaults snapshot and
+    // the store upsert so a concurrent reconfigure/configure cannot yield
+    // a mixed snapshot (e.g. new baud with old framing defaults).
+    let _learning_guard = conn.learning_lock().lock().await;
+
     let info = conn
         .port_info()
         .ok_or_else(|| format!("No port identity available for {}", args.connection_id))?;
@@ -1045,4 +1050,191 @@ pub async fn export_log(
         path: args.path,
         events_written: count,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::pin::Pin;
+    use std::sync::Arc;
+    use std::task::{Context, Poll};
+    use std::time::Duration;
+
+    use tokio::io::{AsyncRead, AsyncWrite};
+
+    use crate::profile_store::ProfileStore;
+    use crate::profiles::{
+        IdentityConfidence, Profile, ProfileDefaults, ProfileMetadata, ProfileSelectionSource,
+        ProfileSelector,
+    };
+    use crate::serial::{
+        ConnectionConfig, ConnectionManager, DataBits, FlowControl, FlushTarget, Parity, PortInfo,
+        PortTransport, SerialConnection, SerialIo, StopBits,
+    };
+
+    /// Minimal `SerialIo` for in-crate tool tests: no real hardware, all
+    /// control/reconfigure operations are no-ops. I/O returns EOF/0 — the
+    /// tests here never exchange bytes.
+    struct FakeIo;
+
+    impl AsyncRead for FakeIo {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            _buf: &mut tokio::io::ReadBuf<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            // EOF: no bytes ever become available (tests never exchange
+            // bytes over this fake).
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    impl AsyncWrite for FakeIo {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            _buf: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            Poll::Ready(Ok(0))
+        }
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    impl SerialIo for FakeIo {
+        fn clear_os_buffers(&self, _target: FlushTarget) -> std::io::Result<()> {
+            Ok(())
+        }
+        fn set_dtr_rts(&mut self, _dtr: bool, _rts: bool) -> std::io::Result<()> {
+            Ok(())
+        }
+        fn set_flow_control(&mut self, _flow_control: FlowControl) -> std::io::Result<()> {
+            Ok(())
+        }
+        fn set_break_state(&self, _asserted: bool) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn fake_port_info() -> PortInfo {
+        PortInfo {
+            name: "/dev/fake".into(),
+            display_name: "fake".into(),
+            description: "Fake".into(),
+            hardware_id: Some("USB VID:1234 PID:5678".into()),
+            transport: PortTransport::Usb,
+            vid: Some(0x1234),
+            pid: Some(0x5678),
+            serial_number: Some("SN-LOCK".into()),
+            manufacturer: Some("Synthetic".into()),
+            product: Some("Fake USB Serial".into()),
+            interface: None,
+        }
+    }
+
+    /// Build a manager with one connection that carries a persistent
+    /// binding to profile `dev` (baud 115200) and an identity, so
+    /// `save_profile` has everything it needs.
+    async fn bound_connection(store: &Arc<ProfileStore>) -> (Arc<ConnectionManager>, String) {
+        let profile = Profile {
+            name: "dev".into(),
+            selector: ProfileSelector::default(),
+            defaults: ProfileDefaults {
+                baud_rate: 115200,
+                ..Default::default()
+            },
+            metadata: ProfileMetadata::default(),
+            revisions: Vec::new(),
+        };
+        store.upsert(profile, false).await.unwrap();
+
+        let manager = Arc::new(ConnectionManager::new());
+        let conn = SerialConnection::from_io_with_config(
+            ConnectionConfig {
+                port: "/dev/fake".into(),
+                name: Some("fake-dev".into()),
+                baud_rate: 115200,
+                data_bits: DataBits::Eight,
+                stop_bits: StopBits::One,
+                parity: Parity::None,
+                flow_control: FlowControl::None,
+                port_info: Some(fake_port_info()),
+                log_capacity: 1024,
+                log_enabled: true,
+                tx_framing: None,
+                rx_framing: None,
+                rx_parser: None,
+                protocol: None,
+                rx_buffer_size: crate::limits::DEFAULT_RX_BUFFER_SIZE,
+                max_buffered_bytes: 32768,
+                poll_interval_ms: 200,
+            },
+            Box::new(FakeIo),
+        );
+        conn.set_active_profile_binding(Some(crate::serial::ActiveProfileBinding {
+            profile_name: "dev".into(),
+            source: ProfileSelectionSource::Automatic,
+            confidence: IdentityConfidence::High,
+            persistent: true,
+            generated: false,
+            revision: Some(1),
+            dirty: false,
+            stale: false,
+            candidates: Vec::new(),
+            last_persistence_error: None,
+        }));
+        let id = manager.insert(conn).await.unwrap();
+        (manager, id)
+    }
+
+    /// `save_profile` must hold the connection's learning lock across the
+    /// effective-defaults snapshot and the store upsert. While the lock is
+    /// held by a concurrent durable operation, a spawned save_profile must
+    /// block; it completes only after the lock is released.
+    #[tokio::test]
+    async fn save_profile_holds_learning_lock_across_snapshot_and_upsert() {
+        let store = Arc::new(ProfileStore::ephemeral());
+        let (manager, connection_id) = bound_connection(&store).await;
+        let conn = manager.get(&connection_id).await.unwrap();
+
+        let guard = conn.learning_lock().lock().await;
+
+        let manager_task = Arc::clone(&manager);
+        let store_task = Arc::clone(&store);
+        let task = tokio::spawn(async move {
+            super::save_profile(
+                &manager_task,
+                &store_task,
+                crate::tools::types::SaveProfileArgs {
+                    connection_id,
+                    profile_name: "snap".into(),
+                    overwrite: false,
+                },
+            )
+            .await
+        });
+
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert!(
+            !task.is_finished(),
+            "save_profile must block while the learning lock is held"
+        );
+
+        drop(guard);
+        let result = tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("save_profile completes after lock release")
+            .expect("task did not panic")
+            .expect("save_profile succeeds");
+        assert_eq!(result.0.name, "snap");
+
+        // The snapshot is consistent with the connection's live state.
+        let saved = store.get("snap").await.unwrap();
+        assert_eq!(saved.defaults.baud_rate, conn.baud_rate());
+        assert_eq!(saved.selector.serial_number.as_deref(), Some("SN-LOCK"));
+        assert!(!saved.metadata.generated, "save_profile creates user-owned");
+    }
 }

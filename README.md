@@ -19,7 +19,7 @@ client flash, reset, and talk to a board on their own.
 
 ## Capabilities
 
-**26 tools:** list_ports, list_connections, open, close, read, write, transact, flush, set_dtr_rts, set_flow_control, send_break, subscribe, unsubscribe, get_status, reconfigure, list_profiles, open_profile, save_profile, delete_profile, configure, rollback_profile, get_log, clear_log, export_log, reconnect, compute_checksum  
+**26 tools:** list_ports, list_connections, open, close, read, write, transact, flush, set_dtr_rts, set_flow_control, send_break, subscribe, unsubscribe, get_status, reconfigure, list_profiles, open_profile, save_profile, delete_profile, configure, rollback_profile, get_log, clear_log, export_log, reconnect, compute_checksum
 **5 resources:** `serial://ports`, `serial://connections`, `serial://connections/{id}`, `serial://connections/{id}/raw`, `serial://connections/{id}/log` (3 resource templates plus 2 static)  
 **2 prompt templates:** `diagnose_port`, `interactive_terminal`  
 
