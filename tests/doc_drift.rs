@@ -90,15 +90,15 @@ fn server_json_description_tool_count_matches_code() {
 #[test]
 fn readme_mentions_every_protocol_preset() {
     // The preset list also drifts (the pre-0.7.1 README stopped at SLIP).
-    // Keep this list in sync with `ProtocolPreset` in src/framing.rs; the
+    // Keep this list in sync with `ProtocolPreset` in src/framing/config.rs; the
     // enum source is grepped so adding a preset without README mention fails.
-    let framing = repo_file("src/framing.rs");
+    let framing = repo_file("src/framing/config.rs");
     let readme = repo_file("README.md");
     let enum_body = framing
         .split("pub enum ProtocolPreset")
         .nth(1)
         .and_then(|s| s.split('}').next())
-        .expect("src/framing.rs must define ProtocolPreset");
+        .expect("src/framing/config.rs must define ProtocolPreset");
     // Serde renames variants to snake_case; derive the wire names.
     let wire_names: Vec<String> = enum_body
         .lines()
@@ -179,26 +179,130 @@ fn readme_readfrom_examples_use_tagged_wire_form() {
 fn server_json_versions_match_cargo_toml() {
     let cargo_version = cargo_toml_version();
     let server_json = repo_file("server.json");
+    let mismatches = server_json_version_mismatches(&server_json, &cargo_version)
+        .expect("server.json version fields must be readable");
+    assert!(
+        mismatches.is_empty(),
+        "server.json version fields {mismatches:?} do not match Cargo.toml \
+         package version {cargo_version:?}"
+    );
+}
+
+#[test]
+fn changelog_matches_cargo_package_version() {
+    // Release roll contract: a Cargo.toml package version bump must come with
+    // a release table row and a matching body heading in CHANGELOG.md, plus
+    // an [Unreleased] heading above the current release. Reads the real
+    // Cargo.toml + CHANGELOG.md.
+    let version = cargo_toml_version();
+    let changelog = repo_file("CHANGELOG.md");
+    check_changelog_contract(&changelog, &version)
+        .unwrap_or_else(|e| panic!("release/documentation consistency violated: {e}"));
+}
+
+#[test]
+fn changelog_contract_rejects_missing_version_table_row() {
+    // Negative proof: drop only the current-version table row from a
+    // contract-satisfying fixture; the failure must name the table row, not
+    // the body headings.
+    let version = "9.9.9";
+    let row = format!("| [{version}](#{}) |", version.replace('.', ""));
+    let text = synthetic_changelog(version)
+        .lines()
+        .filter(|l| !l.starts_with(&row))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let err = check_changelog_contract(&text, version).unwrap_err();
+    assert_eq!(
+        err,
+        format!(
+            "CHANGELOG release table must contain a row starting with {row:?} \
+             for version {version:?}"
+        )
+    );
+}
+
+#[test]
+fn changelog_contract_rejects_missing_version_heading() {
+    // Negative proof: drop only the `## [x.y.z]` body heading; the table row
+    // stays, so the failure must be the heading rule alone.
+    let version = "9.9.9";
+    let text = synthetic_changelog(version)
+        .lines()
+        .filter(|l| *l != format!("## [{version}]"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let err = check_changelog_contract(&text, version).unwrap_err();
+    assert_eq!(
+        err,
+        format!("CHANGELOG body must contain the exact heading \"## [{version}]\"")
+    );
+}
+
+#[test]
+fn changelog_contract_rejects_missing_unreleased_heading() {
+    // Negative proof: drop only the `## [Unreleased]` heading.
+    let version = "9.9.9";
+    let text = synthetic_changelog(version)
+        .lines()
+        .filter(|l| *l != "## [Unreleased]")
+        .collect::<Vec<_>>()
+        .join("\n");
+    let err = check_changelog_contract(&text, version).unwrap_err();
+    assert_eq!(
+        err,
+        "CHANGELOG body must contain the heading \"## [Unreleased]\""
+    );
+}
+
+#[test]
+fn changelog_contract_rejects_unreleased_after_current_release() {
+    // Negative proof: swap the two headings so [Unreleased] sits after the
+    // current release; every earlier rule still passes, so only the ordering
+    // rule may fire.
+    let version = "9.9.9";
+    let heading = format!("## [{version}]");
+    let unreleased = "## [Unreleased]";
+    let fixture = synthetic_changelog(version);
+    let mut lines: Vec<&str> = fixture.lines().collect();
+    let u = lines.iter().position(|l| *l == unreleased).unwrap();
+    let r = lines.iter().position(|l| *l == heading).unwrap();
+    lines.swap(u, r);
+    let err = check_changelog_contract(&lines.join("\n"), version).unwrap_err();
+    assert_eq!(
+        err,
+        format!(
+            "the \"## [Unreleased]\" heading must appear before the \
+             \"## [{version}]\" heading"
+        )
+    );
+}
+
+#[test]
+fn server_json_version_mismatch_is_rejected() {
+    // Negative proof for the Cargo/server.json version equality: a committed
+    // template with a drifted version field must be reported with the
+    // mismatching value, not silently accepted.
+    let cargo_version = cargo_toml_version();
+    let server_json = repo_file("server.json");
     let v: serde_json::Value =
         serde_json::from_str(&server_json).expect("server.json is valid JSON");
-    // Collect every "version" field value anywhere in the JSON tree. With the
-    // packages array stripped from the committed file this is currently just
-    // the top-level field, but walking the whole tree keeps the guard honest
-    // if versioned sections are ever added back.
-    let mut versions: Vec<String> = Vec::new();
-    collect_versions(&v, &mut versions);
-    assert!(
-        !versions.is_empty(),
-        "server.json must contain at least one \"version\" field — \
-         did the schema change?"
+    let mut obj = v
+        .as_object()
+        .expect("server.json top-level value must be an object")
+        .clone();
+    obj.insert(
+        "version".to_string(),
+        serde_json::Value::String("9.9.9-drift".to_string()),
     );
-    for ver in &versions {
-        assert_eq!(
-            ver, &cargo_version,
-            "server.json version field {ver:?} does not match Cargo.toml \
-             package version {cargo_version:?}"
-        );
-    }
+    let drifted = serde_json::Value::Object(obj).to_string();
+    let mismatches = server_json_version_mismatches(&drifted, &cargo_version)
+        .expect("drifted template still yields readable version fields");
+    assert_eq!(
+        mismatches,
+        vec!["9.9.9-drift"],
+        "drifted server.json version must be reported"
+    );
 }
 
 #[test]
@@ -455,6 +559,107 @@ fn collect_versions(v: &serde_json::Value, out: &mut Vec<String>) {
         for val in arr {
             collect_versions(val, out);
         }
+    }
+}
+
+/// Compare every `version` field in a committed registry template against the
+/// Cargo package version. Returns each mismatching value; an empty vector
+/// means aligned. Errors when the template is unreadable or carries no
+/// version field at all (so the guard cannot pass vacuously on an empty tree).
+fn server_json_version_mismatches(
+    server_json: &str,
+    cargo_version: &str,
+) -> Result<Vec<String>, String> {
+    let v: serde_json::Value = serde_json::from_str(server_json)
+        .map_err(|e| format!("server.json is not valid JSON: {e}"))?;
+    // Collect every "version" field value anywhere in the JSON tree. With the
+    // packages array stripped from the committed file this is currently just
+    // the top-level field, but walking the whole tree keeps the guard honest
+    // if versioned sections are ever added back.
+    let mut versions: Vec<String> = Vec::new();
+    collect_versions(&v, &mut versions);
+    if versions.is_empty() {
+        return Err("server.json must contain at least one \"version\" field — \
+             did the schema change?"
+            .to_string());
+    }
+    Ok(versions
+        .into_iter()
+        .filter(|ver| ver != cargo_version)
+        .collect())
+}
+
+/// A minimal changelog satisfying the full contract for `version`. The
+/// negative tests below mutate exactly one element so each rule fails for its
+/// own named reason — this satisfies the plan's mutation-check requirement
+/// without dirtying the real CHANGELOG.md during test runs.
+fn synthetic_changelog(version: &str) -> String {
+    let anchor = version.replace('.', "");
+    format!(
+        "# Changelog\n\
+         \n\
+         | Version | Date | Highlights |\n\
+         | --- | --- | --- |\n\
+         | [{version}](#{anchor}) | 2099-01-01 | synthetic entry |\n\
+         \n\
+         ## [Unreleased]\n\
+         \n\
+         - nothing yet\n\
+         \n\
+         ## [{version}]\n\
+         \n\
+         - released\n"
+    )
+}
+
+/// Changelog contract for the current package version:
+///
+/// 1. release table contains a row beginning with `| [x.y.z](#xyz) |`
+///    (anchor removes dots);
+/// 2. body contains the exact heading `## [x.y.z]`;
+/// 3. body contains the exact heading `## [Unreleased]`;
+/// 4. the Unreleased heading occurs before the current release heading.
+///
+/// All matching is line-based and exact, so prose mentions never satisfy the
+/// contract. Every violated rule is collected into one descriptive error, so
+/// an earlier failure can never mask a later rule.
+fn check_changelog_contract(changelog: &str, version: &str) -> Result<(), String> {
+    let lines: Vec<&str> = changelog.lines().collect();
+    let row_prefix = format!("| [{version}](#{}) |", version.replace('.', ""));
+    let heading = format!("## [{version}]");
+    let unreleased = "## [Unreleased]";
+
+    let mut errors = Vec::new();
+    if !lines.iter().any(|l| l.starts_with(&row_prefix)) {
+        errors.push(format!(
+            "CHANGELOG release table must contain a row starting with {row_prefix:?} \
+             for version {version:?}"
+        ));
+    }
+    if !lines.iter().any(|l| *l == heading) {
+        errors.push(format!(
+            "CHANGELOG body must contain the exact heading {heading:?}"
+        ));
+    }
+    if !lines.contains(&unreleased) {
+        errors.push(format!(
+            "CHANGELOG body must contain the heading {unreleased:?}"
+        ));
+    }
+    match (
+        lines.iter().position(|l| *l == unreleased),
+        lines.iter().position(|l| *l == heading),
+    ) {
+        (Some(u), Some(r)) if u >= r => errors.push(format!(
+            "the {unreleased:?} heading must appear before the {heading:?} heading"
+        )),
+        _ => {}
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join("; "))
     }
 }
 

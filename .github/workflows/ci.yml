@@ -67,9 +67,12 @@ jobs:
         run: ${{ matrix.install }}
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.88.0
         with:
           components: clippy, rustfmt
+
+      - name: Report Rust toolchain
+        run: rustc --version --verbose
 
       - name: Cache cargo registry + build
         if: matrix.os != 'windows-latest'
@@ -90,6 +93,10 @@ jobs:
       - name: Validate example configs against vendored schemas
         if: matrix.os == 'ubuntu-latest'
         run: cargo test --locked --test config_schema_validation
+
+      - name: Validate release and documentation consistency
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo test --locked --test doc_drift
 
   native-sim:
     name: native_sim firmware + test
@@ -124,7 +131,10 @@ jobs:
           sudo apt-get install -y libudev-dev pkg-config gcc-multilib libusb-1.0-0
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.88.0
+
+      - name: Report Rust toolchain
+        run: rustc --version --verbose
 
       - name: Cache cargo registry + build
         uses: Swatinem/rust-cache@v2

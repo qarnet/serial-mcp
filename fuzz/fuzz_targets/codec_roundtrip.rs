@@ -39,14 +39,18 @@ fuzz_target!(|data: &[u8]| {
                 ..Default::default()
             };
             if let Ok(mut dec) = framing::FrameDecoder::new(&cfg, None) {
-                if let Ok(frames) = dec.push(&framed) {
-                    assert!(!frames.is_empty(), "COBS decode produced no frames");
-                    let mut reconstructed = Vec::new();
-                    for f in &frames {
-                        reconstructed.extend_from_slice(&f.data);
-                    }
-                    assert_eq!(reconstructed, data, "COBS roundtrip mismatch");
+                let outcome = dec.push(&framed);
+                assert!(
+                    outcome.error.is_none(),
+                    "valid COBS decode produced an error: {:?}",
+                    outcome.error
+                );
+                assert!(!outcome.frames.is_empty(), "COBS decode produced no frames");
+                let mut reconstructed = Vec::new();
+                for f in &outcome.frames {
+                    reconstructed.extend_from_slice(&f.data);
                 }
+                assert_eq!(reconstructed, data, "COBS roundtrip mismatch");
             }
         }
     }

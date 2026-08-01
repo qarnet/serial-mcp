@@ -81,6 +81,45 @@ pub fn encode(encoding: Encoding, bytes: &[u8]) -> Result<String, CodecError> {
     }
 }
 
+/// Result of [`encode_or_hex`]: the encoded string plus the effective
+/// encoding actually used to produce it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EncodedPayload {
+    pub data: String,
+    pub encoding: Encoding,
+    /// `Some(original error text)` when `requested` could not represent the
+    /// bytes and the payload was re-encoded as hex; `None` on direct success.
+    pub fallback_reason: Option<String>,
+}
+
+/// Try `requested`, then fall back to exact lowercase spaced hex when the
+/// requested encoding cannot represent `bytes`.
+///
+/// A successful fallback returns the hex payload with
+/// `encoding == Encoding::Hex` and `fallback_reason` set to the original
+/// error text; it is NOT an error — callers own warning/drop semantics and
+/// must not count a successful fallback as a dropped payload. Only a true
+/// hex-encoding failure returns `Err`.
+///
+/// Never lossy: invalid UTF-8 bytes are preserved exactly in hex form.
+pub fn encode_or_hex(requested: Encoding, bytes: &[u8]) -> Result<EncodedPayload, CodecError> {
+    match encode(requested, bytes) {
+        Ok(data) => Ok(EncodedPayload {
+            data,
+            encoding: requested,
+            fallback_reason: None,
+        }),
+        Err(e) => {
+            let data = encode(Encoding::Hex, bytes)?;
+            Ok(EncodedPayload {
+                data,
+                encoding: Encoding::Hex,
+                fallback_reason: Some(e.to_string()),
+            })
+        }
+    }
+}
+
 fn decode_hex(input: &str) -> Result<Vec<u8>, CodecError> {
     let stripped = input.trim().replace(' ', "");
     if !stripped.len().is_multiple_of(2) {
@@ -180,5 +219,62 @@ mod tests {
         assert_eq!(decode(Encoding::Hex, &hex).unwrap(), data);
         let b64 = encode(Encoding::Base64, data).unwrap();
         assert_eq!(decode(Encoding::Base64, &b64).unwrap(), data);
+    }
+
+    // ── encode_or_hex ─────────────────────────────────────────────────────
+
+    #[test]
+    fn encode_or_hex_valid_utf8_stays_requested_encoding() {
+        // "Hello, 世界!" as explicit UTF-8 bytes (byte strings are ASCII-only).
+        let bytes: &[u8] = b"Hello, \xE4\xB8\x96\xE7\x95\x8C!";
+        let p = encode_or_hex(Encoding::Utf8, bytes).unwrap();
+        assert_eq!(p.data, "Hello, 世界!");
+        assert_eq!(p.encoding, Encoding::Utf8);
+        assert!(p.fallback_reason.is_none());
+    }
+
+    #[test]
+    fn encode_or_hex_invalid_utf8_falls_back_to_exact_hex() {
+        let bytes: &[u8] = &[0x48, 0x69, 0xFF, 0xFE, 0x00];
+        let p = encode_or_hex(Encoding::Utf8, bytes).unwrap();
+        assert_eq!(p.data, "48 69 ff fe 00");
+        assert_eq!(p.encoding, Encoding::Hex);
+        let reason = p.fallback_reason.expect("fallback reason present");
+        assert!(
+            reason.contains("UTF-8"),
+            "reason should name UTF-8: {reason}"
+        );
+    }
+
+    #[test]
+    fn encode_or_hex_requested_hex_has_no_fallback() {
+        let p = encode_or_hex(Encoding::Hex, &[0x00, 0x01, 0x02, 0xFF]).unwrap();
+        assert_eq!(p.data, "00 01 02 ff");
+        assert_eq!(p.encoding, Encoding::Hex);
+        assert!(p.fallback_reason.is_none());
+    }
+
+    #[test]
+    fn encode_or_hex_requested_base64_has_no_fallback() {
+        let p = encode_or_hex(Encoding::Base64, b"Hello World").unwrap();
+        assert_eq!(p.data, "SGVsbG8gV29ybGQ=");
+        assert_eq!(p.encoding, Encoding::Base64);
+        assert!(p.fallback_reason.is_none());
+    }
+
+    #[test]
+    fn encode_or_hex_empty_bytes() {
+        let p = encode_or_hex(Encoding::Utf8, b"").unwrap();
+        assert_eq!(p.data, "");
+        assert_eq!(p.encoding, Encoding::Utf8);
+        assert!(p.fallback_reason.is_none());
+    }
+
+    #[test]
+    fn encode_or_hex_fallback_bytes_roundtrip() {
+        let bytes: &[u8] = &[0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0xFF];
+        let p = encode_or_hex(Encoding::Utf8, bytes).unwrap();
+        assert_eq!(p.encoding, Encoding::Hex);
+        assert_eq!(decode(Encoding::Hex, &p.data).unwrap(), bytes);
     }
 }

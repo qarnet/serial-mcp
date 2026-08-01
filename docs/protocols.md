@@ -244,8 +244,20 @@ Summary table:
 ## Field reference
 
 - `ReadResult.frames_dropped` — count of frames dropped by the decoder
-  (checksum mismatches with `validate: true`) plus frames dropped during
-  result encoding (rare; per-frame encoding failure). Always observable.
+  (checksum mismatches with `validate: true`) plus frames dropped when even
+  the hex encoding fallback fails (effectively unreachable — hex is total).
+  A successful per-frame encoding fallback (bytes re-encoded as `hex`) is
+  emitted normally and does NOT increment this counter. Always observable.
+- `ReadResult.encoding` / `FrameResult.encoding` — the effective encoding of
+  the payload: the requested encoding on direct success, `"hex"` after a
+  lossless fallback. Each frame is encoded independently from the requested
+  encoding, so a valid UTF-8 frame preceding malformed binary data stays
+  UTF-8 while the raw bytes use hex.
+- `SubscribeStopNotification.encoding` — effective encoding of the matched
+  `data` context; serialized only when `data` is present. A successful
+  fallback emits the normal payload with `encoding: "hex"` and never uses
+  `SubscribeEncodingErrorNotification`; that error notification is retained
+  for a true encode+hex failure only.
 - `ReadResult.stop_reason` — includes `"framing_error"` for stream-fatal
   decode errors. Not a normal stop; the result still carries partial data.
 - `Frame.index` — 0-based, contiguous across dropped frames and across

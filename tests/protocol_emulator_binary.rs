@@ -62,23 +62,6 @@ fn assert_tool_ok(result: &rmcp::model::CallToolResult, label: &str) {
     assert_ne!(result.is_error, Some(true), "{label} failed: {result:?}");
 }
 
-fn assert_tool_err(result: &rmcp::model::CallToolResult, label: &str) {
-    assert_eq!(
-        result.is_error,
-        Some(true),
-        "expected {label} to fail: {result:?}"
-    );
-}
-
-fn get_text(result: &rmcp::model::CallToolResult) -> String {
-    result
-        .content
-        .first()
-        .and_then(|c| c.as_text())
-        .map(|t| t.text.to_string())
-        .unwrap_or_default()
-}
-
 #[tokio::test]
 async fn protocol_emulator_binary_workflow() {
     // ---- Stage 0: setup ----
@@ -196,7 +179,7 @@ async fn protocol_emulator_binary_workflow() {
         "base64 roundtrip must match original bytes"
     );
 
-    // ---- Stage 3: utf8 encoding must fail on binary data ----
+    // ---- Stage 3: utf8 read of binary falls back to exact hex (lossless) ----
     client
         .peer()
         .call_tool(tool_request(
@@ -232,11 +215,21 @@ async fn protocol_emulator_binary_workflow() {
         ))
         .await
         .unwrap();
-    assert_tool_err(&utf8_result, "utf8_encoding_binary");
-    let err_text = get_text(&utf8_result);
-    assert!(
-        err_text.contains("encoding") || err_text.contains("utf-8") || err_text.contains("invalid"),
-        "error must mention encoding failure: {err_text}"
+    // Phase 4 contract: invalid UTF-8 no longer fails the read — the same
+    // bytes are re-encoded as exact spaced hex with effective encoding "hex".
+    assert_tool_ok(&utf8_result, "utf8_encoding_binary_hex_fallback");
+    let utf8_structured = utf8_result.structured_content.expect("structured");
+    assert_eq!(
+        utf8_structured["encoding"],
+        json!("hex"),
+        "effective encoding must be hex: {utf8_structured:?}"
+    );
+    let fallback_str = utf8_structured["data"].as_str().expect("hex data string");
+    let decoded = serial_mcp::codec::decode(serial_mcp::codec::Encoding::Hex, fallback_str)
+        .expect("hex decode of fallback");
+    assert_eq!(
+        decoded, expected,
+        "utf8-requested read must preserve every byte via hex fallback"
     );
 
     // ---- Stage 4: large payload (>3 KB) via hex read ----

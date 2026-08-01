@@ -432,6 +432,9 @@ pub struct WriteResult {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct FrameResult {
     pub data: String,
+    /// Effective encoding of `data`: the requested encoding on direct
+    /// success, `"hex"` after a lossless fallback when the requested
+    /// encoding could not represent the frame bytes.
     pub encoding: String,
     #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
     pub frame_index: usize,
@@ -446,6 +449,9 @@ pub struct ReadResult {
     pub name: Option<String>,
     #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
     pub bytes_read: usize,
+    /// Effective encoding of `data`: the requested encoding on direct
+    /// success, `"hex"` after a lossless fallback when the requested
+    /// encoding could not represent the raw bytes.
     pub encoding: String,
     pub data: String,
     #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
@@ -490,7 +496,10 @@ pub struct ReadResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub frames: Option<Vec<FrameResult>>,
     /// Number of frames dropped due to decode errors (checksum mismatches
-    /// with `validate: true`) and encoding failures. When a checksum-mismatched
+    /// with `validate: true`) or a true encode failure (including the hex
+    /// fallback failing). A successful lossless encoding fallback (e.g.
+    /// binary bytes under `utf8` re-encoded as `hex`) is NOT a drop and
+    /// does not increment this counter. When a checksum-mismatched
     /// frame is dropped by the decoder, it does NOT appear in `frames` and is
     /// counted here instead.
     #[serde(default)]
@@ -583,6 +592,9 @@ pub struct SendBreakResult {
 pub struct SubscribeResult {
     pub connection_id: String,
     pub name: Option<String>,
+    /// The requested encoding echoed back at subscription start. Per-payload
+    /// notifications carry their own effective `encoding` (which may fall
+    /// back to `"hex"` per chunk/frame).
     pub encoding: String,
     #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
     pub max_buffered_bytes: usize,
@@ -599,6 +611,8 @@ pub struct SubscribeChunkNotification {
     pub connection_id: String,
     #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
     pub bytes_read: usize,
+    /// Effective encoding of `data`: the requested encoding on direct
+    /// success, `"hex"` after a lossless fallback.
     pub encoding: String,
     pub data: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -613,6 +627,8 @@ pub struct SubscribeFrameNotification {
     #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
     pub frame_index: usize,
     pub frame_type: String,
+    /// Effective encoding of `data`: the requested encoding on direct
+    /// success, `"hex"` after a lossless fallback.
     pub encoding: String,
     pub data: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -621,8 +637,11 @@ pub struct SubscribeFrameNotification {
     pub matched: Option<bool>,
 }
 
-/// Per-chunk error notification emitted by `subscribe` when the chunk
-/// cannot be encoded in the requested encoding.
+/// Per-chunk error notification emitted by `subscribe` when a chunk cannot
+/// be represented in the requested encoding AND the lossless hex fallback
+/// also fails (effectively unreachable — hex is total — but preserved).
+/// A successful hex fallback does NOT use this notification: the chunk is
+/// emitted normally with `encoding: "hex"` instead.
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct SubscribeEncodingErrorNotification {
     pub connection_id: String,
@@ -645,6 +664,8 @@ pub struct SubscribePartialFrameNotification {
     #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
     pub frame_index: usize,
     pub frame_type: String,
+    /// Effective encoding of `data`: the requested encoding on direct
+    /// success, `"hex"` after a lossless fallback.
     pub encoding: String,
     pub data: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -688,6 +709,11 @@ pub struct SubscribeStopNotification {
     pub match_frame_index: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data: Option<String>,
+    /// Effective encoding of `data` (`"hex"` when the requested encoding
+    /// could not represent the matched context and the payload fell back to
+    /// exact spaced hex). Serialized only when `data` is present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encoding: Option<String>,
     #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
     pub frames_emitted: usize,
     #[schemars(schema_with = "crate::schema_helpers::uint_schema")]

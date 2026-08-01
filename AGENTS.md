@@ -7,7 +7,7 @@
 - `SerialHandler` is built via `SerialHandler::builder()...build()` (`src/server.rs`); the old `with_manager*` telescoping constructors are gone and `with_profiles()` is gone. The builder defaults `profile_store` to an ephemeral store and `capture_store` to disabled. `SerialHandler::new()` tries the OS default profile store and falls back to an ephemeral store with a warning. Production `main.rs` injects the resolved `profile_store`, a `CaptureStore` built from `--capture-dir` + quota flags (disabled by default), and `SystemPortProvider` through the builder.
 - Profiles live in a process-wide `Arc<ProfileStore>` (`src/profile_store.rs`), shared by every stdio/HTTP session handler. `main.rs` resolves the path (`--profiles-path` or the OS user-config default, failing startup on an unavailable config dir or invalid file) and injects one store. Persistent mutations take a process-local async mutex, then `spawn_blocking` + an advisory lock on `<file>.lock`, reload-under-lock, `NamedTempFile` + `sync_all` + rename; the cache (shared `Arc<RwLock>`) is published from inside the blocking transaction right after the durable write, before the lock is released — so a cancelled awaiting tool still converges (cache never changes on failed write). `update_defaults_preserving_selector` returns the effective profile atomically (no racy second lookup). File format is schema-versioned TOML (v1 legacy auto-migrates in memory; `schema_version == 0` or `> 2` rejects startup). `Profile` carries `metadata` (revision/timestamps/generated/use_count) and a bounded `revisions` history (max 5 prior snapshots) for the profile-session feature.
 - Shared RX framing lives in `src/tools/rx_consume.rs` (`consume_frames` + `RxFrameSink` trait + `disconnect_state`); both `read` and `subscribe` route framing through it, but their raw (no-framing) paths stay per-tool by design (see "Invariants easy to break").
-- Connection lifecycle is in `src/serial.rs`; shared RX/TX coordination is in `src/rx_session.rs` (always-on pump + ring buffer), `src/tx_session.rs`, and `src/stop_controller.rs`. The pump appends all received bytes to `src/rx_ring.rs`; both `read` and `subscribe` read from the ring via cursors.
+- Connection lifecycle is in `src/serial/`; shared RX/TX coordination is in `src/rx_session.rs` (always-on pump + ring buffer), `src/tx_session.rs`, and `src/stop_controller.rs`. The pump appends all received bytes to `src/rx_ring.rs`; both `read` and `subscribe` read from the ring via cursors.
 - Low-level shared primitives: `src/util.rs` (`find_subsequence`, the byte-substring search used by `framing` + `tools::helpers` via a `find_subslice` re-export alias) and `src/precedence.rs` (`resolve_field`, the four-layer framing/parser/protocol precedence helper shared by `io_ops` + `stream_ops`). Both `pub(crate)`.
 - `build.rs` injects `GIT_HASH` / `GIT_HASH_AVAILABLE` / `BUILD_TARGET`.
 
@@ -35,9 +35,9 @@ cargo test --test native_sim_validation -- --ignored
 cargo test --test native_sim_connection_lifecycle -- --ignored --test-threads=1
 ```
 
-- CI runs exactly: fmt -> build -> test -> clippy, plus `cargo test --locked --test config_schema_validation` on Ubuntu.
+- CI runs exactly: fmt -> build -> test -> clippy, plus named Ubuntu gates for config-schema validation (`cargo test --locked --test config_schema_validation`) and release/documentation consistency (`cargo test --locked --test doc_drift`).
 - CI and schema workflows set `RUSTFLAGS="-D warnings"`. Treat warnings as errors locally too.
-- `nix flake check` is part of CI. On Nix, prefer `nix develop` before changing firmware or release workflow bits.
+- `nix flake check` is part of CI. The source filter admits the complete `schemas/` tree (all four vendored schemas validate hermetically offline — missing fixtures fail). On Nix, prefer `nix develop` before changing firmware or release workflow bits.
 
 ## Invariants easy to break
 
@@ -50,7 +50,7 @@ cargo test --test native_sim_connection_lifecycle -- --ignored --test-threads=1
   be annotated with
   `#[schemars(schema_with = "crate::schema_helpers::uint_schema")]`
   (or `option_uint_schema` for `Option<uN>`). Regression tests live in
-  `serial::schema` (`src/serial.rs`) — extend the `check_schema!` list when
+  `serial::schema` (`src/serial/mod.rs`) — extend the `check_schema!` list when
   adding a new `JsonSchema`-deriving struct with unsigned integer fields.
   History: b12b09fd, bc37a0b0, and the PortInfo (vid/pid/interface) regression
   that slipped through because the old guard only checked uint/uint32/uint64.
@@ -58,6 +58,7 @@ cargo test --test native_sim_connection_lifecycle -- --ignored --test-threads=1
 - Open/close changes must notify resource subscribers via `notify_resource_list_changed()`.
 - `read` and `subscribe` share stop-reason vocabulary via `RxStopController`. Both read from the ring via cursors: `read` advances the shared cursor (unless `from` jumps it elsewhere first); `subscribe` uses a per-call private cursor via the `from` parameter (`{"type":"now"}`/`{"type":"cursor"}`/`{"type":"buffer_start"}`/`{"type":"offset","offset":N}`). Subscriptions do NOT move the shared read cursor. `read`'s `from` parameter resolves the start position and writes the shared cursor before reading (atomic seek+read).
 - Both tools catch cross-chunk matches in raw mode because matcher state is sliding-window based. In framed mode both match per-frame, so patterns spanning frames are intentionally not matched.
+- Raw `read` and `subscribe` share ONE matcher-owned bounded-window policy (`Matcher::push_bounded` in `src/match_config.rs`), used at read's initial-history and live paths and at subscribe's raw path. Retained window ≤ `max_buffered_bytes + overlap`, where literal overlap = `needle.len().saturating_sub(1)` and regex/glob overlap = 256 (`REGEX_GLOB_OVERLAP_ALLOWANCE`); retained length after every call never exceeds that limit, including after `NoMatch`. `Found(index)` is GLOBAL (total bytes fed since last `reset_window`): front truncation advances an internal base by exactly the bytes removed, so match indexes stay stream-relative after subscription truncation. Literal pre-match context is matcher-owned: `shape_literal_match_context(global_index)` returns the payload shaped at match time — over the retained window for bounded raw paths (pre-match context capped at `min(requested_context, max_buffered_bytes)`) and over the matching frame's bytes for framed subscribe, which gets full configured context bounded naturally by the frame (read's initial-history path keeps its exact hist-based shaping; read's live path and subscribe both use the matcher's). Regex/glob store no shaped context. Glob truncation marks the first retained line partial when the byte before the new window start was not `\n`; an incomplete prefix is never treated as a complete line. `reset_window` (framed per-frame matching in `rx_consume`) clears window + base + saved context so frame indexes stay frame-local; `rx_consume` never uses bounded push. No wire fields/limits change.
 - `bytes_returned` in both tools is cumulative emitted bytes. `read` match meta now uses the same definition as `subscribe`.
 - `from` parameter on `read` and `subscribe` shares the `ReadFrom` enum: `{"type":"now"}` (default for subscribe, live edge), `{"type":"cursor"}` (default for `read`, shared read cursor), `{"type":"buffer_start"}` (oldest retained byte), or `{"type":"offset","offset":N}` (absolute). Replayed history flows through the same framing/match pipeline as live data. `read`'s `from` parameter resolves the start position and writes the shared cursor BEFORE reading (atomic seek+read). `subscribe` defaults to `{"type":"now"}` and does NOT move the shared cursor.
 - Slow subscriptions observe `bytes_lost` gap in notifications — never silently die.
@@ -67,7 +68,10 @@ cargo test --test native_sim_connection_lifecycle -- --ignored --test-threads=1
 
 ## Frame pipeline (TX + RX framing, parsers, presets, profile defaults)
 
-- `src/framing.rs` owns both RX and TX framing. RX: `RxFramingConfig` +
+- `src/framing/` owns both RX and TX framing (`config.rs` types + preset
+  expansion, `decoder.rs` state machine, `codecs.rs` TX codecs, `parsers/`
+  frame-content parsers; re-exported flat at `crate::framing::*`). RX:
+  `RxFramingConfig` +
   `RxFramingMode` (line/delimiter/length_prefixed/start_end/slip/cobs),
   `FrameDecoder` (stateful, byte-driven), `FrameDecodeError`,
   `ParserConfig`/`ParserType`/`ParsedFrame`. TX: `TxFramingConfig` +
@@ -104,6 +108,25 @@ cargo test --test native_sim_connection_lifecycle -- --ignored --test-threads=1
   `src/precedence.rs` (`resolve_field`), called from `io_ops::write`/`read` +
   `stream_ops::subscribe`. `ConnectionConfig` + `SerialConnection` store the
   defaults; accessors `*_default()`.
+- **Lossless RX encoding parity:** `read`, `subscribe`, and `capture_boot`
+  encode every RX payload via the shared `codec::encode_or_hex` primitive
+  (`src/codec.rs`): try the requested encoding; on failure re-encode the SAME
+  bytes as exact lowercase spaced hex and report the payload's effective
+  `encoding` as `"hex"` (`EncodedPayload.fallback_reason` carries the original
+  error text). A successful fallback warns (`tracing::warn!`) but is NEVER a
+  drop: no `notification_dropped` log event, no `record_notification_drop`,
+  no `frames_dropped` increment, no `SubscribeEncodingErrorNotification`.
+  Applies to raw reads, each decoded frame (encoded independently from the
+  REQUESTED encoding — a valid UTF-8 frame before malformed binary SLIP stays
+  UTF-8 while the raw tail is hex), subscribe raw chunks, framed frame
+  notifications, partial-frame flushes, and shaped match-context `data` in the
+  final stop notification (`SubscribeStopNotification.encoding` accompanies
+  `data`, serialized only when `data` is present). Never lossy UTF-8. Only a
+  TRUE encode+hex failure counts as a drop: read becomes a tool-result
+  construction error, subscribe's raw path keeps the legacy
+  `SubscribeEncodingErrorNotification` + drop count, and frame/partial/context
+  paths warn + count. `SubscribeEncodingErrorNotification` stays on the wire
+  surface (true-failure path only).
 - `RxStopReason::FramingError` is a runtime decode-error stop reason (SLIP
   malformed escape, COBS invalid code). NOT a normal stop
   (`is_normal_stop` excludes it). `read` surfaces it as a normal tool result
@@ -130,8 +153,8 @@ cargo test --test native_sim_connection_lifecycle -- --ignored --test-threads=1
 - `tests/resource_subscriptions.rs` — MCP resource subscribe/unsubscribe protocol.
 - `tests/tx_session.rs` — cross-module TxSession wiring.
 - `tests/proptest.rs` — property-based and boundary-value tests.
-- `tests/doc_drift.rs` — prose-vs-code drift guards: tool count across README/Cargo.toml/server.json, protocol-preset mentions, tagged `from` wire forms, capture CLI option sync, FEATURES.md shipped-items absence, `server.json` package/version rules.
-- `tests/config_schema_validation.rs` validates generated schemas against vendored examples; ignored case fetches upstream schemas.
+- `tests/doc_drift.rs` — prose-vs-code drift guards: tool count across README/Cargo.toml/server.json, protocol-preset mentions, tagged `from` wire forms, capture CLI option sync, FEATURES.md shipped-items absence, `server.json` package/version rules, and a CHANGELOG release contract (release-table row + body heading for the Cargo package version, `## [Unreleased]` before the current release) with synthetic negative proofs for each rule.
+- `tests/config_schema_validation.rs` validates all three vendored example configs (Claude Code, Codex, opencode) hermetically and offline — the vendored `models.dev` document is registered in memory under its original URI, a no-network retriever fails on anything else, and missing/malformed schema or instance fixtures fail the run (no skip path). Only the ignored case fetches latest upstream schemas.
 - `tests/native_sim_validation.rs` — native_sim firmware over PTY. 57 tests, pure software, fast (no hardware). Env: `SERIAL_MCP_NATIVE_SIM_BIN` (default `build/native_sim/firmware/zephyr/zephyr.exe`). Thin wrapper; all tests + helpers live in `tests/native_sim_validation/unix.rs` (Unix-only via `#[cfg(unix)]` module gate), with an empty `windows.rs` stub for future Windows-specific tests.
 - `tests/native_sim_connection_lifecycle.rs` — software-only lifecycle (6 tests): named connection, `set_flow_control`, close-while-read, reopen, touch-command bootloader entry. Run with `--test-threads=1`.
 - There are no hardware-required tests in this repo. All test coverage is runnable on a normal Linux host.
@@ -163,8 +186,40 @@ fw-run-native
 - Release artifacts are built for: `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`, `aarch64-apple-darwin`, `x86_64-pc-windows-msvc`.
 - `server.json` is a registry template: it carries name/description/version only. The `packages` array (release-asset URLs + `fileSha256`) is generated at publish time by `publish-mcp-registry.yml` from the actual release binaries — never commit one (`tests/doc_drift.rs::server_json_omits_packages` enforces this). Version bump = `Cargo.toml` + the single top-level `server.json` version.
 
+## Hardening (scheduled, not PR-gated)
+
+`.github/workflows/hardening.yml` runs weekly (Sunday 06:00 UTC) and on
+`workflow_dispatch` only — no push/PR trigger, `permissions: contents: read`,
+`concurrency: { group: hardening, cancel-in-progress: true }`. Both jobs are
+bounded; a hung or slow run must fail the job, not idle.
+
+- **Fuzz smoke** — matrix over the three existing targets (`tool_call_json`,
+  `codec_roundtrip`, `clamp_bounds`), `fail-fast: false`. Pinned toolchain
+  `dtolnay/rust-toolchain@nightly-2026-07-15` (no floating nightly) + pinned
+  `cargo install cargo-fuzz --locked --version 0.13.2`. Per target:
+  libFuzzer `-max_total_time=300` wrapped in GNU `timeout 360`, job
+  `timeout-minutes: 12`. Ubuntu + `libudev-dev pkg-config`. On failure,
+  upload `fuzz/artifacts/<target>/` + `fuzz/corpus/<target>/` via
+  `actions/upload-artifact@v4` (`if-no-files-found: warn`, `retention-days: 7`)
+  — missing paths warn but never mask the original failure.
+- **Mutation** — project Rust `dtolnay/rust-toolchain@1.88.0` (NOT nightly;
+  cargo-fuzz/nightly are isolated fuzz tooling, not an MSRV bump) + pinned
+  `cargo install cargo-mutants --locked --version 27.1.0`. Focused scope only:
+  `--file src/checksums.rs` and `--file 'src/framing/parsers/**'` (quote the
+  glob), with `--cargo-arg=--locked`, `--timeout 120`, `--jobs 2`, `-- --lib`.
+  Baseline stays enabled. Whole command wrapped in GNU `timeout 1500`, job
+  `timeout-minutes: 30`. Missed/time-out mutants fail the job — exit status is
+  never suppressed. On failure upload `mutants.out/` (same warn/no-mask rule).
+- These jobs are NOT a PR-required gate.
+- Windows serial E2E is **deferred**: no privileged virtual-port driver
+  installation on GitHub-hosted runners (com0com-style drivers are
+  kernel-mode, typically test-signed, admin/reboot-sensitive). Decision and
+  sources: `docs/development/windows-serial-e2e-investigation.md`. Revisit
+  only with a pre-provisioned signed-driver runner or an approved design.
+
 ## Repo workflow
 
+- Rust toolchain policy: CI, release, and schema-drift workflows install Rust 1.88.0 (`dtolnay/rust-toolchain@1.88.0`, each followed by a `rustc --version --verbose` report step); Nix derives the same version from `rust-toolchain.toml`. Bump both together.
 - Conventional commits used here: `feat:`, `fix:`, `docs:`, `test:`, `refactor:`.
 - Never add attribution footers or co-author lines.
 
@@ -194,7 +249,7 @@ cargo run --manifest-path xtask/Cargo.toml -- print-paths
 - **`ProfileDefaults`** carries `max_buffered_bytes`, `poll_interval_ms`, `reconnect_policy`, `log_capacity`, `log_enabled` plus the serial-line fields; they flow profile → `OpenArgs` → `ConnectionConfig` → `SerialConnection`. Per-call `max_buffered_bytes` / `poll_interval_ms` do NOT exist on `ReadArgs`/`SubscribeArgs` — both come from connection defaults (mutable via `configure`).
 - **`precedence::resolve_field`** takes `conn_default` by value (`Option<T>`); the framing-default accessors on `SerialConnection` return cloned values.
 - **`transact`** = write-then-await-response in one call, read half defaults `from: {"type":"now"}` to skip pre-write backlog (`src/tools/io_ops.rs`). **`compute_checksum`** (xor/lrc) is a pure utility with no connection (`src/tools/utility_ops.rs`).
-- **`PortProvider` trait + `SystemPortProvider`** (`src/serial.rs`): process-wide injectable port enumeration used by `list_ports`, bare `open` identity capture, `open_profile` matching, `serial://ports`, resource port counts, and completions. Tests inject `StaticPortProvider` (`tests/common/mod.rs`) whose `PortInfo.name` points at a real PTY slave.
+- **`PortProvider` trait + `SystemPortProvider`** (`src/serial/port_info.rs`): process-wide injectable port enumeration used by `list_ports`, bare `open` identity capture, `open_profile` matching, `serial://ports`, resource port counts, and completions. Tests inject `StaticPortProvider` (`tests/common/mod.rs`) whose `PortInfo.name` points at a real PTY slave.
 - **Open overlay:** `OpenArgs` default-bearing fields are `Option<T>` with `#[serde(default)]` plus `profile_mode` (`auto`/`none`); omitted baud resolves to 115200. Resolution lives in `tools::helpers::{OpenOverlay, ResolvedOpenSettings}` — explicit field > selected profile default > built-in default; `from_profile` compares for `dirty`.
 - **Session plan + binding:** `port_ops::open` decides a `SessionPlan` (disabled/transient/selected/explicit/generate) BEFORE hardware open; `open_connection` opens, starts RX, and only then marks used / creates the generated profile / attaches the binding. `ActiveProfileBinding` (StdMutex on `SerialConnection`) converts losslessly to wire `ProfileSessionResult` (`src/profiles.rs`) on `OpenResult`, `GetStatusResult`, `ConnectionSummary`. Never close a working port on profile-metadata failure — surface `last_persistence_error`. `open_connection` obtains the `Arc<SerialConnection>` once after hardware open and errors if it is missing; every successful public open returns `OpenResult.profile: Some(...)`; selected-profile `dirty` is computed BEFORE hardware open; invalid profile defaults fail the call instead of mapping to clean.
 - **Identity rules:** `IdentityConfidence` High = USB + VID + PID + non-empty serial (+ interface); Medium = USB VID/PID only; Low = other identity; None = path-only. Automatic reuse only for High and only when the high fingerprint is unique among live ports. Canonical generated selector = transport/VID/PID/serial/interface only. Pure helpers in `src/profiles.rs`: `high_identity`, `identity_confidence`, `canonical_high_selector`, `selector_matches_high_identity`, `rank_candidates` (None sorts oldest), `normalize_generated_label` (lowercase, run→`-`, ≤32 chars, `serial-device` fallback), `allocate_generated_name` (base, -2, -3, ...).
@@ -213,16 +268,16 @@ cargo run --manifest-path xtask/Cargo.toml -- print-paths
 - **`list_ports` previews profile selection**: `ListPortsResult.profile_matches` parallels `ports` (same length/order, always serialized). Per-port: `confidence` + `outcome` (`selected`/`ambiguous`/`ineligible`/`duplicate`/`none`), `selected_profile`, and ordered `candidates` (name/generated/revision/last_used_at_ms). Preview is read-only — no `mark_used`, no file mutation. Pure computation in `port_ops::compute_profile_matches(ports, profiles)`: one `ProfileStore::list_fresh()` per `list_ports` call (corrupt store = tool error); high identity reuses the identity rules exactly (unique max `last_used_at_ms`, `None` sorts oldest, equal top rank = `Ambiguous`; name is display-only and never breaks a tie); duplicate live fingerprints = `Duplicate` for every such port; weak identity lists explicitly matching non-empty selectors as `Ineligible`. The `serial://ports` resource serves the same map.
 - **Decision-tree teaching**: server `instructions` + the 12 common tool descriptions + README flow + both prompts teach `list_ports` → bare `open` → `transact`/`read`/`write` → inspect `profile`/`profile_persistence` → `open_profile` only for explicit choice/weak identity, `rollback_profile` for recovery → escalate to framing/cursor/reconnect/line-control/log tools only when needed. `from` wire examples stay tagged (`{"type":"now"}` etc.) — no string shorthand.
 - **Tool count: 27** — `server::tool_catalog()` returns the exact 27 `rmcp::model::Tool` attrs served by MCP; schema tests and the xtask evaluator consume it (exact-count test `tool_catalog_has_exactly_twenty_seven_tools` guards drift). Update all references when adding/removing tools.
-- **Evaluator**: `cargo run --manifest-path xtask/Cargo.toml -- agent-eval [--output-dir PATH] [--baseline PATH] [--write-baseline PATH]` — deterministic catalog + scenario metrics under `target/agent-interface-eval/` (`report.json`/`report.md`), no network/user config/timestamps. Committed baseline `docs/development/agent-interface-baseline.json` (26 tools / 258964 bytes) is HISTORICAL — it measures the pre-`capture_boot` catalog; the consolidated current report lives in `docs/development/agent-interface-evaluation.md` (27 tools / 286285 bytes). Thresholds and yes/no decisions (automatic profiles + `transact` + atomic `capture_boot` accepted; shorthand/recipes/versioned facade rejected) are computed by the evaluator from fixed rules. Modeled (non-implemented) candidates are marked `modeled` with their expansion into current calls.
+- **Evaluator**: `cargo run --manifest-path xtask/Cargo.toml -- agent-eval [--output-dir PATH] [--baseline PATH] [--write-baseline PATH]` — deterministic catalog + scenario metrics under `target/agent-interface-eval/` (`report.json`/`report.md`), no network/user config/timestamps. Committed baseline `docs/development/agent-interface-baseline.json` (26 tools / 258964 bytes) is HISTORICAL — it measures the pre-`capture_boot` catalog; the consolidated current report lives in `docs/development/agent-interface-evaluation.md` (27 tools / 288177 bytes). Thresholds and yes/no decisions (automatic profiles + `transact` + atomic `capture_boot` accepted; shorthand/recipes/versioned facade rejected) are computed by the evaluator from fixed rules. Modeled (non-implemented) candidates are marked `modeled` with their expansion into current calls.
 
 ## Atomic boot capture
 
 - **`capture_boot`** (`src/tools/control_ops.rs`): one bounded operation — purge unread OS input, mark the RX live edge atomically, optionally pulse DTR/RTS, then capture ONLY post-mark bytes through the existing read pipeline with a PRIVATE cursor. `reset=null` = arm-only capture (lines never touched). Result stays in memory (connection `max_buffered_bytes` bounds it); no file output. `read.from_offset` equals `mark_offset` unless the ring wrapped (then `bytes_lost` reports it). Omitted/null `timeout_ms` resolves to a bounded 5000ms default; total op bounded by hold + settle + read timeout. Capture is transient: no profile learning.
 - **Pump gate (`src/rx_session.rs`):** the pump holds `pump_gate` across one complete read + ring append and releases before disconnect pause/sleep; `capture_boot` acquires it via `pump_gate_guard()` for the purge→mark→assert sequence, so a byte physically read before the reset can never append after the mark. Deterministic unit test: while the gate is held the pump appends nothing.
-- **Line-control lock (`src/serial.rs`):** per-connection `control_lock`; public `set_dtr_rts` takes it, crate-private `set_dtr_rts_unlocked` + `control_lock()` accessor cover capture's whole assert/hold/release sequence — a concurrent `set_dtr_rts` cannot interleave inside a pulse. The lock is scoped to the pulse only, dropped before settle/read so other line-control callers are not blocked for the whole capture.
+- **Line-control lock (`src/serial/connection.rs`):** per-connection `control_lock`; public `set_dtr_rts` takes it, crate-private `set_dtr_rts_unlocked` + `control_lock()` accessor cover capture's whole assert/hold/release sequence — a concurrent `set_dtr_rts` cannot interleave inside a pulse. The lock is scoped to the pulse only, dropped before settle/read so other line-control callers are not blocked for the whole capture.
 - **Release guarantee:** `ResetReleaseGuard` (modeled on `BreakResetGuard`) is armed with the configured release state BEFORE assertion; every explicit path releases and disarms ONLY on success (`release_reset_lines`); its drop — after the pulse-scoped control guard in the unwind order — spawns a best-effort release through the PUBLIC `set_dtr_rts` (queued on the control lock). No unconditional disarm: a swallowed release failure on the cancellation path keeps the guard armed so drop retries. A closed/disconnected port counts as released. Assertion/release I/O failure = tool error with cleanup attempted.
-- **Private cursor extraction (`src/tools/helpers.rs`):** `read_from_private_cursor(session, initial_cursor, ...) -> (ReadOutcome, final_cursor)` is the extracted read core; the shared wrapper reads the shared cursor, delegates, and applies the returned cursor. `read`/`transact` behavior unchanged; capture starts at its mark and discards the final cursor.
-- **Cancellation:** request-scoped `notifications/cancelled` during hold/settle releases lines first, then routes the already-cancelled token through the private read path → structured `stop_reason="cancelled"` result with offsets (unit-tested in helpers.rs; rmcp's client discards post-cancel responses, so HTTP tests assert the observable release + control-lock release).
+- **Private cursor extraction (`src/tools/read_loop.rs`):** `read_from_private_cursor(session, initial_cursor, ...) -> (ReadOutcome, final_cursor)` is the extracted read core; the shared wrapper reads the shared cursor, delegates, and applies the returned cursor. `read`/`transact` behavior unchanged; capture starts at its mark and discards the final cursor.
+- **Cancellation:** request-scoped `notifications/cancelled` during hold/settle releases lines first, then routes the already-cancelled token through the private read path → structured `stop_reason="cancelled"` result with offsets (unit-tested in read_loop.rs; rmcp's client discards post-cancel responses, so HTTP tests assert the observable release + control-lock release).
 - **Controlled backend tests** (`tests/common/controlled.rs` + `tests/http_integration.rs`): real HTTP MCP + injected `ControlledIo` recording line transitions and injecting RX bytes synchronously at assertion/release. Covers: stale exclusion + cursor/history preservation, immediate-bytes match stop, pump barrier (in-flight pre-reset read appends before mark), cancellation release, assertion/release failure cleanup, invalid-framing-before-lines, runtime SLIP error, NDJSON + hex/base64, silence + wall timeouts, disconnect (`connection_closed`), ring wrap `bytes_lost`, concurrent `set_dtr_rts` serialization, arm-only. PTY arm-only test in `tests/serial_pty.rs`; native_sim arm-only test in `tests/native_sim_validation/unix.rs` (honest about no DTR observation on native_sim's PTY UART).
 
 ## Safe persistent capture

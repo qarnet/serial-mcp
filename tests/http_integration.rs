@@ -1099,6 +1099,454 @@ async fn subscribe_closed_from_other_session_stops_streaming_task() {
     client_b.cancel().await.ok();
 }
 
+// ── Phase 4: lossless RX encoding fallback ────────────────────────────────
+
+#[tokio::test]
+async fn read_invalid_utf8_falls_back_to_exact_hex() {
+    let manager = Arc::new(ConnectionManager::new());
+    let (conn, mut peer) = loopback_connection("loop-read-binary-hex");
+    let connection_id = manager.insert(conn).await.unwrap();
+
+    peer.write_all(&[0x48, 0x69, 0xFF, 0xFE, 0x00])
+        .await
+        .unwrap();
+    peer.flush().await.unwrap();
+
+    let server = TestServer::start_with(manager).await;
+    let (client, _rx) = connect_client(&server).await.unwrap();
+
+    let result = client
+        .peer()
+        .call_tool(tool_request(
+            "read",
+            json!({
+                "connection_id": connection_id,
+                "timeout_ms": 1000,
+                "encoding": "utf8",
+            }),
+        ))
+        .await
+        .unwrap();
+    // Fallback is a normal result, never a tool error.
+    assert_ne!(result.is_error, Some(true), "{result:?}");
+    let s = result.structured_content.expect("structured content");
+    assert_eq!(s["data"], json!("48 69 ff fe 00"));
+    assert_eq!(s["encoding"], json!("hex"));
+    assert_eq!(s["bytes_read"], json!(5));
+    // Cat path drains instantly ("drained") when bytes are already buffered;
+    // otherwise the read waits and stops at "timeout". Both carry the data.
+    assert!(
+        s["stop_reason"] == json!("drained") || s["stop_reason"] == json!("timeout"),
+        "unexpected stop_reason: {s:?}"
+    );
+    assert_eq!(s["frames_dropped"], json!(0));
+
+    client.cancel().await.ok();
+}
+
+#[tokio::test]
+async fn read_framing_error_keeps_valid_frame_utf8_and_raw_hex() {
+    let manager = Arc::new(ConnectionManager::new());
+    let (conn, mut peer) = loopback_connection("loop-read-slip-partial-enc");
+    let connection_id = manager.insert(conn).await.unwrap();
+
+    // One valid SLIP frame then a malformed escape (0xDB 0xFF).
+    let slip_bytes: [u8; 6] = [0xC0, b'O', b'K', 0xC0, 0xDB, 0xFF];
+    peer.write_all(&slip_bytes).await.unwrap();
+    peer.flush().await.unwrap();
+
+    let server = TestServer::start_with(manager).await;
+    let (client, _rx) = connect_client(&server).await.unwrap();
+
+    let result = client
+        .peer()
+        .call_tool(tool_request(
+            "read",
+            json!({
+                "connection_id": connection_id,
+                "timeout_ms": 2000,
+                "encoding": "utf8",
+                "rx_framing": { "type": "slip" },
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_ne!(result.is_error, Some(true), "{result:?}");
+    let s = result.structured_content.expect("structured content");
+    assert_eq!(s["stop_reason"], json!("framing_error"));
+    assert!(
+        s["error"].as_str().is_some_and(|e| e.contains("SLIP")),
+        "framing error text must be present: {s:?}"
+    );
+    // Top-level raw bytes (malformed tail) fall back to hex...
+    assert_eq!(s["encoding"], json!("hex"));
+    assert!(
+        s["data"]
+            .as_str()
+            .unwrap()
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() || c == ' '),
+        "top-level data should be hex: {s:?}"
+    );
+    // ...while the independently valid frame stays in requested UTF-8.
+    let frames = s["frames"].as_array().expect("partial frames");
+    assert_eq!(frames.len(), 1);
+    assert_eq!(frames[0]["data"], json!("OK"));
+    assert_eq!(frames[0]["encoding"], json!("utf8"));
+    assert_eq!(s["frames_dropped"], json!(0));
+
+    client.cancel().await.ok();
+}
+
+#[tokio::test]
+async fn subscribe_binary_chunk_emits_hex_advances_and_counts_no_drop() {
+    let manager = Arc::new(ConnectionManager::new());
+    let (conn, mut peer) = loopback_connection("loop-sub-binary-hex");
+    let connection_id = manager.insert(conn).await.unwrap();
+
+    let server = TestServer::start_with(manager).await;
+    let (client, mut rx) = connect_client(&server).await.unwrap();
+
+    let result = client
+        .peer()
+        .call_tool(tool_request(
+            "subscribe",
+            json!({
+                "connection_id": connection_id,
+                "timeout_ms": 600,
+                "encoding": "utf8",
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_ne!(result.is_error, Some(true), "{result:?}");
+
+    // Write AFTER the ack so `from: now` is resolved before the bytes exist.
+    peer.write_all(&[0xDE, 0xAD, 0xFF]).await.unwrap();
+    peer.flush().await.unwrap();
+
+    // One chunk notification with exact spaced hex + effective encoding.
+    let event = next_notification(&mut rx, Duration::from_secs(2))
+        .await
+        .expect("binary chunk notification");
+    let data = event.data.as_object().unwrap();
+    assert_eq!(data["connection_id"], json!(connection_id));
+    assert_eq!(data["bytes_read"], json!(3));
+    assert_eq!(data["data"], json!("de ad ff"));
+    assert_eq!(data["encoding"], json!("hex"));
+    // No SubscribeEncodingErrorNotification: `encoding_error` must be absent.
+    assert!(
+        data.get("encoding_error").is_none(),
+        "fallback must not emit the error notification: {data:?}"
+    );
+
+    // The chunk advances the private cursor: no repeated notification, and
+    // the stream ends by timeout with no drop counted.
+    let stop = next_notification(&mut rx, Duration::from_secs(3))
+        .await
+        .expect("stop notification");
+    let stop_data = stop.data.as_object().unwrap();
+    assert_eq!(stop_data["stop_reason"], json!("timeout"));
+    assert_eq!(stop_data["bytes_returned"], json!(3));
+
+    // Successful fallback never increments the notification drop count.
+    let status = client
+        .peer()
+        .call_tool(tool_request(
+            "get_status",
+            json!({ "connection_id": connection_id }),
+        ))
+        .await
+        .unwrap();
+    let s = status.structured_content.expect("structured status");
+    assert_eq!(s["notification_drop_count"], json!(0));
+    assert_eq!(s["truncation_count"], json!(0));
+
+    client.cancel().await.ok();
+}
+
+#[tokio::test]
+async fn subscribe_binary_framed_frame_emits_hex_without_drop() {
+    let manager = Arc::new(ConnectionManager::new());
+    let (conn, mut peer) = loopback_connection("loop-sub-slip-binary");
+    let connection_id = manager.insert(conn).await.unwrap();
+
+    let server = TestServer::start_with(manager).await;
+    let (client, mut rx) = connect_client(&server).await.unwrap();
+
+    let result = client
+        .peer()
+        .call_tool(tool_request(
+            "subscribe",
+            json!({
+                "connection_id": connection_id,
+                "timeout_ms": 600,
+                "encoding": "utf8",
+                "rx_framing": { "type": "slip" },
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_ne!(result.is_error, Some(true), "{result:?}");
+
+    // One SLIP frame whose payload is a single binary byte (0xFF).
+    peer.write_all(&[0xC0, 0xFF, 0xC0]).await.unwrap();
+    peer.flush().await.unwrap();
+
+    let event = next_notification(&mut rx, Duration::from_secs(2))
+        .await
+        .expect("frame notification");
+    let data = event.data.as_object().unwrap();
+    assert_eq!(data["frame_type"], json!("slip"));
+    assert_eq!(data["frame_index"], json!(0));
+    assert_eq!(data["data"], json!("ff"));
+    assert_eq!(data["encoding"], json!("hex"));
+    assert!(
+        data.get("encoding_error").is_none(),
+        "fallback must not emit the error notification: {data:?}"
+    );
+
+    let stop = next_notification(&mut rx, Duration::from_secs(3))
+        .await
+        .expect("stop notification");
+    let stop_data = stop.data.as_object().unwrap();
+    assert_eq!(stop_data["stop_reason"], json!("timeout"));
+    assert_eq!(stop_data["frames_emitted"], json!(1));
+    assert_eq!(stop_data["frames_dropped"], json!(0));
+
+    client.cancel().await.ok();
+}
+
+#[tokio::test]
+async fn subscribe_binary_partial_flush_emits_hex_with_effective_encoding() {
+    let manager = Arc::new(ConnectionManager::new());
+    let (conn, mut peer) = loopback_connection("loop-sub-partial-binary");
+    let connection_id = manager.insert(conn).await.unwrap();
+
+    let server = TestServer::start_with(manager).await;
+    let (client, mut rx) = connect_client(&server).await.unwrap();
+
+    let result = client
+        .peer()
+        .call_tool(tool_request(
+            "subscribe",
+            json!({
+                "connection_id": connection_id,
+                "timeout_ms": 400,
+                "encoding": "utf8",
+                "rx_framing": { "type": "line" },
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_ne!(result.is_error, Some(true), "{result:?}");
+
+    // Binary bytes with NO line terminator: the decoder buffers them and
+    // flush_partial emits them at stop.
+    peer.write_all(&[0xFF, 0xFE, 0x00]).await.unwrap();
+    peer.flush().await.unwrap();
+
+    let event = next_notification(&mut rx, Duration::from_secs(2))
+        .await
+        .expect("partial-frame notification");
+    let data = event.data.as_object().unwrap();
+    assert_eq!(data["partial"], json!(true));
+    assert_eq!(data["data"], json!("ff fe 00"));
+    assert_eq!(data["encoding"], json!("hex"));
+
+    let stop = next_notification(&mut rx, Duration::from_secs(2))
+        .await
+        .expect("stop notification");
+    let stop_data = stop.data.as_object().unwrap();
+    assert_eq!(stop_data["stop_reason"], json!("timeout"));
+    // All observed partial bytes were emitted, so bytes_returned is the exact
+    // partial raw length and nothing is reported as truncated.
+    assert_eq!(stop_data["bytes_returned"], json!(3));
+    assert_eq!(stop_data["truncated"], json!(false));
+
+    client.cancel().await.ok();
+}
+
+#[tokio::test]
+async fn subscribe_matched_binary_context_reports_hex_data_and_encoding() {
+    let manager = Arc::new(ConnectionManager::new());
+    let (conn, mut peer) = loopback_connection("loop-sub-match-binary");
+    let connection_id = manager.insert(conn).await.unwrap();
+
+    let server = TestServer::start_with(manager).await;
+    let (client, mut rx) = connect_client(&server).await.unwrap();
+
+    let result = client
+        .peer()
+        .call_tool(tool_request(
+            "subscribe",
+            json!({
+                "connection_id": connection_id,
+                "timeout_ms": 2000,
+                "encoding": "utf8",
+                "match": {
+                    "pattern": "ff",
+                    "config": { "mode": "literal_substring",
+                                "pattern_encoding": "hex",
+                                "context_amount_of_matched_bytes": 16 },
+                },
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_ne!(result.is_error, Some(true), "{result:?}");
+
+    // Raw chunk with a binary match target (0xFF).
+    peer.write_all(&[0xDE, 0xAD, 0xFF]).await.unwrap();
+    peer.flush().await.unwrap();
+
+    // Chunk notification (hex fallback) then the matched stop notification.
+    let event = next_notification(&mut rx, Duration::from_secs(2))
+        .await
+        .expect("chunk notification");
+    assert_eq!(event.data["data"], json!("de ad ff"));
+    assert_eq!(event.data["encoding"], json!("hex"));
+
+    let stop = next_notification(&mut rx, Duration::from_secs(2))
+        .await
+        .expect("stop notification");
+    let stop_data = stop.data.as_object().unwrap();
+    assert_eq!(stop_data["stop_reason"], json!("match_found"));
+    assert_eq!(stop_data["matched"], json!(true));
+    // Shaped context is the full chunk (pre-match + matched bytes).
+    assert_eq!(stop_data["data"], json!("de ad ff"));
+    assert_eq!(stop_data["encoding"], json!("hex"));
+    assert_eq!(stop_data["match_index"], json!(2));
+
+    client.cancel().await.ok();
+}
+
+#[tokio::test]
+async fn read_and_subscribe_same_literal_match_index_over_chunked_stream() {
+    let manager = Arc::new(ConnectionManager::new());
+    let (conn, mut peer) = loopback_connection("loop-match-parity");
+    let connection_id = manager.insert(conn).await.unwrap();
+
+    let server = TestServer::start_with(manager).await;
+    let (client, mut rx) = connect_client(&server).await.unwrap();
+
+    // Chunked stream: the literal spans the boundary between two writes.
+    peer.write_all(b"ABCD").await.unwrap();
+    peer.flush().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    peer.write_all(b"EFOK>tail").await.unwrap();
+    peer.flush().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // read over the chunked stream: "OK>" at global index 6.
+    let result = client
+        .peer()
+        .call_tool(tool_request(
+            "read",
+            json!({
+                "connection_id": connection_id,
+                "timeout_ms": 2000,
+                "match": { "pattern": "OK>" },
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_ne!(result.is_error, Some(true), "{result:?}");
+    let s = result.structured_content.expect("structured");
+    assert_eq!(s["matched"], json!(true), "{s:?}");
+    assert_eq!(s["match_index"], json!(6), "{s:?}");
+
+    // subscribe replays the same retained bytes from buffer_start and must
+    // report the same match outcome and index.
+    client
+        .peer()
+        .call_tool(tool_request(
+            "subscribe",
+            json!({
+                "connection_id": connection_id,
+                "from": { "type": "buffer_start" },
+                "timeout_ms": 2000,
+                "match": { "pattern": "OK>" },
+            }),
+        ))
+        .await
+        .unwrap();
+
+    let mut saw_match_stop = false;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        match next_notification(&mut rx, Duration::from_secs(2)).await {
+            Ok(event) => {
+                let data = event.data.as_object().unwrap();
+                if data.get("stop_reason").is_some() {
+                    saw_match_stop = true;
+                    assert_eq!(data["matched"], json!(true), "{data:?}");
+                    assert_eq!(data["match_index"], json!(6), "{data:?}");
+                    break;
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    assert!(
+        saw_match_stop,
+        "subscribe should emit a match stop notification"
+    );
+
+    // No-match parity: a pattern absent from the stream times out without a
+    // match on both tools.
+    let result = client
+        .peer()
+        .call_tool(tool_request(
+            "read",
+            json!({
+                "connection_id": connection_id,
+                "from": { "type": "now" },
+                "timeout_ms": 400,
+                "match": never_match(),
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_ne!(result.is_error, Some(true), "{result:?}");
+    let s = result.structured_content.expect("structured");
+    assert_eq!(s["matched"], json!(false), "{s:?}");
+
+    client
+        .peer()
+        .call_tool(tool_request(
+            "subscribe",
+            json!({
+                "connection_id": connection_id,
+                "timeout_ms": 600,
+                "match": never_match(),
+            }),
+        ))
+        .await
+        .unwrap();
+    let mut saw_no_match_stop = false;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        match next_notification(&mut rx, Duration::from_secs(2)).await {
+            Ok(event) => {
+                let data = event.data.as_object().unwrap();
+                if data.get("stop_reason").is_some() {
+                    saw_no_match_stop = true;
+                    assert_ne!(data.get("matched"), Some(&json!(true)), "{data:?}");
+                    break;
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    assert!(
+        saw_no_match_stop,
+        "subscribe should emit a timeout stop notification"
+    );
+
+    client.cancel().await.ok();
+}
+
 #[tokio::test]
 async fn validation_limits_return_tool_errors_over_http() {
     let manager = Arc::new(ConnectionManager::new());
@@ -2834,7 +3282,7 @@ async fn capture_boot_cancellation_releases_lines_request_scoped() {
     // not whole-client teardown. Note: rmcp's client resolves its own
     // cancelled request handle with `Err(Cancelled)` and discards the server
     // response, so the structured `cancelled` outcome is proven at the unit
-    // level (helpers.rs) and the wire-level release is proven below.
+    // level (read_loop.rs) and the wire-level release is proven below.
     handle
         .peer
         .notify_cancelled(CancelledNotificationParam {
@@ -3142,12 +3590,16 @@ async fn capture_boot_runtime_framing_error_returns_partial_result_and_releases_
             .is_some_and(|e| e.contains("SLIP")),
         "framing error text must be present: {s:?}"
     );
-    // The valid frame decoded before the error survives. On the framing
-    // error the effective encoding falls back to hex, so the frame is
-    // reported in hex too (4f 4b = "OK").
+    // The valid frame decoded before the error survives. Each frame is
+    // encoded independently from the requested encoding (utf8 default), so
+    // the valid "OK" frame stays UTF-8 while only the top-level raw bytes
+    // (malformed tail) fall back to hex.
     let frames = s["read"]["frames"].as_array().expect("partial frames");
     assert_eq!(frames.len(), 1);
-    assert_eq!(frames[0]["data"], json!("4f 4b"));
+    assert_eq!(frames[0]["data"], json!("OK"));
+    assert_eq!(frames[0]["encoding"], json!("utf8"));
+    assert_eq!(s["read"]["encoding"], json!("hex"));
+    assert_eq!(s["read"]["frames_dropped"], json!(0));
     // Lines were released despite the decode error.
     assert_eq!(state.line_log(), vec![(false, false), (true, true)]);
 

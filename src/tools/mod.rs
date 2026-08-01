@@ -2,7 +2,10 @@ pub mod control_ops;
 pub mod helpers;
 pub mod io_ops;
 pub mod port_ops;
+pub mod read_loop;
+pub mod result_builders;
 pub mod rx_consume;
+pub mod rx_validate;
 pub mod stream_ops;
 pub mod types;
 pub mod utility_ops;
@@ -40,7 +43,7 @@ mod tests {
     /// `uint*` format keywords that schemars 1.x emits for unsigned integer
     /// fields.
     ///
-    /// DO NOT DELETE — see the header of `serial::schema` (src/serial.rs) and
+    /// DO NOT DELETE — see the header of `serial::schema` (src/serial/mod.rs) and
     /// `src/schema_helpers.rs` for the full rationale. History: b12b09fd,
     /// bc37a0b0, and the PortInfo regression this test originally missed
     /// because it only checked `uint`/`uint32`/`uint64` and not `uint8`/

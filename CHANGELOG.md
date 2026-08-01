@@ -2,6 +2,7 @@
 
 | Version | Date | Highlights |
 |---|---|---|
+| [0.9.1](#091) | 2026-08-01 | lossless RX byte preservation via shared encoding fallback (exact spaced hex, effective encoding reported, no drop accounting on success) across `read`/`subscribe`/`transact`/`capture_boot` raw/frame/partial/match-context paths; unified matcher-owned bounded window for raw read/subscribe with global indexes; framing/serial/RX-tool module splits (public surface unchanged); hermetic mandatory config-schema validation + release/drift guards; pinned `quinn-proto` 0.11.15 (RUSTSEC-2026-0185 / CVE-2026-25800); Rust 1.88.0 workflow/Nix alignment; weekly fuzz + mutation hardening; Windows serial E2E deferred |
 | [0.9.0](#090) | 2026-08-01 | process-wide versioned `ProfileStore` + automatic high-confidence profile sessions (generated/reused, open overlay, observable bindings); write-through profile learning with revision-CAS/conflict/stale/close retry; `rollback_profile` + deletion guard; `list_ports` `profile_matches` discovery; decision-tree teaching + deterministic agent evaluator; atomic pump-gated cancellation-safe `capture_boot`; disabled-by-default `CaptureStore` with CLI quotas + no-clobber `export_log` (breaking: arbitrary paths removed); `flush(both)` RX backlog fix; tool count 25 → 27 |
 | [0.8.1](#081) | 2026-07-19 | `configure` tool (profile + live-connection modes), `compute_checksum` tool (xor + lrc), `transact` tool (write-then-read); `max_buffered_bytes` and `poll_interval_ms` moved from per-call to connection defaults (via `ProfileDefaults` + `configure`); `save_profile` `rx_buffer_size` snapshot bug fixed; tool count 22 → 25 |
 | [0.8.0](#080) | 2026-07-08 | RX ring buffer redesign: always-on pump + `RxRing` capture from open to close; `read` cat semantics (buffered bytes immediately + `peek` + offset fields); `seek` tool (non-destructive cursor move); `subscribe` cursor follower with `from` history replay + `bytes_lost` gap reporting; `flush(input)` ring clear; `get_status` ring fields; `open` `rx_buffer_size` (256 KiB default); `ConsumerRegistry`/`RxEvent` fanout deleted; unified read/subscribe semantics; budget ring at open |
@@ -95,6 +96,47 @@
 - Tool count drops from 23 → 22 (`seek` removed, folded into `read`).
 
 ## [Unreleased]
+
+## [0.9.1]
+
+### Security / maintenance
+- locked `quinn-proto` 0.11.15 fixes RUSTSEC-2026-0185 / CVE-2026-25800;
+- monthly grouped Cargo/GitHub Actions Dependabot;
+- Rust 1.88.0 workflow/Nix alignment with explicit compiler reports.
+
+### Validation / CI
+- all three config examples are mandatory/hermetic; exact vendored models.dev
+  resource registered under original URI; missing fixtures fail; Nix includes
+  all schemas; scheduled upstream test remains networked;
+- changelog/server/Cargo release consistency regression guard and named Ubuntu
+  doc-drift gate;
+- weekly/manual non-PR hardening: all three fuzz targets (pinned nightly +
+  cargo-fuzz, five-minute bounded matrix) and focused checksums/parser mutation
+  testing (pinned cargo-mutants, bounded), failure artifacts;
+- Windows serial E2E deferred rather than installing privileged drivers.
+
+### RX behavior fixes
+- `read`, `subscribe`, `transact`, and `capture_boot` preserve unrepresentable
+  RX bytes through exact lowercase spaced hex fallback, report effective
+  encoding, never use lossy UTF-8, and do not count successful fallback as a
+  dropped notification/frame; applies to raw/frame/partial/match-context paths;
+- one matcher-owned bounded policy for raw read/subscribe with global indexes,
+  literal overlap/context bounds, regex/glob allowance, safe truncated glob
+  lines, and frame-local reset/context behavior.
+
+### Internal / documentation
+- split framing into config/codecs/decoder/parsers modules;
+- split serial into config/connection/manager/port-info/test-support modules;
+- split RX tool validation/read-loop/result-builder modules;
+- flat Rust paths, 27-tool count, MCP tool input/result data-field sets, and
+  lifecycle behavior stayed stable;
+- matched-context subscribe stop notification additively reports effective
+  `encoding` alongside `data` (omitted when no data);
+- MCP tool output-schema size changes are documentation descriptions only;
+- evaluator current catalog 27 tools / 288177 bytes; +1892 versus pre-refinement
+  from approved output-schema descriptions only;
+- roadmap/docs reconciled; UInt/schemars, long-loop decomposition, continuous
+  capture remain deferred.
 
 ## [0.9.0]
 

@@ -12,18 +12,19 @@ use tracing::{debug, error, info, warn};
 use crate::buffer_budget::BufferBudget;
 use crate::codec;
 use crate::limits::DEFAULT_RX_BUFFER_SIZE;
-use crate::match_config::{shape_match_context, Matcher};
+use crate::match_config::Matcher;
 use crate::rx_metadata::{RxStopMetadata, RxStopReason};
 use crate::rx_session::RxSessionManager;
 use crate::serial::ConnectionManager;
 use crate::stop_controller::{RxStopController, RxStopDecision};
 use crate::tools::helpers::{
-    clamp_poll_interval_or_err, lookup_connection, map_budget_err, validate_rx_request,
-    ResolvedRxArgs, RxLimits, MAX_STREAM_CHUNK_BYTES, MIN_POLL_INTERVAL_MS, MIN_STREAM_CHUNK_BYTES,
+    clamp_poll_interval_or_err, lookup_connection, map_budget_err, MAX_STREAM_CHUNK_BYTES,
+    MIN_POLL_INTERVAL_MS, MIN_STREAM_CHUNK_BYTES,
 };
 use crate::tools::rx_consume::{
     consume_frames, disconnect_state, frame_outcome_to_stop, DisconnectState, RxFrameSink, SinkFlow,
 };
+use crate::tools::rx_validate::{validate_rx_request, ResolvedRxArgs, RxLimits};
 use crate::tools::types::{
     ReadFrom, SubscribeArgs, SubscribeChunkNotification, SubscribeEncodingErrorNotification,
     SubscribeFrameNotification, SubscribePartialFrameNotification, SubscribeResult,
@@ -279,8 +280,19 @@ impl RxFrameSink for SubscribeFrameSink<'_> {
         matched: bool,
         match_index: Option<usize>,
     ) -> SinkFlow {
-        let encoded = match codec::encode(self.encoding, &frame.data) {
-            Ok(s) => s,
+        let encoded = match codec::encode_or_hex(self.encoding, &frame.data) {
+            Ok(payload) => {
+                if let Some(reason) = &payload.fallback_reason {
+                    // Lossless fallback: warn, but never count as a drop —
+                    // the bytes are still represented exactly.
+                    warn!(
+                        "RX frame on {} not encodable as {} ({reason}); \
+                         using hex",
+                        self.conn_id, self.encoding
+                    );
+                }
+                payload
+            }
             Err(e) => {
                 warn!("RX frame encoding error on {}: {e}", self.conn_id);
                 self.conn.record_notification_drop();
@@ -295,8 +307,8 @@ impl RxFrameSink for SubscribeFrameSink<'_> {
             connection_id: self.conn_id.to_string(),
             frame_index: frame.index,
             frame_type: frame.frame_type.to_string(),
-            encoding: self.encoding.to_string(),
-            data: encoded,
+            encoding: encoded.encoding.to_string(),
+            data: encoded.data,
             parsed: frame.parsed,
             matched: if matched { Some(true) } else { None },
         };
@@ -373,7 +385,7 @@ async fn stream_rx_from_ring(
     conn: Arc<crate::serial::SerialConnection>,
     session: Arc<crate::rx_session::RxSession>,
     encoding: crate::codec::Encoding,
-    _max_buffered_bytes: usize,
+    max_buffered_bytes: usize,
     poll_interval_ms: u64,
     timeout_ms: Option<u64>,
     no_new_rx_timeout_ms: Option<u64>,
@@ -409,11 +421,6 @@ async fn stream_rx_from_ring(
 
     // Track total bytes sent via per-chunk data notifications.
     let mut total_returned: usize = 0;
-
-    // Accumulated buffer for context shaping on match.
-    let context_amount = matcher.as_ref().and_then(|m| m.context_amount());
-    let needle_len = matcher.as_ref().and_then(|m| m.needle_len());
-    let mut accumulated: Vec<u8> = Vec::new();
 
     // Frame decoder state.
     let max_frames = framing.as_ref().and_then(|f| f.max_frames);
@@ -456,7 +463,7 @@ async fn stream_rx_from_ring(
         }
 
         // Read next data from the ring at the private cursor.
-        let slice = ring.read_from(private_cursor, _max_buffered_bytes);
+        let slice = ring.read_from(private_cursor, max_buffered_bytes);
 
         // Gap reporting: if bytes_lost > 0, include it and continue.
         if slice.bytes_lost > 0 {
@@ -491,13 +498,6 @@ async fn stream_rx_from_ring(
             from_offset = Some(slice.from_offset);
         }
         next_offset = slice.next_offset;
-
-        // Accumulate for context shaping if a matcher with context is active.
-        if context_amount.is_some() {
-            let room = _max_buffered_bytes.saturating_sub(accumulated.len());
-            let take = chunk.len().min(room);
-            accumulated.extend_from_slice(&chunk[..take]);
-        }
 
         // Feed to frame decoder.
         let mut suppress_chunk_notification = false;
@@ -538,25 +538,33 @@ async fn stream_rx_from_ring(
 
         // When framing is NOT active, match on raw chunk bytes.
         if !suppress_chunk_notification {
-            let match_result = matcher.as_mut().map(|m| m.push(&chunk));
-            if let Some(m) = matcher.as_mut() {
-                let keep = m
-                    .needle_len()
-                    .map(|n| n.max(1).saturating_add(1))
-                    .unwrap_or(256);
-                let cap = _max_buffered_bytes.max(keep);
-                if m.len() > cap {
-                    m.truncate_front(cap);
-                }
-            }
+            // Bounded push: matcher-owned window policy caps retained memory
+            // at max_buffered_bytes plus the mode overlap allowance, and
+            // keeps match indexes global across front truncation.
+            let match_result = matcher
+                .as_mut()
+                .map(|m| m.push_bounded(&chunk, max_buffered_bytes));
             if let RxStopDecision::Stop(outcome) = ctrl.push_data(n, total_returned, match_result) {
                 stop_outcome = Some(outcome);
             }
 
             // Emit data notification (including gap info).
-            let encoded = match codec::encode(encoding, &chunk) {
-                Ok(s) => s,
+            let encoded = match codec::encode_or_hex(encoding, &chunk) {
+                Ok(payload) => {
+                    if let Some(reason) = &payload.fallback_reason {
+                        // Lossless fallback: the chunk still emits as exact
+                        // spaced hex and the private cursor advances. Never
+                        // counted as a dropped notification.
+                        warn!(
+                            "RX chunk on {conn_id}: {encoding} cannot encode {n} bytes \
+                             ({reason}); using hex"
+                        );
+                    }
+                    payload
+                }
                 Err(e) => {
+                    // True encode+hex failure: preserve the legacy error
+                    // notification + drop accounting.
                     warn!(
                         "RX encoding error on {conn_id}: {encoding} cannot encode {n} bytes — dropped"
                     );
@@ -601,8 +609,8 @@ async fn stream_rx_from_ring(
             let notification = SubscribeChunkNotification {
                 connection_id: conn_id.to_string(),
                 bytes_read: n,
-                encoding: encoding.to_string(),
-                data: encoded,
+                encoding: encoded.encoding.to_string(),
+                data: encoded.data,
                 bytes_lost: if slice.bytes_lost > 0 {
                     Some(slice.bytes_lost)
                 } else {
@@ -645,14 +653,32 @@ async fn stream_rx_from_ring(
     if let Some(ref mut dec) = decoder {
         if let Some(partial) = dec.flush_partial() {
             frames_emitted += 1;
-            if let Ok(encoded) = codec::encode(encoding, &partial.data) {
+            let encoded = match codec::encode_or_hex(encoding, &partial.data) {
+                Ok(payload) => {
+                    if let Some(reason) = &payload.fallback_reason {
+                        warn!(
+                            "RX partial frame on {conn_id} not encodable as {encoding} \
+                             ({reason}); using hex"
+                        );
+                    }
+                    Some(payload)
+                }
+                Err(e) => {
+                    warn!("RX partial frame encoding error on {conn_id}: {e}");
+                    conn.record_notification_drop();
+                    conn.log()
+                        .notification_dropped(&format!("partial frame encoding error: {e}"));
+                    None
+                }
+            };
+            if let Some(encoded) = encoded {
                 let notification = SubscribePartialFrameNotification {
                     connection_id: conn_id.to_string(),
                     partial: true,
                     frame_index: partial.index,
                     frame_type: partial.frame_type.to_string(),
-                    encoding: encoding.to_string(),
-                    data: encoded,
+                    encoding: encoded.encoding.to_string(),
+                    data: encoded.data,
                     parsed: partial.parsed,
                 };
                 let payload = serde_json::to_value(&notification).unwrap_or_else(|e| {
@@ -671,9 +697,13 @@ async fn stream_rx_from_ring(
                     conn.record_notification_drop();
                     conn.log()
                         .notification_dropped(&format!("partial frame notify: {e}"));
+                } else {
+                    // Count only bytes actually emitted to the client; an
+                    // encode failure or a failed send leaves total_returned
+                    // unchanged (same contract as the raw chunk path).
+                    total_returned += partial.data.len();
                 }
             }
-            total_returned += partial.data.len();
         }
     }
 
@@ -692,25 +722,46 @@ async fn stream_rx_from_ring(
         bytes_returned: total_returned,
     };
 
-    // Apply context shaping if configured (must be done before building the
-    // struct since the shaped values differ from the raw outcome).
-    let (shaped_match_index, shaped_data) = if let (Some(midx), Some(ca), Some(nlen)) =
-        (outcome.match_index, context_amount, needle_len)
-    {
-        let shaped = shape_match_context(&accumulated, midx, nlen, Some(ca));
-        (Some(shaped.match_index), Some(shaped.data))
+    // Apply matcher-owned context shaping if configured (must be done before
+    // building the struct since the shaped values differ from the raw
+    // outcome). The matcher shaped the payload at match time — over its
+    // retained window on the raw path, over the matching frame's bytes on
+    // the framed path; regex/glob store no shaped context.
+    let (shaped_match_index, shaped_data) = if outcome.matched {
+        match outcome.match_index.and_then(|midx| {
+            matcher
+                .as_ref()
+                .and_then(|m| m.shape_literal_match_context(midx))
+        }) {
+            Some(shaped) => (Some(shaped.match_index), Some(shaped.data)),
+            None => (outcome.match_index, None),
+        }
     } else {
         (outcome.match_index, None)
     };
-    let match_data_encoded = match shaped_data.as_ref() {
-        Some(data) => match codec::encode(encoding, data) {
-            Ok(encoded) => Some(encoded),
+    // Shaped match context: `data` + its effective `encoding` are set
+    // together so hex fallback remains decodable. A successful fallback is
+    // warned but not counted; only a true encode+hex failure drops.
+    let (match_data_encoded, match_data_encoding) = match shaped_data.as_ref() {
+        Some(data) => match codec::encode_or_hex(encoding, data) {
+            Ok(payload) => {
+                if let Some(reason) = &payload.fallback_reason {
+                    warn!(
+                        "RX stream match context on {conn_id} not encodable as {encoding} \
+                         ({reason}); using hex"
+                    );
+                }
+                (Some(payload.data), Some(payload.encoding.to_string()))
+            }
             Err(e) => {
                 warn!("RX stream match context encoding error on {conn_id}: {e}");
-                None
+                conn.record_notification_drop();
+                conn.log()
+                    .notification_dropped(&format!("match context encoding error: {e}"));
+                (None, None)
             }
         },
-        None => None,
+        None => (None, None),
     };
 
     let stop_notification = SubscribeStopNotification {
@@ -739,6 +790,11 @@ async fn stream_rx_from_ring(
         },
         data: if outcome.matched {
             match_data_encoded
+        } else {
+            None
+        },
+        encoding: if outcome.matched {
+            match_data_encoding
         } else {
             None
         },
@@ -947,6 +1003,7 @@ mod tests {
             match_index: None,
             match_frame_index: None,
             data: None,
+            encoding: None,
             frames_emitted: 0,
             frames_dropped: 0,
             start_offset: 0,
@@ -964,6 +1021,8 @@ mod tests {
         assert!(v.get("match_index").is_none());
         assert!(v.get("match_frame_index").is_none());
         assert!(v.get("data").is_none());
+        // encoding is only serialized alongside data.
+        assert!(v.get("encoding").is_none());
 
         // With match.
         let n_m = SubscribeStopNotification {
@@ -983,6 +1042,7 @@ mod tests {
             match_index: Some(5),
             match_frame_index: Some(2),
             data: Some("TARGET".into()),
+            encoding: Some("utf8".into()),
             frames_emitted: 3,
             frames_dropped: 0,
             start_offset: 0,
@@ -993,5 +1053,6 @@ mod tests {
         assert_eq!(v["match_index"], 5);
         assert_eq!(v["match_frame_index"], 2);
         assert_eq!(v["data"], "TARGET");
+        assert_eq!(v["encoding"], "utf8");
     }
 }

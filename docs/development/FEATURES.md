@@ -228,30 +228,13 @@
 
 Non-feature work, roughly in suggested order. From the 2026-07-05 repo review.
 
-### Split `src/framing.rs` into a module tree
-- a single file holds config types, two codecs, six parsers, the decoder
-  state machine, and a test region of its own — past its scaling limit
-- target shape: `framing/` with `config.rs`, `decoder.rs`, `codecs.rs`,
-  `parsers/`, tests alongside their subjects
-- major rework — sequence AFTER the review-hardening work that rewrites
-  chunks of the same file; a split first would create painful conflicts
-
-### Split `src/serial.rs` and `src/tools/helpers.rs`
-- `src/serial.rs` holds `SerialConnection`, `ConnectionManager`,
-  `ConnectionConfig`, six enums, `PortInfo`, the `SerialIo` trait, and a
-  `test_support` module — god-file; split into `serial/config.rs`,
-  `serial/connection.rs`, `serial/manager.rs`, `serial/port_info.rs`,
-  `serial/test_support.rs`
-- `src/tools/helpers.rs` mixes validation, ring driving, result building,
-  sinks, encoding fallback, and open-arg parsing — split into
-  `tools/rx_validate.rs`, `tools/read_loop.rs`, `tools/result_builders.rs`;
-  `frame_outcome_to_stop` and the shared-cursor wrapper around
-  `read_from_private_cursor` are the first step in that direction
-- `read_from_private_cursor` (the extracted read core in `helpers.rs`) and
-  `stream_rx_from_ring` (`stream_ops.rs`) are the longest functions in the
-  codebase; further decompose into `read_initial_slice` / `read_wait_loop` /
-  `handle_frame_outcome` once the god-file split unblocks finer module
-  boundaries
+### Decompose the longest read/stream functions
+- `read_from_private_cursor` (`src/tools/read_loop.rs`) and
+  `stream_rx_from_ring` (`src/tools/stream_ops.rs`) are the longest functions
+  in the codebase; further decompose into `read_initial_slice` /
+  `read_wait_loop` / `handle_frame_outcome` now that the tool-helper split
+  (`tools/rx_validate.rs`, `tools/read_loop.rs`, `tools/result_builders.rs`)
+  unblocked finer module boundaries
 
 ### `UInt` newtype to kill schemars `uint_schema` boilerplate
 - per-field `#[schemars(schema_with = "crate::schema_helpers::uint_schema")]`
@@ -266,76 +249,3 @@ Non-feature work, roughly in suggested order. From the 2026-07-05 repo review.
   the per-struct `check_schema!` maintenance burden
 - coordinate with any schemars 2.x migration if one is on the roadmap;
   the upstream fix may make the newtype redundant
-
-### Hex fallback + matcher-truncation parity between read and subscribe
-- `read` falls back to hex encoding when framing-error bytes can't be
-  represented in the requested encoding; `subscribe` drops the
-  notification and emits a warning — binary SLIP/COBS data under utf8
-  subscribe is just lost (documented asymmetry in AGENTS.md, not
-  abstracted)
-- `subscribe` bounds matcher memory with `truncate_front` when the
-  buffered window exceeds `max_buffered_bytes`; `read` does not —
-  asymmetric and undocumented
-- decide: unify on hex fallback (subscribe learns it) or drop it (read
-  stops falling back and surfaces the error like subscribe); unify
-  matcher truncation (read learns it) or document why read is unbounded
-- small behavior change, needs a design call before implementing
-
-### Proper dependabot / renovate setup
-- dependency updates (cargo crates + pinned GitHub Actions) are currently
-  manual; some dependabot experimentation happened but nothing landed
-- monthly cadence, cargo + github-actions ecosystems; the 4-OS CI matrix is
-  strong enough to catch bad bumps automatically
-
-### Scheduled mutation testing + fuzz smoke in CI
-- `cargo-mutants` and the `fuzz/` targets exist but run only on demand — the
-  NMEA parser panic found in review is exactly the class a scheduled fuzz
-  run would have caught first
-- weekly `cargo-mutants` job (scope to `framing.rs` + `checksums.rs` to keep
-  runtime sane) + a short scheduled fuzz smoke
-  (`cargo fuzz run codec_roundtrip -- -max_total_time=300`)
-- follows the `schema-drift.yml` precedent for scheduled jobs
-
-### Release-flow guard: version bump ⇒ CHANGELOG roll
-- releases key off the `Cargo.toml` version on main, but nothing enforces
-  that a bump comes with a rolled `[Unreleased]` section — a stale changelog
-  can ship silently
-- small CI check: if `Cargo.toml` version changed vs the last release tag,
-  `CHANGELOG.md` must contain a section for that version
-
-### Explicit `doc_drift` gate in CI
-- `tests/doc_drift.rs` (tool-count and preset-list guards across README,
-  Cargo.toml, server.json) already runs implicitly via `cargo test --locked`
-  in CI, but nothing names it — a failure shows up as a generic test failure,
-  and a future test-filtering change could silently drop it
-- add an explicit named step (`cargo test --locked --test doc_drift`)
-  following the `config_schema_validation` precedent in `ci.yml`, so doc
-  drift is its own visible, required check
-
-### Vendor the `models.dev` model schema for hermetic schema tests
-- `schemas/opencode.schema.json` refs
-  `https://models.dev/model-schema.json#/$defs/Model` externally; the
-  `jsonschema` crate resolves external refs eagerly in `validator_for`, so
-  the network-less Nix build sandbox cannot compile it
-- until vendored, `flake.nix`'s source filter excludes
-  `schemas/opencode.schema.json` from the Nix source — that fixture still
-  silently skips in `nix flake check` (network-enabled CI covers it), while
-  the self-contained Claude Code / Codex fixtures now validate for real
-- follow-up: vendor `model-schema.json` under `schemas/`, rewrite the four
-  `$ref`s to a local resource, and register it in the validator so the test
-  is hermetic on every runner (see the filter comment in `flake.nix`)
-
-### Toolchain single source of truth
-- `rust-toolchain.toml` pins 1.88.0 while workflows install
-  `dtolnay/rust-toolchain@stable`; rustup resolves the pin correctly but the
-  intent is ambiguous and the two can silently diverge (schema-drift job
-  runs whatever stable is that day)
-- pick one source (recommend: the toolchain file) and make the workflows
-  honor it explicitly
-
-### Windows e2e test path — investigate
-- CI builds and unit-tests Windows, but the native_sim e2e suite is
-  Unix-only (PTY-based; 57 tests ignored on the Windows runner)
-- investigate whether a Windows equivalent exists (e.g. com0com-style
-  virtual port pairs, or a named-pipe loopback backend); there may be a
-  sound reason this was skipped — document it if so, close the gap if not

@@ -15,4 +15,12 @@ curl -fsSL \
   https://opencode.ai/config.json \
   -o schemas/opencode.schema.json
 
+curl -fsSL \
+  https://models.dev/model-schema.json \
+  -o schemas/models-dev-model.schema.json
+
+echo "models-dev-model.schema.json SHA-256:"
+sha256sum schemas/models-dev-model.schema.json
+echo "Update schemas/README.md with the new checksum (manual step)."
+
 cargo test --locked --test config_schema_validation
