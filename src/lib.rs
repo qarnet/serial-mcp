@@ -3,6 +3,7 @@ pub(crate) mod checksums;
 pub mod codec;
 pub mod error;
 pub mod framing;
+pub(crate) mod learning;
 pub mod limits;
 pub mod log_buffer;
 pub mod match_config;

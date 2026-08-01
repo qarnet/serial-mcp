@@ -281,7 +281,7 @@ impl SerialHandler {
         let connection_id = args.connection_id.clone();
         // Cancel any running reconnect task so it doesn't try to reopen.
         self.connections.cancel_reconnect(&connection_id).await;
-        let result = port_ops::close(&self.connections, args).await?;
+        let result = port_ops::close(&self.connections, &self.profile_store, args).await?;
         // Shut down RX session (pump + consumers) for this connection.
         // This closes the pump channel, causing the subscribe task's
         // event_rx.recv() to return None, which exits the loop and
@@ -410,7 +410,7 @@ impl SerialHandler {
         &self,
         Parameters(args): Parameters<SetFlowControlArgs>,
     ) -> Result<Json<SetFlowControlResult>, String> {
-        control_ops::set_flow_control(&self.connections, args).await
+        control_ops::set_flow_control(&self.connections, &self.profile_store, args).await
     }
 
     #[tool(
@@ -498,7 +498,7 @@ impl SerialHandler {
         &self,
         Parameters(args): Parameters<ReconfigureArgs>,
     ) -> Result<Json<ReconfigureResult>, String> {
-        port_ops::reconfigure(&self.connections, args).await
+        port_ops::reconfigure(&self.connections, &self.profile_store, args).await
     }
 
     #[tool(
@@ -560,7 +560,19 @@ impl SerialHandler {
         &self,
         Parameters(args): Parameters<DeleteProfileArgs>,
     ) -> Result<Json<DeleteProfileResult>, String> {
-        port_ops::delete_profile(&self.profile_store, args).await
+        port_ops::delete_profile(&self.connections, &self.profile_store, args).await
+    }
+
+    #[tool(
+        description = "Roll a profile back to a prior retained revision. Restores that revision's selector and defaults as a NEW monotonic revision (never backward); active connections bound to the profile stay on their live state and become stale (learning/close cannot overwrite the rollback; reopen applies the restored defaults). Provide the profile's current revision as expected_revision to guard against concurrent modification. Wrong expected_revision or an evicted target revision is a tool error that leaves the file unchanged. Find prior revisions in list_profiles `revisions`.",
+        title = "Roll Back Profile",
+        annotations(destructive_hint = true, open_world_hint = false)
+    )]
+    async fn rollback_profile(
+        &self,
+        Parameters(args): Parameters<RollbackProfileArgs>,
+    ) -> Result<Json<RollbackProfileResult>, String> {
+        port_ops::rollback_profile(&self.connections, &self.profile_store, args).await
     }
 
     #[tool(

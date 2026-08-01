@@ -29,7 +29,7 @@ mod tests {
     /// per-type coverage lives in `serial::schema`.
     ///
     /// Keep this list in sync with the `#[tool]` methods in `src/server.rs`.
-    /// The list below is exhaustive (25 tools); a missing tool would skip its
+    /// The list below is exhaustive (26 tools); a missing tool would skip its
     /// `outputSchema`/`title` check and any uint-format scan.
     fn all_tool_attrs() -> Vec<(&'static str, rmcp::model::Tool)> {
         vec![
@@ -59,6 +59,10 @@ mod tests {
             ("save_profile", SerialHandler::save_profile_tool_attr()),
             ("delete_profile", SerialHandler::delete_profile_tool_attr()),
             ("configure", SerialHandler::configure_tool_attr()),
+            (
+                "rollback_profile",
+                SerialHandler::rollback_profile_tool_attr(),
+            ),
             ("get_log", SerialHandler::get_log_tool_attr()),
             ("clear_log", SerialHandler::clear_log_tool_attr()),
             ("export_log", SerialHandler::export_log_tool_attr()),

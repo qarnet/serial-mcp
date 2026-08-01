@@ -19,7 +19,7 @@ client flash, reset, and talk to a board on their own.
 
 ## Capabilities
 
-**25 tools:** list_ports, list_connections, open, close, read, write, transact, flush, set_dtr_rts, set_flow_control, send_break, subscribe, unsubscribe, get_status, reconfigure, list_profiles, open_profile, save_profile, delete_profile, configure, get_log, clear_log, export_log, reconnect, compute_checksum  
+**26 tools:** list_ports, list_connections, open, close, read, write, transact, flush, set_dtr_rts, set_flow_control, send_break, subscribe, unsubscribe, get_status, reconfigure, list_profiles, open_profile, save_profile, delete_profile, configure, rollback_profile, get_log, clear_log, export_log, reconnect, compute_checksum  
 **5 resources:** `serial://ports`, `serial://connections`, `serial://connections/{id}`, `serial://connections/{id}/raw`, `serial://connections/{id}/log` (3 resource templates plus 2 static)  
 **2 prompt templates:** `diagnose_port`, `interactive_terminal`  
 
@@ -132,8 +132,35 @@ generated, revision, dirty, candidates, last persistence error):
 - **Explicit open fields override the selected profile's defaults**
   (baud, data bits, stop bits, parity, flow control, log, reconnect policy,
   framing/parser/protocol, ring size, read/subscribe defaults). Omitted
-  fields come from the profile, then built-in 115200/8-N-1 defaults. An
-  override marks the binding `dirty` (persisted by a later phase).
+  fields come from the profile, then built-in 115200/8-N-1 defaults.
+- **Automatic write-through learning:** a dirty open override is persisted
+  right after the successful hardware open, and durable live changes
+  (`reconfigure`, `set_flow_control`, connection-mode `configure`) persist
+  the full effective defaults through the bound profile after the live
+  change succeeds. The result carries `profile_persistence` (`persisted` /
+  `not_needed` / `transient` / `failed`) plus the updated `profile`
+  binding. Reopen/restart applies the learned settings. Clean close is a
+  safety net: a dirty or differing binding is retried on close
+  (`close_snapshot`).
+- **Partial failure is honest:** if the live change succeeds but the
+  profile write fails, the tool result stays successful, `state` is
+  `failed` with the error, the binding turns `dirty`, and the next durable
+  mutation or clean close retries. Transient line control (DTR/RTS, BREAK),
+  per-call read/write/transact framing, payloads, cursors, and subscription
+  lifecycle never touch profile defaults or revisions.
+- **Revision-CAS conflicts:** persistence is guarded by the bound
+  revision. If another client bumps or rolls back the profile, the next
+  learning attempt reports an explicit conflict (`failed`, binding
+  `stale`) instead of silently overwriting the newer profile; a stale
+  binding keeps reporting the conflict until reopened.
+- **`rollback_profile`** restores any retained prior revision (see
+  `list_profiles` `revisions`, newest five snapshots) as a new monotonic
+  revision. Active connections bound to the profile stay on their live
+  state and become stale; reopen applies the restored defaults. A wrong
+  `expected_revision` or an evicted revision is a tool error that leaves
+  the file unchanged.
+- **`delete_profile` is refused while a same-process open connection
+  binds the profile** (the error lists the connection IDs).
 - **Weak identity** (no USB serial number, non-USB, or path-only) opens with
   a non-persistent transient session and never writes a durable profile.
   Duplicate live fingerprints also degrade to transient — settings are never

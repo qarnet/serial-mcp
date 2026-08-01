@@ -317,14 +317,14 @@ proptest! {
     fn open_result_schema_valid(
         id in opaque_id(), port in valid_port_name(), baud in any_u32(),
     ) {
-        let r = OpenResult { connection_id: id, name: None, port, baud_rate: baud, profile: None };
+        let r = OpenResult { connection_id: id, name: None, port, baud_rate: baud, profile: None, profile_persistence: None };
         let v = serde_json::to_value(&r).unwrap();
         assert_schema_valid!(OpenResult, v);
     }
 
     #[test]
     fn close_result_schema_valid(id in opaque_id()) {
-        let r = CloseResult { connection_id: id, name: None };
+        let r = CloseResult { connection_id: id, name: None, profile: None, profile_persistence: None };
         let v = serde_json::to_value(&r).unwrap();
         assert_schema_valid!(CloseResult, v);
     }

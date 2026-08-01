@@ -640,6 +640,9 @@ pub struct ActiveProfileBinding {
     pub generated: bool,
     pub revision: Option<u64>,
     pub dirty: bool,
+    /// `true` when the durable profile revision changed externally (CAS
+    /// conflict or rollback) and this connection must not overwrite it.
+    pub stale: bool,
     pub candidates: Vec<String>,
     pub last_persistence_error: Option<String>,
 }
@@ -655,6 +658,7 @@ impl ActiveProfileBinding {
             generated: self.generated,
             revision: self.revision,
             dirty: self.dirty,
+            stale: self.stale,
             candidates: self.candidates.clone(),
             last_persistence_error: self.last_persistence_error.clone(),
         }
@@ -717,6 +721,12 @@ pub struct SerialConnection {
     /// Active profile-session binding (Phase 3A). `None` for connections
     /// inserted directly by low-level tests.
     active_profile: StdMutex<Option<ActiveProfileBinding>>,
+    /// Serializes durable write-through-learning sequences on this
+    /// connection (live mutation → effective snapshot → CAS persistence →
+    /// binding update). Held across `reconfigure`/`set_flow_control`/
+    /// connection-mode `configure`/clean close so concurrent requests
+    /// cannot snapshot each other's half-applied state.
+    learning_lock: tokio::sync::Mutex<()>,
     /// Effective RX ring buffer size from the open config, so profile
     /// snapshots never depend on whichever handler-local `RxSessionManager`
     /// receives a later request.
@@ -803,6 +813,7 @@ impl SerialConnection {
             max_buffered_bytes_default: AtomicUsize::new(config.max_buffered_bytes),
             poll_interval_ms_default: AtomicU64::new(config.poll_interval_ms),
             active_profile: StdMutex::new(None),
+            learning_lock: tokio::sync::Mutex::new(()),
             rx_buffer_size: config.rx_buffer_size,
         }
     }
@@ -898,6 +909,52 @@ impl SerialConnection {
     /// Attach (or clear) the active profile-session binding.
     pub(crate) fn set_active_profile_binding(&self, binding: Option<ActiveProfileBinding>) {
         *self.active_profile.lock().expect("poisoned") = binding;
+    }
+
+    /// Mutate the active profile-session binding in place (Phase 3B:
+    /// dirty/stale/error/revision updates from write-through learning).
+    pub(crate) fn update_active_profile_binding(
+        &self,
+        update: impl FnOnce(&mut ActiveProfileBinding),
+    ) {
+        let mut guard = self.active_profile.lock().expect("poisoned");
+        if let Some(binding) = guard.as_mut() {
+            update(binding);
+        }
+    }
+
+    /// The per-connection learning lock. Durable operations hold this across
+    /// the live mutation, the effective snapshot, the CAS persistence
+    /// attempt, and the binding update.
+    pub(crate) fn learning_lock(&self) -> &tokio::sync::Mutex<()> {
+        &self.learning_lock
+    }
+
+    /// Snapshot the connection's full effective `ProfileDefaults`: current
+    /// serial parameters, framing/parser/protocol defaults, the stored RX
+    /// buffer size, read/subscribe defaults, reconnect policy, log
+    /// configuration, and the connection name. Used by write-through
+    /// learning, close retry, and explicit `save_profile` — never consults
+    /// a handler-local `RxSessionManager`.
+    pub(crate) fn effective_defaults(&self) -> crate::profiles::ProfileDefaults {
+        crate::profiles::ProfileDefaults {
+            baud_rate: self.baud_rate(),
+            data_bits: data_bits_to_str(self.data_bits()),
+            stop_bits: stop_bits_to_str(self.stop_bits()),
+            parity: parity_to_str(self.parity()),
+            flow_control: flow_control_to_str(self.flow_control()),
+            name: self.name.clone(),
+            tx_framing: self.tx_framing_default(),
+            rx_framing: self.rx_framing_default(),
+            rx_parser: self.rx_parser_default(),
+            protocol: self.protocol_default(),
+            rx_buffer_size: self.rx_buffer_size(),
+            max_buffered_bytes: self.max_buffered_bytes_default(),
+            poll_interval_ms: self.poll_interval_ms_default(),
+            reconnect_policy: self.reconnect_policy.lock().expect("poisoned").clone(),
+            log_capacity: self.log.capacity(),
+            log_enabled: self.log.is_enabled(),
+        }
     }
 
     /// The effective RX ring buffer size configured at open time.
@@ -2291,15 +2348,17 @@ mod schema {
         Frame, ParsedFrame, RxFramingConfig, RxFramingMode, TxFramingConfig, TxFramingMode,
     };
     use crate::profiles::{
-        Profile, ProfileMetadata, ProfileRevision, ProfileSelector, ProfileSessionResult,
+        Profile, ProfileMetadata, ProfilePersistenceResult, ProfileRevision, ProfileSelector,
+        ProfileSessionResult,
     };
     use crate::serial::{ConnectionStatus, PortInfo};
     use crate::tools::types::{
         ClearLogResult, CloseResult, ComputeChecksumResult, ConfigureResult, DeleteProfileResult,
         ExportLogResult, FlushResult, GetLogResult, GetStatusResult, ListConnectionsResult,
         ListPortsResult, ListProfilesResult, OpenResult, ReadResult, ReconfigureResult,
-        ReconnectResult, SaveProfileResult, SendBreakResult, SetDtrRtsResult, SetFlowControlResult,
-        SubscribeChunkNotification, SubscribeEncodingErrorNotification, SubscribeFrameNotification,
+        ReconnectResult, RollbackProfileArgs, RollbackProfileResult, SaveProfileResult,
+        SendBreakResult, SetDtrRtsResult, SetFlowControlResult, SubscribeChunkNotification,
+        SubscribeEncodingErrorNotification, SubscribeFrameNotification,
         SubscribePartialFrameNotification, SubscribeResult, SubscribeStopNotification,
         TransactResult, UnsubscribeResult, WriteResult,
     };
@@ -2439,6 +2498,18 @@ mod schema {
         ComputeChecksumResult
     );
     check_schema!(transact_result_has_no_uint_formats, TransactResult);
+    check_schema!(
+        rollback_profile_args_has_no_uint_formats,
+        RollbackProfileArgs
+    );
+    check_schema!(
+        rollback_profile_result_has_no_uint_formats,
+        RollbackProfileResult
+    );
+    check_schema!(
+        profile_persistence_result_has_no_uint_formats,
+        ProfilePersistenceResult
+    );
 
     // Framing config types (checked for uint format regressions on fields like
     // prefix_size, max_frames, and cobs delimiter).

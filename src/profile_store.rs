@@ -68,6 +68,18 @@ pub struct AutomaticResolution {
     pub candidates: Vec<String>,
 }
 
+/// Outcome of a revision-CAS learned update.
+#[derive(Debug, Clone)]
+pub struct LearnedUpdate {
+    /// The effective profile after the attempt (unchanged when `changed`
+    /// is false).
+    pub profile: Profile,
+    /// `true` when defaults changed and the revision/history were bumped
+    /// and persisted; `false` for a no-op where durable defaults already
+    /// equal the incoming defaults (no file write).
+    pub changed: bool,
+}
+
 /// Process-wide store of named profiles.
 ///
 /// `path == None` marks an ephemeral store: mutations only touch the
@@ -287,6 +299,145 @@ impl ProfileStore {
         .await
     }
 
+    /// Revision-CAS learned update (Phase 3B write-through learning).
+    ///
+    /// Inside the locked reload-under-lock transaction:
+    ///
+    /// 1. Requires the profile to exist.
+    /// 2. Requires its current metadata revision to equal `expected_revision`.
+    /// 3. When `defaults` already equal the current defaults, returns the
+    ///    unchanged profile with `changed = false` and does NOT rewrite the
+    ///    file, bump the revision, or touch history/timestamps.
+    /// 4. Otherwise pushes the current selector/defaults into the bounded
+    ///    history, preserves selector + usage/creation/generated metadata,
+    ///    bumps the revision, stamps `updated_at_ms`, persists atomically,
+    ///    and returns the resulting profile.
+    ///
+    /// A revision mismatch is an explicit conflict error naming the profile,
+    /// expected revision, and actual revision — never a silent last-writer
+    /// overwrite.
+    pub async fn update_learned_defaults(
+        &self,
+        profile_name: String,
+        expected_revision: u64,
+        defaults: ProfileDefaults,
+    ) -> Result<LearnedUpdate, String> {
+        self.run_conditional_mutation(move |mut profiles, now| {
+            let idx = profiles
+                .iter()
+                .position(|p| p.name == profile_name)
+                .ok_or_else(|| format!("Profile '{profile_name}' not found"))?;
+            let current = profiles[idx].clone();
+            if current.metadata.revision != expected_revision {
+                return Err(format!(
+                    "Profile '{profile_name}' revision conflict: expected {expected_revision}, \
+                     found {}",
+                    current.metadata.revision
+                ));
+            }
+            if current.defaults == defaults {
+                // No-op: durable defaults already equal the effective
+                // snapshot. No revision/history/timestamp bump, and no file
+                // rewrite (the mutation returns None).
+                return Ok((
+                    LearnedUpdate {
+                        profile: current,
+                        changed: false,
+                    },
+                    None,
+                ));
+            }
+            let updated = Profile {
+                defaults,
+                metadata: bump_metadata(&current, now),
+                revisions: push_revision(&current, now, current.revisions.clone()),
+                ..current
+            };
+            let effective = updated.clone();
+            profiles[idx] = updated;
+            Ok((
+                LearnedUpdate {
+                    profile: effective,
+                    changed: true,
+                },
+                Some(profiles),
+            ))
+        })
+        .await
+    }
+
+    /// Roll a profile back to a prior retained revision (Phase 3B).
+    ///
+    /// Requires the current revision to equal `expected_revision`, then:
+    ///
+    /// 1. finds the requested prior snapshot (a missing/evicted revision is
+    ///    a tool error — nothing changes),
+    /// 2. pushes the current selector/defaults into the bounded history,
+    /// 3. restores the target snapshot's selector/defaults,
+    /// 4. sets the new revision to `current + 1` (never backward),
+    /// 5. preserves generated/created/last-used/use-count metadata,
+    /// 6. stamps `updated_at_ms`, caps history at five, writes atomically,
+    /// 7. returns the resulting profile.
+    ///
+    /// Rollback never touches live hardware; the caller marks affected
+    /// same-process bindings stale.
+    pub async fn rollback(
+        &self,
+        profile_name: String,
+        expected_revision: u64,
+        target_revision: u64,
+    ) -> Result<Profile, String> {
+        self.run_mutation(move |mut profiles, now| {
+            let idx = profiles
+                .iter()
+                .position(|p| p.name == profile_name)
+                .ok_or_else(|| format!("Profile '{profile_name}' not found"))?;
+            let current = profiles[idx].clone();
+            if current.metadata.revision != expected_revision {
+                return Err(format!(
+                    "Profile '{profile_name}' revision conflict: expected {expected_revision}, \
+                     found {}",
+                    current.metadata.revision
+                ));
+            }
+            let retained: Vec<u64> = current.revisions.iter().map(|r| r.revision).collect();
+            let snapshot = current
+                .revisions
+                .iter()
+                .find(|r| r.revision == target_revision)
+                .cloned()
+                .ok_or_else(|| {
+                    format!(
+                        "Profile '{profile_name}' has no retained snapshot at revision \
+                         {target_revision} (retained: {})",
+                        retained
+                            .iter()
+                            .map(u64::to_string)
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
+                })?;
+            let restored = Profile {
+                name: current.name.clone(),
+                selector: snapshot.selector.clone(),
+                defaults: snapshot.defaults.clone(),
+                metadata: ProfileMetadata {
+                    generated: current.metadata.generated,
+                    revision: current.metadata.revision.saturating_add(1),
+                    created_at_ms: current.metadata.created_at_ms,
+                    updated_at_ms: Some(now),
+                    last_used_at_ms: current.metadata.last_used_at_ms,
+                    use_count: current.metadata.use_count,
+                },
+                revisions: push_revision(&current, now, current.revisions.clone()),
+            };
+            let effective = restored.clone();
+            profiles[idx] = restored;
+            Ok((effective, profiles))
+        })
+        .await
+    }
+
     /// Run one fresh read-only transaction.
     ///
     /// Persistent stores: the compute closure runs inside
@@ -347,6 +498,26 @@ impl ProfileStore {
         F: FnOnce(Vec<Profile>, u64) -> Result<(T, Vec<Profile>), String> + Send + 'static,
         T: Send + 'static,
     {
+        self.run_conditional_mutation(move |profiles, now| {
+            apply(profiles, now).map(|(value, next)| (value, Some(next)))
+        })
+        .await
+    }
+
+    /// Like [`Self::run_mutation`], but the apply closure may decide NOT to
+    /// write: returning `Ok((value, None))` leaves both the file and the
+    /// cache untouched (used by the learned-update no-op path so `NotNeeded`
+    /// truly does not rewrite the file).
+    ///
+    /// On an apply error the cache is republished to the freshly-read disk
+    /// state (already in hand under the advisory lock) so a CAS conflict or
+    /// external writer becomes visible to later cache reads instead of
+    /// hiding behind a stale snapshot.
+    async fn run_conditional_mutation<T, F>(&self, apply: F) -> Result<T, String>
+    where
+        F: FnOnce(Vec<Profile>, u64) -> Result<(T, Option<Vec<Profile>>), String> + Send + 'static,
+        T: Send + 'static,
+    {
         let _guard = self.mutation_lock.lock().await;
         let now = now_ms();
         let path = self.path.clone();
@@ -357,14 +528,23 @@ impl ProfileStore {
                     let lock = acquire_lock(&path)?;
                     let outcome: Result<T, String> = (|| {
                         let current = load_validated(&path)?;
-                        let (value, next) = apply(current, now)?;
-                        write_atomic(&path, &next)?;
-                        // Durable write succeeded: publish the full
-                        // resulting vector to the shared cache before
-                        // releasing the advisory lock.
-                        *cache.blocking_write() = next;
+                        let (value, next) = apply(current.clone(), now)?;
+                        if let Some(next) = next {
+                            write_atomic(&path, &next)?;
+                            // Durable write succeeded: publish the full
+                            // resulting vector to the shared cache before
+                            // releasing the advisory lock.
+                            *cache.blocking_write() = next;
+                        }
                         Ok(value)
-                    })();
+                    })()
+                    .inspect_err(|_e| {
+                        // Refresh the cache from the fresh read so conflicts
+                        // and external writers are observable.
+                        if let Ok(current) = load_validated(&path) {
+                            *cache.blocking_write() = current;
+                        }
+                    });
                     // Dropping the lock file releases the advisory lock.
                     drop(lock);
                     outcome
@@ -376,7 +556,9 @@ impl ProfileStore {
             None => {
                 let current = self.cache.read().await.clone();
                 let (value, next) = apply(current, now)?;
-                *self.cache.write().await = next;
+                if let Some(next) = next {
+                    *self.cache.write().await = next;
+                }
                 Ok(value)
             }
         }
@@ -1353,6 +1535,338 @@ vid = 0x1234
         let (_dir, path) = temp_path();
         let store = ProfileStore::open(path).unwrap();
         let err = store.mark_used("no-such").await.unwrap_err();
+        assert!(err.contains("not found"), "got: {err}");
+    }
+
+    // ── Phase 3B: learned CAS updates, no-op detection, rollback ──────────
+
+    #[tokio::test]
+    async fn update_learned_defaults_bumps_revision_and_preserves_selector_and_generated_metadata()
+    {
+        let (_dir, path) = temp_path();
+        std::fs::write(
+            &path,
+            r#"
+schema_version = 2
+
+[[profile]]
+name = "gen-device"
+[profile.selector]
+vid = 0x1234
+pid = 0x5678
+serial_number = "SN-1"
+transport = "usb"
+[profile.metadata]
+generated = true
+revision = 1
+created_at_ms = 100
+updated_at_ms = 100
+last_used_at_ms = 200
+use_count = 4
+"#,
+        )
+        .unwrap();
+        let store = ProfileStore::open(path.clone()).unwrap();
+
+        let learned = store
+            .update_learned_defaults(
+                "gen-device".into(),
+                1,
+                ProfileDefaults {
+                    baud_rate: 9600,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert!(learned.changed);
+        assert_eq!(learned.profile.defaults.baud_rate, 9600);
+        assert_eq!(learned.profile.metadata.revision, 2, "revision bumped");
+        assert_eq!(
+            learned.profile.selector.vid,
+            Some(0x1234),
+            "selector preserved"
+        );
+        assert!(
+            learned.profile.metadata.generated,
+            "generated flag preserved"
+        );
+        assert_eq!(learned.profile.metadata.last_used_at_ms, Some(200));
+        assert_eq!(learned.profile.metadata.use_count, 4);
+        assert_eq!(learned.profile.metadata.created_at_ms, Some(100));
+        assert_eq!(
+            learned.profile.revisions.len(),
+            1,
+            "prior state snapshotted"
+        );
+        assert_eq!(learned.profile.revisions[0].revision, 1);
+        assert_eq!(
+            learned.profile.revisions[0].defaults.baud_rate, 115200,
+            "prior defaults captured"
+        );
+
+        let reloaded = ProfileStore::open(path).unwrap();
+        let p = reloaded.get("gen-device").await.unwrap();
+        assert_eq!(p.metadata.revision, 2, "durable on disk");
+        assert_eq!(p.defaults.baud_rate, 9600);
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn update_learned_defaults_noop_returns_changed_false_without_rewriting_file() {
+        use std::os::unix::fs::MetadataExt;
+        let (_dir, path) = temp_path();
+        let store = ProfileStore::open(path.clone()).unwrap();
+        store
+            .update_defaults_preserving_selector(
+                "dev".into(),
+                ProfileDefaults {
+                    baud_rate: 9600,
+                    ..Default::default()
+                },
+                true,
+            )
+            .await
+            .unwrap();
+        let inode_before = std::fs::metadata(&path).unwrap().ino();
+        let before = store.get("dev").await.unwrap();
+
+        // Identical defaults → changed=false; revision/history/timestamps
+        // untouched AND the file is not rewritten (rename would change the
+        // inode).
+        let learned = store
+            .update_learned_defaults(
+                "dev".into(),
+                1,
+                ProfileDefaults {
+                    baud_rate: 9600,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert!(!learned.changed);
+        assert_eq!(learned.profile.metadata.revision, 1);
+        assert_eq!(learned.profile.defaults.baud_rate, 9600);
+
+        let after = store.get("dev").await.unwrap();
+        assert_eq!(after.metadata.revision, before.metadata.revision);
+        assert_eq!(after.metadata.updated_at_ms, before.metadata.updated_at_ms);
+        assert!(after.revisions.is_empty(), "no history on no-op");
+        let inode_after = std::fs::metadata(&path).unwrap().ino();
+        assert_eq!(
+            inode_before, inode_after,
+            "no-op must not rewrite the profiles file"
+        );
+    }
+
+    #[tokio::test]
+    async fn update_learned_defaults_conflict_error_names_profile_expected_and_actual() {
+        let (_dir, path) = temp_path();
+        let store = ProfileStore::open(path).unwrap();
+        store
+            .update_defaults_preserving_selector(
+                "dev".into(),
+                ProfileDefaults {
+                    baud_rate: 9600,
+                    ..Default::default()
+                },
+                true,
+            )
+            .await
+            .unwrap();
+
+        // Profile is at revision 1; expect revision 7 → explicit conflict
+        // naming profile + expected + actual, never a silent overwrite.
+        let err = store
+            .update_learned_defaults(
+                "dev".into(),
+                7,
+                ProfileDefaults {
+                    baud_rate: 19200,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            err.contains("revision conflict")
+                && err.contains("'dev'")
+                && err.contains("expected 7")
+                && err.contains("found 1"),
+            "conflict must name profile, expected, and actual revision: {err}"
+        );
+        // The file must remain untouched by the failed CAS.
+        let p = store.get("dev").await.unwrap();
+        assert_eq!(p.metadata.revision, 1);
+        assert_eq!(p.defaults.baud_rate, 9600);
+    }
+
+    #[tokio::test]
+    async fn update_learned_defaults_missing_profile_errors() {
+        let (_dir, path) = temp_path();
+        let store = ProfileStore::open(path).unwrap();
+        let err = store
+            .update_learned_defaults("ghost".into(), 1, ProfileDefaults::default())
+            .await
+            .unwrap_err();
+        assert!(err.contains("not found"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn rollback_restores_snapshot_as_new_monotonic_revision() {
+        let (_dir, path) = temp_path();
+        let store = ProfileStore::open(path).unwrap();
+        store
+            .update_defaults_preserving_selector(
+                "dev".into(),
+                ProfileDefaults {
+                    baud_rate: 9600,
+                    ..Default::default()
+                },
+                true,
+            )
+            .await
+            .unwrap();
+        store
+            .update_defaults_preserving_selector(
+                "dev".into(),
+                ProfileDefaults {
+                    baud_rate: 19200,
+                    ..Default::default()
+                },
+                true,
+            )
+            .await
+            .unwrap();
+        // History: [rev1(9600), rev2(19200)] — wait, update_defaults bumps
+        // metadata and pushes the prior state; verify the layout first.
+        let p = store.get("dev").await.unwrap();
+        assert_eq!(p.metadata.revision, 2);
+        let retained: Vec<u64> = p.revisions.iter().map(|r| r.revision).collect();
+        assert_eq!(retained, vec![1], "one prior snapshot after two writes");
+        assert_eq!(p.revisions[0].defaults.baud_rate, 9600);
+
+        // Roll back to revision 1 (9600) with expected revision 2.
+        let rolled = store.rollback("dev".into(), 2, 1).await.unwrap();
+        assert_eq!(rolled.metadata.revision, 3, "new monotonic revision");
+        assert_eq!(rolled.defaults.baud_rate, 9600, "restored defaults");
+        assert_eq!(
+            rolled.selector,
+            ProfileSelector::default(),
+            "selector (empty) restored from snapshot"
+        );
+        // History after rollback: [rev1(9600), rev2(19200)] (current state
+        // pushed at rollback time).
+        let p = store.get("dev").await.unwrap();
+        assert_eq!(p.metadata.revision, 3);
+        assert_eq!(p.defaults.baud_rate, 9600);
+        let retained: Vec<u64> = p.revisions.iter().map(|r| r.revision).collect();
+        assert_eq!(retained, vec![1, 2], "current state pushed into history");
+        assert_eq!(p.revisions[1].defaults.baud_rate, 19200);
+    }
+
+    #[tokio::test]
+    async fn rollback_preserves_generated_and_usage_metadata() {
+        let (_dir, path) = temp_path();
+        std::fs::write(
+            &path,
+            r#"
+schema_version = 2
+
+[[profile]]
+name = "gen-device"
+[profile.selector]
+vid = 0x1234
+[profile.metadata]
+generated = true
+revision = 1
+created_at_ms = 100
+updated_at_ms = 100
+last_used_at_ms = 500
+use_count = 9
+"#,
+        )
+        .unwrap();
+        let store = ProfileStore::open(path.clone()).unwrap();
+        store
+            .update_learned_defaults(
+                "gen-device".into(),
+                1,
+                ProfileDefaults {
+                    baud_rate: 9600,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        let rolled = store.rollback("gen-device".into(), 2, 1).await.unwrap();
+        assert_eq!(rolled.metadata.revision, 3);
+        assert!(rolled.metadata.generated, "generated preserved");
+        assert_eq!(rolled.metadata.last_used_at_ms, Some(500));
+        assert_eq!(rolled.metadata.use_count, 9);
+        assert_eq!(rolled.metadata.created_at_ms, Some(100));
+
+        let reloaded = ProfileStore::open(path).unwrap();
+        let p = reloaded.get("gen-device").await.unwrap();
+        assert!(p.metadata.generated, "durable on disk");
+        assert_eq!(p.metadata.revision, 3);
+    }
+
+    #[tokio::test]
+    async fn rollback_wrong_expected_revision_and_evicted_revision_error_without_change() {
+        let (_dir, path) = temp_path();
+        let store = ProfileStore::open(path.clone()).unwrap();
+        store
+            .update_defaults_preserving_selector(
+                "dev".into(),
+                ProfileDefaults {
+                    baud_rate: 9600,
+                    ..Default::default()
+                },
+                true,
+            )
+            .await
+            .unwrap();
+        store
+            .update_defaults_preserving_selector(
+                "dev".into(),
+                ProfileDefaults {
+                    baud_rate: 19200,
+                    ..Default::default()
+                },
+                true,
+            )
+            .await
+            .unwrap();
+
+        // Wrong expected revision → conflict, file unchanged.
+        let err = store.rollback("dev".into(), 1, 1).await.unwrap_err();
+        assert!(
+            err.contains("revision conflict")
+                && err.contains("expected 1")
+                && err.contains("found 2"),
+            "got: {err}"
+        );
+        let p = store.get("dev").await.unwrap();
+        assert_eq!(p.metadata.revision, 2, "file unchanged after wrong CAS");
+
+        // Evicted/missing target revision → tool error, file unchanged.
+        let err = store.rollback("dev".into(), 2, 99).await.unwrap_err();
+        assert!(
+            err.contains("no retained snapshot at revision 99"),
+            "got: {err}"
+        );
+        let p = store.get("dev").await.unwrap();
+        assert_eq!(
+            p.metadata.revision, 2,
+            "file unchanged after evicted rollback"
+        );
+        assert_eq!(p.defaults.baud_rate, 19200);
+
+        // Missing profile → error.
+        let err = store.rollback("ghost".into(), 1, 1).await.unwrap_err();
         assert!(err.contains("not found"), "got: {err}");
     }
 

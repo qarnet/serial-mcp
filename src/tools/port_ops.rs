@@ -3,9 +3,10 @@ use std::sync::Arc;
 use rmcp::Json;
 use tracing::{debug, info};
 
+use crate::learning;
 use crate::profiles::{
     canonical_high_selector, high_identity, identity_confidence, IdentityConfidence, Profile,
-    ProfileMode, ProfileSelectionSource,
+    ProfileMode, ProfilePersistenceOperation, ProfileSelectionSource,
 };
 use crate::rx_session::RxSessionManager;
 use crate::security::SecurityManager;
@@ -18,7 +19,8 @@ use crate::tools::types::{
     DeleteProfileArgs, DeleteProfileResult, ExportLogArgs, ExportLogResult, GetLogArgs,
     GetLogResult, GetStatusArgs, GetStatusResult, ListConnectionsResult, ListPortsResult,
     ListProfilesResult, OpenArgs, OpenProfileArgs, OpenResult, ProfileSummary, ReconfigureArgs,
-    ReconfigureResult, ReconnectArgs, ReconnectResult, SaveProfileArgs, SaveProfileResult,
+    ReconfigureResult, ReconnectArgs, ReconnectResult, RollbackProfileArgs, RollbackProfileResult,
+    SaveProfileArgs, SaveProfileResult,
 };
 
 pub async fn list_ports(provider: &Arc<dyn PortProvider>) -> Result<Json<ListPortsResult>, String> {
@@ -146,6 +148,7 @@ async fn attach_session_binding(
             generated: false,
             revision: None,
             dirty: false,
+            stale: false,
             candidates: Vec::new(),
             last_persistence_error: None,
         },
@@ -160,6 +163,7 @@ async fn attach_session_binding(
             generated: false,
             revision: None,
             dirty: false,
+            stale: false,
             candidates,
             last_persistence_error: None,
         },
@@ -174,6 +178,7 @@ async fn attach_session_binding(
                     generated: used.metadata.generated,
                     revision: Some(used.metadata.revision),
                     dirty,
+                    stale: false,
                     candidates: Vec::new(),
                     last_persistence_error: None,
                 },
@@ -185,6 +190,7 @@ async fn attach_session_binding(
                     generated: profile.metadata.generated,
                     revision: Some(profile.metadata.revision),
                     dirty,
+                    stale: false,
                     candidates: Vec::new(),
                     last_persistence_error: Some(e),
                 },
@@ -203,6 +209,7 @@ async fn attach_session_binding(
                     generated: used.metadata.generated,
                     revision: Some(used.metadata.revision),
                     dirty,
+                    stale: false,
                     candidates: Vec::new(),
                     last_persistence_error: None,
                 },
@@ -214,6 +221,7 @@ async fn attach_session_binding(
                     generated: profile.metadata.generated,
                     revision: Some(profile.metadata.revision),
                     dirty,
+                    stale: false,
                     candidates: Vec::new(),
                     last_persistence_error: Some(e),
                 },
@@ -235,6 +243,7 @@ async fn attach_session_binding(
                     generated: true,
                     revision: Some(created.metadata.revision),
                     dirty: false,
+                    stale: false,
                     candidates: Vec::new(),
                     last_persistence_error: None,
                 },
@@ -249,6 +258,7 @@ async fn attach_session_binding(
                     generated: false,
                     revision: None,
                     dirty: false,
+                    stale: false,
                     candidates: Vec::new(),
                     last_persistence_error: Some(e),
                 },
@@ -378,6 +388,27 @@ async fn open_connection(
     )
     .await?;
 
+    // Open-override learning: a selected/explicit binding that is dirty
+    // (explicit fields differ from the profile's defaults) is persisted
+    // write-through before the open result returns. Persistence failure
+    // keeps the open a success — the result carries `failed` state and the
+    // binding stays dirty. Generated/transient/disabled sessions have
+    // nothing to persist.
+    let mut session = binding.to_session_result();
+    let mut profile_persistence = None;
+    if binding.dirty {
+        let (learned, persistence) = learning::learn(
+            ctx.store,
+            &connection,
+            ProfilePersistenceOperation::OpenOverride,
+        )
+        .await;
+        if let Some(learned) = learned {
+            session = learned;
+        }
+        profile_persistence = Some(persistence);
+    }
+
     info!("Opened connection {} -> {}", connection_id, port);
 
     Ok(Json(OpenResult {
@@ -385,7 +416,8 @@ async fn open_connection(
         name: resolved.name,
         port: resolved.port,
         baud_rate: resolved.baud_rate,
-        profile: Some(binding.to_session_result()),
+        profile: Some(session),
+        profile_persistence,
     }))
 }
 
@@ -496,14 +528,20 @@ pub async fn open_profile(
 
 pub async fn close(
     connections: &Arc<ConnectionManager>,
+    store: &Arc<crate::profile_store::ProfileStore>,
     args: CloseArgs,
 ) -> Result<Json<CloseResult>, String> {
     debug!("Closing {}", args.connection_id);
-    let name = connections
-        .get(&args.connection_id)
-        .await
-        .ok()
-        .and_then(|connection| connection.name().map(str::to_string));
+
+    // Retain the connection Arc (and its binding) BEFORE the registry
+    // removes it, so the close snapshot can still read effective state.
+    let conn = lookup_connection(connections, &args.connection_id).await?;
+    let name = conn.name().map(str::to_string);
+
+    // Hold the learning lock across the clean hardware close and the
+    // close-snapshot persistence so no concurrent durable mutation can
+    // interleave.
+    let _learning_guard = conn.learning_lock().lock().await;
 
     connections.close(&args.connection_id).await.map_err(|e| {
         log_tool_err(
@@ -514,9 +552,18 @@ pub async fn close(
     })?;
     info!("Closed connection {}", args.connection_id);
 
+    // Close snapshot: only after successful hardware close, persist the
+    // effective defaults when the persistent binding is dirty or differs.
+    // A no-op is `NotNeeded`; persistence failure neither reopens hardware
+    // nor turns close into a tool error.
+    let (profile, persistence) =
+        learning::learn(store, &conn, ProfilePersistenceOperation::CloseSnapshot).await;
+
     Ok(Json(CloseResult {
         connection_id: args.connection_id,
         name,
+        profile,
+        profile_persistence: Some(persistence),
     }))
 }
 
@@ -593,6 +640,7 @@ pub async fn get_status(
 
 pub async fn reconfigure(
     connections: &Arc<ConnectionManager>,
+    store: &Arc<crate::profile_store::ProfileStore>,
     args: ReconfigureArgs,
 ) -> Result<Json<ReconfigureResult>, String> {
     let conn_id = &args.connection_id;
@@ -622,6 +670,10 @@ pub async fn reconfigure(
         .map(|s| s.parse::<crate::serial::FlowControl>())
         .transpose()?;
 
+    // Hold the learning lock across live mutation → effective snapshot →
+    // CAS persistence → binding update.
+    let _learning_guard = conn.learning_lock().lock().await;
+
     let status = conn
         .reconfigure(baud_rate, data_bits, stop_bits, parity, flow_control)
         .await
@@ -635,6 +687,12 @@ pub async fn reconfigure(
 
     info!("Reconfigured {}: baud={}", conn_id, status.baud_rate);
 
+    // Write-through learning: hardware mutation succeeded; persist the
+    // effective defaults through the bound profile (if any). Persistence
+    // failure keeps the tool result successful with `state="failed"`.
+    let (profile, persistence) =
+        learning::learn(store, &conn, ProfilePersistenceOperation::Learned).await;
+
     Ok(Json(ReconfigureResult {
         connection_id: status.connection_id,
         name: status.name,
@@ -644,6 +702,8 @@ pub async fn reconfigure(
         stop_bits: status.stop_bits,
         parity: status.parity,
         flow_control: status.flow_control,
+        profile,
+        profile_persistence: Some(persistence),
     }))
 }
 
@@ -692,7 +752,9 @@ pub async fn configure(
         // Profile mode: the store reloads under lock, preserves the
         // on-disk selector, and persists before updating its cache. The
         // effective profile (created flag + defaults) is returned from the
-        // same transaction — no racy second lookup.
+        // same transaction — no racy second lookup. Profile mode never
+        // touches live connections, so `profile`/`profile_persistence`
+        // fields stay None.
         let (created, profile) = store
             .update_defaults_preserving_selector(
                 profile_name.clone(),
@@ -704,11 +766,19 @@ pub async fn configure(
             mode: "profile".into(),
             defaults: profile.defaults,
             created: Some(created),
+            profile: None,
+            profile_persistence: None,
         }))
     } else {
         // Connection mode: mutate the live connection's defaults.
         let conn_id = args.connection_id.as_ref().unwrap();
         let conn = lookup_connection(connections, conn_id).await?;
+
+        // Hold the learning lock across the setters, the effective
+        // snapshot, and the CAS persistence attempt so concurrent durable
+        // requests cannot snapshot half-applied state.
+        let _learning_guard = conn.learning_lock().lock().await;
+
         // Apply framing defaults.
         conn.set_tx_framing_default(args.defaults.tx_framing.clone());
         conn.set_rx_framing_default(args.defaults.rx_framing.clone());
@@ -721,10 +791,19 @@ pub async fn configure(
         conn.set_poll_interval_ms_default(args.defaults.poll_interval_ms);
         // log_capacity/log_enabled: LogBuffer has NO live setters. Documented as
         // profile-only. rx_buffer_size: ring is fixed at open. Also profile-only.
+
+        // Write-through learning for connection mode: persist the full
+        // effective defaults through the bound profile (if any). Failure
+        // keeps the result successful with `state="failed"`.
+        let (profile, persistence) =
+            learning::learn(store, &conn, ProfilePersistenceOperation::Learned).await;
+
         Ok(Json(ConfigureResult {
             mode: "connection".into(),
             defaults: args.defaults,
             created: None,
+            profile,
+            profile_persistence: Some(persistence),
         }))
     }
 }
@@ -742,29 +821,12 @@ pub async fn save_profile(
         .port_info()
         .ok_or_else(|| format!("No port identity available for {}", args.connection_id))?;
 
-    // Snapshot rx_buffer_size from the connection's stored effective value;
-    // never from a handler-local session manager (a later request may land
-    // on a different manager).
-    let rx_buffer_size = conn.rx_buffer_size();
-
-    let defaults = crate::profiles::ProfileDefaults {
-        baud_rate: conn.baud_rate(),
-        data_bits: crate::serial::data_bits_to_str(conn.data_bits()),
-        stop_bits: crate::serial::stop_bits_to_str(conn.stop_bits()),
-        parity: crate::serial::parity_to_str(conn.parity()),
-        flow_control: crate::serial::flow_control_to_str(conn.flow_control()),
-        name: conn.name().map(str::to_string),
-        tx_framing: conn.tx_framing_default(),
-        rx_framing: conn.rx_framing_default(),
-        rx_parser: conn.rx_parser_default(),
-        protocol: conn.protocol_default(),
-        rx_buffer_size,
-        max_buffered_bytes: conn.max_buffered_bytes_default(),
-        poll_interval_ms: conn.poll_interval_ms_default(),
-        reconnect_policy: conn.reconnect_policy.lock().expect("poisoned").clone(),
-        log_capacity: conn.log().capacity(),
-        log_enabled: conn.log().is_enabled(),
-    };
+    // Snapshot the connection's full effective defaults from the shared
+    // helper (never a handler-local session manager); it covers serial
+    // parameters, framing/parser/protocol defaults, the stored RX buffer
+    // size, read/subscribe defaults, reconnect policy, log config, and the
+    // connection name.
+    let defaults = conn.effective_defaults();
 
     let selector = crate::profiles::ProfileSelector {
         vid: info.vid,
@@ -798,14 +860,102 @@ pub async fn save_profile(
 }
 
 /// Delete a profile by name.
+///
+/// Rejects deletion while any same-process open connection binds the
+/// profile (the error lists the connection IDs). Cross-process active
+/// ownership cannot be known here; a later missing-profile CAS protects
+/// those processes.
 pub async fn delete_profile(
+    connections: &Arc<ConnectionManager>,
     store: &Arc<crate::profile_store::ProfileStore>,
     args: DeleteProfileArgs,
 ) -> Result<Json<DeleteProfileResult>, String> {
+    let bound: Vec<String> = connections
+        .list_all()
+        .await
+        .into_iter()
+        .filter(|(_, conn)| {
+            conn.active_profile_binding()
+                .map(|b| b.persistent && b.profile_name == args.profile_name)
+                .unwrap_or(false)
+        })
+        .map(|(id, _)| id)
+        .collect();
+    if !bound.is_empty() {
+        return Err(format!(
+            "Cannot delete profile '{}': bound to open connection(s) {}",
+            args.profile_name,
+            bound.join(", ")
+        ));
+    }
+
     store.delete(&args.profile_name).await?;
 
     Ok(Json(DeleteProfileResult {
         profile_name: args.profile_name,
+    }))
+}
+
+/// Roll a profile back to a prior retained revision.
+///
+/// Restores the target revision's selector/defaults as a NEW monotonic
+/// revision (`current + 1`), preserving generated/usage metadata. Live
+/// hardware is never touched: same-process connections bound to the
+/// profile are marked stale+dirty (so neither learning nor close can
+/// overwrite the rollback) and counted in the result. Wrong
+/// `expected_revision` or an evicted target revision is a tool error that
+/// leaves the file unchanged.
+pub async fn rollback_profile(
+    connections: &Arc<ConnectionManager>,
+    store: &Arc<crate::profile_store::ProfileStore>,
+    args: RollbackProfileArgs,
+) -> Result<Json<RollbackProfileResult>, String> {
+    let rolled_back = store
+        .rollback(
+            args.profile_name.clone(),
+            args.expected_revision,
+            args.revision,
+        )
+        .await?;
+
+    let mut active_connections_unchanged = 0usize;
+    for (_, conn) in connections.list_all().await {
+        let is_bound = conn
+            .active_profile_binding()
+            .map(|b| b.persistent && b.profile_name == args.profile_name)
+            .unwrap_or(false);
+        if is_bound {
+            let error = format!(
+                "profile '{}' rolled back to revision {} by rollback_profile; \
+                 connection stays on its live state until reopened",
+                args.profile_name, args.revision
+            );
+            conn.update_active_profile_binding(|b| {
+                b.stale = true;
+                b.dirty = true;
+                b.last_persistence_error = Some(error);
+            });
+            active_connections_unchanged += 1;
+        }
+    }
+
+    let revision = rolled_back.metadata.revision;
+    Ok(Json(RollbackProfileResult {
+        profile_name: args.profile_name,
+        restored_from_revision: args.revision,
+        previous_revision: args.expected_revision,
+        revision,
+        selector: rolled_back.selector,
+        defaults: rolled_back.defaults,
+        metadata: rolled_back.metadata,
+        active_connections_unchanged,
+        persistence: crate::profiles::ProfilePersistenceResult {
+            state: crate::profiles::ProfilePersistenceState::Persisted,
+            operation: crate::profiles::ProfilePersistenceOperation::Rollback,
+            profile_name: Some(rolled_back.name),
+            revision: Some(revision),
+            error: None,
+        },
     }))
 }
 

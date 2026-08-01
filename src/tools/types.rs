@@ -321,6 +321,11 @@ pub struct OpenResult {
     /// profile (automatic/explicit/generated/transient/disabled), the
     /// profile name, confidence, dirty state, and any persistence error.
     pub profile: Option<crate::profiles::ProfileSessionResult>,
+    /// Write-through persistence outcome for a dirty selected-profile
+    /// overlay (open override learning). `null` when the open had nothing
+    /// to persist (clean/generated/transient/disabled sessions).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile_persistence: Option<crate::profiles::ProfilePersistenceResult>,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -334,6 +339,14 @@ pub struct ListConnectionsResult {
 pub struct CloseResult {
     pub connection_id: String,
     pub name: Option<String>,
+    /// Active profile-session binding captured before clean close (with
+    /// any dirty/stale state after the close snapshot/retry).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<crate::profiles::ProfileSessionResult>,
+    /// Close-snapshot persistence outcome. `null` when the connection had
+    /// no durable binding.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile_persistence: Option<crate::profiles::ProfilePersistenceResult>,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -482,6 +495,12 @@ pub struct SetFlowControlResult {
     pub connection_id: String,
     pub name: Option<String>,
     pub flow_control: FlowControl,
+    /// Active profile-session binding after write-through learning.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<crate::profiles::ProfileSessionResult>,
+    /// Write-through persistence outcome for the flow-control change.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile_persistence: Option<crate::profiles::ProfilePersistenceResult>,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -693,6 +712,12 @@ pub struct ReconfigureResult {
     pub stop_bits: String,
     pub parity: String,
     pub flow_control: String,
+    /// Active profile-session binding after write-through learning.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<crate::profiles::ProfileSessionResult>,
+    /// Write-through persistence outcome for the reconfigure.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile_persistence: Option<crate::profiles::ProfilePersistenceResult>,
 }
 
 /// Summary of a single profile returned by `list_profiles`.
@@ -765,6 +790,14 @@ pub struct ConfigureResult {
     /// For connection mode: always null.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created: Option<bool>,
+    /// Active profile-session binding after connection-mode write-through
+    /// learning. `null` in profile mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<crate::profiles::ProfileSessionResult>,
+    /// Write-through persistence outcome for connection mode. `null` in
+    /// profile mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile_persistence: Option<crate::profiles::ProfilePersistenceResult>,
 }
 
 /// Save a profile by snapshotting an open connection's identity and config.
@@ -797,6 +830,49 @@ pub struct DeleteProfileArgs {
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct DeleteProfileResult {
     pub profile_name: String,
+}
+
+/// Roll a profile back to a prior retained revision (Phase 3B).
+///
+/// Restores the snapshot's selector/defaults as a NEW monotonic revision;
+/// active connections bound to the profile remain unchanged and become
+/// stale. A wrong `expected_revision` (concurrent modification) or an
+/// evicted target `revision` is a tool error that leaves the file
+/// unchanged.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct RollbackProfileArgs {
+    pub profile_name: String,
+    /// Prior retained revision to restore (see `list_profiles` revisions).
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub revision: u64,
+    /// Revision the profile currently has (from `list_profiles` metadata).
+    /// Guards against rolling back a concurrently modified profile.
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub expected_revision: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct RollbackProfileResult {
+    pub profile_name: String,
+    /// The retained revision whose snapshot was restored.
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub restored_from_revision: u64,
+    /// The revision the profile had before this rollback
+    /// (`expected_revision`).
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub previous_revision: u64,
+    /// The new monotonic revision after the rollback (never moves
+    /// backward).
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub revision: u64,
+    pub selector: crate::profiles::ProfileSelector,
+    pub defaults: crate::profiles::ProfileDefaults,
+    pub metadata: crate::profiles::ProfileMetadata,
+    /// Number of same-process open connections bound to the profile whose
+    /// live state was left unchanged (marked stale).
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub active_connections_unchanged: usize,
+    pub persistence: crate::profiles::ProfilePersistenceResult,
 }
 
 // ---- Log tools -------------------------------------------------------------

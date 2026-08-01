@@ -36,6 +36,7 @@ const EXPECTED_TOOLS: &[&str] = &[
     "save_profile",
     "delete_profile",
     "configure",
+    "rollback_profile",
     "get_log",
     "clear_log",
     "export_log",
@@ -81,7 +82,7 @@ async fn stdio_initialize_handshake_succeeds() {
 }
 
 #[tokio::test]
-async fn stdio_list_tools_returns_all_twenty_five_tools() {
+async fn stdio_list_tools_returns_all_twenty_six_tools() {
     let (client, _profiles_dir) = start_stdio_client().await;
 
     let result = client

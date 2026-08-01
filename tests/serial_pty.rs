@@ -2038,9 +2038,11 @@ async fn auto_session_profile_mode_none_disables_selection_and_creation() {
 }
 
 /// 7. An explicit open field overrides the selected profile's default for
-///    the live connection and marks the binding dirty.
+///    the live connection AND is persisted write-through immediately
+///    (Phase 3B open-override learning): the binding comes back clean with
+///    a bumped revision, and the next bare reopen applies the override.
 #[tokio::test]
-async fn auto_session_explicit_open_field_overrides_profile_and_marks_dirty() {
+async fn learning_explicit_open_override_persists_immediately_and_next_reopen_uses_it() {
     let pty = PtyPair::open().expect("openpty");
     let slave = pty.slave_path.to_string_lossy().into_owned();
     let provider = StaticPortProvider::new(vec![StaticPortProvider::usb_port(
@@ -2069,10 +2071,25 @@ async fn auto_session_explicit_open_field_overrides_profile_and_marks_dirty() {
     assert_eq!(second["profile"]["profile_name"], json!(profile_name));
     assert_eq!(second["profile"]["source"], json!("automatic"));
     assert_eq!(
-        second["profile"]["dirty"],
-        json!(true),
-        "explicit override → dirty"
+        second["profile"]["revision"],
+        json!(2),
+        "override persisted as a new revision"
     );
+    assert_eq!(
+        second["profile"]["dirty"],
+        json!(false),
+        "override was learned; binding is clean"
+    );
+    assert_eq!(
+        second["profile_persistence"]["state"],
+        json!("persisted"),
+        "open-override persistence must report persisted: {second:?}"
+    );
+    assert_eq!(
+        second["profile_persistence"]["operation"],
+        json!("open_override")
+    );
+    assert!(second["profile_persistence"]["error"].is_null());
 
     // The live connection actually runs at the overridden baud.
     let status = client
@@ -2087,6 +2104,14 @@ async fn auto_session_explicit_open_field_overrides_profile_and_marks_dirty() {
         status.structured_content.as_ref().unwrap()["baud_rate"],
         json!(9600)
     );
+    close_port(client, &second_id).await;
+
+    // Next bare reopen applies the learned 9600 from the profile.
+    let third = open_port(client, &slave, json!({})).await;
+    assert_eq!(third["profile"]["source"], json!("automatic"));
+    assert_eq!(third["baud_rate"], json!(9600), "learned baud applied");
+    assert_eq!(third["profile"]["revision"], json!(2));
+    assert_eq!(third["profile"]["dirty"], json!(false));
 
     harness._client.cancel().await.ok();
 }
@@ -2592,6 +2617,925 @@ async fn save_profile_on_generated_bound_connection_promotes_to_user_owned() {
         .find(|p| p["name"] == json!("auto-fake-usb-serial"))
         .expect("auto-generated profile still exists");
     assert_eq!(auto["metadata"]["generated"], json!(true));
+
+    harness._client.cancel().await.ok();
+}
+
+// ── Phase 3B: write-through learning, conflicts, rollback ────────────────────
+//
+// Same harness as Phase 3A: real PTY + injected high-confidence
+// StaticPortProvider. These tests prove learning, partial-failure honesty,
+// CAS/stale behavior, rollback, and deletion protection through public MCP
+// results and real serial traffic.
+
+/// Reconfigure one connection and return the structured result.
+async fn reconfigure_baud(
+    client: &rmcp::service::RunningService<
+        rmcp::service::RoleClient,
+        common::NotificationCollector,
+    >,
+    connection_id: &str,
+    baud: u32,
+) -> serde_json::Value {
+    let result = client
+        .peer()
+        .call_tool(tool_request(
+            "reconfigure",
+            json!({ "connection_id": connection_id, "baud_rate": baud }),
+        ))
+        .await
+        .unwrap();
+    assert_ne!(
+        result.is_error,
+        Some(true),
+        "reconfigure failed: {result:?}"
+    );
+    result.structured_content.expect("structured")
+}
+
+/// 1. Generated profile revision 1 → reconfigure baud → revision 2
+///    persisted; close/reopen applies the baud on live status.
+#[tokio::test]
+async fn learning_reconfigure_baud_bumps_revision_and_reopen_applies() {
+    let pty = PtyPair::open().expect("openpty");
+    let slave = pty.slave_path.to_string_lossy().into_owned();
+    let provider = StaticPortProvider::new(vec![StaticPortProvider::usb_port(
+        &slave,
+        VID,
+        PID,
+        "SN-1",
+        Some("Fake USB Serial"),
+        None,
+    )]);
+    let harness = session_harness(provider).await;
+    let client = &harness._client;
+
+    let opened = open_port(client, &slave, json!({})).await;
+    let connection_id = opened["connection_id"].as_str().unwrap().to_string();
+    let profile_name = opened["profile"]["profile_name"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(opened["profile"]["revision"], json!(1));
+
+    let r = reconfigure_baud(client, &connection_id, 9600).await;
+    assert_eq!(r["baud_rate"], json!(9600), "live state changed");
+    assert_eq!(r["profile_persistence"]["state"], json!("persisted"));
+    assert_eq!(r["profile_persistence"]["operation"], json!("learned"));
+    assert_eq!(r["profile_persistence"]["revision"], json!(2));
+    assert_eq!(r["profile"]["revision"], json!(2));
+    assert_eq!(r["profile"]["dirty"], json!(false));
+
+    let (_, rev, defaults) = session_profile_snapshot(client, &profile_name).await;
+    assert_eq!(rev, json!(2));
+    assert_eq!(
+        defaults["baud_rate"],
+        json!(9600),
+        "profile defaults updated"
+    );
+
+    close_port(client, &connection_id).await;
+
+    let reopened = open_port(client, &slave, json!({})).await;
+    assert_eq!(
+        reopened["baud_rate"],
+        json!(9600),
+        "learned baud applied on reopen"
+    );
+    assert_eq!(reopened["profile"]["revision"], json!(2));
+
+    harness._client.cancel().await.ok();
+}
+
+/// 2. set_flow_control persists and applies on reopen.
+#[tokio::test]
+async fn learning_set_flow_control_persists_and_applies_on_reopen() {
+    let pty = PtyPair::open().expect("openpty");
+    let slave = pty.slave_path.to_string_lossy().into_owned();
+    let provider = StaticPortProvider::new(vec![StaticPortProvider::usb_port(
+        &slave,
+        VID,
+        PID,
+        "SN-1",
+        Some("Fake USB Serial"),
+        None,
+    )]);
+    let harness = session_harness(provider).await;
+    let client = &harness._client;
+
+    let opened = open_port(client, &slave, json!({})).await;
+    let connection_id = opened["connection_id"].as_str().unwrap().to_string();
+
+    let sfc = client
+        .peer()
+        .call_tool(tool_request(
+            "set_flow_control",
+            json!({ "connection_id": connection_id, "flow_control": "software" }),
+        ))
+        .await
+        .unwrap();
+    assert_ne!(sfc.is_error, Some(true), "{sfc:?}");
+    let s = sfc.structured_content.as_ref().unwrap();
+    assert_eq!(s["flow_control"], json!("software"));
+    assert_eq!(s["profile_persistence"]["state"], json!("persisted"));
+    assert_eq!(s["profile"]["revision"], json!(2));
+    assert_eq!(s["profile"]["dirty"], json!(false));
+
+    close_port(client, &connection_id).await;
+
+    let reopened = open_port(client, &slave, json!({})).await;
+    let reopened_id = reopened["connection_id"].as_str().unwrap().to_string();
+    let status = client
+        .peer()
+        .call_tool(tool_request(
+            "get_status",
+            json!({ "connection_id": reopened_id }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        status.structured_content.as_ref().unwrap()["flow_control"],
+        json!("software"),
+        "learned flow control applied on reopen"
+    );
+
+    harness._client.cancel().await.ok();
+}
+
+/// 3. Connection-mode configure persists framing; reopen and an actual
+///    framed read prove it.
+#[tokio::test]
+async fn learning_connection_configure_framing_persists_and_framed_read_proves_it() {
+    let mut pty = PtyPair::open().expect("openpty");
+    let slave = pty.slave_path.to_string_lossy().into_owned();
+    let provider = StaticPortProvider::new(vec![StaticPortProvider::usb_port(
+        &slave,
+        VID,
+        PID,
+        "SN-1",
+        Some("Fake USB Serial"),
+        None,
+    )]);
+    let harness = session_harness(provider).await;
+    let client = &harness._client;
+
+    let opened = open_port(client, &slave, json!({})).await;
+    let connection_id = opened["connection_id"].as_str().unwrap().to_string();
+    let profile_name = opened["profile"]["profile_name"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let cfg = client
+        .peer()
+        .call_tool(tool_request(
+            "configure",
+            json!({
+                "connection_id": connection_id,
+                "defaults": { "rx_framing": { "type": "line", "ending": "lf" } },
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_ne!(cfg.is_error, Some(true), "{cfg:?}");
+    let c = cfg.structured_content.as_ref().unwrap();
+    assert_eq!(c["mode"], json!("connection"));
+    assert_eq!(c["profile_persistence"]["state"], json!("persisted"));
+    assert_eq!(c["profile"]["revision"], json!(2));
+    let (_, rev, defaults) = session_profile_snapshot(client, &profile_name).await;
+    assert_eq!(rev, json!(2));
+    assert_eq!(defaults["rx_framing"]["type"], json!("line"));
+
+    close_port(client, &connection_id).await;
+
+    // Reopen: the profile's framing default applies to the connection.
+    let reopened = open_port(client, &slave, json!({})).await;
+    let reopened_id = reopened["connection_id"].as_str().unwrap().to_string();
+    pty.write_device(b"LINE1\nLINE2\n").await.unwrap();
+    let read = client
+        .peer()
+        .call_tool(tool_request(
+            "read",
+            json!({ "connection_id": reopened_id, "timeout_ms": 1000 }),
+        ))
+        .await
+        .unwrap();
+    assert_ne!(read.is_error, Some(true), "{read:?}");
+    let rd = read.structured_content.as_ref().unwrap();
+    let frames = rd["frames"].as_array().expect("framed read expected");
+    assert_eq!(frames[0]["data"], json!("LINE1"));
+    assert_eq!(frames[1]["data"], json!("LINE2"));
+
+    harness._client.cancel().await.ok();
+}
+
+/// 4. Multiple durable changes create a bounded revision history (max 5).
+#[tokio::test]
+async fn learning_multiple_changes_create_bounded_revision_history() {
+    let pty = PtyPair::open().expect("openpty");
+    let slave = pty.slave_path.to_string_lossy().into_owned();
+    let provider = StaticPortProvider::new(vec![StaticPortProvider::usb_port(
+        &slave,
+        VID,
+        PID,
+        "SN-1",
+        Some("Fake USB Serial"),
+        None,
+    )]);
+    let harness = session_harness(provider).await;
+    let client = &harness._client;
+
+    let opened = open_port(client, &slave, json!({})).await;
+    let connection_id = opened["connection_id"].as_str().unwrap().to_string();
+    let profile_name = opened["profile"]["profile_name"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // 5 reconfigures after the rev-1 generated profile → revision 6.
+    for baud in [1200u32, 2400, 4800, 9600, 19200] {
+        reconfigure_baud(client, &connection_id, baud).await;
+    }
+
+    let (_, rev, _) = session_profile_snapshot(client, &profile_name).await;
+    assert_eq!(rev, json!(6));
+
+    let listed = client
+        .peer()
+        .call_tool(tool_request("list_profiles", json!({})))
+        .await
+        .unwrap();
+    let s = listed.structured_content.as_ref().unwrap();
+    let revisions = s["profiles"][0]["revisions"].as_array().unwrap();
+    assert_eq!(
+        revisions.len(),
+        serial_mcp::profiles::MAX_PROFILE_REVISIONS,
+        "history capped at five prior snapshots"
+    );
+    let retained: Vec<u64> = revisions
+        .iter()
+        .map(|r| r["revision"].as_u64().unwrap())
+        .collect();
+    assert_eq!(retained, vec![1, 2, 3, 4, 5], "newest five prior states");
+
+    harness._client.cancel().await.ok();
+}
+
+/// 5. Non-durable operations never change profile defaults or revision:
+///    BREAK, flush, subscribe/unsubscribe, and per-call framing/match on
+///    read/write. (DTR/RTS is covered by the http_integration loopback
+///    suite; PTYs cannot drive modem lines — ENOTTY.)
+#[tokio::test]
+async fn non_learning_operations_do_not_alter_profile() {
+    let mut pty = PtyPair::open().expect("openpty");
+    let slave = pty.slave_path.to_string_lossy().into_owned();
+    let provider = StaticPortProvider::new(vec![StaticPortProvider::usb_port(
+        &slave,
+        VID,
+        PID,
+        "SN-1",
+        Some("Fake USB Serial"),
+        None,
+    )]);
+    let harness = session_harness(provider).await;
+    let client = &harness._client;
+
+    let opened = open_port(client, &slave, json!({})).await;
+    let connection_id = opened["connection_id"].as_str().unwrap().to_string();
+    let profile_name = opened["profile"]["profile_name"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let before = session_profile_snapshot(client, &profile_name).await;
+
+    // BREAK pulse.
+    let brk = client
+        .peer()
+        .call_tool(tool_request(
+            "send_break",
+            json!({ "connection_id": connection_id, "duration_ms": 30 }),
+        ))
+        .await
+        .unwrap();
+    assert_ne!(brk.is_error, Some(true), "{brk:?}");
+
+    // Flush both directions.
+    let fl = client
+        .peer()
+        .call_tool(tool_request(
+            "flush",
+            json!({ "connection_id": connection_id, "target": "both" }),
+        ))
+        .await
+        .unwrap();
+    assert_ne!(fl.is_error, Some(true), "{fl:?}");
+
+    // Subscribe (short timeout) then unsubscribe.
+    let sub = client
+        .peer()
+        .call_tool(tool_request(
+            "subscribe",
+            json!({ "connection_id": connection_id, "timeout_ms": 100 }),
+        ))
+        .await
+        .unwrap();
+    assert_ne!(sub.is_error, Some(true), "{sub:?}");
+    let unsub = client
+        .peer()
+        .call_tool(tool_request(
+            "unsubscribe",
+            json!({ "connection_id": connection_id }),
+        ))
+        .await
+        .unwrap();
+    assert_ne!(unsub.is_error, Some(true), "{unsub:?}");
+
+    // Per-call write with tx_framing (device drains).
+    let w = client
+        .peer()
+        .call_tool(tool_request(
+            "write",
+            json!({
+                "connection_id": connection_id,
+                "data": "PING",
+                "tx_framing": { "type": "line", "ending": "lf" },
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_ne!(w.is_error, Some(true), "{w:?}");
+    let mut drain = [0u8; 8];
+    let _ = pty.read_device(&mut drain).await;
+
+    // Per-call read with framing + match.
+    pty.write_device(b"MATCHED\n").await.unwrap();
+    let rd = client
+        .peer()
+        .call_tool(tool_request(
+            "read",
+            json!({
+                "connection_id": connection_id,
+                "timeout_ms": 500,
+                "rx_framing": { "type": "line", "ending": "lf" },
+                "match": { "pattern": "MATCHED" },
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_ne!(rd.is_error, Some(true), "{rd:?}");
+
+    let after = session_profile_snapshot(client, &profile_name).await;
+    assert_eq!(after.0, before.0, "non-durable ops must not bump use_count");
+    assert_eq!(after.1, before.1, "non-durable ops must not bump revision");
+    assert_eq!(after.2, before.2, "non-durable ops must not alter defaults");
+
+    harness._client.cancel().await.ok();
+}
+
+/// 6. Partial failure: live reconfigure succeeds, profile write fails
+///    (read-only dir) → result stays successful with `state="failed"`,
+///    binding dirty, cache/file old. Restoring permissions + clean close
+///    retries and persists; reopen uses the new baud.
+#[tokio::test]
+async fn learning_partial_failure_reports_failed_and_clean_close_retries() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let pty = PtyPair::open().expect("openpty");
+    let slave = pty.slave_path.to_string_lossy().into_owned();
+    let provider = StaticPortProvider::new(vec![StaticPortProvider::usb_port(
+        &slave,
+        VID,
+        PID,
+        "SN-1",
+        Some("Fake USB Serial"),
+        None,
+    )]);
+    let dir = tempfile::tempdir().expect("tempdir");
+    let profiles_path = dir.path().join("profiles.toml");
+    let server = TestServer::start_with_provider_and_profiles_path(
+        Arc::new(serial_mcp::serial::ConnectionManager::new()),
+        provider,
+        profiles_path.clone(),
+    )
+    .await;
+    let (client, _rx) = connect_client(&server).await.unwrap();
+
+    // First open creates the generated profile while the dir is writable.
+    let first = open_port(&client, &slave, json!({})).await;
+    let profile_name = first["profile"]["profile_name"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let first_id = first["connection_id"].as_str().unwrap().to_string();
+    close_port(&client, &first_id).await;
+
+    // Make the profile directory read-only: live mutations still succeed,
+    // profile writes fail.
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o555)).unwrap();
+
+    // Reopen: mark_used fails but the binding stays persistent and the
+    // open stays a success.
+    let second = open_port(&client, &slave, json!({})).await;
+    let second_id = second["connection_id"].as_str().unwrap().to_string();
+    assert_eq!(second["profile"]["profile_name"], json!(profile_name));
+    assert_eq!(second["profile"]["persistent"], json!(true));
+    assert!(
+        !second["profile"]["last_persistence_error"].is_null(),
+        "metadata failure surfaces on the binding"
+    );
+
+    // Live reconfigure succeeds; persistence fails and is reported as a
+    // successful result with failed state.
+    let r = reconfigure_baud(&client, &second_id, 9600).await;
+    assert_eq!(r["baud_rate"], json!(9600), "live state changed");
+    assert_eq!(r["profile_persistence"]["state"], json!("failed"));
+    assert!(
+        !r["profile_persistence"]["error"].is_null(),
+        "failure carries the error: {r:?}"
+    );
+    assert_eq!(r["profile"]["dirty"], json!(true), "binding dirty");
+    assert_eq!(
+        r["profile"]["stale"],
+        json!(false),
+        "plain I/O failure stays retryable, not stale"
+    );
+
+    // Status shows the new live baud.
+    let status = client
+        .peer()
+        .call_tool(tool_request(
+            "get_status",
+            json!({ "connection_id": second_id }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        status.structured_content.as_ref().unwrap()["baud_rate"],
+        json!(9600)
+    );
+
+    // Profile file/cache stay old.
+    let (_, rev, defaults) = session_profile_snapshot(&client, &profile_name).await;
+    assert_eq!(rev, json!(1), "failed write must not bump revision");
+    assert_eq!(defaults["baud_rate"], json!(115200), "file/cache old");
+
+    // Restore permissions; clean close retries and persists.
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+    let cl = client
+        .peer()
+        .call_tool(tool_request("close", json!({ "connection_id": second_id })))
+        .await
+        .unwrap();
+    assert_ne!(cl.is_error, Some(true), "{cl:?}");
+    let clr = cl.structured_content.as_ref().unwrap();
+    assert_eq!(
+        clr["profile_persistence"]["state"],
+        json!("persisted"),
+        "clean close retries the dirty state: {clr:?}"
+    );
+    assert_eq!(clr["profile"]["dirty"], json!(false));
+
+    // Reopen uses the new baud.
+    let third = open_port(&client, &slave, json!({})).await;
+    assert_eq!(third["baud_rate"], json!(9600));
+    assert_eq!(third["profile"]["revision"], json!(2));
+
+    client.cancel().await.ok();
+}
+
+/// 7. CAS/stale: an external profile-mode configure bumps the bound
+///    profile; the next live reconfigure succeeds but reports a conflict,
+///    the binding turns stale, and the newer profile remains untouched.
+///    Close does not overwrite the stale profile.
+#[tokio::test]
+async fn learning_cas_conflict_marks_stale_and_close_does_not_overwrite() {
+    let pty = PtyPair::open().expect("openpty");
+    let slave = pty.slave_path.to_string_lossy().into_owned();
+    let provider = StaticPortProvider::new(vec![StaticPortProvider::usb_port(
+        &slave,
+        VID,
+        PID,
+        "SN-1",
+        Some("Fake USB Serial"),
+        None,
+    )]);
+    let harness = session_harness(provider).await;
+    let client = &harness._client;
+    let (client_b, _rx_b) = connect_client(&harness._server).await.unwrap();
+
+    let opened = open_port(client, &slave, json!({})).await;
+    let connection_id = opened["connection_id"].as_str().unwrap().to_string();
+    let profile_name = opened["profile"]["profile_name"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(opened["profile"]["revision"], json!(1));
+
+    // Second client bumps the profile to revision 2 with baud 14400.
+    let cfg = client_b
+        .peer()
+        .call_tool(tool_request(
+            "configure",
+            json!({
+                "profile": profile_name,
+                "overwrite": true,
+                "defaults": { "baud_rate": 14400 },
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_ne!(cfg.is_error, Some(true), "{cfg:?}");
+
+    // Live reconfigure succeeds; persistence reports a conflict.
+    let r = reconfigure_baud(client, &connection_id, 9600).await;
+    assert_eq!(r["baud_rate"], json!(9600), "hardware mutation applied");
+    assert_eq!(r["profile_persistence"]["state"], json!("failed"));
+    let err = r["profile_persistence"]["error"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        err.contains("revision conflict") && err.contains("expected 1") && err.contains("found 2"),
+        "conflict names expected + actual revision: {err}"
+    );
+    assert_eq!(r["profile"]["stale"], json!(true));
+    assert_eq!(r["profile"]["dirty"], json!(true));
+
+    // The newer profile remains untouched.
+    let (_, rev, defaults) = session_profile_snapshot(client, &profile_name).await;
+    assert_eq!(rev, json!(2));
+    assert_eq!(
+        defaults["baud_rate"],
+        json!(14400),
+        "newer profile untouched"
+    );
+
+    // Close must not overwrite the stale profile.
+    let cl = client
+        .peer()
+        .call_tool(tool_request(
+            "close",
+            json!({ "connection_id": connection_id }),
+        ))
+        .await
+        .unwrap();
+    assert_ne!(cl.is_error, Some(true), "{cl:?}");
+    let clr = cl.structured_content.as_ref().unwrap();
+    assert_eq!(
+        clr["profile_persistence"]["state"],
+        json!("failed"),
+        "stale binding keeps reporting the conflict on close"
+    );
+    assert_eq!(clr["profile"]["stale"], json!(true));
+    let (_, rev, defaults) = session_profile_snapshot(client, &profile_name).await;
+    assert_eq!(rev, json!(2));
+    assert_eq!(defaults["baud_rate"], json!(14400));
+
+    harness._client.cancel().await.ok();
+    client_b.cancel().await.ok();
+}
+
+/// 8. Rollback restores a prior baud as a new monotonic revision; the
+///    active connection stays unchanged and stale; close cannot overwrite
+///    the rollback; reopen applies the rolled-back baud.
+#[tokio::test]
+async fn rollback_restores_prior_baud_and_active_connection_stays_unchanged() {
+    let pty = PtyPair::open().expect("openpty");
+    let slave = pty.slave_path.to_string_lossy().into_owned();
+    let provider = StaticPortProvider::new(vec![StaticPortProvider::usb_port(
+        &slave,
+        VID,
+        PID,
+        "SN-1",
+        Some("Fake USB Serial"),
+        None,
+    )]);
+    let harness = session_harness(provider).await;
+    let client = &harness._client;
+
+    let opened = open_port(client, &slave, json!({})).await;
+    let connection_id = opened["connection_id"].as_str().unwrap().to_string();
+    let profile_name = opened["profile"]["profile_name"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    // rev 1 (115200) → rev 2 (9600) → rev 3 (19200).
+    reconfigure_baud(client, &connection_id, 9600).await;
+    reconfigure_baud(client, &connection_id, 19200).await;
+
+    // Roll back to revision 2 (9600) as new revision 4.
+    let rb = client
+        .peer()
+        .call_tool(tool_request(
+            "rollback_profile",
+            json!({
+                "profile_name": profile_name,
+                "expected_revision": 3,
+                "revision": 2,
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_ne!(rb.is_error, Some(true), "{rb:?}");
+    let rb_r = rb.structured_content.as_ref().unwrap();
+    assert_eq!(rb_r["restored_from_revision"], json!(2));
+    assert_eq!(rb_r["previous_revision"], json!(3));
+    assert_eq!(rb_r["revision"], json!(4), "new monotonic revision");
+    assert_eq!(rb_r["defaults"]["baud_rate"], json!(9600));
+    assert_eq!(rb_r["active_connections_unchanged"], json!(1));
+    assert_eq!(rb_r["persistence"]["state"], json!("persisted"));
+    assert_eq!(rb_r["persistence"]["operation"], json!("rollback"));
+
+    // Active connection stays on its live state and turns stale.
+    let status = client
+        .peer()
+        .call_tool(tool_request(
+            "get_status",
+            json!({ "connection_id": connection_id }),
+        ))
+        .await
+        .unwrap();
+    let st = status.structured_content.as_ref().unwrap();
+    assert_eq!(st["baud_rate"], json!(19200), "live hardware untouched");
+    assert_eq!(st["profile"]["stale"], json!(true), "binding stale");
+
+    // Close cannot overwrite the rollback.
+    let cl = client
+        .peer()
+        .call_tool(tool_request(
+            "close",
+            json!({ "connection_id": connection_id }),
+        ))
+        .await
+        .unwrap();
+    assert_ne!(cl.is_error, Some(true), "{cl:?}");
+    let clr = cl.structured_content.as_ref().unwrap();
+    assert_eq!(clr["profile_persistence"]["state"], json!("failed"));
+    let (_, rev, defaults) = session_profile_snapshot(client, &profile_name).await;
+    assert_eq!(rev, json!(4));
+    assert_eq!(defaults["baud_rate"], json!(9600));
+
+    // Reopen applies the rolled-back baud.
+    let reopened = open_port(client, &slave, json!({})).await;
+    assert_eq!(reopened["baud_rate"], json!(9600));
+
+    harness._client.cancel().await.ok();
+}
+
+/// 9. Rollback of a framing revision: after reopen, actual framed traffic
+///    proves the restored framing default.
+#[tokio::test]
+async fn rollback_framing_revision_proves_framed_traffic_after_reopen() {
+    let mut pty = PtyPair::open().expect("openpty");
+    let slave = pty.slave_path.to_string_lossy().into_owned();
+    let provider = StaticPortProvider::new(vec![StaticPortProvider::usb_port(
+        &slave,
+        VID,
+        PID,
+        "SN-1",
+        Some("Fake USB Serial"),
+        None,
+    )]);
+    let harness = session_harness(provider).await;
+    let client = &harness._client;
+
+    // Open with explicit rx_framing: the generated profile bakes the
+    // framing into revision 1.
+    let opened = open_port(
+        client,
+        &slave,
+        json!({ "rx_framing": { "type": "line", "ending": "lf" } }),
+    )
+    .await;
+    let connection_id = opened["connection_id"].as_str().unwrap().to_string();
+    let profile_name = opened["profile"]["profile_name"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(opened["profile"]["revision"], json!(1));
+
+    // Connection-mode configure clears the framing → revision 2 (raw).
+    let cfg = client
+        .peer()
+        .call_tool(tool_request(
+            "configure",
+            json!({
+                "connection_id": connection_id,
+                "defaults": { "rx_framing": null },
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_ne!(cfg.is_error, Some(true), "{cfg:?}");
+    let c = cfg.structured_content.as_ref().unwrap();
+    assert_eq!(c["profile_persistence"]["state"], json!("persisted"));
+    assert_eq!(c["profile"]["revision"], json!(2));
+    let (_, _, defaults) = session_profile_snapshot(client, &profile_name).await;
+    assert!(
+        defaults["rx_framing"].is_null(),
+        "revision 2 must be raw: {defaults:?}"
+    );
+
+    // Roll back to revision 1 (framing) as new revision 3.
+    let rb = client
+        .peer()
+        .call_tool(tool_request(
+            "rollback_profile",
+            json!({
+                "profile_name": profile_name,
+                "expected_revision": 2,
+                "revision": 1,
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_ne!(rb.is_error, Some(true), "{rb:?}");
+    let rb_r = rb.structured_content.as_ref().unwrap();
+    assert_eq!(rb_r["revision"], json!(3));
+    assert_eq!(rb_r["defaults"]["rx_framing"]["type"], json!("line"));
+    assert_eq!(rb_r["active_connections_unchanged"], json!(1));
+
+    // Close (stale → failed, file unchanged), reopen, framed read proves
+    // the restored framing.
+    let cl = client
+        .peer()
+        .call_tool(tool_request(
+            "close",
+            json!({ "connection_id": connection_id }),
+        ))
+        .await
+        .unwrap();
+    assert_ne!(cl.is_error, Some(true), "{cl:?}");
+    assert_eq!(
+        cl.structured_content.as_ref().unwrap()["profile_persistence"]["state"],
+        json!("failed")
+    );
+
+    let reopened = open_port(client, &slave, json!({})).await;
+    let reopened_id = reopened["connection_id"].as_str().unwrap().to_string();
+    pty.write_device(b"ROLLED\n").await.unwrap();
+    let read = client
+        .peer()
+        .call_tool(tool_request(
+            "read",
+            json!({ "connection_id": reopened_id, "timeout_ms": 1000 }),
+        ))
+        .await
+        .unwrap();
+    assert_ne!(read.is_error, Some(true), "{read:?}");
+    let rd = read.structured_content.as_ref().unwrap();
+    let frames = rd["frames"].as_array().expect("framed read expected");
+    assert_eq!(frames[0]["data"], json!("ROLLED"));
+
+    harness._client.cancel().await.ok();
+}
+
+/// 10. Wrong expected revision and evicted revision are tool errors that
+///     leave the file unchanged.
+#[tokio::test]
+async fn rollback_wrong_expected_and_evicted_revision_error_without_file_change() {
+    let pty = PtyPair::open().expect("openpty");
+    let slave = pty.slave_path.to_string_lossy().into_owned();
+    let provider = StaticPortProvider::new(vec![StaticPortProvider::usb_port(
+        &slave,
+        VID,
+        PID,
+        "SN-1",
+        Some("Fake USB Serial"),
+        None,
+    )]);
+    let harness = session_harness(provider).await;
+    let client = &harness._client;
+
+    let opened = open_port(client, &slave, json!({})).await;
+    let connection_id = opened["connection_id"].as_str().unwrap().to_string();
+    let profile_name = opened["profile"]["profile_name"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    reconfigure_baud(client, &connection_id, 9600).await;
+    reconfigure_baud(client, &connection_id, 19200).await;
+    let (_, rev, defaults) = session_profile_snapshot(client, &profile_name).await;
+    assert_eq!(rev, json!(3));
+    let original_baud = defaults["baud_rate"].clone();
+
+    // Wrong expected_revision → conflict, file unchanged.
+    let bad = client
+        .peer()
+        .call_tool(tool_request(
+            "rollback_profile",
+            json!({
+                "profile_name": profile_name,
+                "expected_revision": 1,
+                "revision": 2,
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(bad.is_error, Some(true), "wrong CAS must error: {bad:?}");
+    let err = tool_error_text(&bad);
+    assert!(
+        err.contains("revision conflict") && err.contains("expected 1") && err.contains("found 3"),
+        "got: {err}"
+    );
+    let (_, rev, defaults) = session_profile_snapshot(client, &profile_name).await;
+    assert_eq!(rev, json!(3), "file unchanged after wrong CAS");
+    assert_eq!(defaults["baud_rate"], original_baud);
+
+    // Evicted/never-existing target revision → tool error, file unchanged.
+    let bad = client
+        .peer()
+        .call_tool(tool_request(
+            "rollback_profile",
+            json!({
+                "profile_name": profile_name,
+                "expected_revision": 3,
+                "revision": 99,
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        bad.is_error,
+        Some(true),
+        "evicted revision must error: {bad:?}"
+    );
+    let err = tool_error_text(&bad);
+    assert!(
+        err.contains("no retained snapshot at revision 99"),
+        "got: {err}"
+    );
+    let (_, rev, defaults) = session_profile_snapshot(client, &profile_name).await;
+    assert_eq!(rev, json!(3), "file unchanged after evicted rollback");
+    assert_eq!(defaults["baud_rate"], original_baud);
+
+    harness._client.cancel().await.ok();
+}
+
+/// 11. Deleting a profile bound to an open connection errors with the
+///     connection ID; after close, deletion succeeds.
+#[tokio::test]
+async fn delete_profile_bound_to_open_connection_errors_and_succeeds_after_close() {
+    let pty = PtyPair::open().expect("openpty");
+    let slave = pty.slave_path.to_string_lossy().into_owned();
+    let provider = StaticPortProvider::new(vec![StaticPortProvider::usb_port(
+        &slave,
+        VID,
+        PID,
+        "SN-1",
+        Some("Fake USB Serial"),
+        None,
+    )]);
+    let harness = session_harness(provider).await;
+    let client = &harness._client;
+
+    let opened = open_port(client, &slave, json!({})).await;
+    let connection_id = opened["connection_id"].as_str().unwrap().to_string();
+    let profile_name = opened["profile"]["profile_name"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let del = client
+        .peer()
+        .call_tool(tool_request(
+            "delete_profile",
+            json!({ "profile_name": profile_name }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        del.is_error,
+        Some(true),
+        "bound profile must refuse deletion: {del:?}"
+    );
+    let err = tool_error_text(&del);
+    assert!(
+        err.contains("bound to open connection") && err.contains(&connection_id),
+        "error must list the bound connection ID: {err}"
+    );
+
+    close_port(client, &connection_id).await;
+
+    let del = client
+        .peer()
+        .call_tool(tool_request(
+            "delete_profile",
+            json!({ "profile_name": profile_name }),
+        ))
+        .await
+        .unwrap();
+    assert_ne!(del.is_error, Some(true), "{del:?}");
+
+    let listed = client
+        .peer()
+        .call_tool(tool_request("list_profiles", json!({})))
+        .await
+        .unwrap();
+    assert_eq!(
+        listed.structured_content.as_ref().unwrap()["count"],
+        json!(0)
+    );
 
     harness._client.cancel().await.ok();
 }

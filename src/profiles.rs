@@ -40,6 +40,58 @@ pub enum IdentityConfidence {
     None,
 }
 
+/// Outcome of a write-through profile persistence attempt (Phase 3B).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ProfilePersistenceState {
+    /// The effective defaults were durably written to the bound profile.
+    Persisted,
+    /// No persistence was needed — the durable defaults already equal the
+    /// connection's effective defaults (no file write happened).
+    NotNeeded,
+    /// The connection is not backed by a durable profile (transient,
+    /// disabled, or no binding); nothing was persisted.
+    Transient,
+    /// Live state changed but the profile write failed or conflicted. The
+    /// binding is dirty (and stale for conflicts/missing profiles).
+    Failed,
+}
+
+/// What kind of durable operation triggered a persistence attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ProfilePersistenceOperation {
+    /// Explicit open-field overrides learned after successful hardware open.
+    OpenOverride,
+    /// A durable live mutation (`reconfigure`, `set_flow_control`,
+    /// connection-mode `configure`).
+    Learned,
+    /// Clean close snapshot/retry.
+    CloseSnapshot,
+    /// The `rollback_profile` tool.
+    Rollback,
+}
+
+/// Additive result of one write-through persistence attempt, carried on
+/// tool results whose live mutation succeeded. `state == "failed"` means
+/// the live change applied but the profile write did not; the binding is
+/// dirty and the error is recorded.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ProfilePersistenceResult {
+    pub state: ProfilePersistenceState,
+    pub operation: ProfilePersistenceOperation,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile_name: Option<String>,
+    /// Profile revision after the attempt (`None` for transient sessions or
+    /// when the attempt failed before any revision was observed).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "crate::schema_helpers::option_uint_schema")]
+    pub revision: Option<u64>,
+    /// Persistence/conflict error text when `state == "failed"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
 /// How an active connection's profile session was selected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -79,8 +131,12 @@ pub struct ProfileSessionResult {
     #[schemars(schema_with = "crate::schema_helpers::option_uint_schema")]
     pub revision: Option<u64>,
     /// `true` when explicit open fields override the selected profile's
-    /// defaults (3B will persist the effective settings).
+    /// defaults (3B persists the effective settings on durable operations).
     pub dirty: bool,
+    /// `true` when the durable profile revision changed externally (CAS
+    /// conflict or rollback) and this connection must not overwrite it.
+    /// Stale bindings keep reporting the conflict until reopened.
+    pub stale: bool,
     /// Candidate profile names when selection was ambiguous; empty
     /// otherwise.
     pub candidates: Vec<String>,
@@ -335,7 +391,7 @@ pub struct ProfileSelector {
 }
 
 /// Default serial configuration applied when opening via this profile.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct ProfileDefaults {
     #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
     #[serde(default = "default_baud")]

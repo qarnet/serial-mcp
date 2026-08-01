@@ -46,6 +46,7 @@ const EXPECTED_TOOLS: &[&str] = &[
     "save_profile",
     "delete_profile",
     "configure",
+    "rollback_profile",
     "get_log",
     "clear_log",
     "export_log",
@@ -63,7 +64,7 @@ async fn initialize_handshake_succeeds() {
 }
 
 #[tokio::test]
-async fn list_tools_returns_all_twenty_five_tools() {
+async fn list_tools_returns_all_twenty_six_tools() {
     let server = common::spawned::SpawnedServer::start().await;
     let (client, _rx) = common::spawned::spawn_client(&server).await.unwrap();
 

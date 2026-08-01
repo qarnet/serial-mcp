@@ -5,6 +5,8 @@ use rmcp::{model::Meta, Json, Peer, RoleServer};
 use tokio::time::{Duration, Instant};
 use tracing::{debug, info};
 
+use crate::learning;
+use crate::profiles::ProfilePersistenceOperation;
 use crate::serial::{ConnectionManager, SerialConnection};
 use crate::tools::helpers::{
     clamp_timeout_or_err, log_tool_err, lookup_connection, MAX_TIMEOUT_MS,
@@ -50,6 +52,7 @@ pub async fn set_dtr_rts(
 
 pub async fn set_flow_control(
     connections: &Arc<ConnectionManager>,
+    store: &Arc<crate::profile_store::ProfileStore>,
     args: SetFlowControlArgs,
 ) -> Result<Json<SetFlowControlResult>, String> {
     debug!(
@@ -59,6 +62,11 @@ pub async fn set_flow_control(
 
     let flow_control = args.flow_control.parse::<crate::serial::FlowControl>()?;
     let connection = lookup_connection(connections, &args.connection_id).await?;
+
+    // Hold the learning lock across the hardware mutation, the effective
+    // snapshot, and the CAS persistence attempt.
+    let _learning_guard = connection.learning_lock().lock().await;
+
     connection
         .set_flow_control(flow_control)
         .await
@@ -70,10 +78,18 @@ pub async fn set_flow_control(
             )
         })?;
 
+    // Write-through learning: hardware mutation succeeded; persist flow
+    // control through the bound profile (if any). Failure keeps the result
+    // successful with `state="failed"`.
+    let (profile, persistence) =
+        learning::learn(store, &connection, ProfilePersistenceOperation::Learned).await;
+
     Ok(Json(SetFlowControlResult {
         connection_id: args.connection_id,
         name: connection.name().map(str::to_string),
         flow_control,
+        profile,
+        profile_persistence: Some(persistence),
     }))
 }
 
