@@ -228,12 +228,7 @@
 
 Non-feature work, roughly in suggested order. From the 2026-07-05 repo review.
 
-### Split `src/serial.rs` and `src/tools/helpers.rs`
-- `src/serial.rs` holds `SerialConnection`, `ConnectionManager`,
-  `ConnectionConfig`, six enums, `PortInfo`, the `SerialIo` trait, and a
-  `test_support` module — god-file; split into `serial/config.rs`,
-  `serial/connection.rs`, `serial/manager.rs`, `serial/port_info.rs`,
-  `serial/test_support.rs`
+### Split `src/tools/helpers.rs`
 - `src/tools/helpers.rs` mixes validation, ring driving, result building,
   sinks, encoding fallback, and open-arg parsing — split into
   `tools/rx_validate.rs`, `tools/read_loop.rs`, `tools/result_builders.rs`;
