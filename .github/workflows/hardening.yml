@@ -60,7 +60,7 @@ jobs:
 
       - name: Upload fuzz artifacts and corpus
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: fuzz-artifacts-${{ matrix.target }}
           path: |
@@ -110,7 +110,7 @@ jobs:
 
       - name: Upload mutants.out
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: mutants-out
           path: mutants.out
