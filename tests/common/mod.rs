@@ -14,6 +14,57 @@ pub mod controlled;
 pub mod firmware;
 pub mod spawned;
 
+/// Absolute path to the `serial-mcp` workspace root.
+///
+/// Resolved at first call by reading `CARGO_MANIFEST_DIR` (always
+/// populated by cargo when running tests) and walking up to the
+/// directory that contains `Cargo.toml`.
+pub fn workspace_root() -> &'static std::path::PathBuf {
+    static WORKSPACE_ROOT: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+    WORKSPACE_ROOT.get_or_init(|| {
+        let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        debug_assert!(
+            manifest.join("Cargo.toml").is_file(),
+            "CARGO_MANIFEST_DIR does not point at a Cargo workspace root: {}",
+            manifest.display()
+        );
+        manifest
+    })
+}
+
+/// Explicit expected tool list shared by the HTTP and stdio transport
+/// tests. Kept independent of the production `tool_catalog` so the
+/// transport tests verify the actual wire surface.
+pub const EXPECTED_TOOLS: &[&str] = &[
+    "list_ports",
+    "list_connections",
+    "open",
+    "close",
+    "write",
+    "transact",
+    "read",
+    "capture_boot",
+    "flush",
+    "set_dtr_rts",
+    "set_flow_control",
+    "send_break",
+    "subscribe",
+    "unsubscribe",
+    "get_status",
+    "reconfigure",
+    "list_profiles",
+    "open_profile",
+    "save_profile",
+    "delete_profile",
+    "configure",
+    "rollback_profile",
+    "get_log",
+    "clear_log",
+    "export_log",
+    "reconnect",
+    "compute_checksum",
+];
+
 use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;

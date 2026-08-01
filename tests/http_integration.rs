@@ -26,38 +26,9 @@ use serial_mcp::serial::{test_support::loopback_connection, ConnectionManager};
 mod common;
 use common::controlled::ControlledState;
 use common::{
-    args_object, connect_client, next_notification, tool_request, NotificationCollector, TestServer,
+    args_object, connect_client, next_notification, tool_request, NotificationCollector,
+    TestServer, EXPECTED_TOOLS,
 };
-
-const EXPECTED_TOOLS: &[&str] = &[
-    "list_ports",
-    "list_connections",
-    "open",
-    "close",
-    "write",
-    "transact",
-    "read",
-    "capture_boot",
-    "flush",
-    "set_dtr_rts",
-    "set_flow_control",
-    "send_break",
-    "subscribe",
-    "unsubscribe",
-    "get_status",
-    "reconfigure",
-    "list_profiles",
-    "open_profile",
-    "save_profile",
-    "delete_profile",
-    "configure",
-    "rollback_profile",
-    "get_log",
-    "clear_log",
-    "export_log",
-    "reconnect",
-    "compute_checksum",
-];
 
 #[tokio::test]
 async fn initialize_handshake_succeeds() {
