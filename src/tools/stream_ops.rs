@@ -279,8 +279,19 @@ impl RxFrameSink for SubscribeFrameSink<'_> {
         matched: bool,
         match_index: Option<usize>,
     ) -> SinkFlow {
-        let encoded = match codec::encode(self.encoding, &frame.data) {
-            Ok(s) => s,
+        let encoded = match codec::encode_or_hex(self.encoding, &frame.data) {
+            Ok(payload) => {
+                if let Some(reason) = &payload.fallback_reason {
+                    // Lossless fallback: warn, but never count as a drop —
+                    // the bytes are still represented exactly.
+                    warn!(
+                        "RX frame on {} not encodable as {} ({reason}); \
+                         using hex",
+                        self.conn_id, self.encoding
+                    );
+                }
+                payload
+            }
             Err(e) => {
                 warn!("RX frame encoding error on {}: {e}", self.conn_id);
                 self.conn.record_notification_drop();
@@ -295,8 +306,8 @@ impl RxFrameSink for SubscribeFrameSink<'_> {
             connection_id: self.conn_id.to_string(),
             frame_index: frame.index,
             frame_type: frame.frame_type.to_string(),
-            encoding: self.encoding.to_string(),
-            data: encoded,
+            encoding: encoded.encoding.to_string(),
+            data: encoded.data,
             parsed: frame.parsed,
             matched: if matched { Some(true) } else { None },
         };
@@ -554,9 +565,22 @@ async fn stream_rx_from_ring(
             }
 
             // Emit data notification (including gap info).
-            let encoded = match codec::encode(encoding, &chunk) {
-                Ok(s) => s,
+            let encoded = match codec::encode_or_hex(encoding, &chunk) {
+                Ok(payload) => {
+                    if let Some(reason) = &payload.fallback_reason {
+                        // Lossless fallback: the chunk still emits as exact
+                        // spaced hex and the private cursor advances. Never
+                        // counted as a dropped notification.
+                        warn!(
+                            "RX chunk on {conn_id}: {encoding} cannot encode {n} bytes \
+                             ({reason}); using hex"
+                        );
+                    }
+                    payload
+                }
                 Err(e) => {
+                    // True encode+hex failure: preserve the legacy error
+                    // notification + drop accounting.
                     warn!(
                         "RX encoding error on {conn_id}: {encoding} cannot encode {n} bytes — dropped"
                     );
@@ -601,8 +625,8 @@ async fn stream_rx_from_ring(
             let notification = SubscribeChunkNotification {
                 connection_id: conn_id.to_string(),
                 bytes_read: n,
-                encoding: encoding.to_string(),
-                data: encoded,
+                encoding: encoded.encoding.to_string(),
+                data: encoded.data,
                 bytes_lost: if slice.bytes_lost > 0 {
                     Some(slice.bytes_lost)
                 } else {
@@ -645,14 +669,32 @@ async fn stream_rx_from_ring(
     if let Some(ref mut dec) = decoder {
         if let Some(partial) = dec.flush_partial() {
             frames_emitted += 1;
-            if let Ok(encoded) = codec::encode(encoding, &partial.data) {
+            let encoded = match codec::encode_or_hex(encoding, &partial.data) {
+                Ok(payload) => {
+                    if let Some(reason) = &payload.fallback_reason {
+                        warn!(
+                            "RX partial frame on {conn_id} not encodable as {encoding} \
+                             ({reason}); using hex"
+                        );
+                    }
+                    Some(payload)
+                }
+                Err(e) => {
+                    warn!("RX partial frame encoding error on {conn_id}: {e}");
+                    conn.record_notification_drop();
+                    conn.log()
+                        .notification_dropped(&format!("partial frame encoding error: {e}"));
+                    None
+                }
+            };
+            if let Some(encoded) = encoded {
                 let notification = SubscribePartialFrameNotification {
                     connection_id: conn_id.to_string(),
                     partial: true,
                     frame_index: partial.index,
                     frame_type: partial.frame_type.to_string(),
-                    encoding: encoding.to_string(),
-                    data: encoded,
+                    encoding: encoded.encoding.to_string(),
+                    data: encoded.data,
                     parsed: partial.parsed,
                 };
                 let payload = serde_json::to_value(&notification).unwrap_or_else(|e| {
@@ -702,15 +744,29 @@ async fn stream_rx_from_ring(
     } else {
         (outcome.match_index, None)
     };
-    let match_data_encoded = match shaped_data.as_ref() {
-        Some(data) => match codec::encode(encoding, data) {
-            Ok(encoded) => Some(encoded),
+    // Shaped match context: `data` + its effective `encoding` are set
+    // together so hex fallback remains decodable. A successful fallback is
+    // warned but not counted; only a true encode+hex failure drops.
+    let (match_data_encoded, match_data_encoding) = match shaped_data.as_ref() {
+        Some(data) => match codec::encode_or_hex(encoding, data) {
+            Ok(payload) => {
+                if let Some(reason) = &payload.fallback_reason {
+                    warn!(
+                        "RX stream match context on {conn_id} not encodable as {encoding} \
+                         ({reason}); using hex"
+                    );
+                }
+                (Some(payload.data), Some(payload.encoding.to_string()))
+            }
             Err(e) => {
                 warn!("RX stream match context encoding error on {conn_id}: {e}");
-                None
+                conn.record_notification_drop();
+                conn.log()
+                    .notification_dropped(&format!("match context encoding error: {e}"));
+                (None, None)
             }
         },
-        None => None,
+        None => (None, None),
     };
 
     let stop_notification = SubscribeStopNotification {
@@ -739,6 +795,11 @@ async fn stream_rx_from_ring(
         },
         data: if outcome.matched {
             match_data_encoded
+        } else {
+            None
+        },
+        encoding: if outcome.matched {
+            match_data_encoding
         } else {
             None
         },
@@ -947,6 +1008,7 @@ mod tests {
             match_index: None,
             match_frame_index: None,
             data: None,
+            encoding: None,
             frames_emitted: 0,
             frames_dropped: 0,
             start_offset: 0,
@@ -964,6 +1026,8 @@ mod tests {
         assert!(v.get("match_index").is_none());
         assert!(v.get("match_frame_index").is_none());
         assert!(v.get("data").is_none());
+        // encoding is only serialized alongside data.
+        assert!(v.get("encoding").is_none());
 
         // With match.
         let n_m = SubscribeStopNotification {
@@ -983,6 +1047,7 @@ mod tests {
             match_index: Some(5),
             match_frame_index: Some(2),
             data: Some("TARGET".into()),
+            encoding: Some("utf8".into()),
             frames_emitted: 3,
             frames_dropped: 0,
             start_offset: 0,
@@ -993,5 +1058,6 @@ mod tests {
         assert_eq!(v["match_index"], 5);
         assert_eq!(v["match_frame_index"], 2);
         assert_eq!(v["data"], "TARGET");
+        assert_eq!(v["encoding"], "utf8");
     }
 }

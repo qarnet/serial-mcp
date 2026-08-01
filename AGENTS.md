@@ -104,6 +104,25 @@ cargo test --test native_sim_connection_lifecycle -- --ignored --test-threads=1
   `src/precedence.rs` (`resolve_field`), called from `io_ops::write`/`read` +
   `stream_ops::subscribe`. `ConnectionConfig` + `SerialConnection` store the
   defaults; accessors `*_default()`.
+- **Lossless RX encoding parity:** `read`, `subscribe`, and `capture_boot`
+  encode every RX payload via the shared `codec::encode_or_hex` primitive
+  (`src/codec.rs`): try the requested encoding; on failure re-encode the SAME
+  bytes as exact lowercase spaced hex and report the payload's effective
+  `encoding` as `"hex"` (`EncodedPayload.fallback_reason` carries the original
+  error text). A successful fallback warns (`tracing::warn!`) but is NEVER a
+  drop: no `notification_dropped` log event, no `record_notification_drop`,
+  no `frames_dropped` increment, no `SubscribeEncodingErrorNotification`.
+  Applies to raw reads, each decoded frame (encoded independently from the
+  REQUESTED encoding — a valid UTF-8 frame before malformed binary SLIP stays
+  UTF-8 while the raw tail is hex), subscribe raw chunks, framed frame
+  notifications, partial-frame flushes, and shaped match-context `data` in the
+  final stop notification (`SubscribeStopNotification.encoding` accompanies
+  `data`, serialized only when `data` is present). Never lossy UTF-8. Only a
+  TRUE encode+hex failure counts as a drop: read becomes a tool-result
+  construction error, subscribe's raw path keeps the legacy
+  `SubscribeEncodingErrorNotification` + drop count, and frame/partial/context
+  paths warn + count. `SubscribeEncodingErrorNotification` stays on the wire
+  surface (true-failure path only).
 - `RxStopReason::FramingError` is a runtime decode-error stop reason (SLIP
   malformed escape, COBS invalid code). NOT a normal stop
   (`is_normal_stop` excludes it). `read` surfaces it as a normal tool result

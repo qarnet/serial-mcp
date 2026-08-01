@@ -111,6 +111,42 @@ async fn pty_device_write_then_client_read() {
 }
 
 #[tokio::test]
+async fn pty_device_binary_read_falls_back_to_exact_hex() {
+    let (_server, client, _rx, mut pty, connection_id) = setup().await;
+
+    // Invalid UTF-8 bytes over the real PTY serial path.
+    pty.write_device(&[0xDE, 0xAD, 0xBE, 0xEF, 0xFF])
+        .await
+        .unwrap();
+
+    let result = client
+        .peer()
+        .call_tool(tool_request(
+            "read",
+            json!({
+                "connection_id": connection_id,
+                "timeout_ms": 1000,
+                "encoding": "utf8",
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_ne!(result.is_error, Some(true), "{result:?}");
+    let structured = result.structured_content.expect("structured");
+    assert_eq!(structured["bytes_read"], json!(5));
+    assert_eq!(structured["data"], json!("de ad be ef ff"));
+    assert_eq!(structured["encoding"], json!("hex"));
+    // Cat path drains instantly ("drained") when bytes are already buffered;
+    // otherwise the read waits and stops at "timeout". Both carry the data.
+    assert!(
+        structured["stop_reason"] == json!("drained")
+            || structured["stop_reason"] == json!("timeout"),
+        "unexpected stop_reason: {structured:?}"
+    );
+    client.cancel().await.ok();
+}
+
+#[tokio::test]
 async fn pty_subscribe_streams_device_writes_as_notifications() {
     let (_server, client, mut rx, mut pty, connection_id) = setup().await;
 

@@ -933,21 +933,19 @@ pub fn build_read_result(
     let bytes_read = outcome.bytes.len();
     let elapsed_ms = outcome.elapsed_ms;
 
-    let is_framing_error = outcome.error.is_some();
-    let (data, effective_encoding) = match codec::encode(encoding, &outcome.bytes) {
-        Ok(s) => (s, encoding),
-        Err(e) if is_framing_error => {
-            // Framing-error path: fall back to hex so the partial bytes and
-            // the framing diagnostic both survive. Lossy UTF-8 was rejected
-            // (corrupts bytes); base64 would also work but hex matches the
-            // binary-protocol context that produced the framing error.
-            tracing::warn!(
-                "read framing-error data not encodable as {encoding} ({e}); \
-                 falling back to hex"
-            );
-            let hex = codec::encode(Encoding::Hex, &outcome.bytes)
-                .map_err(|e| format!("hex fallback encoding failed - {e}"))?;
-            (hex, Encoding::Hex)
+    let (data, effective_encoding) = match codec::encode_or_hex(encoding, &outcome.bytes) {
+        Ok(payload) => {
+            if let Some(reason) = &payload.fallback_reason {
+                // Lossless fallback: exact spaced hex preserves every byte.
+                // Warned but never counted as a drop. Lossy UTF-8 was
+                // rejected (corrupts bytes); hex matches the binary-protocol
+                // context that produced the unencodable payload.
+                tracing::warn!(
+                    "read data not encodable as {encoding} ({reason}); \
+                     falling back to hex"
+                );
+            }
+            (payload.data, payload.encoding)
         }
         Err(e) => return Err(format!("Data encoding failed - {e}")),
     };
@@ -960,32 +958,34 @@ pub fn build_read_result(
             .frames
             .iter()
             .filter_map(|f| {
-                let encode = |enc: Encoding, data: &[u8]| -> Option<FrameResult> {
-                    match codec::encode(enc, data) {
-                        Ok(fdata) => Some(FrameResult {
-                            data: fdata,
-                            encoding: enc.to_string(),
+                // Encode each frame independently from the REQUESTED
+                // encoding (not the top-level effective encoding): a valid
+                // UTF-8 frame preceding malformed binary SLIP stays UTF-8
+                // while the top-level raw data falls back to hex.
+                match codec::encode_or_hex(encoding, &f.data) {
+                    Ok(payload) => {
+                        if let Some(reason) = &payload.fallback_reason {
+                            tracing::warn!(
+                                "Frame {} not encodable as {encoding} ({reason}); \
+                                 falling back to hex",
+                                f.index
+                            );
+                        }
+                        Some(FrameResult {
+                            data: payload.data,
+                            encoding: payload.encoding.to_string(),
                             frame_index: f.index,
                             frame_type: f.frame_type.to_string(),
                             parsed: f.parsed.clone(),
-                        }),
-                        Err(err) => {
-                            tracing::warn!("Frame {} encoding failed: {err}", f.index);
-                            None
-                        }
+                        })
                     }
-                };
-                // Try the effective encoding first.
-                let mut frame = encode(effective_encoding, &f.data);
-                // On framing error, fall back to hex per-frame so partial
-                // frames survive alongside the raw bytes.
-                if frame.is_none() && is_framing_error && effective_encoding != Encoding::Hex {
-                    frame = encode(Encoding::Hex, &f.data);
+                    Err(err) => {
+                        // Only a true encode+hex failure counts as a drop.
+                        tracing::warn!("Frame {} encoding failed: {err}", f.index);
+                        frames_dropped += 1;
+                        None
+                    }
                 }
-                if frame.is_none() {
-                    frames_dropped += 1;
-                }
-                frame
             })
             .collect();
         if encoded_frames.is_empty() {
