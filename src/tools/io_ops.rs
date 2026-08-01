@@ -32,6 +32,7 @@ pub async fn write(
     let encoding = parse_encoding(&args.encoding)?;
     let connection = lookup_connection(connections, &args.connection_id).await?;
     let decoded = decode_tx_payload(encoding, &args.data, "write.data.len()")?;
+    let decoded_len = decoded.len();
 
     // Resolve tx_framing via the shared 4-layer precedence helper.
     let tx_framing = crate::precedence::resolve_field(
@@ -42,7 +43,7 @@ pub async fn write(
         connection.protocol_default(),
     );
 
-    let prepared =
+    let data =
         apply_tx_framing(decoded, tx_framing.as_ref(), "write.framed_len()").map_err(|err| {
             match err {
                 TxFramingError::Encode(e) => log_tool_err(
@@ -55,7 +56,7 @@ pub async fn write(
         })?;
 
     let session = tx_sessions.get_or_create(Arc::clone(&connection)).await;
-    let bytes_written = session.write(prepared.data).await.map_err(|e| {
+    let bytes_written = session.write(data).await.map_err(|e| {
         log_tool_err(
             "write",
             &format!("Data sending failed on {}", args.connection_id),
@@ -69,8 +70,8 @@ pub async fn write(
         connection_id: args.connection_id,
         name: connection.name().map(str::to_string),
         bytes_written,
-        decoded_bytes: prepared.decoded_len,
-        encoding: prepared.encoding.to_string(),
+        decoded_bytes: decoded_len,
+        encoding: encoding.to_string(),
     }))
 }
 
@@ -196,6 +197,7 @@ pub async fn transact(
 
     // --- Write half (shared decode/validate/framing, then session I/O) ---
     let decoded = decode_tx_payload(encoding, &args.data, "transact.data.len()")?;
+    let decoded_len = decoded.len();
 
     let tx_framing = crate::precedence::resolve_field(
         args.tx_framing,
@@ -205,15 +207,17 @@ pub async fn transact(
         connection.protocol_default(),
     );
 
-    let prepared = apply_tx_framing(decoded, tx_framing.as_ref(), "transact.framed_len()")
-        .map_err(|err| match err {
-            TxFramingError::Encode(e) => format!("TX framing failed: {e}"),
-            TxFramingError::Size(e) => e,
+    let data =
+        apply_tx_framing(decoded, tx_framing.as_ref(), "transact.framed_len()").map_err(|err| {
+            match err {
+                TxFramingError::Encode(e) => format!("TX framing failed: {e}"),
+                TxFramingError::Size(e) => e,
+            }
         })?;
 
     let tx_session = tx_sessions.get_or_create(Arc::clone(&connection)).await;
     let bytes_written = tx_session
-        .write(prepared.data)
+        .write(data)
         .await
         .map_err(|e| format!("Write failed: {e}"))?;
     connection.record_write_op();
@@ -221,8 +225,8 @@ pub async fn transact(
         connection_id: args.connection_id.clone(),
         name: connection.name().map(str::to_string),
         bytes_written,
-        decoded_bytes: prepared.decoded_len,
-        encoding: prepared.encoding.to_string(),
+        decoded_bytes: decoded_len,
+        encoding: encoding.to_string(),
     };
 
     // --- Read half (inlined from read handler, default from="now") ---
@@ -392,38 +396,20 @@ async fn discard_rx_backlog(rx_sessions: &Arc<RxSessionManager>, connection_id: 
 // Shared TX preparation (used by `write` and `transact`)
 // ------------------------------------------------------------------
 
-/// Decoded (but not yet framed) TX payload from a tool string, with its
-/// decoded byte count and resolved encoding. Size was validated against
-/// `MAX_WRITE_BYTES` before this value exists.
-#[derive(Debug)]
-struct DecodedTxPayload {
-    bytes: Vec<u8>,
-    decoded_len: usize,
-    encoding: Encoding,
-}
-
-/// Decode a tool string and validate the decoded size. Failure mapping is
-/// shared: decode errors produce the exact `Data decoding failed - {e}` text
-/// and oversize produces the caller-supplied field-label error.
+/// Decode a tool string and validate decoded size against `MAX_WRITE_BYTES`.
 fn decode_tx_payload(
     encoding: Encoding,
     input: &str,
     decoded_limit_field: &str,
-) -> Result<DecodedTxPayload, String> {
+) -> Result<Vec<u8>, String> {
     let bytes =
         crate::codec::decode(encoding, input).map_err(|e| format!("Data decoding failed - {e}"))?;
-    let decoded_len = bytes.len();
-    clamp_or_err(decoded_limit_field, decoded_len, MAX_WRITE_BYTES)?;
-    Ok(DecodedTxPayload {
-        bytes,
-        decoded_len,
-        encoding,
-    })
+    clamp_or_err(decoded_limit_field, bytes.len(), MAX_WRITE_BYTES)?;
+    Ok(bytes)
 }
 
-/// Failure of the shared TX framing stage, split so each caller can keep its
-/// exact framing error text while size-validation errors pass through
-/// unchanged.
+/// Failure of the shared TX framing stage: callers map `Encode` errors
+/// themselves; `Size` validation errors pass through unchanged.
 #[derive(Debug)]
 enum TxFramingError {
     /// `TxFramingMode::encode` failed; the caller owns the error mapping.
@@ -433,42 +419,22 @@ enum TxFramingError {
     Size(String),
 }
 
-/// Fully prepared TX bytes for the session: `Arc<[u8]>` payload, decoded
-/// byte count (pre-framing), and the resolved encoding.
-#[derive(Debug)]
-struct PreparedTxData {
-    data: Arc<[u8]>,
-    decoded_len: usize,
-    encoding: Encoding,
-}
-
-/// Apply TX framing when configured; without framing the decoded bytes are
-/// retained directly. Validates the final length against `MAX_WRITE_BYTES`
-/// with the supplied field label. Does no I/O, logging, or counter work.
+/// Apply TX framing when configured; otherwise return the decoded bytes
+/// unchanged. Validates the final length against `MAX_WRITE_BYTES`.
 fn apply_tx_framing(
-    decoded: DecodedTxPayload,
+    decoded: Vec<u8>,
     framing: Option<&crate::framing::TxFramingConfig>,
     framed_limit_field: &str,
-) -> Result<PreparedTxData, TxFramingError> {
-    let DecodedTxPayload {
-        bytes,
-        decoded_len,
-        encoding,
-    } = decoded;
-    let data: Arc<[u8]> = match framing {
+) -> Result<Arc<[u8]>, TxFramingError> {
+    match framing {
         Some(cfg) => {
-            let framed = cfg.mode.encode(&bytes).map_err(TxFramingError::Encode)?;
+            let framed = cfg.mode.encode(&decoded).map_err(TxFramingError::Encode)?;
             clamp_or_err(framed_limit_field, framed.len(), MAX_WRITE_BYTES)
                 .map_err(TxFramingError::Size)?;
-            Arc::from(framed)
+            Ok(Arc::from(framed))
         }
-        None => Arc::from(bytes),
-    };
-    Ok(PreparedTxData {
-        data,
-        decoded_len,
-        encoding,
-    })
+        None => Ok(Arc::from(decoded)),
+    }
 }
 
 #[cfg(test)]
@@ -478,21 +444,18 @@ mod tests {
     use crate::framing::{Endianness, TxFramingConfig, TxFramingMode, TxLineEnding};
 
     #[test]
-    fn decode_tx_payload_preserves_encoding_and_decoded_length() {
+    fn decode_tx_payload_preserves_decoded_bytes_across_encodings() {
         let utf8 = decode_tx_payload(Encoding::Utf8, "hello", "t.data.len()").unwrap();
-        assert_eq!(utf8.bytes, b"hello");
-        assert_eq!(utf8.decoded_len, 5);
-        assert_eq!(utf8.encoding, Encoding::Utf8);
+        assert_eq!(utf8, b"hello");
+        assert_eq!(utf8.len(), 5);
 
         let hex = decode_tx_payload(Encoding::Hex, "48 65 6c 6c 6f", "t.data.len()").unwrap();
-        assert_eq!(hex.bytes, b"Hello");
-        assert_eq!(hex.decoded_len, 5);
-        assert_eq!(hex.encoding, Encoding::Hex);
+        assert_eq!(hex, b"Hello");
+        assert_eq!(hex.len(), 5);
 
         let b64 = decode_tx_payload(Encoding::Base64, "aGVsbG8=", "t.data.len()").unwrap();
-        assert_eq!(b64.bytes, b"hello");
-        assert_eq!(b64.decoded_len, 5);
-        assert_eq!(b64.encoding, Encoding::Base64);
+        assert_eq!(b64, b"hello");
+        assert_eq!(b64.len(), 5);
     }
 
     #[test]
@@ -518,10 +481,8 @@ mod tests {
     #[test]
     fn apply_tx_framing_unframed_retains_bytes_byte_identical() {
         let decoded = decode_tx_payload(Encoding::Utf8, "hello", "t.data.len()").unwrap();
-        let prepared = apply_tx_framing(decoded, None, "t.framed_len()").unwrap();
-        assert_eq!(&*prepared.data, b"hello");
-        assert_eq!(prepared.decoded_len, 5);
-        assert_eq!(prepared.encoding, Encoding::Utf8);
+        let data = apply_tx_framing(decoded, None, "t.framed_len()").unwrap();
+        assert_eq!(&*data, b"hello");
     }
 
     #[test]
@@ -532,13 +493,8 @@ mod tests {
                 ending: TxLineEnding::Crlf,
             },
         };
-        let prepared = apply_tx_framing(decoded, Some(&framing), "t.framed_len()").unwrap();
-        assert_eq!(&*prepared.data, b"hello\r\n");
-        assert_eq!(
-            prepared.decoded_len, 5,
-            "decoded length stays the pre-framing length"
-        );
-        assert_eq!(prepared.encoding, Encoding::Utf8);
+        let data = apply_tx_framing(decoded, Some(&framing), "t.framed_len()").unwrap();
+        assert_eq!(&*data, b"hello\r\n");
     }
 
     #[test]
