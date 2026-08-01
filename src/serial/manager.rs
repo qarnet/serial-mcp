@@ -3,7 +3,6 @@
 //! manager-only tests. Depends on the `config` and `connection` siblings.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use tokio::sync::Mutex;
@@ -179,7 +178,7 @@ impl ConnectionManager {
                 match conn_clone.reconnect().await {
                     Ok(()) => {
                         // Reset attempt counter after successful reconnect.
-                        conn_clone.reconnect_attempts.store(0, Ordering::SeqCst);
+                        conn_clone.reset_reconnect_attempts();
                         // Restart the RX pump so data flows again.
                         if let Some(session) = rx_sessions.get(&id_owned).await {
                             session.ensure_pump_running();

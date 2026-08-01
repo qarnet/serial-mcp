@@ -153,7 +153,7 @@ pub struct SerialConnection {
     /// Reconnect policy for this connection.
     pub(crate) reconnect_policy: StdMutex<ReconnectPolicy>,
     /// Count of reconnect attempts since the last disconnect.
-    pub(crate) reconnect_attempts: AtomicU64,
+    reconnect_attempts: AtomicU64,
     /// Last fatal I/O error message and timestamp.
     last_error: StdMutex<Option<(std::time::SystemTime, String)>>,
     /// Default TX framing from profile/open call.
@@ -550,6 +550,11 @@ impl SerialConnection {
                 Err(e)
             }
         }
+    }
+
+    /// Reset the reconnect-attempt counter after a successful reconnect.
+    pub(super) fn reset_reconnect_attempts(&self) {
+        self.reconnect_attempts.store(0, Ordering::SeqCst);
     }
 
     /// Build a `ConnectionConfig` from the current connection state,
