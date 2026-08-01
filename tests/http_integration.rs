@@ -1359,7 +1359,10 @@ async fn subscribe_binary_partial_flush_emits_hex_with_effective_encoding() {
         .expect("stop notification");
     let stop_data = stop.data.as_object().unwrap();
     assert_eq!(stop_data["stop_reason"], json!("timeout"));
+    // All observed partial bytes were emitted, so bytes_returned is the exact
+    // partial raw length and nothing is reported as truncated.
     assert_eq!(stop_data["bytes_returned"], json!(3));
+    assert_eq!(stop_data["truncated"], json!(false));
 
     client.cancel().await.ok();
 }

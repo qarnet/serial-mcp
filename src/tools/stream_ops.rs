@@ -713,9 +713,13 @@ async fn stream_rx_from_ring(
                     conn.record_notification_drop();
                     conn.log()
                         .notification_dropped(&format!("partial frame notify: {e}"));
+                } else {
+                    // Count only bytes actually emitted to the client; an
+                    // encode failure or a failed send leaves total_returned
+                    // unchanged (same contract as the raw chunk path).
+                    total_returned += partial.data.len();
                 }
             }
-            total_returned += partial.data.len();
         }
     }
 
