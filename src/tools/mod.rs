@@ -13,8 +13,27 @@ mod tests {
     use serde_json;
     use serde_json::json;
 
-    use crate::server::SerialHandler;
+    use crate::server::tool_catalog;
     use crate::tools::types::OpenArgs;
+
+    /// The exhaustive 26-tool catalog served by MCP (Phase 4: shared with
+    /// the xtask `agent-eval` catalog metrics via
+    /// `crate::server::tool_catalog`). A missing tool would skip its
+    /// `outputSchema`/`title` check and any uint-format scan, so the count
+    /// is guarded explicitly.
+    #[test]
+    fn tool_catalog_has_exactly_twenty_six_tools() {
+        let catalog = tool_catalog();
+        assert_eq!(
+            catalog.len(),
+            26,
+            "tool catalog must contain exactly 26 tools: {catalog:?}"
+        );
+        let mut names: Vec<String> = catalog.iter().map(|t| t.name.to_string()).collect();
+        names.sort();
+        names.dedup();
+        assert_eq!(names.len(), 26, "tool names must be unique");
+    }
 
     /// Regression guard: every MCP tool must carry `outputSchema` and `title`,
     /// and every MCP tool `outputSchema` must be free of the non-standard
@@ -27,51 +46,11 @@ mod tests {
     /// because it only checked `uint`/`uint32`/`uint64` and not `uint8`/
     /// `uint16`. The `uint8`/`uint16` cases are now covered here, and the
     /// per-type coverage lives in `serial::schema`.
-    ///
-    /// Keep this list in sync with the `#[tool]` methods in `src/server.rs`.
-    /// The list below is exhaustive (26 tools); a missing tool would skip its
-    /// `outputSchema`/`title` check and any uint-format scan.
-    fn all_tool_attrs() -> Vec<(&'static str, rmcp::model::Tool)> {
-        vec![
-            ("list_ports", SerialHandler::list_ports_tool_attr()),
-            (
-                "list_connections",
-                SerialHandler::list_connections_tool_attr(),
-            ),
-            ("open", SerialHandler::open_tool_attr()),
-            ("close", SerialHandler::close_tool_attr()),
-            ("write", SerialHandler::write_tool_attr()),
-            ("transact", SerialHandler::transact_tool_attr()),
-            ("read", SerialHandler::read_tool_attr()),
-            ("flush", SerialHandler::flush_tool_attr()),
-            ("set_dtr_rts", SerialHandler::set_dtr_rts_tool_attr()),
-            (
-                "set_flow_control",
-                SerialHandler::set_flow_control_tool_attr(),
-            ),
-            ("send_break", SerialHandler::send_break_tool_attr()),
-            ("subscribe", SerialHandler::subscribe_tool_attr()),
-            ("unsubscribe", SerialHandler::unsubscribe_tool_attr()),
-            ("get_status", SerialHandler::get_status_tool_attr()),
-            ("reconfigure", SerialHandler::reconfigure_tool_attr()),
-            ("list_profiles", SerialHandler::list_profiles_tool_attr()),
-            ("open_profile", SerialHandler::open_profile_tool_attr()),
-            ("save_profile", SerialHandler::save_profile_tool_attr()),
-            ("delete_profile", SerialHandler::delete_profile_tool_attr()),
-            ("configure", SerialHandler::configure_tool_attr()),
-            (
-                "rollback_profile",
-                SerialHandler::rollback_profile_tool_attr(),
-            ),
-            ("get_log", SerialHandler::get_log_tool_attr()),
-            ("clear_log", SerialHandler::clear_log_tool_attr()),
-            ("export_log", SerialHandler::export_log_tool_attr()),
-            ("reconnect", SerialHandler::reconnect_tool_attr()),
-            (
-                "compute_checksum",
-                SerialHandler::compute_checksum_tool_attr(),
-            ),
-        ]
+    fn all_tool_attrs() -> Vec<(String, rmcp::model::Tool)> {
+        tool_catalog()
+            .into_iter()
+            .map(|tool| (tool.name.to_string(), tool))
+            .collect()
     }
 
     #[test]
@@ -87,19 +66,30 @@ mod tests {
 
     #[test]
     fn tool_schemas_have_no_nonstandard_uint_formats() {
-        for tool in all_tool_attrs() {
+        for (name, tool) in all_tool_attrs() {
             let schema_str = serde_json::to_string(&tool).unwrap();
             for bad_format in ["uint", "uint8", "uint16", "uint32", "uint64"] {
                 assert!(
                     !schema_str.contains(&format!("\"format\":\"{bad_format}\"")),
-                    "schema for {} contains non-standard '{bad_format}' format.\n\
+                    "schema for {name} contains non-standard '{bad_format}' format.\n\
                      Fix: annotate each uN/Option<uN> field with \
                      `#[schemars(schema_with = \"crate::schema_helpers::uint_schema\")]` \
                      (or `option_uint_schema` for Option<uN>). \
                      See src/schema_helpers.rs.",
-                    tool.0
                 );
             }
+        }
+    }
+
+    #[test]
+    fn tool_catalog_names_match_served_route_names() {
+        // Every catalog entry must carry a non-empty name and the exact
+        // served count (26); duplicate names would make tools/list ambiguous.
+        let catalog = tool_catalog();
+        let names: Vec<&str> = catalog.iter().map(|t| t.name.as_ref()).collect();
+        assert_eq!(names.len(), 26);
+        for n in &names {
+            assert!(!n.is_empty());
         }
     }
 

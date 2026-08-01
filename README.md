@@ -120,6 +120,15 @@ profile session reported in the open result, `get_status`, and
 `list_connections` (`profile`: name, selection source, confidence, persistent,
 generated, revision, dirty, candidates, last persistence error):
 
+- **`list_ports` previews profile selection.** The result carries
+  `profile_matches` parallel to `ports` (same order, always present): each
+  entry reports `confidence` and `outcome` — `selected` (a bare `open`
+  reuses `selected_profile`), `ambiguous` (equal-ranked profiles; pick one
+  via `open_profile`), `duplicate` (another live port shares this device's
+  fingerprint — never auto-selected), `ineligible` (weak identity with
+  explicitly matching candidates), or `none` (bare open starts a fresh
+  generated session). The preview is read-only: nothing is marked used and
+  no file is written. The `serial://ports` resource carries the same map.
 - **First bare `open` of a uniquely identified USB device** (transport + VID +
   PID + non-empty serial number, interface when available) creates a durable
   generated profile (name `auto-{label}`) whose defaults equal the effective
@@ -185,20 +194,38 @@ generated, revision, dirty, candidates, last persistence error):
 
 ## Example Agent Flow
 
+The normal workflow is a short decision tree: discover (`list_ports`), open
+(bare `open`), talk (`transact`/`read`/`write`), verify the learned profile,
+escalate to advanced tools only when needed.
+
 ```
-1. list_ports → ["/dev/ttyUSB0", "/dev/ttyACM0"]
-2. open(port="/dev/ttyACM0", name="board-uart", baud_rate=115200) → { connection_id: "9f...", name: "board-uart" }
-   # bare open(port=...) also works: baud defaults to 115200 and the
-   # connection is bound to an automatic profile session (see above)
-3. list_connections() → [{ connection_id: "9f...", name: "board-uart", port: "/dev/ttyACM0" }]
-4. set_dtr_rts(id, dtr=false, rts=false)  # Arduino reset
-   set_dtr_rts(id, dtr=true,  rts=true)
-5. read(id, match={ pattern: "OK>" }, timeout_ms=3000)
-   → { stop_reason: "match_found", matched: true, match_index: 0,
-       bytes_observed: 37, bytes_returned: 37, truncated: false,
-       data: "...OK>" }
-6. write(id, data="status\r\n")
-7. close(id)
+1. list_ports()
+   → ports: [{ name: "/dev/ttyACM0", ... }]
+     profile_matches: [{ port: "/dev/ttyACM0", confidence: "high",
+                         outcome: "selected",
+                         selected_profile: "auto-fake-usb-serial", ... }]
+   # the preview says a bare open will reuse the auto-generated profile
+2. open(port="/dev/ttyACM0")
+   → { connection_id: "9f...", baud_rate: 115200,
+       profile: { profile_name: "auto-fake-usb-serial", source: "generated",
+                  confidence: "high", persistent: true, revision: 1, ... } }
+   # bare open(port=...) only: baud defaults to 115200/8-N-1 and the server
+   # reuses the most recently used high-confidence profile for a known
+   # device, or creates a durable generated profile for a new one
+3. transact(connection_id="9f...", data="status\r\n",
+            match={ pattern: "OK>", config: { mode: "literal_substring",
+            pattern_encoding: "utf8" } }, timeout_ms=3000)
+   → { stop_reason: "match_found", data: "status\r\n...OK>", ... }
+   # one call = write + awaited response (prefer over write+read);
+   # use read() for buffered or unsolicited data, subscribe() only for
+   # ongoing notifications
+4. reconfigure(connection_id="9f...", baud_rate=230400)
+   → { baud_rate: 230400,
+       profile: { profile_name: "auto-fake-usb-serial", dirty: false, ... },
+       profile_persistence: { state: "persisted", ... } }
+   # durable changes are learned into the bound profile automatically;
+   # a later bare open of the same device applies them
+5. close(connection_id="9f...")
 ```
 
 ## Development

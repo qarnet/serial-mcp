@@ -220,6 +220,122 @@ fn server_json_omits_packages() {
     );
 }
 
+#[test]
+fn readme_teaches_profile_discovery_and_common_flow() {
+    // Phase 4: the normal workflow is discover → bare open → transact →
+    // inspect the learned profile → escalate. Positive guidance assertions.
+    let readme = repo_file("README.md");
+    assert!(
+        readme.contains("profile_matches"),
+        "README must teach the list_ports profile-match preview"
+    );
+    assert!(
+        readme.contains("transact"),
+        "README must teach transact as the command/response primitive"
+    );
+    assert!(
+        readme.contains("bare `open`") || readme.contains("bare open"),
+        "README must teach bare open as the common call"
+    );
+    assert!(
+        readme.contains("profile_persistence"),
+        "README must teach inspecting profile persistence after durable changes"
+    );
+}
+
+#[test]
+fn prompts_teach_current_decision_tree_without_stale_references() {
+    // The diagnose prompt must teach list_ports → bare open → transact →
+    // rollback, and neither prompt may reference removed tools or removed
+    // per-call fields.
+    let diagnose = repo_file("src/prompts/diagnose.rs");
+    assert!(
+        diagnose.contains("`list_ports`") && diagnose.contains("profile_matches"),
+        "diagnose prompt must teach the profile-match preview"
+    );
+    assert!(
+        diagnose.contains("`open(port="),
+        "diagnose prompt must teach the bare open call"
+    );
+    assert!(
+        diagnose.contains("`transact("),
+        "diagnose prompt must use transact for probes"
+    );
+    assert!(
+        diagnose.contains("rollback_profile"),
+        "diagnose prompt must teach rollback after bad learned settings"
+    );
+    let interactive = repo_file("src/prompts/interactive.rs");
+    assert!(
+        interactive.contains("`transact("),
+        "interactive prompt must drive commands via transact"
+    );
+    for prompt_src in [&diagnose, &interactive] {
+        assert!(
+            !prompt_src.contains("wait_for"),
+            "prompts must not reference the removed wait_for tool"
+        );
+        assert!(
+            !prompt_src.contains("max_buffered_bytes"),
+            "prompts must not use the removed per-call max_buffered_bytes"
+        );
+    }
+}
+
+#[test]
+fn server_instructions_teach_decision_tree() {
+    // The server `instructions` string (served on initialize) must carry the
+    // Phase 4 decision tree, not a flat tool list.
+    let server = repo_file("src/server.rs");
+    let instructions = server
+        .split("with_instructions(")
+        .nth(1)
+        .and_then(|s| s.split("to_string()").next())
+        .expect("server.rs must contain with_instructions");
+    for needle in [
+        "list_ports",
+        "bare",
+        "transact",
+        "profile_matches",
+        "rollback_profile",
+        "open_profile",
+    ] {
+        assert!(
+            instructions.contains(needle),
+            "server instructions must teach {needle}"
+        );
+    }
+}
+
+#[test]
+fn agent_config_readme_anchor_is_valid() {
+    // docs/agent-config.md referenced the removed `#how-rx-works` anchor.
+    let config = repo_file("docs/agent-config.md");
+    assert!(
+        !config.contains("#how-rx-works"),
+        "agent-config.md must not reference the removed README anchor"
+    );
+    assert!(
+        config.contains("../README.md#capabilities"),
+        "agent-config.md must link a valid README anchor"
+    );
+}
+
+#[test]
+fn features_md_marks_reconnect_policy_shipped() {
+    // The reconnect-policy profile wiring shipped in v0.8.1; the near-term
+    // item must no longer read as unbuilt.
+    let features = repo_file("docs/development/FEATURES.md");
+    assert!(
+        features.contains("Profile-configurable reconnect policy ✅"),
+        "FEATURES.md must mark the shipped reconnect-policy item"
+    );
+    assert!(
+        !features.contains("pure wiring: profile field"),
+        "FEATURES.md must not still describe the reconnect-policy item as unwired"
+    );
+}
+
 fn collect_versions(v: &serde_json::Value, out: &mut Vec<String>) {
     if let serde_json::Value::Object(map) = v {
         for (k, val) in map {

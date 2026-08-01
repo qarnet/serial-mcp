@@ -90,11 +90,11 @@
   flag) driven by the parser's declared checksum width, not a match on the
   error variant.
 
-### Profile-configurable reconnect policy
-- let profiles set the (already shipped and enforced) per-connection
-  `ReconnectPolicy` — carried over from the removed `ProfileDefaults.reconnect_policy`
-  string field, which was never wired up
-- pure wiring: profile field → `open_profile` → existing policy
+### Profile-configurable reconnect policy ✅ **Shipped in v0.8.1**
+- profiles set the per-connection `ReconnectPolicy` through
+  `ProfileDefaults.reconnect_policy` (profile → `open_profile`/bare `open`
+  → existing policy); connection-mode `configure` and `reconfigure` also
+  learn through it
 
 ### Config import/export
 - likely pairs with profiles (already shipped)

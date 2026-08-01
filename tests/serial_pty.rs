@@ -3634,3 +3634,519 @@ async fn rollback_with_no_active_connections_reports_zero() {
 
     harness._client.cancel().await.ok();
 }
+
+// ── Phase 4: list_ports profile discovery preview ───────────────────────────
+//
+// Behavior-first tests for `ListPortsResult.profile_matches`: real PTY slave
+// paths, injected StaticPortProvider identity, and public MCP calls only.
+// The preview must exactly predict what a bare `open(port=...)` does,
+// without marking any profile used or mutating the store.
+
+/// Call `list_ports` through the public MCP surface and return the
+/// structured result.
+async fn call_list_ports<H: rmcp::handler::client::ClientHandler>(
+    client: &rmcp::service::RunningService<rmcp::service::RoleClient, H>,
+) -> serde_json::Value {
+    let result = client
+        .peer()
+        .call_tool(tool_request("list_ports", json!({})))
+        .await
+        .unwrap();
+    assert_ne!(result.is_error, Some(true), "list_ports failed: {result:?}");
+    result.structured_content.expect("structured")
+}
+
+/// Find the profile-match entry for one port.
+fn match_for<'a>(listed: &'a serde_json::Value, port: &str) -> &'a serde_json::Value {
+    listed["profile_matches"]
+        .as_array()
+        .expect("profile_matches array")
+        .iter()
+        .find(|m| m["port"] == json!(port))
+        .unwrap_or_else(|| panic!("no profile_match entry for {port}: {listed}"))
+}
+
+/// 1. Empty store: one `none` entry per port, parallel to `ports`, with the
+///    `ports` array serialized exactly like the provider's raw PortInfo
+///    (match metadata never contaminates OS enumeration).
+#[tokio::test]
+async fn list_ports_preview_empty_store_reports_none_parallel_and_pure_ports() {
+    let pty1 = PtyPair::open().expect("openpty");
+    let slave1 = pty1.slave_path.to_string_lossy().into_owned();
+    let pty2 = PtyPair::open().expect("openpty");
+    let slave2 = pty2.slave_path.to_string_lossy().into_owned();
+    let provider_ports = vec![
+        StaticPortProvider::usb_port(&slave1, VID, PID, "SN-1", Some("Fake USB Serial"), Some(2)),
+        StaticPortProvider::weak_port(&slave2),
+    ];
+    let provider = StaticPortProvider::new(provider_ports.clone());
+    let harness = session_harness(provider).await;
+    let client = &harness._client;
+
+    let listed = call_list_ports(client).await;
+    let ports = listed["ports"].as_array().expect("ports array");
+    let matches = listed["profile_matches"].as_array().expect("matches array");
+    assert_eq!(
+        listed["count"],
+        json!(2),
+        "count matches the number of ports"
+    );
+    assert_eq!(
+        ports.len(),
+        matches.len(),
+        "profile_matches must parallel ports"
+    );
+    assert_eq!(
+        listed["ports"],
+        serde_json::to_value(&provider_ports).unwrap(),
+        "ports elements must serialize identically regardless of match metadata"
+    );
+
+    let high = match_for(&listed, &slave1);
+    assert_eq!(high["confidence"], json!("high"));
+    assert_eq!(high["outcome"], json!("none"));
+    assert!(high["selected_profile"].is_null());
+    assert_eq!(high["candidates"].as_array().unwrap().len(), 0);
+
+    let weak = match_for(&listed, &slave2);
+    assert_eq!(weak["confidence"], json!("none"));
+    assert_eq!(weak["outcome"], json!("none"));
+    assert!(weak["selected_profile"].is_null());
+
+    harness._client.cancel().await.ok();
+}
+
+/// 2. Generated/saved high profiles preview as `selected` with the right
+///    name/revision, and the unique last-used winner matches what a later
+///    bare `open` actually selects.
+#[tokio::test]
+async fn list_ports_preview_selected_winner_matches_later_bare_open() {
+    let pty = PtyPair::open().expect("openpty");
+    let slave = pty.slave_path.to_string_lossy().into_owned();
+    let provider = StaticPortProvider::new(vec![StaticPortProvider::usb_port(
+        &slave,
+        VID,
+        PID,
+        "SN-1",
+        Some("Fake USB Serial"),
+        None,
+    )]);
+    let harness = session_harness(provider).await;
+    let client = &harness._client;
+
+    // First bare open creates the generated profile (revision 1).
+    let opened = open_port(client, &slave, json!({})).await;
+    let connection_id = opened["connection_id"].as_str().unwrap().to_string();
+    assert_eq!(
+        opened["profile"]["profile_name"],
+        json!("auto-fake-usb-serial")
+    );
+
+    // Save a second, user-named profile for the same device. It has never
+    // been used, so it sorts oldest despite being newer on disk.
+    let saved = client
+        .peer()
+        .call_tool(tool_request(
+            "save_profile",
+            json!({ "connection_id": connection_id, "profile_name": "my-dev" }),
+        ))
+        .await
+        .unwrap();
+    assert_ne!(saved.is_error, Some(true), "{saved:?}");
+    close_port(client, &connection_id).await;
+
+    // Preview: generated profile is the unique most-recently-used winner.
+    let listed = call_list_ports(client).await;
+    let high = match_for(&listed, &slave);
+    assert_eq!(high["outcome"], json!("selected"));
+    assert_eq!(high["selected_profile"], json!("auto-fake-usb-serial"));
+    let candidates = high["candidates"].as_array().unwrap();
+    assert_eq!(candidates.len(), 2, "both profiles listed as candidates");
+    assert_eq!(candidates[0]["profile_name"], json!("auto-fake-usb-serial"));
+    assert_eq!(candidates[0]["generated"], json!(true));
+    assert_eq!(candidates[0]["revision"], json!(1));
+    assert!(candidates[0]["last_used_at_ms"].is_number());
+
+    // Explicit use of the second profile makes IT the winner.
+    let opened = open_port(client, &slave, json!({ "profile_mode": "none" })).await;
+    let connection_id = opened["connection_id"].as_str().unwrap().to_string();
+    close_port(client, &connection_id).await;
+    let opened = client
+        .peer()
+        .call_tool(tool_request("open_profile", json!({ "profile": "my-dev" })))
+        .await
+        .unwrap();
+    assert_ne!(opened.is_error, Some(true), "{opened:?}");
+    let connection_id = opened.structured_content.as_ref().unwrap()["connection_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    close_port(client, &connection_id).await;
+
+    let listed = call_list_ports(client).await;
+    let high = match_for(&listed, &slave);
+    assert_eq!(high["outcome"], json!("selected"));
+    assert_eq!(high["selected_profile"], json!("my-dev"));
+
+    // A bare open selects exactly what the preview advertised.
+    let reopened = open_port(client, &slave, json!({})).await;
+    assert_eq!(reopened["profile"]["profile_name"], json!("my-dev"));
+    assert_eq!(reopened["profile"]["source"], json!("automatic"));
+    let connection_id = reopened["connection_id"].as_str().unwrap().to_string();
+    close_port(client, &connection_id).await;
+
+    harness._client.cancel().await.ok();
+}
+
+/// 3. Equal top rank (two saved profiles that were never used): `ambiguous`,
+///    both candidates listed, no selected profile — and a bare open stays
+///    transient instead of guessing.
+#[tokio::test]
+async fn list_ports_preview_equal_timestamps_is_ambiguous_and_open_stays_transient() {
+    let pty = PtyPair::open().expect("openpty");
+    let slave = pty.slave_path.to_string_lossy().into_owned();
+    let provider = StaticPortProvider::new(vec![StaticPortProvider::usb_port(
+        &slave,
+        VID,
+        PID,
+        "SN-1",
+        Some("Fake USB Serial"),
+        None,
+    )]);
+    let harness = session_harness(provider).await;
+    let client = &harness._client;
+
+    // profile_mode=none: no generated profile competes; both saved profiles
+    // carry last_used_at_ms = null, so they tie at the oldest rank.
+    let opened = open_port(client, &slave, json!({ "profile_mode": "none" })).await;
+    let connection_id = opened["connection_id"].as_str().unwrap().to_string();
+    for name in ["dev-a", "dev-b"] {
+        let saved = client
+            .peer()
+            .call_tool(tool_request(
+                "save_profile",
+                json!({ "connection_id": connection_id, "profile_name": name }),
+            ))
+            .await
+            .unwrap();
+        assert_ne!(saved.is_error, Some(true), "{saved:?}");
+    }
+    close_port(client, &connection_id).await;
+
+    let listed = call_list_ports(client).await;
+    let high = match_for(&listed, &slave);
+    assert_eq!(high["outcome"], json!("ambiguous"));
+    assert!(high["selected_profile"].is_null());
+    let candidate_names: Vec<&str> = high["candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["profile_name"].as_str().unwrap())
+        .collect();
+    assert_eq!(candidate_names, vec!["dev-a", "dev-b"]);
+
+    // Bare open must not guess: transient session listing both candidates.
+    let opened = open_port(client, &slave, json!({})).await;
+    assert_eq!(opened["profile"]["source"], json!("transient"));
+    assert_eq!(opened["profile"]["persistent"], json!(false));
+    let trans_candidates: Vec<&str> = opened["profile"]["candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c.as_str().unwrap())
+        .collect();
+    assert_eq!(trans_candidates, vec!["dev-a", "dev-b"]);
+    let connection_id = opened["connection_id"].as_str().unwrap().to_string();
+    close_port(client, &connection_id).await;
+
+    harness._client.cancel().await.ok();
+}
+
+/// 4. Duplicate live high fingerprints: `duplicate` for BOTH ports, never a
+///    selection — even when a matching profile exists.
+#[tokio::test]
+async fn list_ports_preview_duplicate_fingerprints_report_duplicate() {
+    let pty1 = PtyPair::open().expect("openpty");
+    let slave1 = pty1.slave_path.to_string_lossy().into_owned();
+    let pty2 = PtyPair::open().expect("openpty");
+    let slave2 = pty2.slave_path.to_string_lossy().into_owned();
+    let provider = StaticPortProvider::new(vec![
+        StaticPortProvider::usb_port(&slave1, VID, PID, "SAME-SN", Some("Fake USB Serial"), None),
+        StaticPortProvider::usb_port(&slave2, VID, PID, "SAME-SN", Some("Fake USB Serial"), None),
+    ]);
+    let harness = session_harness(provider).await;
+    let client = &harness._client;
+
+    // Give both ports a matching profile on disk via a second store
+    // instance (same file), then preview: both must be `duplicate`.
+    let store2 = serial_mcp::profile_store::ProfileStore::open(harness.profiles_path.clone())
+        .expect("second store instance on same file");
+    store2
+        .upsert(
+            serial_mcp::profiles::Profile {
+                name: "shared-dev".into(),
+                selector: serial_mcp::profiles::ProfileSelector {
+                    vid: Some(VID),
+                    pid: Some(PID),
+                    serial_number: Some("SAME-SN".into()),
+                    transport: Some("usb".into()),
+                    ..Default::default()
+                },
+                defaults: Default::default(),
+                metadata: Default::default(),
+                revisions: Vec::new(),
+            },
+            false,
+        )
+        .await
+        .unwrap();
+
+    let listed = call_list_ports(client).await;
+    for slave in [&slave1, &slave2] {
+        let m = match_for(&listed, slave);
+        assert_eq!(m["confidence"], json!("high"));
+        assert_eq!(m["outcome"], json!("duplicate"), "port {slave}");
+        assert!(m["selected_profile"].is_null());
+        assert_eq!(m["candidates"].as_array().unwrap().len(), 0);
+    }
+
+    harness._client.cancel().await.ok();
+}
+
+/// 5. Medium identity (VID/PID, no serial): never auto-selected; explicitly
+///    matching non-empty selectors are `ineligible` candidates, and empty
+///    selectors (which match every port) are excluded.
+#[tokio::test]
+async fn list_ports_preview_medium_identity_ineligible_and_empty_selector_excluded() {
+    let pty = PtyPair::open().expect("openpty");
+    let slave = pty.slave_path.to_string_lossy().into_owned();
+    let mut medium = StaticPortProvider::usb_port(&slave, VID, PID, "", Some("No Serial"), None);
+    medium.serial_number = None;
+    let provider = StaticPortProvider::new(vec![medium]);
+    let harness = session_harness(provider).await;
+    let client = &harness._client;
+
+    // A profile with an explicit (non-empty) VID/PID selector via
+    // save_profile, plus an empty-selector profile via configure.
+    let opened = open_port(client, &slave, json!({ "profile_mode": "none" })).await;
+    let connection_id = opened["connection_id"].as_str().unwrap().to_string();
+    let saved = client
+        .peer()
+        .call_tool(tool_request(
+            "save_profile",
+            json!({ "connection_id": connection_id, "profile_name": "mid-dev" }),
+        ))
+        .await
+        .unwrap();
+    assert_ne!(saved.is_error, Some(true), "{saved:?}");
+    close_port(client, &connection_id).await;
+
+    let configured = client
+        .peer()
+        .call_tool(tool_request(
+            "configure",
+            json!({ "profile": "empty-sel", "defaults": {} }),
+        ))
+        .await
+        .unwrap();
+    assert_ne!(configured.is_error, Some(true), "{configured:?}");
+
+    let listed = call_list_ports(client).await;
+    let m = match_for(&listed, &slave);
+    assert_eq!(m["confidence"], json!("medium"));
+    assert_eq!(m["outcome"], json!("ineligible"));
+    assert!(m["selected_profile"].is_null());
+    let candidate_names: Vec<&str> = m["candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["profile_name"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        candidate_names,
+        vec!["mid-dev"],
+        "only the explicitly matching selector is a candidate; \
+         empty-selector 'empty-sel' must be excluded"
+    );
+
+    harness._client.cancel().await.ok();
+}
+
+/// 6. Deleting the only matching profile returns the preview to `none`.
+#[tokio::test]
+async fn list_ports_preview_delete_profile_returns_to_none() {
+    let pty = PtyPair::open().expect("openpty");
+    let slave = pty.slave_path.to_string_lossy().into_owned();
+    let provider = StaticPortProvider::new(vec![StaticPortProvider::usb_port(
+        &slave,
+        VID,
+        PID,
+        "SN-1",
+        Some("Fake USB Serial"),
+        None,
+    )]);
+    let harness = session_harness(provider).await;
+    let client = &harness._client;
+
+    let opened = open_port(client, &slave, json!({})).await;
+    let connection_id = opened["connection_id"].as_str().unwrap().to_string();
+    close_port(client, &connection_id).await;
+
+    let listed = call_list_ports(client).await;
+    assert_eq!(match_for(&listed, &slave)["outcome"], json!("selected"));
+
+    let deleted = client
+        .peer()
+        .call_tool(tool_request(
+            "delete_profile",
+            json!({ "profile_name": "auto-fake-usb-serial" }),
+        ))
+        .await
+        .unwrap();
+    assert_ne!(deleted.is_error, Some(true), "{deleted:?}");
+
+    let listed = call_list_ports(client).await;
+    let m = match_for(&listed, &slave);
+    assert_eq!(m["outcome"], json!("none"));
+    assert!(m["selected_profile"].is_null());
+    assert_eq!(m["candidates"].as_array().unwrap().len(), 0);
+
+    harness._client.cancel().await.ok();
+}
+
+/// 7. Fresh read across store instances: a second store writing to the same
+///    file (as another process would) is visible to `list_ports` immediately.
+#[tokio::test]
+async fn list_ports_preview_fresh_read_sees_second_store_write() {
+    let pty = PtyPair::open().expect("openpty");
+    let slave = pty.slave_path.to_string_lossy().into_owned();
+    let provider = StaticPortProvider::new(vec![StaticPortProvider::usb_port(
+        &slave,
+        VID,
+        PID,
+        "SN-1",
+        Some("Fake USB Serial"),
+        None,
+    )]);
+    let harness = session_harness(provider).await;
+    let client = &harness._client;
+
+    // The server's store cache is empty; a DIFFERENT store instance writes
+    // the file. list_ports must reload under the advisory lock (fresh read),
+    // not answer from the stale cache.
+    let store2 = serial_mcp::profile_store::ProfileStore::open(harness.profiles_path.clone())
+        .expect("second store instance on same file");
+    store2
+        .upsert(
+            serial_mcp::profiles::Profile {
+                name: "other-proc".into(),
+                selector: serial_mcp::profiles::ProfileSelector {
+                    vid: Some(VID),
+                    pid: Some(PID),
+                    serial_number: Some("SN-1".into()),
+                    transport: Some("usb".into()),
+                    ..Default::default()
+                },
+                defaults: Default::default(),
+                metadata: Default::default(),
+                revisions: Vec::new(),
+            },
+            false,
+        )
+        .await
+        .unwrap();
+
+    let listed = call_list_ports(client).await;
+    let m = match_for(&listed, &slave);
+    assert_eq!(m["outcome"], json!("selected"));
+    assert_eq!(m["selected_profile"], json!("other-proc"));
+    assert_eq!(m["candidates"][0]["revision"], json!(1));
+
+    harness._client.cancel().await.ok();
+}
+
+/// 8. A real `list_ports` response (with candidates and a selection)
+///    validates against the generated schema's Phase 4 wire types, and the
+///    catalog schema carries no non-standard uint formats.
+///
+/// Note: the FULL generated `ListPortsResult` schema cannot validate raw OS
+/// enumeration output because schemars marks `PortInfo.vid`/`pid`/`interface`
+/// `required` while serde `skip_serializing_if` omits them when `None` — a
+/// pre-existing `PortInfo` schema quirk that Phase 4 must not touch (see the
+/// "Do not change `PortInfo`" non-scope). The new Phase 4 wire types
+/// (`PortProfileMatch`/`ProfileMatchCandidate`) validate cleanly.
+#[tokio::test]
+async fn list_ports_preview_output_validates_against_generated_schema() {
+    let pty = PtyPair::open().expect("openpty");
+    let slave = pty.slave_path.to_string_lossy().into_owned();
+    let provider = StaticPortProvider::new(vec![StaticPortProvider::usb_port(
+        &slave,
+        VID,
+        PID,
+        "SN-1",
+        Some("Fake USB Serial"),
+        None,
+    )]);
+    let harness = session_harness(provider).await;
+    let client = &harness._client;
+
+    let opened = open_port(client, &slave, json!({})).await;
+    let connection_id = opened["connection_id"].as_str().unwrap().to_string();
+    close_port(client, &connection_id).await;
+
+    let listed = call_list_ports(client).await;
+
+    let catalog = serial_mcp::server::tool_catalog();
+    let list_ports_tool = catalog
+        .iter()
+        .find(|t| t.name.as_ref() == "list_ports")
+        .expect("list_ports in catalog");
+    let schema = list_ports_tool
+        .output_schema
+        .as_ref()
+        .expect("list_ports outputSchema");
+    let schema_value = serde_json::Value::Object((**schema).clone());
+    let schema_text = serde_json::to_string(&schema_value).unwrap();
+    for bad in ["uint", "uint8", "uint16", "uint32", "uint64"] {
+        assert!(
+            !schema_text.contains(&format!("\"format\":\"{bad}\"")),
+            "list_ports output schema must not emit {bad} format"
+        );
+    }
+
+    // Validate the Phase 4 match entries against their generated $defs
+    // (def + sibling $defs kept together so internal $refs resolve).
+    let defs = schema_value["$defs"].clone();
+    let match_schema = serde_json::json!({
+        "$ref": "#/$defs/PortProfileMatch",
+        "$defs": defs,
+    });
+    let candidate_schema = serde_json::json!({
+        "$ref": "#/$defs/ProfileMatchCandidate",
+        "$defs": defs,
+    });
+    let match_validator = jsonschema::validator_for(&match_schema).unwrap();
+    let candidate_validator = jsonschema::validator_for(&candidate_schema).unwrap();
+    for entry in listed["profile_matches"].as_array().unwrap() {
+        let errors: Vec<String> = match_validator
+            .iter_errors(entry)
+            .map(|e| e.to_string())
+            .collect();
+        assert!(
+            errors.is_empty(),
+            "profile_matches entry must validate against PortProfileMatch: {errors:?}"
+        );
+        for candidate in entry["candidates"].as_array().unwrap() {
+            let errors: Vec<String> = candidate_validator
+                .iter_errors(candidate)
+                .map(|e| e.to_string())
+                .collect();
+            assert!(
+                errors.is_empty(),
+                "candidate must validate against ProfileMatchCandidate: {errors:?}"
+            );
+        }
+    }
+
+    harness._client.cancel().await.ok();
+}

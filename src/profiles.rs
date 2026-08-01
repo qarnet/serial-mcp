@@ -161,7 +161,7 @@ pub enum ProfileMode {
 
 /// Canonical high-confidence device identity used for automatic profile
 /// matching and duplicate detection.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct HighIdentity {
     /// Transport as displayed by `PortTransport` (`"usb"` for USB ports).
     pub transport: String,
@@ -390,6 +390,26 @@ pub struct ProfileSelector {
     pub hardware_id: Option<String>,
 }
 
+impl ProfileSelector {
+    /// Whether every selector field is `None` — an empty selector matches
+    /// ANY port and must never appear as a weak candidate in `list_ports`
+    /// profile previews (Phase 4). Empty selectors remain valid for
+    /// `Profile::matches` (used by tests and the `configure` profile mode
+    /// creation path), but they carry no discoverable device knowledge.
+    pub fn is_empty(&self) -> bool {
+        self.vid.is_none()
+            && self.pid.is_none()
+            && self.serial_number.is_none()
+            && self.manufacturer.is_none()
+            && self.product.is_none()
+            && self.interface.is_none()
+            && self.port_pattern.is_none()
+            && self.description_pattern.is_none()
+            && self.transport.is_none()
+            && self.hardware_id.is_none()
+    }
+}
+
 /// Default serial configuration applied when opening via this profile.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct ProfileDefaults {
@@ -612,6 +632,26 @@ mod tests {
         };
         assert!(p.matches(&make_port("/dev/ttyUSB0", Some(0x1234), Some(0x5678), None)));
         assert!(p.matches(&make_port("/dev/ttyACM0", None, None, None)));
+    }
+
+    #[test]
+    fn empty_selector_is_detected() {
+        assert!(ProfileSelector::default().is_empty());
+        assert!(!ProfileSelector {
+            vid: Some(0x1234),
+            ..Default::default()
+        }
+        .is_empty());
+        assert!(!ProfileSelector {
+            port_pattern: Some("/dev/ttyACM*".into()),
+            ..Default::default()
+        }
+        .is_empty());
+        assert!(!ProfileSelector {
+            transport: Some("usb".into()),
+            ..Default::default()
+        }
+        .is_empty());
     }
 
     #[test]

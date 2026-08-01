@@ -127,6 +127,20 @@ impl ProfileStore {
         self.cache.read().await.clone()
     }
 
+    /// Fresh cross-process read of all profiles (Phase 4 `list_ports`
+    /// preview).
+    ///
+    /// Persistent stores: acquires the advisory file lock, reloads the file
+    /// from disk (never cache-only — another process may have changed
+    /// profiles), republishes the cache, and returns the fresh snapshot in
+    /// ONE transaction, so a `list_ports` call performs a single lock/reload
+    /// regardless of how many ports it previews. Ephemeral stores: returns
+    /// the in-memory cache. Corrupt store data is an error (the tool
+    /// surfaces it rather than silently claiming no matches).
+    pub async fn list_fresh(&self) -> Result<Vec<Profile>, String> {
+        self.run_read(|profiles| Ok(profiles.to_vec())).await
+    }
+
     /// Look up a single profile by name.
     pub async fn get(&self, name: &str) -> Option<Profile> {
         self.cache

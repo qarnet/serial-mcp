@@ -673,6 +673,51 @@ async fn call_tool_list_ports_returns_structured_result() {
         .expect("list_ports must produce structuredContent");
     assert!(structured.get("count").is_some());
     assert!(structured.get("ports").is_some());
+    // Phase 4: the parallel profile-match preview is always present.
+    let ports = structured["ports"].as_array().unwrap();
+    let matches = structured["profile_matches"]
+        .as_array()
+        .expect("list_ports must carry profile_matches");
+    assert_eq!(
+        matches.len(),
+        ports.len(),
+        "profile_matches must parallel ports"
+    );
+    assert_eq!(structured["count"], json!(ports.len()));
+    client.cancel().await.ok();
+}
+
+/// Phase 4: the `serial://ports` resource serves the same profile-match map
+/// as the `list_ports` tool (same fresh store read, same pure computation).
+#[tokio::test]
+async fn ports_resource_includes_profile_match_map() {
+    let server = common::spawned::SpawnedServer::start().await;
+    let (client, _rx) = common::spawned::spawn_client(&server).await.unwrap();
+
+    let resource = client
+        .peer()
+        .read_resource(rmcp::model::ReadResourceRequestParams::new(
+            "serial://ports",
+        ))
+        .await
+        .unwrap();
+    let body = &resource.contents[0];
+    let parsed: serde_json::Value = match body {
+        rmcp::model::ResourceContents::TextResourceContents { text, .. } => {
+            serde_json::from_str(text).unwrap()
+        }
+        other => panic!("expected text resource contents, got {other:?}"),
+    };
+    assert!(parsed.get("count").is_some());
+    let ports = parsed["ports"].as_array().unwrap();
+    let matches = parsed["profile_matches"]
+        .as_array()
+        .expect("serial://ports must carry profile_matches");
+    assert_eq!(matches.len(), ports.len(), "resource map parallels ports");
+    for m in matches {
+        assert!(m["port"].is_string());
+        assert!(m["outcome"].is_string());
+    }
     client.cancel().await.ok();
 }
 

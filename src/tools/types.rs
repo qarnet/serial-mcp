@@ -303,11 +303,75 @@ pub struct OpenProfileArgs {
 
 // ---- Response structs ------------------------------------------------------
 
+/// Preview outcome of automatic profile selection for one port (Phase 4).
+///
+/// Mirrors what a bare `open(port=...)` would do, WITHOUT marking any
+/// profile used or mutating the store:
+///
+/// - `selected`: a bare open would reuse `selected_profile` (unique
+///   high-confidence winner, or the single matching high profile).
+/// - `ambiguous`: multiple equally-ranked high-confidence profiles; a bare
+///   open stays transient — pick explicitly with `open_profile`.
+/// - `ineligible`: the port's identity is too weak for automatic selection,
+///   but the listed candidates match explicitly — use `open_profile` for a
+///   deliberate choice.
+/// - `duplicate`: another live port shares this port's high fingerprint, so
+///   settings are never applied automatically to an indistinguishable
+///   device.
+/// - `none`: no matching profile; a bare open starts a fresh generated
+///   session for a high-confidence device.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ProfileMatchOutcome {
+    Selected,
+    Ambiguous,
+    Ineligible,
+    Duplicate,
+    None,
+}
+
+/// One profile that matched a port in the `list_ports` preview.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ProfileMatchCandidate {
+    pub profile_name: String,
+    /// Whether the profile was auto-generated (Phase 3A).
+    pub generated: bool,
+    /// Profile revision at preview time.
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub revision: u64,
+    /// Last open/selection timestamp (ms since Unix epoch), `null` when the
+    /// profile was never used. `null` sorts oldest for selection.
+    #[schemars(schema_with = "crate::schema_helpers::option_uint_schema")]
+    pub last_used_at_ms: Option<u64>,
+}
+
+/// Parallel per-port profile-match preview carried by `list_ports` and the
+/// `serial://ports` resource.
+///
+/// `profile_matches` always has the same length and order as `ports` and is
+/// additionally keyed by the exact `port` name. Preview is read-only: no
+/// profile is marked used and no file is mutated.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct PortProfileMatch {
+    pub port: String,
+    pub confidence: crate::profiles::IdentityConfidence,
+    pub outcome: ProfileMatchOutcome,
+    /// The profile a bare `open(port=...)` would select, `null` unless
+    /// `outcome == "selected"`.
+    pub selected_profile: Option<String>,
+    /// Matching candidates, newest-first for high identity (name is display
+    /// only and never breaks a selection tie); empty for `none`/`duplicate`.
+    pub candidates: Vec<ProfileMatchCandidate>,
+}
+
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct ListPortsResult {
     #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
     pub count: usize,
     pub ports: Vec<PortInfo>,
+    /// Parallel profile-match preview, same length/order as `ports`
+    /// (always serialized, even when empty).
+    pub profile_matches: Vec<PortProfileMatch>,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]

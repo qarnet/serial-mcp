@@ -5,8 +5,9 @@ use tracing::{debug, info};
 
 use crate::learning;
 use crate::profiles::{
-    canonical_high_selector, high_identity, identity_confidence, IdentityConfidence, Profile,
-    ProfileMode, ProfilePersistenceOperation, ProfileSelectionSource,
+    canonical_high_selector, high_identity, identity_confidence, rank_candidates,
+    selector_matches_high_identity, IdentityConfidence, Profile, ProfileMode,
+    ProfilePersistenceOperation, ProfileSelectionSource,
 };
 use crate::rx_session::RxSessionManager;
 use crate::security::SecurityManager;
@@ -18,21 +19,168 @@ use crate::tools::types::{
     ClearLogArgs, ClearLogResult, CloseArgs, CloseResult, ConfigureArgs, ConfigureResult,
     DeleteProfileArgs, DeleteProfileResult, ExportLogArgs, ExportLogResult, GetLogArgs,
     GetLogResult, GetStatusArgs, GetStatusResult, ListConnectionsResult, ListPortsResult,
-    ListProfilesResult, OpenArgs, OpenProfileArgs, OpenResult, ProfileSummary, ReconfigureArgs,
-    ReconfigureResult, ReconnectArgs, ReconnectResult, RollbackProfileArgs, RollbackProfileResult,
-    SaveProfileArgs, SaveProfileResult,
+    ListProfilesResult, OpenArgs, OpenProfileArgs, OpenResult, PortProfileMatch,
+    ProfileMatchCandidate, ProfileMatchOutcome, ProfileSummary, ReconfigureArgs, ReconfigureResult,
+    ReconnectArgs, ReconnectResult, RollbackProfileArgs, RollbackProfileResult, SaveProfileArgs,
+    SaveProfileResult,
 };
 
-pub async fn list_ports(provider: &Arc<dyn PortProvider>) -> Result<Json<ListPortsResult>, String> {
+pub async fn list_ports(
+    provider: &Arc<dyn PortProvider>,
+    store: &Arc<crate::profile_store::ProfileStore>,
+) -> Result<Json<ListPortsResult>, String> {
     debug!("Listing serial ports");
     let ports = provider
         .list_available()
         .map_err(|e| log_tool_err("list_ports", "Failed to list ports", e))?;
+
+    // ONE fresh cross-process read for the whole preview: a corrupt or
+    // unreadable profile store is a tool error, never a silent "no matches".
+    let profiles = store
+        .list_fresh()
+        .await
+        .map_err(|e| log_tool_err("list_ports", "Failed to read profiles", e))?;
+
+    let profile_matches = compute_profile_matches(&ports, &profiles);
+
     info!("Found {} serial ports", ports.len());
     Ok(Json(ListPortsResult {
         count: ports.len(),
         ports,
+        profile_matches,
     }))
+}
+
+/// Pure Phase 4 preview of what a bare `open(port=...)` would do for every
+/// port, computed over ONE live port list + ONE fresh profile snapshot
+/// (the caller performs a single `ProfileStore::list_fresh()`). Never marks
+/// a profile used and never mutates the store.
+///
+/// High identity exactly reuses the Phase 3 rules: candidates must pass
+/// `Profile::matches` AND carry the target's high identity fields; the
+/// unique maximum `last_used_at_ms` wins (`None` sorts oldest); equal top
+/// rank is `Ambiguous`. Candidate order is deterministic — newest first,
+/// then profile name for display only (a name never breaks a selection
+/// tie).
+///
+/// Medium/low/none identity is never automatically selected: explicitly
+/// matching non-empty selectors are listed as `Ineligible` candidates, and
+/// empty selectors (which match any port) are excluded. A high fingerprint
+/// shared by more than one live port yields `Duplicate` for every such
+/// port — settings are never applied to an indistinguishable device.
+pub fn compute_profile_matches(ports: &[PortInfo], profiles: &[Profile]) -> Vec<PortProfileMatch> {
+    // Count live occurrences of each canonical high fingerprint so every
+    // preview for the same device agrees on the duplicate flag.
+    let mut high_counts: std::collections::HashMap<crate::profiles::HighIdentity, usize> =
+        std::collections::HashMap::new();
+    for port in ports {
+        if let Some(identity) = high_identity(port) {
+            *high_counts.entry(identity).or_insert(0) += 1;
+        }
+    }
+
+    ports
+        .iter()
+        .map(|port| {
+            let confidence = identity_confidence(port);
+            let Some(identity) = high_identity(port) else {
+                // Weak identity: never automatically selected, but
+                // explicitly matching non-empty selectors remain visible
+                // candidates.
+                let mut candidates: Vec<ProfileMatchCandidate> = profiles
+                    .iter()
+                    .filter(|p| !p.selector.is_empty() && p.matches(port))
+                    .map(candidate_of)
+                    .collect();
+                candidates.sort_by(|a, b| a.profile_name.cmp(&b.profile_name));
+                return PortProfileMatch {
+                    port: port.name.clone(),
+                    confidence,
+                    outcome: if candidates.is_empty() {
+                        ProfileMatchOutcome::None
+                    } else {
+                        ProfileMatchOutcome::Ineligible
+                    },
+                    selected_profile: None,
+                    candidates,
+                };
+            };
+
+            let duplicated = high_counts.get(&identity).copied().unwrap_or(0) > 1;
+
+            let eligible: Vec<Profile> = profiles
+                .iter()
+                .filter(|p| {
+                    p.matches(port) && selector_matches_high_identity(&p.selector, &identity)
+                })
+                .cloned()
+                .collect();
+
+            if duplicated {
+                return PortProfileMatch {
+                    port: port.name.clone(),
+                    confidence,
+                    outcome: ProfileMatchOutcome::Duplicate,
+                    selected_profile: None,
+                    candidates: Vec::new(),
+                };
+            }
+
+            if eligible.is_empty() {
+                return PortProfileMatch {
+                    port: port.name.clone(),
+                    confidence,
+                    outcome: ProfileMatchOutcome::None,
+                    selected_profile: None,
+                    candidates: Vec::new(),
+                };
+            }
+
+            let ranked = rank_candidates(eligible);
+            let candidates: Vec<ProfileMatchCandidate> = {
+                // Deterministic display order: newest first, then name. The
+                // selection decision below uses timestamps ONLY.
+                let mut sorted = ranked.clone();
+                sorted.sort_by(|a, b| {
+                    b.metadata
+                        .last_used_at_ms
+                        .unwrap_or(0)
+                        .cmp(&a.metadata.last_used_at_ms.unwrap_or(0))
+                        .then_with(|| a.name.cmp(&b.name))
+                });
+                sorted.iter().map(candidate_of).collect()
+            };
+
+            let (selected, outcome) = if ranked.len() == 1 {
+                (Some(ranked[0].name.clone()), ProfileMatchOutcome::Selected)
+            } else {
+                let top_ts = ranked[0].metadata.last_used_at_ms.unwrap_or(0);
+                let next_ts = ranked[1].metadata.last_used_at_ms.unwrap_or(0);
+                if top_ts != next_ts {
+                    (Some(ranked[0].name.clone()), ProfileMatchOutcome::Selected)
+                } else {
+                    (None, ProfileMatchOutcome::Ambiguous)
+                }
+            };
+
+            PortProfileMatch {
+                port: port.name.clone(),
+                confidence,
+                outcome,
+                selected_profile: selected,
+                candidates,
+            }
+        })
+        .collect()
+}
+
+fn candidate_of(p: &Profile) -> ProfileMatchCandidate {
+    ProfileMatchCandidate {
+        profile_name: p.name.clone(),
+        generated: p.metadata.generated,
+        revision: p.metadata.revision,
+        last_used_at_ms: p.metadata.last_used_at_ms,
+    }
 }
 
 pub async fn list_connections(

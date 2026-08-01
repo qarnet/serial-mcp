@@ -2355,10 +2355,10 @@ mod schema {
     use crate::tools::types::{
         ClearLogResult, CloseResult, ComputeChecksumResult, ConfigureResult, DeleteProfileResult,
         ExportLogResult, FlushResult, GetLogResult, GetStatusResult, ListConnectionsResult,
-        ListPortsResult, ListProfilesResult, OpenResult, ReadResult, ReconfigureResult,
-        ReconnectResult, RollbackProfileArgs, RollbackProfileResult, SaveProfileResult,
-        SendBreakResult, SetDtrRtsResult, SetFlowControlResult, SubscribeChunkNotification,
-        SubscribeEncodingErrorNotification, SubscribeFrameNotification,
+        ListPortsResult, ListProfilesResult, OpenResult, PortProfileMatch, ProfileMatchCandidate,
+        ReadResult, ReconfigureResult, ReconnectResult, RollbackProfileArgs, RollbackProfileResult,
+        SaveProfileResult, SendBreakResult, SetDtrRtsResult, SetFlowControlResult,
+        SubscribeChunkNotification, SubscribeEncodingErrorNotification, SubscribeFrameNotification,
         SubscribePartialFrameNotification, SubscribeResult, SubscribeStopNotification,
         TransactResult, UnsubscribeResult, WriteResult,
     };
@@ -2441,8 +2441,15 @@ mod schema {
 
     // Tool result types reachable by clients.
     // Keep this list in sync with the `#[tool]` methods in `src/server.rs`
-    // and with `all_tool_attrs()` in `src/tools/mod.rs`.
+    // and with `tool_catalog()` in `src/server.rs`.
     check_schema!(list_ports_result_has_no_uint_formats, ListPortsResult);
+    // Phase 4 list_ports profile-match preview types (guards the u64
+    // revision / Option<u64> last_used_at_ms fields).
+    check_schema!(
+        profile_match_candidate_has_no_uint_formats,
+        ProfileMatchCandidate
+    );
+    check_schema!(port_profile_match_has_no_uint_formats, PortProfileMatch);
     check_schema!(
         list_connections_result_has_no_uint_formats,
         ListConnectionsResult

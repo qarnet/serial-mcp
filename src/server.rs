@@ -227,12 +227,12 @@ impl SerialHandler {
     }
 
     #[tool(
-        description = "List all available serial ports on the system",
+        description = "List all available serial ports with a profile-match preview. `profile_matches` parallels `ports` (same order) and tells you whether the server already knows each device: `selected` — a bare `open(port=...)` reuses that profile (name in `selected_profile`); `ambiguous` — equal-ranked profiles, pick one via `open_profile`; `duplicate` — another live port shares this device's identity, never auto-selected; `ineligible` — weak identity with explicitly matching candidates (`open_profile` for a deliberate choice); `none` — a bare open starts a fresh generated session. Call this FIRST, then open.",
         title = "List Serial Ports",
         annotations(read_only_hint = true, open_world_hint = false)
     )]
     async fn list_ports(&self) -> Result<Json<ListPortsResult>, String> {
-        port_ops::list_ports(&self.port_provider).await
+        port_ops::list_ports(&self.port_provider, &self.profile_store).await
     }
 
     #[tool(
@@ -245,7 +245,7 @@ impl SerialHandler {
     }
 
     #[tool(
-        description = "Open a serial port connection with specified configuration",
+        description = "Open a serial port. The common call is `open(port=...)` — baud defaults to 115200/8-N-1 and the server automatically reuses the most recently used profile for a known high-confidence device (see `list_ports` `profile_matches`) or creates a durable generated profile for a new one. Add fields only when the automatic choice is wrong: explicit fields (baud, framing/parser/protocol, ...) override the selected profile and are learned back into it. Use `open_profile` for explicit named selection.",
         title = "Open Serial Port",
         annotations(destructive_hint = false, open_world_hint = false)
     )]
@@ -301,7 +301,7 @@ impl SerialHandler {
     }
 
     #[tool(
-        description = "Write data to a serial port connection. Use tx_framing to apply frame boundaries (line terminator, delimiter, length prefix, SLIP, COBS, or start/end markers) around the decoded payload. Use protocol to select a built-in preset (at_command, slip, json_lines, cobs, ndjson, nmea0183, modbus_ascii) that fills in framing defaults. The nmea0183 preset auto-appends the *XX XOR checksum on write. Explicit tx_framing wins over the preset. When tx_framing is used, decoded_bytes reports the payload length before framing, and bytes_written reports the total framed bytes sent.",
+        description = "Send data to a serial port (send-only). Prefer `transact` when the device responds — it writes and awaits the response in one call. `tx_framing` (line terminator, delimiter, length prefix, SLIP, COBS, start/end markers) and `protocol` presets (at_command, slip, json_lines, cobs, ndjson, nmea0183, modbus_ascii) apply only when the connection defaults don't fit; the nmea0183 preset auto-appends the *XX XOR checksum. When tx_framing is used, decoded_bytes reports the payload length before framing and bytes_written the total framed bytes.",
         title = "Write Serial Data",
         annotations(destructive_hint = true, open_world_hint = false)
     )]
@@ -313,7 +313,7 @@ impl SerialHandler {
     }
 
     #[tool(
-        description = "Write data, then await a read response, in one call. The write completes (bytes on wire) before the read starts. The read half defaults `from` to {\"type\":\"now\"} (live edge) so it only awaits post-write bytes — the response to THIS write, not stale buffered data. Use protocol to fill framing defaults for both directions; explicit tx_framing/rx_framing/rx_parser override per direction. Match, rx_framing, no_new_rx_timeout_ms, timeout_ms apply to the read half. Halves the round trips of write-then-read for AT/Modbus/GRBL-style request/response traffic.",
+        description = "Write data, then await the response, in one call — the request/response primitive for AT/Modbus/GRBL-style traffic. Prefer `transact` over separate `write`+`read`. The read half starts at the live edge (`from: {\"type\":\"now\"}`) so it only awaits post-write bytes. Add `match` to stop on a prompt, `no_new_rx_timeout_ms`/`timeout_ms` for bounded waits; `protocol` fills framing defaults for both directions and explicit tx_framing/rx_framing/rx_parser override per direction.",
         title = "Transact (Write + Read)",
         annotations(destructive_hint = true, open_world_hint = false),
         execution(task_support = "optional")
@@ -339,7 +339,7 @@ impl SerialHandler {
     }
 
     #[tool(
-        description = "Read data from a serial port connection. Returns buffered-but-unread bytes from the connection's cursor (like `cat`), consuming by default. Use `from` to control where the read starts: {\"type\":\"cursor\"} (default, the shared read cursor), {\"type\":\"now\"} (live edge, skip buffered backlog), {\"type\":\"buffer_start\"} (replay everything retained in the ring), or {\"type\":\"offset\",\"offset\":N} (absolute stream offset from a prior result's next_offset/from_offset). Re-passing the same `from` on the next call re-reads the same bytes non-destructively. Pattern matching checks buffered history first, then waits for new bytes. With rx_framing, splits the byte stream into structured frames (line, delimiter, length-prefixed, SLIP, COBS, start/end marker). With rx_parser, interprets frame content (AT commands, JSON lines, shell prompts). rx_parser is a sibling to rx_framing. Use protocol to select a built-in preset (at_command, slip, json_lines, cobs, ndjson, nmea0183, modbus_ascii) that fills in rx_framing and rx_parser defaults; explicit fields win. Match and rx_framing can be combined. With validate: true, checksum-mismatched frames are dropped and counted in frames_dropped instead of aborting the read. A malformed SLIP escape sequence or COBS code byte stops with stop_reason=framing_error, returning partial results with an error field and hex fallback. Set no_new_rx_timeout_ms to stop when no new bytes arrive within the specified silence window. Results carry from_offset/next_offset/bytes_lost/buffered_remaining/start_offset/end_offset.",
+        description = "Read buffered serial data or wait for unsolicited data/patterns. Returns buffered-but-unread bytes from the connection's cursor immediately (like `cat`); use `from` to replay (`{\"type\":\"buffer_start\"}`), jump to the live edge (`{\"type\":\"now\"}`), or seek an absolute offset (`{\"type\":\"offset\",\"offset\":N}`); `{\"type\":\"cursor\"}` is the default. Use `match` to wait for a pattern (checks buffered history first, then waits). Framing (`rx_framing`), parser (`rx_parser`), and `protocol` presets apply only when connection defaults don't fit; with validate:true checksum-mismatched frames are dropped and counted. Set `no_new_rx_timeout_ms` to stop on silence. Results carry from_offset/next_offset/bytes_lost/buffered_remaining/start_offset/end_offset.",
         title = "Read Serial Data",
         annotations(read_only_hint = true, open_world_hint = false),
         execution(task_support = "optional")
@@ -430,7 +430,7 @@ impl SerialHandler {
     }
 
     #[tool(
-        description = "Subscribe to a connection: starts a background stream that forwards received bytes as MCP `notifications/message` events with logger=\"serial:<connection_id>\". When timeout_ms is set, the stream auto-stops after that duration. When omitted, the stream runs until unsubscribe, connection close, or error. Set no_new_rx_timeout_ms to stop after a period of silence. With match, detects the first byte pattern. With rx_framing, emits per-frame notifications with structured data (line, delimiter, length-prefixed, SLIP, COBS, start/end marker). With rx_parser, interprets frame content (AT commands, JSON lines, shell prompts) — rx_parser is a sibling to rx_framing. Use protocol to select a built-in preset (at_command, slip, json_lines, cobs, ndjson, nmea0183, modbus_ascii) that fills in rx_framing and rx_parser defaults; explicit fields win. With validate: true, checksum-mismatched frames are dropped and counted in the final stop notification's frames_dropped field. A malformed SLIP escape sequence or COBS code byte emits a final notification with stop_reason=framing_error and an error field, carrying partial results. Replaces any prior subscription on the same connection. A final notification with stop_reason, truncated, bytes_observed, bytes_returned, elapsed_ms, frames_dropped is emitted when the stream ends.",
+        description = "Stream live RX bytes as `notifications/message` events (logger=\"serial:<connection_id>\"). Use ONLY for ongoing monitoring — for command/response use `transact`, for a bounded wait use `read(match=...)`. `from` selects the start point (`{\"type\":\"now\"}` default); `match`, `rx_framing`, `rx_parser`, and `protocol` behave like `read`. Replaces any prior subscription; a final stop notification (stop_reason, bytes_observed, bytes_returned, elapsed_ms, frames_dropped) ends the stream.",
         title = "Subscribe to RX Stream",
         annotations(
             destructive_hint = false,
@@ -478,7 +478,7 @@ impl SerialHandler {
     }
 
     #[tool(
-        description = "Get the current status and configuration of an open serial connection, including RX ring buffer state (size, offsets, cursor, buffered unread bytes, wrap loss).",
+        description = "Inspect a connection's live configuration, RX ring state (size, offsets, cursor, buffered unread bytes, wrap loss), profile binding, and reconnect state. For diagnostics — not routine reads; read results already carry the offsets you need.",
         title = "Get Connection Status",
         annotations(read_only_hint = true, open_world_hint = false)
     )]
@@ -490,7 +490,7 @@ impl SerialHandler {
     }
 
     #[tool(
-        description = "Reconfigure serial parameters (baud rate, data bits, stop bits, parity, flow control) on a live connection without closing and reopening it. Omitted parameters are left unchanged.",
+        description = "Change baud rate, data bits, stop bits, parity, or flow control on a live connection without reopening. Omitted parameters are left unchanged. The change is learned into the bound profile (see result `profile`/`profile_persistence`).",
         title = "Reconfigure Serial Port",
         annotations(destructive_hint = true, open_world_hint = false)
     )]
@@ -502,7 +502,7 @@ impl SerialHandler {
     }
 
     #[tool(
-        description = "List all configured serial device profiles. Profiles define selector rules and default settings so agents can open devices by name instead of fragile port paths.",
+        description = "List saved device profiles (selector, defaults, metadata, revision history). Cross-check with `list_ports` `profile_matches` to see which profiles match live devices before opening.",
         title = "List Profiles",
         annotations(read_only_hint = true, open_world_hint = false)
     )]
@@ -512,7 +512,7 @@ impl SerialHandler {
     }
 
     #[tool(
-        description = "Open a serial port by profile name rather than raw port path. The server matches the profile's selector against live ports and applies the profile's default configuration.",
+        description = "Open a device by named profile (explicit selection). Use when `list_ports` shows `ambiguous`/`ineligible`/`duplicate` matches, when device identity is weak, or to override the automatic last-used choice. The selector must match exactly one live port; the profile's defaults apply.",
         title = "Open by Profile",
         annotations(destructive_hint = false, open_world_hint = false)
     )]
@@ -564,7 +564,7 @@ impl SerialHandler {
     }
 
     #[tool(
-        description = "Roll a profile back to a prior retained revision. Restores that revision's selector and defaults as a NEW monotonic revision (never backward); active connections bound to the profile stay on their live state and become stale (learning/close cannot overwrite the rollback; reopen applies the restored defaults). Provide the profile's current revision as expected_revision to guard against concurrent modification. Wrong expected_revision or an evicted target revision is a tool error that leaves the file unchanged. Find prior revisions in list_profiles `revisions`.",
+        description = "Restore a retained prior revision of a profile after a bad learned setting. `list_profiles` shows `revisions` (newest five snapshots); pass the profile's CURRENT revision as `expected_revision` to guard against concurrent modification. Restores as a NEW monotonic revision; bound connections stay on live state and become stale until reopened. Wrong expected_revision or an evicted target revision is a tool error that leaves the file unchanged.",
         title = "Roll Back Profile",
         annotations(destructive_hint = true, open_world_hint = false)
     )]
@@ -576,7 +576,7 @@ impl SerialHandler {
     }
 
     #[tool(
-        description = "Configure connection defaults. Two modes: (1) profile mode — write defaults to a named profile in the profiles TOML, applied on future open_profile calls; (2) connection mode — mutate the framing/parser/protocol/reconnect_policy/max_buffered_bytes/poll_interval_ms defaults on a live connection (does NOT persist to disk; reopen to apply rx_buffer_size, serial-line params, log_capacity, and log_enabled — the LogBuffer has no live setter for capacity/enabled). Provide exactly one of `profile` or `connection_id`. Profile mode with overwrite=true replaces an existing profile. The `defaults` object carries the full desired state — omit individual fields to use their defaults.",
+        description = "Set defaults in two modes. Profile mode: `configure(profile=..., defaults=...)` writes a named profile in the profiles TOML (applied on future open_profile calls; overwrite=true replaces an existing profile). Connection mode: `configure(connection_id=..., defaults=...)` mutates framing/parser/protocol/reconnect_policy/max_buffered_bytes/poll_interval_ms defaults on a live connection (does NOT persist to disk; reopen to apply rx_buffer_size, serial-line params, log_capacity, log_enabled). The `defaults` object carries the full desired state — omit fields to use their defaults.",
         title = "Configure Defaults",
         annotations(destructive_hint = true, open_world_hint = false)
     )]
@@ -649,6 +649,45 @@ impl SerialHandler {
 }
 
 // ---- Tool helpers (extracted to src/tools/helpers.rs) -----------------------
+
+/// The full public MCP tool catalog exactly as served by `tools/list`.
+///
+/// Every `#[tool]` method's generated attribute is collected here so schema
+/// tests (`src/tools/mod.rs`) and the xtask `agent-eval` catalog metrics
+/// consume the SAME tool attributes the MCP router serves — no duplicated
+/// 26-tool enumeration can drift from the router. Keep this list in sync
+/// with the `#[tool]` methods above; `tool_catalog_has_exactly_twenty_six_tools`
+/// guards the count.
+pub fn tool_catalog() -> Vec<rmcp::model::Tool> {
+    vec![
+        SerialHandler::list_ports_tool_attr(),
+        SerialHandler::list_connections_tool_attr(),
+        SerialHandler::open_tool_attr(),
+        SerialHandler::close_tool_attr(),
+        SerialHandler::write_tool_attr(),
+        SerialHandler::transact_tool_attr(),
+        SerialHandler::read_tool_attr(),
+        SerialHandler::flush_tool_attr(),
+        SerialHandler::set_dtr_rts_tool_attr(),
+        SerialHandler::set_flow_control_tool_attr(),
+        SerialHandler::send_break_tool_attr(),
+        SerialHandler::subscribe_tool_attr(),
+        SerialHandler::unsubscribe_tool_attr(),
+        SerialHandler::get_status_tool_attr(),
+        SerialHandler::reconfigure_tool_attr(),
+        SerialHandler::list_profiles_tool_attr(),
+        SerialHandler::open_profile_tool_attr(),
+        SerialHandler::save_profile_tool_attr(),
+        SerialHandler::delete_profile_tool_attr(),
+        SerialHandler::configure_tool_attr(),
+        SerialHandler::rollback_profile_tool_attr(),
+        SerialHandler::get_log_tool_attr(),
+        SerialHandler::clear_log_tool_attr(),
+        SerialHandler::export_log_tool_attr(),
+        SerialHandler::reconnect_tool_attr(),
+        SerialHandler::compute_checksum_tool_attr(),
+    ]
+}
 
 // ---- ServerHandler boilerplate ----------------------------------------------
 
@@ -765,7 +804,25 @@ impl ServerHandler for SerialHandler {
         ))
         .with_protocol_version(ProtocolVersion::V_2025_11_25)
         .with_instructions(
-            "A serial port communication MCP server. Use list_ports to discover available serial ports, then open connections to communicate with serial devices. Resources: serial://ports, serial://connections, serial://connections/{id}. Prompts: diagnose_port, interactive_terminal. Subscribe to live RX bytes with the subscribe tool; the server emits notifications/message events with logger=\"serial:<connection_id>\"."
+            "Serial port MCP server. Normal workflow:\n\
+             1. Call `list_ports` and inspect `profile_matches` (parallel to `ports`): \
+             it previews which profile a bare `open(port=...)` would reuse.\n\
+             2. Normally call bare `open` with the port only — baud defaults to \
+             115200/8-N-1 and the server automatically reuses the most recently used \
+             high-confidence profile for a known device or creates a durable generated \
+             profile for a new one (both observable in the result's `profile`).\n\
+             3. Use `transact` for command/response, `read` for buffered or unsolicited \
+             data (with `match` to wait for a pattern), `write` for send-only, and \
+             `subscribe` only for ongoing notifications.\n\
+             4. After durable changes inspect `profile` / `profile_persistence` on the \
+             result, or `get_status` for the live binding.\n\
+             5. Use `open_profile` only for explicit choice or weak identity; \
+             `rollback_profile` restores a retained configuration after a bad learned \
+             change.\n\
+             6. Escalate to framing/parser, cursor replay, reconnect, line control, and \
+             log tools only when the common path needs them.\n\
+             Resources: serial://ports (same preview as list_ports), serial://connections, \
+             serial://connections/{id}. Prompts: diagnose_port, interactive_terminal."
                 .to_string(),
         )
     }
@@ -879,9 +936,17 @@ impl ServerHandler for SerialHandler {
                 let ports = self.port_provider.list_available().map_err(|e| {
                     McpError::internal_error(format!("Failed to list ports: {e}"), None)
                 })?;
+                // Same fresh profile-store preview as the `list_ports` tool,
+                // so the resource and the tool never disagree.
+                let profiles = self.profile_store.list_fresh().await.map_err(|e| {
+                    McpError::internal_error(format!("Failed to read profiles: {e}"), None)
+                })?;
+                let profile_matches =
+                    crate::tools::port_ops::compute_profile_matches(&ports, &profiles);
                 let body = serde_json::to_string_pretty(&ListPortsResult {
                     count: ports.len(),
                     ports,
+                    profile_matches,
                 })
                 .map_err(|e| McpError::internal_error(format!("serialize: {e}"), None))?;
                 Ok(ReadResourceResult::new(vec![ResourceContents::text(
