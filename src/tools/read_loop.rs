@@ -702,7 +702,7 @@ mod tests {
 
     use crate::serial::ConnectionManager;
 
-    // ── Phase 5: private-cursor extraction ────────────────────────────────
+    // ── Private/shared cursor behavior ────────────────────────────────────
 
     /// An already-cancelled request token routed through the private read
     /// path yields a STRUCTURED `cancelled` outcome (with offsets), not an
