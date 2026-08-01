@@ -68,7 +68,10 @@ cargo test --test native_sim_connection_lifecycle -- --ignored --test-threads=1
 
 ## Frame pipeline (TX + RX framing, parsers, presets, profile defaults)
 
-- `src/framing.rs` owns both RX and TX framing. RX: `RxFramingConfig` +
+- `src/framing/` owns both RX and TX framing (`config.rs` types + preset
+  expansion, `decoder.rs` state machine, `codecs.rs` TX codecs, `parsers/`
+  frame-content parsers; re-exported flat at `crate::framing::*`). RX:
+  `RxFramingConfig` +
   `RxFramingMode` (line/delimiter/length_prefixed/start_end/slip/cobs),
   `FrameDecoder` (stateful, byte-driven), `FrameDecodeError`,
   `ParserConfig`/`ParserType`/`ParsedFrame`. TX: `TxFramingConfig` +

@@ -90,15 +90,15 @@ fn server_json_description_tool_count_matches_code() {
 #[test]
 fn readme_mentions_every_protocol_preset() {
     // The preset list also drifts (the pre-0.7.1 README stopped at SLIP).
-    // Keep this list in sync with `ProtocolPreset` in src/framing.rs; the
+    // Keep this list in sync with `ProtocolPreset` in src/framing/config.rs; the
     // enum source is grepped so adding a preset without README mention fails.
-    let framing = repo_file("src/framing.rs");
+    let framing = repo_file("src/framing/config.rs");
     let readme = repo_file("README.md");
     let enum_body = framing
         .split("pub enum ProtocolPreset")
         .nth(1)
         .and_then(|s| s.split('}').next())
-        .expect("src/framing.rs must define ProtocolPreset");
+        .expect("src/framing/config.rs must define ProtocolPreset");
     // Serde renames variants to snake_case; derive the wire names.
     let wire_names: Vec<String> = enum_body
         .lines()

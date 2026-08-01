@@ -12,7 +12,7 @@
 - **Status** — `shipped` · `deferred` (FEATURES.md) · `reference` (not a
   serial-framing target).
 - **Effort** — relative implementation cost given the existing 0.7.0 frame
-  pipeline (`src/framing.rs`).
+  pipeline (`src/framing/`).
 - **License** — `free` = redistributable (RFC / IETF draft / explicitly free);
   `©` = copyrighted, cite-only.
 

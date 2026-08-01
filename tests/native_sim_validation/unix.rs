@@ -3444,7 +3444,7 @@ async fn native_read_length_prefixed_framing_decodes() {
     // echo corrupts the length-prefixed framing decoder (the first byte of
     // the echo is interpreted as a prefix length). Read the raw hex data
     // and verify the payload is present. The length-prefixed decoder
-    // is exercised in src/framing.rs unit tests.
+    // is exercised in src/framing/decoder.rs unit tests.
     write_cmd(&client, &id, "sendraw hex 04706F6E67").await;
     tokio::time::sleep(Duration::from_millis(500)).await;
 

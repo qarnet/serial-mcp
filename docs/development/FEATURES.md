@@ -228,14 +228,6 @@
 
 Non-feature work, roughly in suggested order. From the 2026-07-05 repo review.
 
-### Split `src/framing.rs` into a module tree
-- a single file holds config types, two codecs, six parsers, the decoder
-  state machine, and a test region of its own — past its scaling limit
-- target shape: `framing/` with `config.rs`, `decoder.rs`, `codecs.rs`,
-  `parsers/`, tests alongside their subjects
-- major rework — sequence AFTER the review-hardening work that rewrites
-  chunks of the same file; a split first would create painful conflicts
-
 ### Split `src/serial.rs` and `src/tools/helpers.rs`
 - `src/serial.rs` holds `SerialConnection`, `ConnectionManager`,
   `ConnectionConfig`, six enums, `PortInfo`, the `SerialIo` trait, and a
@@ -271,7 +263,7 @@ Non-feature work, roughly in suggested order. From the 2026-07-05 repo review.
 - `cargo-mutants` and the `fuzz/` targets exist but run only on demand — the
   NMEA parser panic found in review is exactly the class a scheduled fuzz
   run would have caught first
-- weekly `cargo-mutants` job (scope to `framing.rs` + `checksums.rs` to keep
+- weekly `cargo-mutants` job (scope to `framing/` + `checksums.rs` to keep
   runtime sane) + a short scheduled fuzz smoke
   (`cargo fuzz run codec_roundtrip -- -max_total_time=300`)
 - follows the `schema-drift.yml` precedent for scheduled jobs
