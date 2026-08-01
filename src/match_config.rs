@@ -46,7 +46,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::codec;
-use crate::tools::helpers::find_subslice;
+use crate::util::find_subsequence;
 
 // ---- Request shape --------------------------------------------------------
 
@@ -335,7 +335,7 @@ impl Matcher {
                 window,
                 base,
                 ..
-            } => find_subslice(window, needle)
+            } => find_subsequence(window, needle)
                 .map_or(MatchResult::NoMatch, |i| MatchResult::Found(base + i)),
             Self::Regex {
                 re, window, base, ..

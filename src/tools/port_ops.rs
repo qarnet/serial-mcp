@@ -11,7 +11,7 @@ use crate::profiles::{
 };
 use crate::rx_session::RxSessionManager;
 use crate::security::SecurityManager;
-use crate::serial::{ConnectionManager, PortInfo, PortProvider};
+use crate::serial::{ActiveProfileBinding, ConnectionManager, PortInfo, PortProvider};
 use crate::tools::helpers::log_tool_err;
 use crate::tools::helpers::lookup_connection;
 use crate::tools::helpers::{OpenOverlay, ResolvedOpenSettings};
@@ -51,12 +51,12 @@ pub async fn list_ports(
     }))
 }
 
-/// Pure Phase 4 preview of what a bare `open(port=...)` would do for every
-/// port, computed over ONE live port list + ONE fresh profile snapshot
-/// (the caller performs a single `ProfileStore::list_fresh()`). Never marks
-/// a profile used and never mutates the store.
+/// Pure preview of what a bare `open(port=...)` would do for every port,
+/// computed over ONE live port list + ONE fresh profile snapshot (the
+/// caller performs a single `ProfileStore::list_fresh()`). Never marks a
+/// profile used and never mutates the store.
 ///
-/// High identity exactly reuses the Phase 3 rules: candidates must pass
+/// High identity reuses the open-time selection rules: candidates must pass
 /// `Profile::matches` AND carry the target's high identity fields; the
 /// unique maximum `last_used_at_ms` wins (`None` sorts oldest); equal top
 /// rank is `Ambiguous`. Candidate order is deterministic — newest first,
@@ -84,26 +84,7 @@ pub fn compute_profile_matches(ports: &[PortInfo], profiles: &[Profile]) -> Vec<
         .map(|port| {
             let confidence = identity_confidence(port);
             let Some(identity) = high_identity(port) else {
-                // Weak identity: never automatically selected, but
-                // explicitly matching non-empty selectors remain visible
-                // candidates.
-                let mut candidates: Vec<ProfileMatchCandidate> = profiles
-                    .iter()
-                    .filter(|p| !p.selector.is_empty() && p.matches(port))
-                    .map(candidate_of)
-                    .collect();
-                candidates.sort_by(|a, b| a.profile_name.cmp(&b.profile_name));
-                return PortProfileMatch {
-                    port: port.name.clone(),
-                    confidence,
-                    outcome: if candidates.is_empty() {
-                        ProfileMatchOutcome::None
-                    } else {
-                        ProfileMatchOutcome::Ineligible
-                    },
-                    selected_profile: None,
-                    candidates,
-                };
+                return weak_identity_profile_match(port, confidence, profiles);
             };
 
             let duplicated = high_counts.get(&identity).copied().unwrap_or(0) > 1;
@@ -136,42 +117,81 @@ pub fn compute_profile_matches(ports: &[PortInfo], profiles: &[Profile]) -> Vec<
                 };
             }
 
-            let ranked = rank_candidates(eligible);
-            let candidates: Vec<ProfileMatchCandidate> = {
-                // Deterministic display order: newest first, then name. The
-                // selection decision below uses timestamps ONLY.
-                let mut sorted = ranked.clone();
-                sorted.sort_by(|a, b| {
-                    b.metadata
-                        .last_used_at_ms
-                        .unwrap_or(0)
-                        .cmp(&a.metadata.last_used_at_ms.unwrap_or(0))
-                        .then_with(|| a.name.cmp(&b.name))
-                });
-                sorted.iter().map(candidate_of).collect()
-            };
-
-            let (selected, outcome) = if ranked.len() == 1 {
-                (Some(ranked[0].name.clone()), ProfileMatchOutcome::Selected)
-            } else {
-                let top_ts = ranked[0].metadata.last_used_at_ms.unwrap_or(0);
-                let next_ts = ranked[1].metadata.last_used_at_ms.unwrap_or(0);
-                if top_ts != next_ts {
-                    (Some(ranked[0].name.clone()), ProfileMatchOutcome::Selected)
-                } else {
-                    (None, ProfileMatchOutcome::Ambiguous)
-                }
-            };
-
-            PortProfileMatch {
-                port: port.name.clone(),
-                confidence,
-                outcome,
-                selected_profile: selected,
-                candidates,
-            }
+            ranked_profile_match(port, confidence, eligible)
         })
         .collect()
+}
+
+/// Weak-identity preview (medium/low/none): never automatically selected.
+/// Explicitly matching non-empty selectors remain visible candidates,
+/// sorted by profile name; empty selectors (which match any port) are
+/// excluded.
+fn weak_identity_profile_match(
+    port: &PortInfo,
+    confidence: IdentityConfidence,
+    profiles: &[Profile],
+) -> PortProfileMatch {
+    let mut candidates: Vec<ProfileMatchCandidate> = profiles
+        .iter()
+        .filter(|p| !p.selector.is_empty() && p.matches(port))
+        .map(candidate_of)
+        .collect();
+    candidates.sort_by(|a, b| a.profile_name.cmp(&b.profile_name));
+    PortProfileMatch {
+        port: port.name.clone(),
+        confidence,
+        outcome: if candidates.is_empty() {
+            ProfileMatchOutcome::None
+        } else {
+            ProfileMatchOutcome::Ineligible
+        },
+        selected_profile: None,
+        candidates,
+    }
+}
+
+/// Ranked high-identity preview over the eligible profiles. Display
+/// candidates are ordered newest `last_used_at_ms` first, then name; the
+/// selection decision below uses timestamps ONLY — a name never breaks an
+/// equal top rank.
+fn ranked_profile_match(
+    port: &PortInfo,
+    confidence: IdentityConfidence,
+    eligible: Vec<Profile>,
+) -> PortProfileMatch {
+    let ranked = rank_candidates(eligible);
+    let candidates: Vec<ProfileMatchCandidate> = {
+        // Deterministic display order: newest first, then name.
+        let mut sorted = ranked.clone();
+        sorted.sort_by(|a, b| {
+            b.metadata
+                .last_used_at_ms
+                .unwrap_or(0)
+                .cmp(&a.metadata.last_used_at_ms.unwrap_or(0))
+                .then_with(|| a.name.cmp(&b.name))
+        });
+        sorted.iter().map(candidate_of).collect()
+    };
+
+    let (selected, outcome) = if ranked.len() == 1 {
+        (Some(ranked[0].name.clone()), ProfileMatchOutcome::Selected)
+    } else {
+        let top_ts = ranked[0].metadata.last_used_at_ms.unwrap_or(0);
+        let next_ts = ranked[1].metadata.last_used_at_ms.unwrap_or(0);
+        if top_ts != next_ts {
+            (Some(ranked[0].name.clone()), ProfileMatchOutcome::Selected)
+        } else {
+            (None, ProfileMatchOutcome::Ambiguous)
+        }
+    };
+
+    PortProfileMatch {
+        port: port.name.clone(),
+        confidence,
+        outcome,
+        selected_profile: selected,
+        candidates,
+    }
 }
 
 fn candidate_of(p: &Profile) -> ProfileMatchCandidate {
@@ -269,6 +289,86 @@ async fn plan_session(
     }
 }
 
+/// Binding for a `profile_mode="none"` session: never persists, no
+/// candidates, no error.
+fn disabled_binding(confidence: IdentityConfidence) -> ActiveProfileBinding {
+    ActiveProfileBinding {
+        profile_name: String::new(),
+        source: ProfileSelectionSource::Disabled,
+        confidence,
+        persistent: false,
+        generated: false,
+        revision: None,
+        dirty: false,
+        stale: false,
+        candidates: Vec::new(),
+        last_persistence_error: None,
+    }
+}
+
+/// Binding for a transient session: never persists, keeps the candidate
+/// list the caller could have selected from, and optionally carries a
+/// persistence error (generated-profile creation failure).
+fn transient_binding(
+    confidence: IdentityConfidence,
+    candidates: Vec<String>,
+    persistence_error: Option<String>,
+) -> ActiveProfileBinding {
+    ActiveProfileBinding {
+        profile_name: String::new(),
+        source: ProfileSelectionSource::Transient,
+        confidence,
+        persistent: false,
+        generated: false,
+        revision: None,
+        dirty: false,
+        stale: false,
+        candidates,
+        last_persistence_error: persistence_error,
+    }
+}
+
+/// Binding for a persistent selected/generated profile. Name, generated
+/// flag, and revision derive from the supplied profile; persistence
+/// failures keep the connection on the original metadata and surface as
+/// `last_persistence_error`.
+fn persistent_binding(
+    profile: &Profile,
+    source: ProfileSelectionSource,
+    confidence: IdentityConfidence,
+    dirty: bool,
+    persistence_error: Option<String>,
+) -> ActiveProfileBinding {
+    ActiveProfileBinding {
+        profile_name: profile.name.clone(),
+        source,
+        confidence,
+        persistent: true,
+        generated: profile.metadata.generated,
+        revision: Some(profile.metadata.revision),
+        dirty,
+        stale: false,
+        candidates: Vec::new(),
+        last_persistence_error: persistence_error,
+    }
+}
+
+/// Mark the selected profile used and build its persistent binding. On
+/// mark-used failure the connection stays on the original profile metadata
+/// and the error is carried on the binding — never a hard open failure.
+async fn mark_used_binding(
+    store: &crate::profile_store::ProfileStore,
+    profile: Profile,
+    source: ProfileSelectionSource,
+    confidence: IdentityConfidence,
+    dirty: bool,
+) -> ActiveProfileBinding {
+    match store.mark_used(&profile.name).await {
+        Ok(used) => persistent_binding(&used, source, confidence, dirty, None),
+        Err(e) => persistent_binding(&profile, source, confidence, dirty, Some(e)),
+    }
+}
+
 /// Shared post-open plumbing: attach the session binding computed from the
 /// resolved settings and the session plan to the already-open connection.
 ///
@@ -283,97 +383,39 @@ async fn attach_session_binding(
     resolved: &ResolvedOpenSettings,
     port_info: Option<&PortInfo>,
     dirty: Option<bool>,
-) -> Result<crate::serial::ActiveProfileBinding, String> {
+) -> Result<ActiveProfileBinding, String> {
     let confidence = port_info
         .map(identity_confidence)
         .unwrap_or(IdentityConfidence::None);
     let binding = match plan {
-        SessionPlan::Disabled { confidence } => crate::serial::ActiveProfileBinding {
-            profile_name: String::new(),
-            source: ProfileSelectionSource::Disabled,
-            confidence,
-            persistent: false,
-            generated: false,
-            revision: None,
-            dirty: false,
-            stale: false,
-            candidates: Vec::new(),
-            last_persistence_error: None,
-        },
+        SessionPlan::Disabled { confidence } => disabled_binding(confidence),
         SessionPlan::Transient {
             confidence,
             candidates,
-        } => crate::serial::ActiveProfileBinding {
-            profile_name: String::new(),
-            source: ProfileSelectionSource::Transient,
-            confidence,
-            persistent: false,
-            generated: false,
-            revision: None,
-            dirty: false,
-            stale: false,
-            candidates,
-            last_persistence_error: None,
-        },
+        } => transient_binding(confidence, candidates, None),
         SessionPlan::Selected { profile } => {
             let dirty = dirty.unwrap_or(false);
-            match store.mark_used(&profile.name).await {
-                Ok(used) => crate::serial::ActiveProfileBinding {
-                    profile_name: used.name.clone(),
-                    source: ProfileSelectionSource::Automatic,
-                    confidence: IdentityConfidence::High,
-                    persistent: true,
-                    generated: used.metadata.generated,
-                    revision: Some(used.metadata.revision),
-                    dirty,
-                    stale: false,
-                    candidates: Vec::new(),
-                    last_persistence_error: None,
-                },
-                Err(e) => crate::serial::ActiveProfileBinding {
-                    profile_name: profile.name.clone(),
-                    source: ProfileSelectionSource::Automatic,
-                    confidence: IdentityConfidence::High,
-                    persistent: true,
-                    generated: profile.metadata.generated,
-                    revision: Some(profile.metadata.revision),
-                    dirty,
-                    stale: false,
-                    candidates: Vec::new(),
-                    last_persistence_error: Some(e),
-                },
-            }
+            mark_used_binding(
+                store,
+                profile,
+                ProfileSelectionSource::Automatic,
+                IdentityConfidence::High,
+                dirty,
+            )
+            .await
         }
         SessionPlan::Explicit { profile } => {
             let dirty = dirty.unwrap_or(false);
             // Explicit selection reports the matched port's own identity
             // confidence — weak selectors are an explicit caller choice.
-            match store.mark_used(&profile.name).await {
-                Ok(used) => crate::serial::ActiveProfileBinding {
-                    profile_name: used.name.clone(),
-                    source: ProfileSelectionSource::Explicit,
-                    confidence,
-                    persistent: true,
-                    generated: used.metadata.generated,
-                    revision: Some(used.metadata.revision),
-                    dirty,
-                    stale: false,
-                    candidates: Vec::new(),
-                    last_persistence_error: None,
-                },
-                Err(e) => crate::serial::ActiveProfileBinding {
-                    profile_name: profile.name.clone(),
-                    source: ProfileSelectionSource::Explicit,
-                    confidence,
-                    persistent: true,
-                    generated: profile.metadata.generated,
-                    revision: Some(profile.metadata.revision),
-                    dirty,
-                    stale: false,
-                    candidates: Vec::new(),
-                    last_persistence_error: Some(e),
-                },
-            }
+            mark_used_binding(
+                store,
+                profile,
+                ProfileSelectionSource::Explicit,
+                confidence,
+                dirty,
+            )
+            .await
         }
         SessionPlan::Generate => {
             // Generated profile defaults equal the effective live settings.
@@ -383,33 +425,17 @@ async fn attach_session_binding(
             })?;
             let label = generated_label(port_info);
             match store.create_generated(label, selector, defaults).await {
-                Ok(created) => crate::serial::ActiveProfileBinding {
-                    profile_name: created.name.clone(),
-                    source: ProfileSelectionSource::Generated,
-                    confidence: IdentityConfidence::High,
-                    persistent: true,
-                    generated: true,
-                    revision: Some(created.metadata.revision),
-                    dirty: false,
-                    stale: false,
-                    candidates: Vec::new(),
-                    last_persistence_error: None,
-                },
+                Ok(created) => persistent_binding(
+                    &created,
+                    ProfileSelectionSource::Generated,
+                    IdentityConfidence::High,
+                    false,
+                    None,
+                ),
                 // Keep the connection open and bind a transient session
                 // carrying the error: do not report open failure or
                 // pretend the profile persisted.
-                Err(e) => crate::serial::ActiveProfileBinding {
-                    profile_name: String::new(),
-                    source: ProfileSelectionSource::Transient,
-                    confidence: IdentityConfidence::High,
-                    persistent: false,
-                    generated: false,
-                    revision: None,
-                    dirty: false,
-                    stale: false,
-                    candidates: Vec::new(),
-                    last_persistence_error: Some(e),
-                },
+                Err(e) => transient_binding(IdentityConfidence::High, Vec::new(), Some(e)),
             }
         }
     };

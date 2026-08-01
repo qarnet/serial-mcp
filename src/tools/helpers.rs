@@ -83,10 +83,6 @@ pub async fn lookup_connection(
         .map_err(|_| format!("Connection ID {id} not found"))
 }
 
-/// Re-export of the shared [`crate::util::find_subsequence`] under the
-/// legacy `find_subslice` name to keep existing import paths stable.
-pub(crate) use crate::util::find_subsequence as find_subslice;
-
 // ------------------------------------------------------------------
 // Parsers
 // ------------------------------------------------------------------
