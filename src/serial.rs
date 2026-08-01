@@ -2199,7 +2199,7 @@ mod schema {
     use crate::framing::{
         Frame, ParsedFrame, RxFramingConfig, RxFramingMode, TxFramingConfig, TxFramingMode,
     };
-    use crate::profiles::{Profile, ProfileSelector};
+    use crate::profiles::{Profile, ProfileMetadata, ProfileRevision, ProfileSelector};
     use crate::serial::{ConnectionStatus, PortInfo};
     use crate::tools::types::{
         ClearLogResult, CloseResult, ComputeChecksumResult, ConfigureResult, DeleteProfileResult,
@@ -2278,6 +2278,8 @@ mod schema {
     // Profile types (already fixed in b12b09fd; guarded against regressions).
     check_schema!(profile_has_no_uint_formats, Profile);
     check_schema!(profile_selector_has_no_uint_formats, ProfileSelector);
+    check_schema!(profile_metadata_has_no_uint_formats, ProfileMetadata);
+    check_schema!(profile_revision_has_no_uint_formats, ProfileRevision);
 
     // Tool result types reachable by clients.
     // Keep this list in sync with the `#[tool]` methods in `src/server.rs`

@@ -35,6 +35,7 @@ pico-args = { version = "0.5.0", features = ["eq-separator"] }
 toml = "0.8"
 dirs = "6"
 tempfile = "3"
+fs2 = "0.4.3"
 
 [[bin]]
 name = "serial-mcp"

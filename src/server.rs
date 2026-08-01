@@ -5,7 +5,6 @@
 //! instead of parsing free-form text.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use base64::Engine as _;
@@ -72,8 +71,7 @@ pub struct SerialHandler {
     rx_sessions: Arc<RxSessionManager>,
     tx_sessions: Arc<TxSessionManager>,
     budget: Arc<dyn BufferBudget>,
-    profiles: Arc<tokio::sync::RwLock<Vec<crate::profiles::Profile>>>,
-    profiles_path: PathBuf,
+    profile_store: Arc<crate::profile_store::ProfileStore>,
 }
 
 /// Injectable configuration for [`SerialHandler`].
@@ -86,8 +84,10 @@ pub struct SerialHandlerOptions {
     pub streams: StreamRegistry,
     pub security: SecurityManager,
     pub budget: Arc<dyn BufferBudget>,
-    // profiles / profiles_path are intentionally NOT here: they are applied
-    // post-build via `with_profiles`, matching today's flow.
+    /// Process-wide profile store. Defaults to an ephemeral store for
+    /// library/test construction; production `main.rs` injects a store
+    /// opened at the resolved `--profiles-path`.
+    pub profile_store: Arc<crate::profile_store::ProfileStore>,
 }
 
 impl Default for SerialHandlerOptions {
@@ -101,6 +101,7 @@ impl Default for SerialHandlerOptions {
                 DEFAULT_MAX_PROGRAM_BUFFERED_BYTES,
                 DEFAULT_MAX_TOOL_BUFFERED_BYTES,
             )),
+            profile_store: Arc::new(crate::profile_store::ProfileStore::ephemeral()),
         }
     }
 }
@@ -128,6 +129,10 @@ impl SerialHandlerBuilder {
         self.options.budget = budget;
         self
     }
+    pub fn profile_store(mut self, profile_store: Arc<crate::profile_store::ProfileStore>) -> Self {
+        self.options.profile_store = profile_store;
+        self
+    }
 
     /// Consume the builder and produce a [`SerialHandler`].
     ///
@@ -138,6 +143,7 @@ impl SerialHandlerBuilder {
             streams,
             security,
             budget,
+            profile_store,
         } = self.options;
         let handler = SerialHandler {
             connections,
@@ -147,8 +153,7 @@ impl SerialHandlerBuilder {
             rx_sessions: Arc::new(RxSessionManager::new(Arc::clone(&budget))),
             tx_sessions: Arc::new(TxSessionManager::new()),
             budget,
-            profiles: Arc::new(tokio::sync::RwLock::new(Vec::new())),
-            profiles_path: crate::profiles::default_profiles_path(),
+            profile_store,
         };
         handler.spawn_reconnect_supervisor();
         handler
@@ -164,18 +169,24 @@ impl SerialHandler {
 
     /// Default handler: default connections, empty allowlist, default budget,
     /// profiles loaded from the default path, reconnect supervisor spawned.
+    ///
+    /// Falls back to an ephemeral (non-persistent) store with a warning when
+    /// the default path cannot be resolved or contains invalid data — for
+    /// library/test convenience. Production `main.rs` does not use this
+    /// fallback: it resolves `--profiles-path` and fails startup on invalid
+    /// persistent data.
     pub fn new() -> Self {
-        let path = crate::profiles::default_profiles_path();
-        let profiles = crate::profiles::load_profiles(&path);
-        Self::builder().build().with_profiles(path, profiles)
-    }
-
-    /// Replace the loaded profiles with the given vector and path.
-    /// (Unchanged from today — kept as a post-build setter.)
-    pub fn with_profiles(mut self, path: PathBuf, profiles: Vec<crate::profiles::Profile>) -> Self {
-        self.profiles = Arc::new(tokio::sync::RwLock::new(profiles));
-        self.profiles_path = path;
-        self
+        let store = crate::profiles::default_profiles_path()
+            .map_err(|e| format!("Cannot resolve default profiles path: {e}"))
+            .and_then(crate::profile_store::ProfileStore::open);
+        let store = match store {
+            Ok(store) => Arc::new(store),
+            Err(e) => {
+                tracing::warn!("profiles store unavailable, using ephemeral store: {e}");
+                Arc::new(crate::profile_store::ProfileStore::ephemeral())
+            }
+        };
+        Self::builder().profile_store(store).build()
     }
 
     /// Start the background reconnect supervisor task.
@@ -476,7 +487,7 @@ impl SerialHandler {
         annotations(read_only_hint = true, open_world_hint = false)
     )]
     async fn list_profiles(&self) -> Result<Json<ListProfilesResult>, String> {
-        let profiles = self.profiles.read().await;
+        let profiles = self.profile_store.list().await;
         port_ops::list_profiles(&profiles)
     }
 
@@ -490,12 +501,14 @@ impl SerialHandler {
         Parameters(args): Parameters<OpenProfileArgs>,
         ctx: RequestContext<RoleServer>,
     ) -> Result<Json<OpenResult>, String> {
-        let profiles = self.profiles.read().await;
+        // Clone the profile out of the store first; do not hold a store
+        // lock while opening serial hardware.
+        let profile = self.profile_store.get(&args.profile).await;
         let result = port_ops::open_profile(
             &self.connections,
             &self.rx_sessions,
             &self.security,
-            &profiles,
+            profile,
             args,
         )
         .await?;
@@ -516,8 +529,7 @@ impl SerialHandler {
         port_ops::save_profile(
             &self.connections,
             &self.rx_sessions,
-            &self.profiles,
-            &self.profiles_path,
+            &self.profile_store,
             args,
         )
         .await
@@ -532,7 +544,7 @@ impl SerialHandler {
         &self,
         Parameters(args): Parameters<DeleteProfileArgs>,
     ) -> Result<Json<DeleteProfileResult>, String> {
-        port_ops::delete_profile(&self.profiles, &self.profiles_path, args).await
+        port_ops::delete_profile(&self.profile_store, args).await
     }
 
     #[tool(
@@ -544,14 +556,7 @@ impl SerialHandler {
         &self,
         Parameters(args): Parameters<ConfigureArgs>,
     ) -> Result<Json<ConfigureResult>, String> {
-        port_ops::configure(
-            &self.connections,
-            &self.rx_sessions,
-            &self.profiles,
-            &self.profiles_path,
-            args,
-        )
-        .await
+        port_ops::configure(&self.connections, &self.profile_store, args).await
     }
 
     #[tool(
@@ -1082,13 +1087,40 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn builder_with_profiles_applies_path_and_profiles() {
-        let path = std::path::PathBuf::from("/nonexistent/test-profiles.json");
+    async fn builder_injected_profile_store_is_used() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("profiles.toml");
+        let store = Arc::new(crate::profile_store::ProfileStore::open(path).unwrap());
         let handler = SerialHandler::builder()
             .connections(Arc::new(ConnectionManager::new()))
-            .build()
-            .with_profiles(path.clone(), Vec::new());
-        assert_eq!(handler.profiles_path, path);
-        assert!(handler.profiles.read().await.is_empty());
+            .profile_store(Arc::clone(&store))
+            .build();
+        // The injected store (not a fresh empty vector) is the one served.
+        assert!(Arc::ptr_eq(&handler.profile_store, &store));
+        assert!(handler.profile_store.list().await.is_empty());
+
+        // A mutation through the handler's store is visible via list().
+        let profile = crate::profiles::Profile {
+            name: "injected".into(),
+            selector: Default::default(),
+            defaults: Default::default(),
+            metadata: Default::default(),
+            revisions: Vec::new(),
+        };
+        store.upsert(profile, false).await.unwrap();
+        let listed = handler.profile_store.list().await;
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].name, "injected");
+    }
+
+    #[tokio::test]
+    async fn builder_default_uses_ephemeral_store() {
+        let handler = SerialHandler::builder()
+            .connections(Arc::new(ConnectionManager::new()))
+            .build();
+        assert!(
+            handler.profile_store.path().is_none(),
+            "builder default must be an ephemeral store"
+        );
     }
 }

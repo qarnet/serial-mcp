@@ -9,6 +9,7 @@ use serial_mcp::serial::ConnectionManager;
 use serial_mcp::server::StreamRegistry;
 use serial_mcp::SerialHandler;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
@@ -22,6 +23,7 @@ struct Args {
     bind: String,
     max_program_buffered_bytes: usize,
     max_tool_buffered_bytes: usize,
+    profiles_path: Option<PathBuf>,
 }
 
 enum Transport {
@@ -57,6 +59,7 @@ const VALUE_TAKING_OPTIONS: &[&str] = &[
     "--bind",
     "--max-program-buffered-bytes",
     "--max-tool-buffered-bytes",
+    "--profiles-path",
 ];
 
 /// Scan argv for a version flag (`-V` / `--version`) that is NOT in the
@@ -123,6 +126,8 @@ Options:
   --bind <addr>                     HTTP bind address (default: {bind})
   --max-program-buffered-bytes <N>  Global budget for all in-flight RX tools (default: {prog_default})
   --max-tool-buffered-bytes <N>     Per-tool ceiling for max_buffered_bytes (default: {tool_default})
+  --profiles-path <path>            Profile store file path
+                                     (default: OS user config dir + serial-mcp/profiles.toml)
   -V, --version                     Print version and exit
   -h, --help                        Print this help
 
@@ -179,6 +184,8 @@ Examples:
         .opt_value_from_str("--max-tool-buffered-bytes")?
         .unwrap_or(DEFAULT_MAX_TOOL_BUFFERED_BYTES);
 
+    let profiles_path: Option<std::path::PathBuf> = pargs.opt_value_from_str("--profiles-path")?;
+
     let remaining = pargs.finish();
     if !remaining.is_empty() {
         eprintln!(
@@ -214,6 +221,7 @@ Examples:
         bind,
         max_program_buffered_bytes,
         max_tool_buffered_bytes,
+        profiles_path,
     })
 }
 
@@ -230,6 +238,7 @@ fn init_tracing() {
 async fn run_stdio(
     security: SecurityManager,
     budget: Arc<dyn serial_mcp::buffer_budget::BufferBudget>,
+    profile_store: Arc<serial_mcp::profile_store::ProfileStore>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     info!("Starting Serial MCP Server v{}", env!("CARGO_PKG_VERSION"));
     let connections = Arc::new(ConnectionManager::new());
@@ -239,6 +248,7 @@ async fn run_stdio(
         .streams(streams)
         .security(security)
         .budget(budget)
+        .profile_store(profile_store)
         .build();
     let service = handler.serve(stdio()).await.map_err(|e| {
         error!("Failed to start server: {:?}", e);
@@ -254,6 +264,7 @@ async fn run_http(
     security: SecurityManager,
     bind: String,
     budget: Arc<dyn serial_mcp::buffer_budget::BufferBudget>,
+    profile_store: Arc<serial_mcp::profile_store::ProfileStore>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     info!(
         "Starting Serial MCP Server (HTTP) v{} on http://{}{}",
@@ -268,6 +279,7 @@ async fn run_http(
     let manager_for_service = Arc::clone(&manager);
     let streams_for_service = Arc::clone(&streams);
     let budget_for_service = Arc::clone(&budget);
+    let profile_store_for_service = Arc::clone(&profile_store);
 
     let service = StreamableHttpService::new(
         move || {
@@ -276,6 +288,7 @@ async fn run_http(
                 .streams(Arc::clone(&streams_for_service))
                 .security(security.clone())
                 .budget(Arc::clone(&budget_for_service))
+                .profile_store(Arc::clone(&profile_store_for_service))
                 .build())
         },
         LocalSessionManager::default().into(),
@@ -325,8 +338,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         args.max_program_buffered_bytes, args.max_tool_buffered_bytes,
     );
 
+    // Resolve the profile store path. Without --profiles-path the OS user
+    // config path is the default; an unavailable config directory is a
+    // startup error (no silent cwd fallback). Invalid persistent data
+    // (corrupt file, unsupported future schema version) also fails
+    // startup — never an empty store.
+    let profiles_path = match args.profiles_path {
+        Some(p) => p,
+        None => serial_mcp::profiles::default_profiles_path().unwrap_or_else(|e| {
+            eprintln!("error: {e}");
+            std::process::exit(1);
+        }),
+    };
+    let profile_store = Arc::new(
+        serial_mcp::profile_store::ProfileStore::open(profiles_path.clone()).unwrap_or_else(|e| {
+            eprintln!(
+                "error: failed to load profiles from {}: {e}",
+                profiles_path.display()
+            );
+            std::process::exit(1);
+        }),
+    );
+    info!("Profiles store: {}", profiles_path.display());
+
     match args.transport {
-        Transport::Http => run_http(security, args.bind, budget).await,
-        Transport::Stdio => run_stdio(security, budget).await,
+        Transport::Http => run_http(security, args.bind, budget, profile_store).await,
+        Transport::Stdio => run_stdio(security, budget, profile_store).await,
     }
 }

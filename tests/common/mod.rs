@@ -68,38 +68,7 @@ impl TestServer {
         manager: Arc<ConnectionManager>,
         security: SecurityManager,
     ) -> Self {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let url = format!("http://{addr}/mcp");
-        let shutdown = CancellationToken::new();
-
-        let streams: StreamRegistry = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
-        let manager_for_service = Arc::clone(&manager);
-        let streams_for_service = Arc::clone(&streams);
-        let shutdown_for_service = shutdown.child_token();
-        let service = StreamableHttpService::new(
-            move || {
-                Ok(SerialHandler::builder()
-                    .connections(Arc::clone(&manager_for_service))
-                    .streams(Arc::clone(&streams_for_service))
-                    .security(security.clone())
-                    .build())
-            },
-            LocalSessionManager::default().into(),
-            StreamableHttpServerConfig::default().with_cancellation_token(shutdown_for_service),
-        );
-        let router = axum::Router::new().nest_service("/mcp", service);
-
-        let handle = tokio::spawn(async move {
-            let _ = axum::serve(listener, router).await;
-        });
-
-        TestServer {
-            url,
-            manager,
-            shutdown,
-            handle,
-        }
+        Self::start_inner(manager, security, None).await
     }
 
     /// Start a server with a custom profiles path (for tests that exercise
@@ -121,24 +90,43 @@ impl TestServer {
         profiles_path: std::path::PathBuf,
         security: SecurityManager,
     ) -> Self {
+        // A pre-written file (legacy migration tests, restart tests) is
+        // loaded and validated like production startup would.
+        let store = Arc::new(
+            serial_mcp::profile_store::ProfileStore::open(profiles_path)
+                .expect("open profiles store for test server"),
+        );
+        Self::start_inner(manager, security, Some(store)).await
+    }
+
+    /// Shared construction: one `Arc<ProfileStore>` per server, cloned into
+    /// every session handler factory so all HTTP MCP sessions observe the
+    /// same profile state. `None` selects the ephemeral store default.
+    async fn start_inner(
+        manager: Arc<ConnectionManager>,
+        security: SecurityManager,
+        profile_store: Option<Arc<serial_mcp::profile_store::ProfileStore>>,
+    ) -> Self {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let url = format!("http://{addr}/mcp");
         let shutdown = CancellationToken::new();
 
         let streams: StreamRegistry = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+        let profile_store = profile_store
+            .unwrap_or_else(|| Arc::new(serial_mcp::profile_store::ProfileStore::ephemeral()));
         let manager_for_service = Arc::clone(&manager);
         let streams_for_service = Arc::clone(&streams);
+        let profile_store_for_service = Arc::clone(&profile_store);
         let shutdown_for_service = shutdown.child_token();
-        let profiles_path_for_service = profiles_path.clone();
         let service = StreamableHttpService::new(
             move || {
                 Ok(SerialHandler::builder()
                     .connections(Arc::clone(&manager_for_service))
                     .streams(Arc::clone(&streams_for_service))
                     .security(security.clone())
-                    .build()
-                    .with_profiles(profiles_path_for_service.clone(), Vec::new()))
+                    .profile_store(Arc::clone(&profile_store_for_service))
+                    .build())
             },
             LocalSessionManager::default().into(),
             StreamableHttpServerConfig::default().with_cancellation_token(shutdown_for_service),

@@ -98,11 +98,20 @@ serial-mcp [OPTIONS]
   --bind <addr>                     HTTP bind address (default: 127.0.0.1:8000)
   --max-program-buffered-bytes <N>  Global budget for all in-flight RX tools
   --max-tool-buffered-bytes <N>     Per-tool ceiling for max_buffered_bytes
+  --profiles-path <path>            Profile store file path (default: OS user
+                                    config dir + serial-mcp/profiles.toml)
   -V, --version                     Print version and exit (also: `serial-mcp version`)
   -h, --help                        Print help
 
   RUST_LOG                   Log level env var (error/warn/info/debug/trace)
 ```
+
+Profiles are persisted to a single TOML store shared by every session of the
+server process. The default location follows your OS user config directory
+(e.g. `~/.config/serial-mcp/profiles.toml`), so device knowledge follows you
+across repositories. Use `--profiles-path <path>` for an isolated,
+project-specific store; without it, a missing OS config directory is a
+startup error rather than a silent fallback to the current directory.
 
 ## Transports
 

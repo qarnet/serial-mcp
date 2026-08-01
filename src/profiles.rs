@@ -10,6 +10,10 @@ use std::path::PathBuf;
 
 use crate::serial::PortInfo;
 
+/// Maximum number of prior selector/defaults snapshots retained per profile.
+/// Oldest snapshots are dropped first; the newest five prior states survive.
+pub const MAX_PROFILE_REVISIONS: usize = 5;
+
 /// A single named profile.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct Profile {
@@ -18,6 +22,50 @@ pub struct Profile {
     pub selector: ProfileSelector,
     #[serde(default)]
     pub defaults: ProfileDefaults,
+    /// Bookkeeping metadata (revision, timestamps, generated flag).
+    /// Phase 3 uses `last_used_at_ms`/`use_count` for selection ranking.
+    #[serde(default)]
+    pub metadata: ProfileMetadata,
+    /// Bounded history of prior selector/defaults snapshots. Empty for
+    /// profiles that were never overwritten.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub revisions: Vec<ProfileRevision>,
+}
+
+/// Per-profile bookkeeping metadata.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+pub struct ProfileMetadata {
+    /// True when the profile was created by automatic session machinery
+    /// (Phase 3), false for profiles created by explicit tools.
+    pub generated: bool,
+    /// Monotonic revision number. Legacy/unversioned profiles default to 0
+    /// and become 1 on their first update.
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub revision: u64,
+    /// Creation timestamp (ms since Unix epoch), set on create.
+    #[schemars(schema_with = "crate::schema_helpers::option_uint_schema")]
+    pub created_at_ms: Option<u64>,
+    /// Last mutation timestamp (ms since Unix epoch).
+    #[schemars(schema_with = "crate::schema_helpers::option_uint_schema")]
+    pub updated_at_ms: Option<u64>,
+    /// Last open/selection timestamp (ms since Unix epoch). Phase 3 only.
+    #[schemars(schema_with = "crate::schema_helpers::option_uint_schema")]
+    pub last_used_at_ms: Option<u64>,
+    /// Number of times the profile was used/selected. Phase 3 only.
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub use_count: u64,
+}
+
+/// A snapshot of a profile's selector/defaults as they were before one
+/// overwrite. `revision` is the profile revision that owned this state.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ProfileRevision {
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub revision: u64,
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub saved_at_ms: u64,
+    pub selector: ProfileSelector,
+    pub defaults: ProfileDefaults,
 }
 
 /// Rules for matching a live serial port against this profile.
@@ -25,7 +73,7 @@ pub struct Profile {
 /// All fields are optional. A port matches when every non-empty field
 /// agrees with the port's identity. An empty selector (all fields
 /// `None`) matches any port — not recommended outside testing.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct ProfileSelector {
     #[schemars(schema_with = "crate::schema_helpers::option_uint_schema")]
     pub vid: Option<u16>,
@@ -226,121 +274,17 @@ impl Profile {
     }
 }
 
-/// Load profiles from a TOML file. Returns an empty vec when the file
-/// does not exist or cannot be read.
-pub fn load_profiles(path: &PathBuf) -> Vec<Profile> {
-    let content = match std::fs::read_to_string(path) {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::warn!("Cannot read profiles file {}: {e}", path.display());
-            return vec![];
-        }
-    };
-
-    match toml::from_str::<ProfilesFile>(&content) {
-        Ok(f) => f.profile,
-        Err(e) => {
-            tracing::warn!("Failed to parse profiles file {}: {e}", path.display());
-            vec![]
-        }
-    }
-}
-
-/// Default location for the profiles configuration file.
-pub fn default_profiles_path() -> PathBuf {
-    let mut p = dirs::config_dir().unwrap_or_else(|| PathBuf::from("."));
-    p.push("serial-mcp");
-    p.push("profiles.toml");
-    p
-}
-
-/// Write a profile to the TOML file atomically.
+/// Default location for the profiles configuration file: the OS user
+/// config directory plus `serial-mcp/profiles.toml`.
 ///
-/// Returns `true` if the profile was newly created, `false` if it
-/// replaced an existing profile with the same name.
-///
-/// Writes to a temporary file first, then renames for atomicity.
-/// When `overwrite` is false and a profile with the same name already
-/// exists, returns an error.
-pub fn save_profile(path: &PathBuf, profile: &Profile, overwrite: bool) -> Result<bool, String> {
-    let mut profiles = load_profiles(path);
-    let existing_idx = profiles.iter().position(|p| p.name == profile.name);
-
-    if existing_idx.is_some() && !overwrite {
-        return Err(format!(
-            "Profile '{}' already exists. Set overwrite=true to replace.",
-            profile.name
-        ));
-    }
-
-    match existing_idx {
-        Some(idx) => {
-            profiles[idx] = profile.clone();
-        }
-        None => {
-            profiles.push(profile.clone());
-        }
-    }
-    let created = existing_idx.is_none();
-
-    let toml = toml::to_string_pretty(&ProfilesFile { profile: profiles })
-        .map_err(|e| format!("Failed to serialize profiles: {e}"))?;
-
-    let dir = path
-        .parent()
-        .ok_or_else(|| "Profiles path has no parent directory".to_string())?;
-    std::fs::create_dir_all(dir).map_err(|e| format!("Cannot create profile dir: {e}"))?;
-
-    let mut tmp = tempfile::NamedTempFile::new_in(dir)
-        .map_err(|e| format!("Failed to create temp file: {e}"))?;
-    std::io::Write::write_all(&mut tmp, toml.as_bytes())
-        .map_err(|e| format!("Failed to write profiles: {e}"))?;
-    tmp.persist(path)
-        .map_err(|e| format!("Failed to commit profiles: {e}"))?;
-
-    tracing::info!(
-        "Profile '{}' {} (path: {})",
-        profile.name,
-        if created { "created" } else { "updated" },
-        path.display()
-    );
-    Ok(created)
-}
-
-/// Delete a profile by name from the TOML file. Returns an error if
-/// the profile does not exist.
-pub fn delete_profile(path: &PathBuf, name: &str) -> Result<(), String> {
-    let mut profiles = load_profiles(path);
-    let len_before = profiles.len();
-    profiles.retain(|p| p.name != name);
-
-    if profiles.len() == len_before {
-        return Err(format!("Profile '{name}' not found"));
-    }
-
-    let toml = toml::to_string_pretty(&ProfilesFile { profile: profiles })
-        .map_err(|e| format!("Failed to serialize profiles: {e}"))?;
-
-    let dir = path
-        .parent()
-        .ok_or_else(|| "Profiles path has no parent directory".to_string())?;
-    std::fs::create_dir_all(dir).map_err(|e| format!("Cannot create profile dir: {e}"))?;
-
-    let mut tmp = tempfile::NamedTempFile::new_in(dir)
-        .map_err(|e| format!("Failed to create temp file: {e}"))?;
-    std::io::Write::write_all(&mut tmp, toml.as_bytes())
-        .map_err(|e| format!("Failed to write profiles: {e}"))?;
-    tmp.persist(path)
-        .map_err(|e| format!("Failed to commit profiles: {e}"))?;
-
-    tracing::info!("Profile '{}' deleted (path: {})", name, path.display());
-    Ok(())
-}
-
-/// TOML root structure for the profiles file.
-#[derive(Debug, Deserialize, Serialize)]
-struct ProfilesFile {
-    profile: Vec<Profile>,
+/// Returns an error when the OS config directory is unavailable. There is
+/// deliberately no silent fallback to the current working directory — an
+/// agent's `profiles.toml` must never accidentally land in a repository.
+pub fn default_profiles_path() -> Result<PathBuf, String> {
+    let dir = dirs::config_dir().ok_or_else(|| {
+        "OS user config directory is unavailable; pass --profiles-path".to_string()
+    })?;
+    Ok(dir.join("serial-mcp").join("profiles.toml"))
 }
 
 #[cfg(test)]
@@ -369,6 +313,8 @@ mod tests {
             name: "any".into(),
             selector: ProfileSelector::default(),
             defaults: ProfileDefaults::default(),
+            metadata: ProfileMetadata::default(),
+            revisions: Vec::new(),
         };
         assert!(p.matches(&make_port("/dev/ttyUSB0", Some(0x1234), Some(0x5678), None)));
         assert!(p.matches(&make_port("/dev/ttyACM0", None, None, None)));
@@ -384,6 +330,8 @@ mod tests {
                 ..Default::default()
             },
             defaults: ProfileDefaults::default(),
+            metadata: ProfileMetadata::default(),
+            revisions: Vec::new(),
         };
         assert!(p.matches(&make_port("/dev/ttyUSB0", Some(0x1234), Some(0x5678), None)));
         assert!(!p.matches(&make_port("/dev/ttyUSB0", Some(0xAAAA), Some(0x5678), None)));
@@ -399,6 +347,8 @@ mod tests {
                 ..Default::default()
             },
             defaults: ProfileDefaults::default(),
+            metadata: ProfileMetadata::default(),
+            revisions: Vec::new(),
         };
         assert!(p.matches(&make_port("/dev/ttyUSB0", None, None, Some("0001"))));
         assert!(!p.matches(&make_port("/dev/ttyUSB0", None, None, Some("0002"))));
@@ -414,6 +364,8 @@ mod tests {
                 ..Default::default()
             },
             defaults: ProfileDefaults::default(),
+            metadata: ProfileMetadata::default(),
+            revisions: Vec::new(),
         };
         assert!(p.matches(&make_port("/dev/ttyACM0", None, None, None)));
         assert!(!p.matches(&make_port("/dev/ttyUSB0", None, None, None)));
@@ -429,6 +381,8 @@ mod tests {
                 ..Default::default()
             },
             defaults: ProfileDefaults::default(),
+            metadata: ProfileMetadata::default(),
+            revisions: Vec::new(),
         };
         assert!(p.matches(&make_port(
             "/dev/ttyUSB0",
@@ -453,40 +407,6 @@ mod tests {
     }
 
     #[test]
-    fn load_profiles_from_toml() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("profiles.toml");
-        std::fs::write(
-            &path,
-            r#"
-[[profile]]
-name = "nrf-dk"
-[profile.selector]
-vid = 0x1366
-pid = 0x0105
-[profile.defaults]
-baud_rate = 115200
-name = "nrf"
-
-[[profile]]
-name = "arduino"
-[profile.selector]
-port_pattern = "/dev/ttyACM*"
-[profile.defaults]
-baud_rate = 9600
-"#,
-        )
-        .unwrap();
-
-        let profiles = load_profiles(&path);
-        assert_eq!(profiles.len(), 2);
-        assert_eq!(profiles[0].name, "nrf-dk");
-        assert_eq!(profiles[0].selector.vid, Some(0x1366));
-        assert_eq!(profiles[0].defaults.name.as_deref(), Some("nrf"));
-        assert_eq!(profiles[1].name, "arduino");
-    }
-
-    #[test]
     fn manufacturer_match() {
         let p = Profile {
             name: "by-mfg".into(),
@@ -495,6 +415,8 @@ baud_rate = 9600
                 ..Default::default()
             },
             defaults: ProfileDefaults::default(),
+            metadata: ProfileMetadata::default(),
+            revisions: Vec::new(),
         };
         let mut port = make_port("/dev/ttyACM0", None, None, None);
         port.manufacturer = Some("STMicro".into());
@@ -512,6 +434,8 @@ baud_rate = 9600
                 ..Default::default()
             },
             defaults: ProfileDefaults::default(),
+            metadata: ProfileMetadata::default(),
+            revisions: Vec::new(),
         };
         let mut port = make_port("/dev/ttyACM0", None, None, None);
         port.product = Some("VirtualCom".into());
@@ -529,6 +453,8 @@ baud_rate = 9600
                 ..Default::default()
             },
             defaults: ProfileDefaults::default(),
+            metadata: ProfileMetadata::default(),
+            revisions: Vec::new(),
         };
         let mut port = make_port("/dev/ttyACM0", None, None, None);
         port.interface = Some(2);
@@ -546,6 +472,8 @@ baud_rate = 9600
                 ..Default::default()
             },
             defaults: ProfileDefaults::default(),
+            metadata: ProfileMetadata::default(),
+            revisions: Vec::new(),
         };
         let port = PortInfo {
             description: "Silicon Labs CP2102 USB to UART Bridge Controller".into(),
@@ -564,115 +492,10 @@ baud_rate = 9600
                 ..Default::default()
             },
             defaults: ProfileDefaults::default(),
+            metadata: ProfileMetadata::default(),
+            revisions: Vec::new(),
         };
         assert!(!p.matches(&make_port("/dev/ttyUSB0", None, None, None)));
-    }
-
-    #[test]
-    fn load_profiles_missing_file_returns_empty() {
-        let profiles = load_profiles(&PathBuf::from("/nonexistent/path/profiles.toml"));
-        assert!(profiles.is_empty());
-    }
-
-    #[test]
-    fn load_profiles_invalid_toml_returns_empty() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("bad.toml");
-        std::fs::write(&path, "not valid toml {{{").unwrap();
-        let profiles = load_profiles(&path);
-        assert!(profiles.is_empty());
-    }
-
-    // ── save_profile / delete_profile ──────────────────────────────────
-
-    fn temp_profiles_path() -> PathBuf {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("profiles.toml");
-        // Prevent tempdir from being dropped — leak it into test scope.
-        // (The test function owns dir until it returns.)
-        std::mem::forget(dir);
-        path
-    }
-
-    fn make_test_profile(name: &str) -> Profile {
-        Profile {
-            name: name.into(),
-            selector: ProfileSelector {
-                vid: Some(0x1234),
-                ..Default::default()
-            },
-            defaults: ProfileDefaults::default(),
-        }
-    }
-
-    #[test]
-    fn save_profile_creates_new() {
-        let path = temp_profiles_path();
-        let profile = make_test_profile("test-device");
-        let created = save_profile(&path, &profile, false).unwrap();
-        assert!(created, "new profile should report created=true");
-
-        let loaded = load_profiles(&path);
-        assert_eq!(loaded.len(), 1);
-        assert_eq!(loaded[0].name, "test-device");
-        assert_eq!(loaded[0].selector.vid, Some(0x1234));
-    }
-
-    #[test]
-    fn save_profile_overwrites_existing() {
-        let path = temp_profiles_path();
-        save_profile(&path, &make_test_profile("test-device"), false).unwrap();
-
-        // Same name with overwrite=true — should update
-        let mut updated = make_test_profile("test-device");
-        updated.defaults.baud_rate = 9600;
-        let created = save_profile(&path, &updated, true).unwrap();
-        assert!(!created, "overwrite should report created=false");
-
-        let loaded = load_profiles(&path);
-        assert_eq!(loaded.len(), 1);
-        assert_eq!(loaded[0].defaults.baud_rate, 9600);
-    }
-
-    #[test]
-    fn save_profile_rejects_existing_without_overwrite() {
-        let path = temp_profiles_path();
-        save_profile(&path, &make_test_profile("test-device"), false).unwrap();
-
-        let result = save_profile(&path, &make_test_profile("test-device"), false);
-        assert!(
-            result.is_err(),
-            "should reject duplicate without overwrite flag"
-        );
-    }
-
-    #[test]
-    fn save_profile_appends_second_profile() {
-        let path = temp_profiles_path();
-        save_profile(&path, &make_test_profile("dev-a"), false).unwrap();
-        save_profile(&path, &make_test_profile("dev-b"), false).unwrap();
-
-        let loaded = load_profiles(&path);
-        assert_eq!(loaded.len(), 2);
-    }
-
-    #[test]
-    fn delete_profile_removes_existing() {
-        let path = temp_profiles_path();
-        save_profile(&path, &make_test_profile("dev-a"), false).unwrap();
-        save_profile(&path, &make_test_profile("dev-b"), false).unwrap();
-
-        delete_profile(&path, "dev-a").unwrap();
-        let loaded = load_profiles(&path);
-        assert_eq!(loaded.len(), 1);
-        assert_eq!(loaded[0].name, "dev-b");
-    }
-
-    #[test]
-    fn delete_profile_nonexistent_returns_error() {
-        let path = temp_profiles_path();
-        let result = delete_profile(&path, "no-such-profile");
-        assert!(result.is_err());
     }
 
     // ── transport / hardware_id selector ───────────────────────────────
@@ -686,6 +509,8 @@ baud_rate = 9600
                 ..Default::default()
             },
             defaults: ProfileDefaults::default(),
+            metadata: ProfileMetadata::default(),
+            revisions: Vec::new(),
         };
         assert!(p.matches(&make_port("/dev/ttyACM0", None, None, None)));
         let mut pci_port = make_port("/dev/ttyS0", None, None, None);
@@ -702,6 +527,8 @@ baud_rate = 9600
                 ..Default::default()
             },
             defaults: ProfileDefaults::default(),
+            metadata: ProfileMetadata::default(),
+            revisions: Vec::new(),
         };
         let mut unknown_port = make_port("/dev/ttyX", None, None, None);
         unknown_port.transport = crate::serial::PortTransport::Unknown;
@@ -717,6 +544,8 @@ baud_rate = 9600
                 ..Default::default()
             },
             defaults: ProfileDefaults::default(),
+            metadata: ProfileMetadata::default(),
+            revisions: Vec::new(),
         };
         // Display output is lowercase — "USB" does not match "usb"
         assert!(!p.matches(&make_port("/dev/ttyACM0", None, None, None)));
@@ -731,6 +560,8 @@ baud_rate = 9600
                 ..Default::default()
             },
             defaults: ProfileDefaults::default(),
+            metadata: ProfileMetadata::default(),
+            revisions: Vec::new(),
         };
         let mut port = make_port("/dev/ttyACM0", None, None, None);
         port.hardware_id = Some("USB\\VID_1234&PID_5678".into());
@@ -749,6 +580,8 @@ baud_rate = 9600
                 ..Default::default()
             },
             defaults: ProfileDefaults::default(),
+            metadata: ProfileMetadata::default(),
+            revisions: Vec::new(),
         };
         // Port with no hardware_id should not match
         assert!(!p.matches(&make_port("/dev/ttyACM0", None, None, None)));

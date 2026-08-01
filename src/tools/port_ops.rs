@@ -278,13 +278,10 @@ pub async fn open_profile(
     connections: &Arc<ConnectionManager>,
     rx_sessions: &Arc<RxSessionManager>,
     security: &SecurityManager,
-    profiles: &[crate::profiles::Profile],
+    profile: Option<crate::profiles::Profile>,
     args: OpenProfileArgs,
 ) -> Result<Json<OpenResult>, String> {
-    let profile = profiles
-        .iter()
-        .find(|p| p.name == args.profile)
-        .ok_or_else(|| format!("Profile '{}' not found", args.profile))?;
+    let profile = profile.ok_or_else(|| format!("Profile '{}' not found", args.profile))?;
 
     let ports = PortInfo::list_available()
         .map_err(|e| log_tool_err("open_profile", "Failed to list ports", e))?;
@@ -337,13 +334,11 @@ pub async fn open_profile(
     .await
 }
 
-/// Configure connection defaults. Two modes: profile (persist to TOML) and
-/// connection (mutate live connection defaults).
+/// Configure connection defaults. Two modes: profile (persist through the
+/// shared store) and connection (mutate live connection defaults).
 pub async fn configure(
     connections: &Arc<ConnectionManager>,
-    _rx_sessions: &Arc<RxSessionManager>,
-    profiles: &Arc<tokio::sync::RwLock<Vec<crate::profiles::Profile>>>,
-    profiles_path: &std::path::PathBuf,
+    store: &Arc<crate::profile_store::ProfileStore>,
     args: ConfigureArgs,
 ) -> Result<Json<ConfigureResult>, String> {
     // Validate: exactly one of profile / connection_id.
@@ -360,28 +355,23 @@ pub async fn configure(
     }
 
     if let Some(profile_name) = args.profile.as_ref() {
-        // Profile mode: build a Profile, save to TOML, reload.
-        let existing = profiles
-            .read()
+        // Profile mode: the store reloads under lock, preserves the
+        // on-disk selector, and persists before updating its cache.
+        let created = store
+            .update_defaults_preserving_selector(
+                profile_name.clone(),
+                args.defaults.clone(),
+                args.overwrite,
+            )
+            .await?;
+        let defaults = store
+            .get(profile_name)
             .await
-            .iter()
-            .find(|p| &p.name == profile_name)
-            .cloned();
-        let selector = existing.map(|p| p.selector).unwrap_or_default();
-        let profile = crate::profiles::Profile {
-            name: profile_name.clone(),
-            selector,
-            defaults: args.defaults.clone(),
-        };
-        let created = crate::profiles::save_profile(profiles_path, &profile, args.overwrite)?;
-        let reloaded = crate::profiles::load_profiles(profiles_path);
-        {
-            let mut lock = profiles.write().await;
-            *lock = reloaded;
-        }
+            .map(|p| p.defaults)
+            .ok_or_else(|| format!("Profile '{profile_name}' not found after update"))?;
         Ok(Json(ConfigureResult {
             mode: "profile".into(),
-            defaults: profile.defaults,
+            defaults,
             created: Some(created),
         }))
     } else {
@@ -413,8 +403,7 @@ pub async fn configure(
 pub async fn save_profile(
     connections: &Arc<ConnectionManager>,
     rx_sessions: &Arc<RxSessionManager>,
-    profiles: &Arc<tokio::sync::RwLock<Vec<crate::profiles::Profile>>>,
-    profiles_path: &std::path::PathBuf,
+    store: &Arc<crate::profile_store::ProfileStore>,
     args: SaveProfileArgs,
 ) -> Result<Json<SaveProfileResult>, String> {
     let conn = lookup_connection(connections, &args.connection_id).await?;
@@ -467,16 +456,11 @@ pub async fn save_profile(
         name: args.profile_name.clone(),
         selector,
         defaults,
+        metadata: crate::profiles::ProfileMetadata::default(),
+        revisions: Vec::new(),
     };
 
-    let created = crate::profiles::save_profile(profiles_path, &profile, args.overwrite)?;
-
-    // Reload profiles into memory.
-    let reloaded = crate::profiles::load_profiles(profiles_path);
-    {
-        let mut lock = profiles.write().await;
-        *lock = reloaded;
-    }
+    let created = store.upsert(profile.clone(), args.overwrite).await?;
 
     Ok(Json(SaveProfileResult {
         name: profile.name,
@@ -488,18 +472,10 @@ pub async fn save_profile(
 
 /// Delete a profile by name.
 pub async fn delete_profile(
-    profiles: &Arc<tokio::sync::RwLock<Vec<crate::profiles::Profile>>>,
-    profiles_path: &std::path::PathBuf,
+    store: &Arc<crate::profile_store::ProfileStore>,
     args: DeleteProfileArgs,
 ) -> Result<Json<DeleteProfileResult>, String> {
-    crate::profiles::delete_profile(profiles_path, &args.profile_name)?;
-
-    // Reload profiles into memory.
-    let reloaded = crate::profiles::load_profiles(profiles_path);
-    {
-        let mut lock = profiles.write().await;
-        *lock = reloaded;
-    }
+    store.delete(&args.profile_name).await?;
 
     Ok(Json(DeleteProfileResult {
         profile_name: args.profile_name,

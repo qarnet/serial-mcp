@@ -234,3 +234,36 @@ fn stdio_version_flag_not_recognized_after_double_dash() {
         "must not print version for `-- --version`, got: {stdout:?}"
     );
 }
+
+#[test]
+fn stdio_help_documents_profiles_path() {
+    let (out, stdout) = run_bin(&["--help"]);
+    assert!(
+        out.status.success(),
+        "expected exit 0, got {:?}",
+        out.status
+    );
+    assert!(
+        stdout.contains("--profiles-path"),
+        "help must document --profiles-path, got: {stdout:?}"
+    );
+}
+
+#[test]
+fn stdio_profiles_path_consumes_version_as_value() {
+    // `--profiles-path --version`: `--version` is the value of the option,
+    // not a version request — same rule as `--bind --version`. The binary
+    // must NOT print the version string. stdin is closed, so a stdio
+    // server that did start exits on EOF.
+    let out = std::process::Command::new(common::binaries::serial_mcp_bin())
+        .args(["--profiles-path", "--version"])
+        .env("RUST_LOG", "off")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("spawn serial-mcp");
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(
+        !stdout.starts_with("serial-mcp "),
+        "must not print version when --version is the value of --profiles-path, got: {stdout:?}"
+    );
+}

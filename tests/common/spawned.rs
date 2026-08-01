@@ -57,10 +57,17 @@ impl SpawnedServer {
     /// local port. Returns the URL (`http://127.0.0.1:<port>/mcp`) and
     /// the chosen port.
     pub async fn start() -> Self {
+        Self::start_with_profiles_path(None).await
+    }
+
+    /// Like [`SpawnedServer::start`], but passes `--profiles-path <path>`
+    /// so the child uses an isolated persistent profile store. `None`
+    /// leaves the default path resolution untouched.
+    pub async fn start_with_profiles_path(profiles_path: Option<&std::path::Path>) -> Self {
         ensure_serial_mcp_built().expect("serial-mcp binary available for spawned server");
         let _guard = SPAWN_LOCK.lock().await;
         let port = pick_free_port().expect("find a free local TCP port for the spawned server");
-        let child = spawn_serial_mcp_http(port)
+        let child = spawn_serial_mcp_http(port, profiles_path)
             .await
             .expect("spawn serial-mcp --transport=http");
         // Wait until the listener is actually accepting. axum binds and
@@ -76,6 +83,20 @@ impl SpawnedServer {
             child: Some(child),
             shutdown,
         }
+    }
+
+    /// Kill the child process and await its exit (reap the zombie).
+    /// After this the server is shut down; use it when a test must prove
+    /// that a fresh process can continue the same profile store.
+    pub async fn stop(&mut self) -> anyhow::Result<()> {
+        self.shutdown.cancel();
+        if let Some(mut child) = self.child.take() {
+            child
+                .start_kill()
+                .context("kill spawned serial-mcp process")?;
+            let _ = child.wait().await;
+        }
+        Ok(())
     }
 }
 
@@ -104,15 +125,23 @@ fn pick_free_port() -> Option<u16> {
     Some(port)
 }
 
-async fn spawn_serial_mcp_http(port: u16) -> Result<Child> {
+async fn spawn_serial_mcp_http(
+    port: u16,
+    profiles_path: Option<&std::path::Path>,
+) -> Result<Child> {
     let bin = serial_mcp_bin();
-    let child = Command::new(&bin)
+    let mut command = Command::new(&bin);
+    command
         .args(["--transport=http", &format!("--bind=127.0.0.1:{port}")])
         .env("RUST_LOG", "off")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .kill_on_drop(true)
+        .kill_on_drop(true);
+    if let Some(path) = profiles_path {
+        command.arg("--profiles-path").arg(path);
+    }
+    let child = command
         .spawn()
         .with_context(|| format!("failed to spawn {} for HTTP tests", bin.display()))?;
     Ok(child)

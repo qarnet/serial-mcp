@@ -1941,3 +1941,394 @@ async fn reconfigure_invalid_stop_bits_returns_error() {
 
     client.cancel().await.ok();
 }
+
+// ── Phase 2: shared persistent profile store ────────────────────────────────
+//
+// These tests prove user-observable persistence behavior through public MCP
+// calls: real process restart, shared HTTP sessions, concurrent writers
+// (same process and across processes), legacy migration, startup rejection
+// of corrupt/future files, and failed-write preservation.
+
+fn profile_names(s: &serde_json::Value) -> Vec<String> {
+    s["profiles"]
+        .as_array()
+        .expect("list_profiles structured content has profiles array")
+        .iter()
+        .map(|p| p["name"].as_str().expect("profile name").to_string())
+        .collect()
+}
+
+/// Create a profile through the public `configure(profile=...)` MCP tool.
+async fn configure_profile_via<H: rmcp::handler::client::ClientHandler>(
+    client: &rmcp::service::RunningService<rmcp::service::RoleClient, H>,
+    name: &str,
+    baud_rate: u64,
+) -> rmcp::model::CallToolResult {
+    client
+        .peer()
+        .call_tool(tool_request(
+            "configure",
+            json!({
+                "profile": name,
+                "defaults": { "baud_rate": baud_rate }
+            }),
+        ))
+        .await
+        .unwrap()
+}
+
+async fn list_profile_names_via<H: rmcp::handler::client::ClientHandler>(
+    client: &rmcp::service::RunningService<rmcp::service::RoleClient, H>,
+) -> Vec<String> {
+    let listed = client
+        .peer()
+        .call_tool(tool_request("list_profiles", json!({})))
+        .await
+        .unwrap();
+    assert_ne!(listed.is_error, Some(true), "{listed:?}");
+    profile_names(&listed.structured_content.expect("structured"))
+}
+
+/// Run the real binary and require it to exit within `timeout`; returns the
+/// captured stdout. Panics on a hang (a regression where startup succeeds).
+async fn run_bin_with_timeout(args: &[&str], timeout: Duration) -> (bool, Vec<u8>) {
+    let child = tokio::process::Command::new(common::binaries::serial_mcp_bin())
+        .args(args)
+        .env("RUST_LOG", "off")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .expect("spawn serial-mcp binary");
+    match tokio::time::timeout(timeout, child.wait_with_output()).await {
+        Ok(Ok(out)) => (out.status.success(), out.stdout),
+        Ok(Err(e)) => panic!("failed to wait for serial-mcp: {e}"),
+        Err(_) => {
+            panic!("serial-mcp did not exit within {timeout:?}; startup unexpectedly succeeded")
+        }
+    }
+}
+
+#[tokio::test]
+async fn profiles_survive_real_process_restart() {
+    use common::spawned::{spawn_client, SpawnedServer};
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("profiles.toml");
+
+    // First actual process creates profile A through the MCP surface.
+    let mut server = SpawnedServer::start_with_profiles_path(Some(&path)).await;
+    let (client, _rx) = spawn_client(&server).await.unwrap();
+    let created = configure_profile_via(&client, "restart-a", 9600).await;
+    assert_ne!(created.is_error, Some(true), "{created:?}");
+    client.cancel().await.ok();
+    server.stop().await.unwrap();
+
+    // Fresh actual process with the same path must load it.
+    let server2 = SpawnedServer::start_with_profiles_path(Some(&path)).await;
+    let (client2, _rx2) = spawn_client(&server2).await.unwrap();
+    let names = list_profile_names_via(&client2).await;
+    assert!(
+        names.contains(&"restart-a".to_string()),
+        "restart must load persisted profile: {names:?}"
+    );
+    let listed = client2
+        .peer()
+        .call_tool(tool_request("list_profiles", json!({})))
+        .await
+        .unwrap();
+    let s = listed.structured_content.expect("structured");
+    let a = s["profiles"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["name"] == "restart-a")
+        .expect("restart-a listed");
+    assert_eq!(a["defaults"]["baud_rate"], 9600, "defaults survive restart");
+    client2.cancel().await.ok();
+}
+
+#[tokio::test]
+async fn profiles_shared_across_http_sessions() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("profiles.toml");
+    let server =
+        TestServer::start_with_profiles_path(Arc::new(ConnectionManager::new()), path).await;
+    let (client_a, _rx_a) = connect_client(&server).await.unwrap();
+    let (client_b, _rx_b) = connect_client(&server).await.unwrap();
+
+    // Client A creates a profile.
+    let created = configure_profile_via(&client_a, "session-a", 9600).await;
+    assert_ne!(created.is_error, Some(true), "{created:?}");
+
+    // Client B (separate session, same server) sees it immediately.
+    let names_b = list_profile_names_via(&client_b).await;
+    assert!(
+        names_b.contains(&"session-a".to_string()),
+        "client B must observe client A's profile: {names_b:?}"
+    );
+
+    // Client B deletes it.
+    let deleted = client_b
+        .peer()
+        .call_tool(tool_request(
+            "delete_profile",
+            json!({ "profile_name": "session-a" }),
+        ))
+        .await
+        .unwrap();
+    assert_ne!(deleted.is_error, Some(true), "{deleted:?}");
+
+    // Client A no longer sees it.
+    let names_a = list_profile_names_via(&client_a).await;
+    assert!(
+        !names_a.contains(&"session-a".to_string()),
+        "client A must observe client B's delete: {names_a:?}"
+    );
+    client_a.cancel().await.ok();
+    client_b.cancel().await.ok();
+}
+
+#[tokio::test]
+async fn concurrent_same_process_profile_writes_keep_both() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("profiles.toml");
+    let server =
+        TestServer::start_with_profiles_path(Arc::new(ConnectionManager::new()), path.clone())
+            .await;
+    let (client_a, _rx_a) = connect_client(&server).await.unwrap();
+    let (client_b, _rx_b) = connect_client(&server).await.unwrap();
+
+    // Two distinct clients create different profiles at the same time.
+    let (ra, rb) = tokio::join!(
+        configure_profile_via(&client_a, "conc-a", 9600),
+        configure_profile_via(&client_b, "conc-b", 19200),
+    );
+    assert_ne!(ra.is_error, Some(true), "{ra:?}");
+    assert_ne!(rb.is_error, Some(true), "{rb:?}");
+
+    // A third view sees both.
+    let names = list_profile_names_via(&client_a).await;
+    assert!(
+        names.contains(&"conc-a".to_string()) && names.contains(&"conc-b".to_string()),
+        "both concurrent writes must be visible: {names:?}"
+    );
+    client_a.cancel().await.ok();
+    client_b.cancel().await.ok();
+    drop(server);
+
+    // A fresh store over the same file proves both persisted.
+    let server2 =
+        TestServer::start_with_profiles_path(Arc::new(ConnectionManager::new()), path).await;
+    let (client2, _rx2) = connect_client(&server2).await.unwrap();
+    let names2 = list_profile_names_via(&client2).await;
+    assert!(
+        names2.contains(&"conc-a".to_string()) && names2.contains(&"conc-b".to_string()),
+        "both profiles must survive store reopen: {names2:?}"
+    );
+    client2.cancel().await.ok();
+}
+
+#[tokio::test]
+async fn concurrent_server_process_profile_writes_keep_both() {
+    use common::spawned::{spawn_client, SpawnedServer};
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("profiles.toml");
+
+    // Two actual server processes share one profile file but bind different
+    // ports. Advisory locking + reload-under-lock must preserve both writes.
+    let mut server1 = SpawnedServer::start_with_profiles_path(Some(&path)).await;
+    let mut server2 = SpawnedServer::start_with_profiles_path(Some(&path)).await;
+    let (client1, _rx1) = spawn_client(&server1).await.unwrap();
+    let (client2, _rx2) = spawn_client(&server2).await.unwrap();
+
+    let (ra, rb) = tokio::join!(
+        configure_profile_via(&client1, "proc-a", 9600),
+        configure_profile_via(&client2, "proc-b", 19200),
+    );
+    assert_ne!(ra.is_error, Some(true), "{ra:?}");
+    assert_ne!(rb.is_error, Some(true), "{rb:?}");
+    client1.cancel().await.ok();
+    client2.cancel().await.ok();
+    server1.stop().await.unwrap();
+    server2.stop().await.unwrap();
+
+    // Third process proves both writes landed.
+    let server3 = SpawnedServer::start_with_profiles_path(Some(&path)).await;
+    let (client3, _rx3) = spawn_client(&server3).await.unwrap();
+    let names = list_profile_names_via(&client3).await;
+    assert!(
+        names.contains(&"proc-a".to_string()) && names.contains(&"proc-b".to_string()),
+        "cross-process concurrent writes must both persist: {names:?}"
+    );
+    client3.cancel().await.ok();
+}
+
+#[tokio::test]
+async fn legacy_unversioned_profiles_migrate_on_mutation() {
+    use common::spawned::{spawn_client, SpawnedServer};
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("profiles.toml");
+    std::fs::write(
+        &path,
+        r#"
+[[profile]]
+name = "legacy-dev"
+[profile.selector]
+vid = 0x1366
+[profile.defaults]
+baud_rate = 115200
+"#,
+    )
+    .unwrap();
+
+    let mut server = SpawnedServer::start_with_profiles_path(Some(&path)).await;
+    let (client, _rx) = spawn_client(&server).await.unwrap();
+
+    // The legacy profile loads with its settings.
+    let listed = client
+        .peer()
+        .call_tool(tool_request("list_profiles", json!({})))
+        .await
+        .unwrap();
+    let s = listed.structured_content.expect("structured");
+    let names = profile_names(&s);
+    assert!(names.contains(&"legacy-dev".to_string()), "{names:?}");
+    let legacy = s["profiles"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["name"] == "legacy-dev")
+        .expect("legacy-dev listed");
+    assert_eq!(legacy["defaults"]["baud_rate"], 115200);
+
+    // A mutation persists the migration: the file now declares v2.
+    let created = configure_profile_via(&client, "new-dev", 9600).await;
+    assert_ne!(created.is_error, Some(true), "{created:?}");
+    client.cancel().await.ok();
+    server.stop().await.unwrap();
+
+    let content = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        content.contains("schema_version = 2"),
+        "mutation must persist current schema version:\n{content}"
+    );
+
+    // Restart proves both profiles remain.
+    let server2 = SpawnedServer::start_with_profiles_path(Some(&path)).await;
+    let (client2, _rx2) = spawn_client(&server2).await.unwrap();
+    let names2 = list_profile_names_via(&client2).await;
+    assert!(
+        names2.contains(&"legacy-dev".to_string()) && names2.contains(&"new-dev".to_string()),
+        "legacy + new profiles must survive restart: {names2:?}"
+    );
+    client2.cancel().await.ok();
+}
+
+#[tokio::test]
+async fn future_schema_version_fails_startup_and_preserves_file() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("profiles.toml");
+    let original = b"schema_version = 999\n\n[[profile]]\nname = \"future-dev\"\n";
+    std::fs::write(&path, original).unwrap();
+
+    let (success, _stdout) = run_bin_with_timeout(
+        &[
+            "--transport=http",
+            "--bind=127.0.0.1:0",
+            "--profiles-path",
+            path.to_str().unwrap(),
+        ],
+        Duration::from_secs(15),
+    )
+    .await;
+    assert!(
+        !success,
+        "binary must exit nonzero for an unsupported future schema version"
+    );
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        original,
+        "future-version file must be left byte-identical"
+    );
+}
+
+#[tokio::test]
+async fn malformed_profiles_file_fails_startup_and_preserves_file() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("profiles.toml");
+    let original = b"not valid toml {{{".to_vec();
+    std::fs::write(&path, &original).unwrap();
+
+    let (success, _stdout) = run_bin_with_timeout(
+        &[
+            "--transport=http",
+            "--bind=127.0.0.1:0",
+            "--profiles-path",
+            path.to_str().unwrap(),
+        ],
+        Duration::from_secs(15),
+    )
+    .await;
+    assert!(
+        !success,
+        "binary must exit nonzero for a malformed profiles file"
+    );
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        original,
+        "malformed file must be left byte-identical"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn failed_profile_write_preserves_previous_state() {
+    use common::spawned::{spawn_client, SpawnedServer};
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("profiles.toml");
+
+    let mut server = SpawnedServer::start_with_profiles_path(Some(&path)).await;
+    let (client, _rx) = spawn_client(&server).await.unwrap();
+
+    // Profile A succeeds.
+    let ra = configure_profile_via(&client, "keep-a", 9600).await;
+    assert_ne!(ra.is_error, Some(true), "{ra:?}");
+
+    // Make the profile directory non-writable (keep execute so the tempdir
+    // stays traversable and cleanup can restore it).
+    let dir_path = dir.path();
+    let original_mode = std::fs::metadata(dir_path).unwrap().permissions().mode();
+    std::fs::set_permissions(dir_path, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+    // Creating profile B must fail as a tool error, not a crash.
+    let rb = configure_profile_via(&client, "lost-b", 19200).await;
+    assert_eq!(
+        rb.is_error,
+        Some(true),
+        "write must fail with the profile dir read-only: {rb:?}"
+    );
+
+    // The in-memory view is unchanged: A present, B absent.
+    let names = list_profile_names_via(&client).await;
+    assert!(
+        names.contains(&"keep-a".to_string()) && !names.contains(&"lost-b".to_string()),
+        "failed write must leave the cache untouched: {names:?}"
+    );
+
+    // Restore permissions, restart the actual server: disk still has A, not B.
+    std::fs::set_permissions(dir_path, std::fs::Permissions::from_mode(original_mode)).unwrap();
+    client.cancel().await.ok();
+    server.stop().await.unwrap();
+
+    let server2 = SpawnedServer::start_with_profiles_path(Some(&path)).await;
+    let (client2, _rx2) = spawn_client(&server2).await.unwrap();
+    let names2 = list_profile_names_via(&client2).await;
+    assert!(
+        names2.contains(&"keep-a".to_string()) && !names2.contains(&"lost-b".to_string()),
+        "failed write must leave the file untouched across restart: {names2:?}"
+    );
+    client2.cancel().await.ok();
+}

@@ -2,9 +2,10 @@
 
 ## Fast truth
 
-- Root server: `src/main.rs` selects stdio vs HTTP transport, parses CLI limits, and mounts HTTP at `/mcp`.
+- Root server: `src/main.rs` selects stdio vs HTTP transport, parses CLI limits (`--profiles-path` included), and mounts HTTP at `/mcp`.
 - MCP surface lives in `src/server.rs`; tool handlers are split under `src/tools/`, prompts under `src/prompts/`, resources under `src/resources/`.
-- `SerialHandler` is built via `SerialHandler::builder()...build()` (`src/server.rs`). The old `with_manager*` telescoping constructors are gone; `new()` is a thin wrapper over the builder. Inject `connections`, `streams`, `security`, `budget` through the builder; `with_profiles()` stays as a post-build setter.
+- `SerialHandler` is built via `SerialHandler::builder()...build()` (`src/server.rs`). The old `with_manager*` telescoping constructors are gone; `new()` is a thin wrapper over the builder. Inject `connections`, `streams`, `security`, `budget`, `profile_store` through the builder; `with_profiles()` is gone.
+- Profiles live in a process-wide `Arc<ProfileStore>` (`src/profile_store.rs`), shared by every stdio/HTTP session handler. `main.rs` resolves the path (`--profiles-path` or the OS user-config default, failing startup on an unavailable config dir or invalid file) and injects one store; `SerialHandler::new()`/builder default to an ephemeral store. Persistent mutations take a process-local async mutex, then `spawn_blocking` + an advisory lock on `<file>.lock`, reload-under-lock, `NamedTempFile` + `sync_all` + rename; the cache only updates after the durable write. File format is schema-versioned TOML (v1 legacy auto-migrates in memory; `schema_version == 0` or `> 2` rejects startup). `Profile` carries `metadata` (revision/timestamps/generated/use_count) and a bounded `revisions` history (max 5 prior snapshots) for Phase 3.
 - Shared RX framing lives in `src/tools/rx_consume.rs` (`consume_frames` + `RxFrameSink` trait + `disconnect_state`); both `read` and `subscribe` route framing through it, but their raw (no-framing) paths stay per-tool by design (see "Invariants easy to break").
 - Connection lifecycle is in `src/serial.rs`; shared RX/TX coordination is in `src/rx_session.rs` (always-on pump + ring buffer), `src/tx_session.rs`, and `src/stop_controller.rs`. The pump appends all received bytes to `src/rx_ring.rs`; both `read` and `subscribe` read from the ring via cursors.
 - Low-level shared primitives: `src/util.rs` (`find_subsequence`, the byte-substring search used by `framing` + `tools::helpers` via a `find_subslice` re-export alias) and `src/precedence.rs` (`resolve_field`, the four-layer framing/parser/protocol precedence helper shared by `io_ops` + `stream_ops`). Both `pub(crate)`.
@@ -119,8 +120,8 @@ cargo test --test native_sim_connection_lifecycle -- --ignored --test-threads=1
 
 ## Test map
 
-- `cargo test --lib` covers core logic (incl. `serial::schema` uint-format regression tests).
-- `tests/http_integration.rs` exercises real MCP HTTP transport in-process.
+- `cargo test --lib` covers core logic (incl. `serial::schema` uint-format regression tests and `profile_store` migration/revision/metadata unit tests).
+- `tests/http_integration.rs` exercises real MCP HTTP transport in-process, including Phase 2 profile persistence: real-binary restart (`profiles_survive_real_process_restart`), shared HTTP sessions, concurrent same-process and cross-process writers (`concurrent_*_keep_both`), legacy migration, startup rejection of corrupt/future files, and Unix failed-write preservation.
 - `tests/serial_pty.rs` is real PTY serial I/O on Unix.
 - `tests/stdio_integration.rs` spawns binary over stdin/stdout.
 - `tests/protocol_emulator*.rs` are protocol hardening tests.
