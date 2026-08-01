@@ -334,6 +334,10 @@ structural changes.
    helper changes.
 5. Remove consumed phase handoff documents before final delivery; retain this
    plan only while it remains useful as active development documentation.
+6. Schema-producing doc comments on generated wire types are intentionally
+   retained unchanged (chronology included) for tool-catalog byte stability;
+   chronology cleanup applies to source comments that do not feed generated
+   schemas.
 
 ### Final verification
 
