@@ -3,13 +3,16 @@ use std::sync::Arc;
 use rmcp::Json;
 use tracing::{debug, info};
 
-use crate::limits::{DEFAULT_RX_BUFFER_SIZE, MAX_RX_BUFFER_SIZE};
+use crate::profiles::{
+    canonical_high_selector, high_identity, identity_confidence, IdentityConfidence, Profile,
+    ProfileMode, ProfileSelectionSource,
+};
 use crate::rx_session::RxSessionManager;
 use crate::security::SecurityManager;
-use crate::serial::{ConnectionManager, PortInfo};
+use crate::serial::{ConnectionManager, PortInfo, PortProvider};
 use crate::tools::helpers::log_tool_err;
 use crate::tools::helpers::lookup_connection;
-use crate::tools::helpers::parse_open_args;
+use crate::tools::helpers::{OpenOverlay, ResolvedOpenSettings};
 use crate::tools::types::{
     ClearLogArgs, ClearLogResult, CloseArgs, CloseResult, ConfigureArgs, ConfigureResult,
     DeleteProfileArgs, DeleteProfileResult, ExportLogArgs, ExportLogResult, GetLogArgs,
@@ -18,9 +21,10 @@ use crate::tools::types::{
     ReconfigureResult, ReconnectArgs, ReconnectResult, SaveProfileArgs, SaveProfileResult,
 };
 
-pub async fn list_ports() -> Result<Json<ListPortsResult>, String> {
+pub async fn list_ports(provider: &Arc<dyn PortProvider>) -> Result<Json<ListPortsResult>, String> {
     debug!("Listing serial ports");
-    let ports = PortInfo::list_available()
+    let ports = provider
+        .list_available()
         .map_err(|e| log_tool_err("list_ports", "Failed to list ports", e))?;
     info!("Found {} serial ports", ports.len());
     Ok(Json(ListPortsResult {
@@ -39,51 +43,293 @@ pub async fn list_connections(
     }))
 }
 
-pub async fn open(
-    connections: &Arc<ConnectionManager>,
-    rx_sessions: &Arc<RxSessionManager>,
-    security: &SecurityManager,
-    args: OpenArgs,
-) -> Result<Json<OpenResult>, String> {
-    let port = args.port.clone();
-    let name = args.name.clone();
-    let baud_rate = args.baud_rate;
-    debug!("Opening {} @ {}", port, baud_rate);
+/// The profile-session plan for a bare `open`, decided BEFORE hardware is
+/// opened. Post-open steps (mark used / create generated / attach binding)
+/// run only after the hardware open succeeds.
+enum SessionPlan {
+    /// `profile_mode="none"`: no automatic behavior at all.
+    Disabled { confidence: IdentityConfidence },
+    /// Weak identity, duplicated live fingerprint, or equal top-ranked
+    /// profile timestamps: transient session, never persisted.
+    Transient {
+        confidence: IdentityConfidence,
+        candidates: Vec<String>,
+    },
+    /// One uniquely most-recently-used high-confidence profile.
+    Selected { profile: Profile },
+    /// Explicit named selection via `open_profile`.
+    Explicit { profile: Profile },
+    /// No matching profile yet: create a durable generated profile after
+    /// the hardware open succeeds.
+    Generate,
+}
 
-    if !security.is_port_allowed(&port) {
+/// Decide the session plan for a bare `open` without touching hardware.
+async fn plan_session(
+    store: &Arc<crate::profile_store::ProfileStore>,
+    args: &OpenArgs,
+    port_info: Option<&PortInfo>,
+    live_ports: &[PortInfo],
+) -> Result<SessionPlan, String> {
+    let confidence = port_info
+        .map(identity_confidence)
+        .unwrap_or(IdentityConfidence::None);
+    if args.profile_mode == Some(ProfileMode::None) {
+        return Ok(SessionPlan::Disabled { confidence });
+    }
+
+    let Some(port_info) = port_info else {
+        return Ok(SessionPlan::Transient {
+            confidence,
+            candidates: Vec::new(),
+        });
+    };
+
+    let Some(identity) = high_identity(port_info) else {
+        return Ok(SessionPlan::Transient {
+            confidence,
+            candidates: Vec::new(),
+        });
+    };
+
+    // If multiple currently enumerated ports share the same high
+    // fingerprint, never apply settings to an indistinguishable device.
+    let duplicates = live_ports
+        .iter()
+        .filter(|p| high_identity(p).as_ref() == Some(&identity))
+        .count();
+    if duplicates > 1 {
+        return Ok(SessionPlan::Transient {
+            confidence: IdentityConfidence::High,
+            candidates: Vec::new(),
+        });
+    }
+
+    let resolution = store
+        .resolve_automatic(port_info)
+        .await
+        .map_err(|e| log_tool_err("open", "Failed to resolve profiles", e))?;
+    match resolution.selected {
+        Some(profile) => Ok(SessionPlan::Selected { profile }),
+        None if resolution.ambiguous => Ok(SessionPlan::Transient {
+            confidence: IdentityConfidence::High,
+            candidates: resolution.candidates,
+        }),
+        None => Ok(SessionPlan::Generate),
+    }
+}
+
+/// Shared post-open plumbing: attach the session binding computed from the
+/// resolved settings and the session plan.
+async fn attach_session_binding(
+    connections: &Arc<ConnectionManager>,
+    store: &Arc<crate::profile_store::ProfileStore>,
+    connection_id: &str,
+    plan: SessionPlan,
+    resolved: &ResolvedOpenSettings,
+    port_info: Option<&PortInfo>,
+) {
+    let conn = match connections.get(connection_id).await {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+    let binding = match plan {
+        SessionPlan::Disabled { confidence } => Some(crate::serial::ActiveProfileBinding {
+            profile_name: String::new(),
+            source: ProfileSelectionSource::Disabled,
+            confidence,
+            persistent: false,
+            generated: false,
+            revision: None,
+            dirty: false,
+            candidates: Vec::new(),
+            last_persistence_error: None,
+        }),
+        SessionPlan::Transient {
+            confidence,
+            candidates,
+        } => Some(crate::serial::ActiveProfileBinding {
+            profile_name: String::new(),
+            source: ProfileSelectionSource::Transient,
+            confidence,
+            persistent: false,
+            generated: false,
+            revision: None,
+            dirty: false,
+            candidates,
+            last_persistence_error: None,
+        }),
+        SessionPlan::Selected { profile } => {
+            let dirty = profile_only_differs(resolved, &profile);
+            match store.mark_used(&profile.name).await {
+                Ok(used) => Some(crate::serial::ActiveProfileBinding {
+                    profile_name: used.name.clone(),
+                    source: ProfileSelectionSource::Automatic,
+                    confidence: IdentityConfidence::High,
+                    persistent: true,
+                    generated: used.metadata.generated,
+                    revision: Some(used.metadata.revision),
+                    dirty,
+                    candidates: Vec::new(),
+                    last_persistence_error: None,
+                }),
+                Err(e) => Some(crate::serial::ActiveProfileBinding {
+                    profile_name: profile.name.clone(),
+                    source: ProfileSelectionSource::Automatic,
+                    confidence: IdentityConfidence::High,
+                    persistent: true,
+                    generated: profile.metadata.generated,
+                    revision: Some(profile.metadata.revision),
+                    dirty,
+                    candidates: Vec::new(),
+                    last_persistence_error: Some(e),
+                }),
+            }
+        }
+        SessionPlan::Explicit { profile } => {
+            let dirty = profile_only_differs(resolved, &profile);
+            match store.mark_used(&profile.name).await {
+                Ok(used) => Some(crate::serial::ActiveProfileBinding {
+                    profile_name: used.name.clone(),
+                    source: ProfileSelectionSource::Explicit,
+                    confidence: IdentityConfidence::High,
+                    persistent: true,
+                    generated: used.metadata.generated,
+                    revision: Some(used.metadata.revision),
+                    dirty,
+                    candidates: Vec::new(),
+                    last_persistence_error: None,
+                }),
+                Err(e) => Some(crate::serial::ActiveProfileBinding {
+                    profile_name: profile.name.clone(),
+                    source: ProfileSelectionSource::Explicit,
+                    confidence: IdentityConfidence::High,
+                    persistent: true,
+                    generated: profile.metadata.generated,
+                    revision: Some(profile.metadata.revision),
+                    dirty,
+                    candidates: Vec::new(),
+                    last_persistence_error: Some(e),
+                }),
+            }
+        }
+        SessionPlan::Generate => {
+            // Generated profile defaults equal the effective live settings.
+            let defaults = resolved.as_profile_defaults();
+            let selector = port_info.and_then(canonical_high_selector);
+            let label = generated_label(port_info);
+            let Some(selector) = selector else {
+                // Cannot happen: Generate requires a high identity.
+                return;
+            };
+            match store.create_generated(label, selector, defaults).await {
+                Ok(created) => Some(crate::serial::ActiveProfileBinding {
+                    profile_name: created.name.clone(),
+                    source: ProfileSelectionSource::Generated,
+                    confidence: IdentityConfidence::High,
+                    persistent: true,
+                    generated: true,
+                    revision: Some(created.metadata.revision),
+                    dirty: false,
+                    candidates: Vec::new(),
+                    last_persistence_error: None,
+                }),
+                // Keep the connection open and bind a transient session
+                // carrying the error: do not report open failure or
+                // pretend the profile persisted.
+                Err(e) => Some(crate::serial::ActiveProfileBinding {
+                    profile_name: String::new(),
+                    source: ProfileSelectionSource::Transient,
+                    confidence: IdentityConfidence::High,
+                    persistent: false,
+                    generated: false,
+                    revision: None,
+                    dirty: false,
+                    candidates: Vec::new(),
+                    last_persistence_error: Some(e),
+                }),
+            }
+        }
+    };
+    conn.set_active_profile_binding(binding);
+}
+
+/// `true` when the resolved effective settings differ from what the
+/// selected profile alone would produce (explicit overrides → dirty).
+fn profile_only_differs(resolved: &ResolvedOpenSettings, profile: &Profile) -> bool {
+    match ResolvedOpenSettings::from_profile(resolved.port.clone(), profile) {
+        Ok(profile_only) => resolved != &profile_only,
+        Err(_) => false,
+    }
+}
+
+/// Generated-profile label: product, else manufacturer, else
+/// `usb-{vid:04x}-{pid:04x}`.
+fn generated_label(port_info: Option<&PortInfo>) -> String {
+    match port_info {
+        Some(p) => {
+            if let Some(product) = p.product.as_deref().filter(|s| !s.is_empty()) {
+                product.to_string()
+            } else if let Some(mfr) = p.manufacturer.as_deref().filter(|s| !s.is_empty()) {
+                mfr.to_string()
+            } else if let (Some(vid), Some(pid)) = (p.vid, p.pid) {
+                format!("usb-{vid:04x}-{pid:04x}")
+            } else {
+                "serial-device".to_string()
+            }
+        }
+        None => "serial-device".to_string(),
+    }
+}
+
+/// Shared open plumbing dependencies.
+struct OpenContext<'a> {
+    connections: &'a Arc<ConnectionManager>,
+    rx_sessions: &'a Arc<RxSessionManager>,
+    security: &'a SecurityManager,
+    store: &'a Arc<crate::profile_store::ProfileStore>,
+}
+
+/// Shared hardware-open step: allowlist check, resolve settings, open the
+/// port, set reconnect policy, start the RX session, then attach the
+/// profile-session binding (create/mark profile only after hardware open
+/// succeeds).
+async fn open_connection(
+    ctx: OpenContext<'_>,
+    port: String,
+    overlay: &OpenOverlay,
+    profile_defaults: Option<&crate::profiles::ProfileDefaults>,
+    port_info: Option<PortInfo>,
+    plan: SessionPlan,
+) -> Result<Json<OpenResult>, String> {
+    if !ctx.security.is_port_allowed(&port) {
         return Err(format!(
             "Port '{port}' is not in the allowlist. Allowed patterns: {}",
-            security.allowlist_summary()
+            ctx.security.allowlist_summary()
         ));
     }
 
-    // Capture OS-level port identity before opening so it is available
-    // for status snapshots and profile save operations.
-    let port_info = PortInfo::list_available()
-        .ok()
-        .and_then(|ports| ports.into_iter().find(|p| p.name == port));
+    let resolved = ResolvedOpenSettings::resolve(port.clone(), overlay, profile_defaults)?;
+    let config = resolved.clone().into_connection_config(port_info.clone());
 
-    let reconnect_policy = args.reconnect_policy.clone();
-    let rx_buffer_size = validate_rx_buffer_size(args.rx_buffer_size)?;
-    let mut config = parse_open_args(args)?;
-    config.port_info = port_info;
-
-    let connection_id = connections
+    let connection_id = ctx
+        .connections
         .open(config)
         .await
         .map_err(|e| log_tool_err("open", &format!("Failed to open port {port}"), e))?;
 
     // Set reconnect policy on the newly opened connection.
-    if let Ok(conn) = connections.get(&connection_id).await {
-        *conn.reconnect_policy.lock().expect("poisoned") = reconnect_policy;
+    if let Ok(conn) = ctx.connections.get(&connection_id).await {
+        *conn.reconnect_policy.lock().expect("poisoned") = resolved.reconnect_policy.clone();
     }
 
     // Create the RX session and start the always-on pump with a budgeted ring.
     // The session is idempotent — if another code path created one first, this
     // returns the existing session.
-    if let Ok(conn) = connections.get(&connection_id).await {
-        let session = rx_sessions
-            .get_or_create(conn, rx_buffer_size)
+    if let Ok(conn) = ctx.connections.get(&connection_id).await {
+        let session = ctx
+            .rx_sessions
+            .get_or_create(conn, resolved.rx_buffer_size)
             .await
             .map_err(|e| log_tool_err("open", "Failed to create RX session", e))?;
         debug!(
@@ -93,14 +339,135 @@ pub async fn open(
         );
     }
 
+    // Post-open profile work: never close a working port merely because
+    // profile metadata failed — failures surface as `last_persistence_error`.
+    attach_session_binding(
+        ctx.connections,
+        ctx.store,
+        &connection_id,
+        plan,
+        &resolved,
+        port_info.as_ref(),
+    )
+    .await;
+
     info!("Opened connection {} -> {}", connection_id, port);
+
+    let binding = ctx
+        .connections
+        .get(&connection_id)
+        .await
+        .ok()
+        .and_then(|c| c.active_profile_binding())
+        .map(|b| b.to_session_result());
 
     Ok(Json(OpenResult {
         connection_id,
-        name,
-        port,
-        baud_rate,
+        name: resolved.name,
+        port: resolved.port,
+        baud_rate: resolved.baud_rate,
+        profile: binding,
     }))
+}
+
+pub async fn open(
+    connections: &Arc<ConnectionManager>,
+    rx_sessions: &Arc<RxSessionManager>,
+    security: &SecurityManager,
+    store: &Arc<crate::profile_store::ProfileStore>,
+    provider: &Arc<dyn PortProvider>,
+    args: OpenArgs,
+) -> Result<Json<OpenResult>, String> {
+    let port = args.port.clone();
+    debug!("Opening {}", port);
+
+    // Enumerate once through the injectable provider: identity capture,
+    // duplicate-fingerprint detection, and automatic resolution all use
+    // the same live view.
+    let live_ports = provider
+        .list_available()
+        .map_err(|e| log_tool_err("open", "Failed to list ports", e))?;
+    let port_info = live_ports.iter().find(|p| p.name == port).cloned();
+
+    let plan = plan_session(store, &args, port_info.as_ref(), &live_ports).await?;
+    let overlay = OpenOverlay::from_open_args(&args);
+    let profile_defaults = match &plan {
+        SessionPlan::Selected { profile } => Some(profile.defaults.clone()),
+        _ => None,
+    };
+
+    open_connection(
+        OpenContext {
+            connections,
+            rx_sessions,
+            security,
+            store,
+        },
+        port,
+        &overlay,
+        profile_defaults.as_ref(),
+        port_info,
+        plan,
+    )
+    .await
+}
+
+pub async fn open_profile(
+    connections: &Arc<ConnectionManager>,
+    rx_sessions: &Arc<RxSessionManager>,
+    security: &SecurityManager,
+    store: &Arc<crate::profile_store::ProfileStore>,
+    provider: &Arc<dyn PortProvider>,
+    profile: Option<Profile>,
+    args: OpenProfileArgs,
+) -> Result<Json<OpenResult>, String> {
+    let profile = profile.ok_or_else(|| format!("Profile '{}' not found", args.profile))?;
+
+    let ports = provider
+        .list_available()
+        .map_err(|e| log_tool_err("open_profile", "Failed to list ports", e))?;
+
+    let matched: Vec<PortInfo> = ports
+        .iter()
+        .filter(|p| profile.matches(p))
+        .cloned()
+        .collect();
+
+    if matched.is_empty() {
+        return Err(format!(
+            "No port matches profile '{}' selector: {:?}",
+            args.profile, profile.selector
+        ));
+    }
+    if matched.len() > 1 {
+        let names: Vec<String> = matched.iter().map(|p| p.name.clone()).collect();
+        return Err(format!(
+            "Profile '{}' selector matches {} live ports ({}) — refusing to choose. \
+             Narrow the selector so exactly one port matches.",
+            args.profile,
+            matched.len(),
+            names.join(", ")
+        ));
+    }
+
+    let port = matched.into_iter().next().expect("exactly one match");
+    let overlay = OpenOverlay::from_open_profile_args(&args);
+    let defaults = profile.defaults.clone();
+
+    open_connection(
+        OpenContext {
+            connections,
+            rx_sessions,
+            security,
+            store,
+        },
+        port.name.clone(),
+        &overlay,
+        Some(&defaults),
+        Some(port),
+        SessionPlan::Explicit { profile },
+    )
+    .await
 }
 
 pub async fn close(
@@ -196,6 +563,7 @@ pub async fn get_status(
         rx_cursor,
         rx_buffered_unread,
         rx_bytes_wrapped_total,
+        profile: status.profile,
     }))
 }
 
@@ -264,6 +632,8 @@ pub fn list_profiles(
             name: p.name.clone(),
             selector: p.selector.clone(),
             defaults: p.defaults.clone(),
+            metadata: p.metadata.clone(),
+            revisions: p.revisions.clone(),
         })
         .collect();
     let count = summaries.len();
@@ -272,66 +642,6 @@ pub fn list_profiles(
         count,
         profiles: summaries,
     }))
-}
-
-pub async fn open_profile(
-    connections: &Arc<ConnectionManager>,
-    rx_sessions: &Arc<RxSessionManager>,
-    security: &SecurityManager,
-    profile: Option<crate::profiles::Profile>,
-    args: OpenProfileArgs,
-) -> Result<Json<OpenResult>, String> {
-    let profile = profile.ok_or_else(|| format!("Profile '{}' not found", args.profile))?;
-
-    let ports = PortInfo::list_available()
-        .map_err(|e| log_tool_err("open_profile", "Failed to list ports", e))?;
-
-    let matched = ports.iter().find(|p| profile.matches(p)).ok_or_else(|| {
-        format!(
-            "No port matches profile '{}' selector: {:?}",
-            args.profile, profile.selector
-        )
-    })?;
-
-    let rx_buffer_size = if args.rx_buffer_size != DEFAULT_RX_BUFFER_SIZE {
-        args.rx_buffer_size
-    } else {
-        profile.defaults.rx_buffer_size
-    };
-
-    open(
-        connections,
-        rx_sessions,
-        security,
-        OpenArgs {
-            port: matched.name.clone(),
-            name: args.name.or_else(|| {
-                profile.defaults.name.as_ref().map(|prefix| {
-                    format!(
-                        "{}-{}",
-                        prefix,
-                        matched.name.rsplit('/').next().unwrap_or(&matched.name)
-                    )
-                })
-            }),
-            baud_rate: profile.defaults.baud_rate,
-            data_bits: profile.defaults.data_bits.clone(),
-            stop_bits: profile.defaults.stop_bits.clone(),
-            parity: profile.defaults.parity.clone(),
-            flow_control: profile.defaults.flow_control.clone(),
-            log_capacity: args.log_capacity,
-            log_enabled: args.log_enabled,
-            reconnect_policy: profile.defaults.reconnect_policy.clone(),
-            tx_framing: profile.defaults.tx_framing.clone(),
-            rx_framing: profile.defaults.rx_framing.clone(),
-            rx_parser: profile.defaults.rx_parser.clone(),
-            protocol: profile.defaults.protocol,
-            rx_buffer_size,
-            max_buffered_bytes: profile.defaults.max_buffered_bytes,
-            poll_interval_ms: profile.defaults.poll_interval_ms,
-        },
-    )
-    .await
 }
 
 /// Configure connection defaults. Two modes: profile (persist through the
@@ -399,7 +709,6 @@ pub async fn configure(
 /// and current configuration.
 pub async fn save_profile(
     connections: &Arc<ConnectionManager>,
-    rx_sessions: &Arc<RxSessionManager>,
     store: &Arc<crate::profile_store::ProfileStore>,
     args: SaveProfileArgs,
 ) -> Result<Json<SaveProfileResult>, String> {
@@ -409,13 +718,10 @@ pub async fn save_profile(
         .port_info()
         .ok_or_else(|| format!("No port identity available for {}", args.connection_id))?;
 
-    // Snapshot rx_buffer_size from the live session if available; fall back
-    // to DEFAULT_RX_BUFFER_SIZE (A7 fix).
-    let rx_buffer_size = rx_sessions
-        .get(&args.connection_id)
-        .await
-        .map(|s| s.ring_capacity())
-        .unwrap_or(DEFAULT_RX_BUFFER_SIZE);
+    // Snapshot rx_buffer_size from the connection's stored effective value;
+    // never from a handler-local session manager (a later request may land
+    // on a different manager).
+    let rx_buffer_size = conn.rx_buffer_size();
 
     let defaults = crate::profiles::ProfileDefaults {
         baud_rate: conn.baud_rate(),
@@ -565,11 +871,4 @@ pub async fn export_log(
         path: args.path,
         events_written: count,
     }))
-}
-
-fn validate_rx_buffer_size(size: usize) -> Result<usize, String> {
-    use crate::tools::helpers::clamp_or_err;
-    use crate::tools::helpers::require_min_or_err;
-    let size = require_min_or_err("open.rx_buffer_size", size, 1)?;
-    clamp_or_err("open.rx_buffer_size", size, MAX_RX_BUFFER_SIZE)
 }

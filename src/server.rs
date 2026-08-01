@@ -19,7 +19,7 @@ use tracing::{debug, info};
 use crate::buffer_budget::BufferBudget;
 use crate::rx_session::RxSessionManager;
 use crate::security::SecurityManager;
-use crate::serial::{ConnectionManager, PortInfo};
+use crate::serial::{ConnectionManager, PortProvider};
 use crate::tx_session::TxSessionManager;
 
 use crate::prompts::types::*;
@@ -72,6 +72,9 @@ pub struct SerialHandler {
     tx_sessions: Arc<TxSessionManager>,
     budget: Arc<dyn BufferBudget>,
     profile_store: Arc<crate::profile_store::ProfileStore>,
+    /// Process-wide injectable port enumeration used consistently by tools,
+    /// resources, and automatic profile-session identity capture.
+    port_provider: Arc<dyn PortProvider>,
 }
 
 /// Injectable configuration for [`SerialHandler`].
@@ -88,6 +91,9 @@ pub struct SerialHandlerOptions {
     /// library/test construction; production `main.rs` injects a store
     /// opened at the resolved `--profiles-path`.
     pub profile_store: Arc<crate::profile_store::ProfileStore>,
+    /// Process-wide port enumeration. Defaults to the system provider;
+    /// tests inject a static provider.
+    pub port_provider: Arc<dyn PortProvider>,
 }
 
 impl Default for SerialHandlerOptions {
@@ -102,6 +108,7 @@ impl Default for SerialHandlerOptions {
                 DEFAULT_MAX_TOOL_BUFFERED_BYTES,
             )),
             profile_store: Arc::new(crate::profile_store::ProfileStore::ephemeral()),
+            port_provider: Arc::new(crate::serial::SystemPortProvider),
         }
     }
 }
@@ -133,6 +140,10 @@ impl SerialHandlerBuilder {
         self.options.profile_store = profile_store;
         self
     }
+    pub fn port_provider(mut self, port_provider: Arc<dyn PortProvider>) -> Self {
+        self.options.port_provider = port_provider;
+        self
+    }
 
     /// Consume the builder and produce a [`SerialHandler`].
     ///
@@ -144,6 +155,7 @@ impl SerialHandlerBuilder {
             security,
             budget,
             profile_store,
+            port_provider,
         } = self.options;
         let handler = SerialHandler {
             connections,
@@ -154,6 +166,7 @@ impl SerialHandlerBuilder {
             tx_sessions: Arc::new(TxSessionManager::new()),
             budget,
             profile_store,
+            port_provider,
         };
         handler.spawn_reconnect_supervisor();
         handler
@@ -219,7 +232,7 @@ impl SerialHandler {
         annotations(read_only_hint = true, open_world_hint = false)
     )]
     async fn list_ports(&self) -> Result<Json<ListPortsResult>, String> {
-        port_ops::list_ports().await
+        port_ops::list_ports(&self.port_provider).await
     }
 
     #[tool(
@@ -241,8 +254,15 @@ impl SerialHandler {
         Parameters(args): Parameters<OpenArgs>,
         ctx: RequestContext<RoleServer>,
     ) -> Result<Json<OpenResult>, String> {
-        let result =
-            port_ops::open(&self.connections, &self.rx_sessions, &self.security, args).await?;
+        let result = port_ops::open(
+            &self.connections,
+            &self.rx_sessions,
+            &self.security,
+            &self.profile_store,
+            &self.port_provider,
+            args,
+        )
+        .await?;
         let connection_id = result.0.connection_id.clone();
         self.notify_resource_changed(&connection_id, &ctx).await;
         Ok(result)
@@ -508,6 +528,8 @@ impl SerialHandler {
             &self.connections,
             &self.rx_sessions,
             &self.security,
+            &self.profile_store,
+            &self.port_provider,
             profile,
             args,
         )
@@ -526,13 +548,7 @@ impl SerialHandler {
         &self,
         Parameters(args): Parameters<SaveProfileArgs>,
     ) -> Result<Json<SaveProfileResult>, String> {
-        port_ops::save_profile(
-            &self.connections,
-            &self.rx_sessions,
-            &self.profile_store,
-            args,
-        )
-        .await
+        port_ops::save_profile(&self.connections, &self.profile_store, args).await
     }
 
     #[tool(
@@ -640,7 +656,7 @@ impl SerialHandler {
         match r#ref {
             Reference::Resource(resource_ref) => {
                 if resource_ref.uri == URI_PORTS && argument.name == "port" {
-                    match PortInfo::list_available() {
+                    match self.port_provider.list_available() {
                         Ok(ports) => ports.into_iter().map(|p| p.name).collect(),
                         Err(_) => vec![],
                     }
@@ -650,7 +666,7 @@ impl SerialHandler {
             }
             Reference::Prompt(prompt_ref) => {
                 if prompt_ref.name == "diagnose_port" && argument.name == "port" {
-                    match PortInfo::list_available() {
+                    match self.port_provider.list_available() {
                         Ok(ports) => ports.into_iter().map(|p| p.name).collect(),
                         Err(_) => vec![],
                     }
@@ -758,7 +774,9 @@ impl ServerHandler for SerialHandler {
     ) -> Result<ListResourcesResult, McpError> {
         const PAGE_SIZE: usize = 100;
 
-        let port_count = PortInfo::list_available()
+        let port_count = self
+            .port_provider
+            .list_available()
             .map(|v| v.len() as u32)
             .unwrap_or(0);
         let conn_count = self.connections.count().await as u32;
@@ -846,7 +864,7 @@ impl ServerHandler for SerialHandler {
         let uri = request.uri;
         match parse_resource_uri(&uri) {
             ResourceUriKind::Ports => {
-                let ports = PortInfo::list_available().map_err(|e| {
+                let ports = self.port_provider.list_available().map_err(|e| {
                     McpError::internal_error(format!("Failed to list ports: {e}"), None)
                 })?;
                 let body = serde_json::to_string_pretty(&ListPortsResult {

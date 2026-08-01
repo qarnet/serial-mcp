@@ -18,6 +18,7 @@ use serde_json::Value;
 
 use serial_mcp::codec::{self, Encoding};
 use serial_mcp::limits::*;
+use serial_mcp::profiles::{allocate_generated_name, normalize_generated_label, Profile};
 use serial_mcp::serial::{DataBits, FlowControl, Parity, StopBits};
 use serial_mcp::tools::helpers::{
     clamp_or_err, clamp_poll_interval_or_err, clamp_timeout_or_err, parse_open_args,
@@ -168,21 +169,22 @@ proptest! {
         let args = OpenArgs {
             port: port.clone(),
             name: None,
-            baud_rate: baud,
-            data_bits: db.clone(),
-            stop_bits: sb.clone(),
-            parity: p.clone(),
-            flow_control: fc.clone(),
-            log_capacity: 1024,
-            log_enabled: true,
-            reconnect_policy: Default::default(),
+            baud_rate: Some(baud),
+            data_bits: Some(db.clone()),
+            stop_bits: Some(sb.clone()),
+            parity: Some(p.clone()),
+            flow_control: Some(fc.clone()),
+            log_capacity: Some(1024),
+            log_enabled: Some(true),
+            reconnect_policy: Some(Default::default()),
             tx_framing: None,
             rx_framing: None,
             rx_parser: None,
             protocol: None,
-            rx_buffer_size: serial_mcp::limits::DEFAULT_RX_BUFFER_SIZE,
-            max_buffered_bytes: 32768,
-            poll_interval_ms: 200,
+            rx_buffer_size: Some(serial_mcp::limits::DEFAULT_RX_BUFFER_SIZE),
+            max_buffered_bytes: Some(32768),
+            poll_interval_ms: Some(200),
+            profile_mode: None,
         };
         assert_roundtrip!(args);
 
@@ -315,7 +317,7 @@ proptest! {
     fn open_result_schema_valid(
         id in opaque_id(), port in valid_port_name(), baud in any_u32(),
     ) {
-        let r = OpenResult { connection_id: id, name: None, port, baud_rate: baud };
+        let r = OpenResult { connection_id: id, name: None, port, baud_rate: baud, profile: None };
         let v = serde_json::to_value(&r).unwrap();
         assert_schema_valid!(OpenResult, v);
     }
@@ -736,21 +738,22 @@ proptest! {
         let args = OpenArgs {
             port,
             name: None,
-            baud_rate: 9600,
-            data_bits: "8".into(),
-            stop_bits: "1".into(),
-            parity: "none".into(),
-            flow_control: "none".into(),
-            log_capacity: 1024,
-            log_enabled: true,
-            reconnect_policy: Default::default(),
+            baud_rate: Some(9600),
+            data_bits: Some("8".into()),
+            stop_bits: Some("1".into()),
+            parity: Some("none".into()),
+            flow_control: Some("none".into()),
+            log_capacity: Some(1024),
+            log_enabled: Some(true),
+            reconnect_policy: Some(Default::default()),
             tx_framing: None,
             rx_framing: None,
             rx_parser: None,
             protocol: None,
-            rx_buffer_size: serial_mcp::limits::DEFAULT_RX_BUFFER_SIZE,
-            max_buffered_bytes: 32768,
-            poll_interval_ms: 200,
+            rx_buffer_size: Some(serial_mcp::limits::DEFAULT_RX_BUFFER_SIZE),
+            max_buffered_bytes: Some(32768),
+            poll_interval_ms: Some(200),
+            profile_mode: None,
         };
         assert_roundtrip!(args);
     }
@@ -1018,4 +1021,79 @@ fn rx_framing_config_roundtrip_all_modes() {
     let c12: RxFramingConfig = serde_json::from_value(json).unwrap();
     assert!(matches!(c12.mode, RxFramingMode::Line { .. }));
     assert!(c12.skip_empty);
+}
+
+// ── Phase 3A: generated-name and ranking properties ─────────────────────────
+
+proptest! {
+    #[test]
+    fn generated_label_normalization_properties(label in "[A-Za-z0-9 _\\-!@#ÄÖÜß]*") {
+        let normalized = normalize_generated_label(&label);
+        // Never empty, never overwritten silently, ASCII lowercase only.
+        assert!(!normalized.is_empty(), "empty label for {label:?}");
+        assert!(normalized.len() <= 32, "cap at 32: {label:?} -> {normalized:?}");
+        assert!(normalized.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'),
+                "non-normalized chars: {label:?} -> {normalized:?}");
+        assert!(!normalized.starts_with('-') && !normalized.ends_with('-'),
+                "trimmed: {label:?} -> {normalized:?}");
+        // Runs of separators collapse to a single dash.
+        assert!(!normalized.contains("--"), "no double dash: {label:?} -> {normalized:?}");
+        // Lowercasing a normalized label is a fixed point.
+        assert_eq!(normalized, normalize_generated_label(&normalized));
+    }
+
+    #[test]
+    fn generated_name_allocation_property(
+        existing in prop::collection::vec("[a-z0-9-]{1,12}", 0..20),
+        base in "[a-z0-9-]{1,12}",
+    ) {
+        let profiles: Vec<Profile> = existing
+            .iter()
+            .map(|n| Profile {
+                name: n.clone(),
+                selector: Default::default(),
+                defaults: Default::default(),
+                metadata: Default::default(),
+                revisions: Vec::new(),
+            })
+            .collect();
+        let allocated = allocate_generated_name(&profiles, &base);
+        assert!(!existing.contains(&allocated), "must never collide: {existing:?} base={base}");
+        assert!(allocated.starts_with(&base), "must keep the base prefix: {allocated}");
+    }
+
+    #[test]
+    fn candidate_ranking_is_stable_and_descending(
+        timestamps in prop::collection::vec(prop::option::of(0u64..1_000_000), 0..30),
+    ) {
+        use serial_mcp::profiles::rank_candidates;
+        let profiles: Vec<Profile> = timestamps
+            .iter()
+            .enumerate()
+            .map(|(i, ts)| Profile {
+                name: format!("p-{i}"),
+                selector: Default::default(),
+                defaults: Default::default(),
+                metadata: serial_mcp::profiles::ProfileMetadata {
+                    last_used_at_ms: *ts,
+                    ..Default::default()
+                },
+                revisions: Vec::new(),
+            })
+            .collect();
+        let ranked = rank_candidates(profiles.clone());
+        assert_eq!(ranked.len(), profiles.len());
+        // Sorted non-increasing by effective timestamp (None == 0).
+        for pair in ranked.windows(2) {
+            let a = pair[0].metadata.last_used_at_ms.unwrap_or(0);
+            let b = pair[1].metadata.last_used_at_ms.unwrap_or(0);
+            assert!(a >= b, "must rank newest first: {timestamps:?}");
+        }
+        // Ranking is a permutation of the inputs.
+        let mut names: Vec<String> = ranked.iter().map(|p| p.name.clone()).collect();
+        names.sort();
+        let mut orig: Vec<String> = profiles.iter().map(|p| p.name.clone()).collect();
+        orig.sort();
+        assert_eq!(names, orig);
+    }
 }

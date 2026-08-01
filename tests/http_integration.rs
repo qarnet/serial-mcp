@@ -330,6 +330,68 @@ async fn configure_profile_creates_new_profile() {
     // TempDir cleanup: profiles_dir dropped here, deletes profiles.toml.
 }
 
+/// Phase 3A: `list_profiles` exposes metadata and bounded revision history
+/// so agents can understand selection and future rollback revisions.
+#[tokio::test]
+async fn list_profiles_exposes_metadata_and_revisions() {
+    let profiles_dir = TempDir::new().unwrap();
+    let profiles_path = profiles_dir.path().join("profiles.toml");
+    let manager = Arc::new(ConnectionManager::new());
+    let server = TestServer::start_with_profiles_path(manager, profiles_path).await;
+    let (client, _rx) = connect_client(&server).await.unwrap();
+    let name = "meta-probe";
+
+    let created = client
+        .peer()
+        .call_tool(tool_request(
+            "configure",
+            json!({ "profile": name, "defaults": { "baud_rate": 9600 } }),
+        ))
+        .await
+        .unwrap();
+    assert_ne!(created.is_error, Some(true), "{created:?}");
+
+    // Overwrite bumps the revision and records the prior state.
+    let overwritten = client
+        .peer()
+        .call_tool(tool_request(
+            "configure",
+            json!({
+                "profile": name,
+                "overwrite": true,
+                "defaults": { "baud_rate": 19200 }
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_ne!(overwritten.is_error, Some(true), "{overwritten:?}");
+
+    let listed = client
+        .peer()
+        .call_tool(tool_request("list_profiles", json!({})))
+        .await
+        .unwrap();
+    let s = listed.structured_content.as_ref().unwrap();
+    let p = &s["profiles"][0];
+    assert_eq!(p["name"], json!(name));
+    assert_eq!(p["metadata"]["generated"], json!(false));
+    assert_eq!(p["metadata"]["revision"], json!(2));
+    assert_eq!(p["metadata"]["use_count"], json!(0));
+    assert!(
+        !p["metadata"]["created_at_ms"].is_null(),
+        "created timestamp set"
+    );
+    // Prior state snapshot for future rollback.
+    let revisions = p["revisions"].as_array().expect("revisions array");
+    assert_eq!(revisions.len(), 1);
+    assert_eq!(revisions[0]["revision"], json!(1));
+    assert_eq!(revisions[0]["defaults"]["baud_rate"], json!(9600));
+    // Metadata must survive serialization to the wire (no uint formats etc.
+    // are exercised by the schema guards).
+
+    client.cancel().await.ok();
+}
+
 #[tokio::test]
 async fn configure_profile_overwrites_existing() {
     let profiles_dir = TempDir::new().unwrap();

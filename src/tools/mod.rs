@@ -104,7 +104,72 @@ mod tests {
         let json = serde_json::to_value(&schema).unwrap();
         let props = json.get("properties").unwrap();
         let baud = props.get("baud_rate").unwrap();
-        assert_eq!(baud.get("minimum"), Some(&serde_json::json!(0)));
+        // baud_rate is optional (Phase 3A): anyOf [null, integer min 0].
+        let inner = &baud["anyOf"][1];
+        assert_eq!(inner.get("minimum"), Some(&serde_json::json!(0)));
+        let required = json
+            .get("required")
+            .and_then(|r| r.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(
+            required,
+            vec![serde_json::json!("port")],
+            "only `port` must be required on open"
+        );
+    }
+
+    #[test]
+    fn open_args_schema_no_longer_requires_default_bearing_fields() {
+        // Phase 3A: omitted baud/default-bearing fields must be valid calls
+        // (they resolve to profile defaults / built-ins).
+        let schema = schema_for!(OpenArgs);
+        let json = serde_json::to_value(&schema).unwrap();
+        let required = json
+            .get("required")
+            .and_then(|r| r.as_array())
+            .cloned()
+            .unwrap_or_default();
+        for field in [
+            "baud_rate",
+            "data_bits",
+            "stop_bits",
+            "parity",
+            "flow_control",
+            "log_capacity",
+            "log_enabled",
+            "reconnect_policy",
+            "rx_buffer_size",
+            "max_buffered_bytes",
+            "poll_interval_ms",
+        ] {
+            assert!(
+                !required.contains(&serde_json::json!(field)),
+                "open schema must not require {field}: {required:?}"
+            );
+        }
+        // The profile_mode field must be present.
+        let props = json.get("properties").unwrap();
+        assert!(
+            props.get("profile_mode").is_some(),
+            "open schema must expose profile_mode"
+        );
+    }
+
+    #[test]
+    fn open_profile_args_schema_makes_overrides_optional() {
+        let schema = schema_for!(crate::tools::types::OpenProfileArgs);
+        let json = serde_json::to_value(&schema).unwrap();
+        let required = json
+            .get("required")
+            .and_then(|r| r.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(
+            required,
+            vec![serde_json::json!("profile")],
+            "only `profile` must be required on open_profile: {required:?}"
+        );
     }
 
     #[test]

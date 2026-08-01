@@ -113,6 +113,38 @@ across repositories. Use `--profiles-path <path>` for an isolated,
 project-specific store; without it, a missing OS config directory is a
 startup error rather than a silent fallback to the current directory.
 
+### Automatic profile sessions
+
+Every successful `open`/`open_profile` binds the connection to an observable
+profile session reported in the open result, `get_status`, and
+`list_connections` (`profile`: name, selection source, confidence, persistent,
+generated, revision, dirty, candidates, last persistence error):
+
+- **First bare `open` of a uniquely identified USB device** (transport + VID +
+  PID + non-empty serial number, interface when available) creates a durable
+  generated profile (name `auto-{label}`) whose defaults equal the effective
+  open settings.
+- **Close/reopen automatically selects the most recently used profile** for
+  the same device. Multiple profiles for one device resolve to the unique
+  newest `last_used_at_ms`; an equal top rank is reported as ambiguity
+  (`candidates`), never vector-order selection, and the session stays
+  transient.
+- **Explicit open fields override the selected profile's defaults**
+  (baud, data bits, stop bits, parity, flow control, log, reconnect policy,
+  framing/parser/protocol, ring size, read/subscribe defaults). Omitted
+  fields come from the profile, then built-in 115200/8-N-1 defaults. An
+  override marks the binding `dirty` (persisted by a later phase).
+- **Weak identity** (no USB serial number, non-USB, or path-only) opens with
+  a non-persistent transient session and never writes a durable profile.
+  Duplicate live fingerprints also degrade to transient — settings are never
+  applied to an indistinguishable device.
+- **`profile_mode="none"`** disables automatic selection/creation for
+  deliberate troubleshooting.
+- `open_profile` remains explicit selection; it now requires exactly one
+  matching live port (multiple matches are a tool error) and marks the
+  profile most recently used. `list_profiles` exposes each profile's
+  metadata and bounded revision history.
+
 ## Transports
 
 | Mode | How to activate | Use case |
@@ -125,6 +157,8 @@ startup error rather than a silent fallback to the current directory.
 ```
 1. list_ports → ["/dev/ttyUSB0", "/dev/ttyACM0"]
 2. open(port="/dev/ttyACM0", name="board-uart", baud_rate=115200) → { connection_id: "9f...", name: "board-uart" }
+   # bare open(port=...) also works: baud defaults to 115200 and the
+   # connection is bound to an automatic profile session (see above)
 3. list_connections() → [{ connection_id: "9f...", name: "board-uart", port: "/dev/ttyACM0" }]
 4. set_dtr_rts(id, dtr=false, rts=false)  # Arduino reset
    set_dtr_rts(id, dtr=true,  rts=true)

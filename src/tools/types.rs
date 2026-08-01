@@ -15,26 +15,37 @@ pub struct OpenArgs {
     pub port: String,
     #[serde(default)]
     pub name: Option<String>,
-    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
-    pub baud_rate: u32,
-    #[serde(default = "default_data_bits")]
-    pub data_bits: String,
-    #[serde(default = "default_stop_bits")]
-    pub stop_bits: String,
-    #[serde(default = "default_parity")]
-    pub parity: String,
-    #[serde(default = "default_flow_control")]
-    pub flow_control: String,
+    /// Baud rate. Omitted values resolve to the selected profile's default,
+    /// else 115200.
+    #[serde(default)]
+    #[schemars(schema_with = "crate::schema_helpers::option_uint_schema")]
+    pub baud_rate: Option<u32>,
+    /// Data bits. Omitted values resolve to the selected profile's default,
+    /// else 8.
+    #[serde(default)]
+    pub data_bits: Option<String>,
+    /// Stop bits. Omitted values resolve to the selected profile's default,
+    /// else 1.
+    #[serde(default)]
+    pub stop_bits: Option<String>,
+    /// Parity. Omitted values resolve to the selected profile's default,
+    /// else none.
+    #[serde(default)]
+    pub parity: Option<String>,
+    /// Flow control. Omitted values resolve to the selected profile's
+    /// default, else none.
+    #[serde(default)]
+    pub flow_control: Option<String>,
     /// Log buffer capacity in events. 0 disables logging. Default: 1024.
-    #[serde(default = "default_log_capacity")]
-    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
-    pub log_capacity: usize,
+    #[serde(default)]
+    #[schemars(schema_with = "crate::schema_helpers::option_uint_schema")]
+    pub log_capacity: Option<usize>,
     /// Whether logging is enabled. Default: true (ignored when capacity is 0).
-    #[serde(default = "default_true")]
-    pub log_enabled: bool,
+    #[serde(default)]
+    pub log_enabled: Option<bool>,
     /// Reconnect policy for this connection. Default: disabled.
     #[serde(default)]
-    pub reconnect_policy: crate::serial::ReconnectPolicy,
+    pub reconnect_policy: Option<crate::serial::ReconnectPolicy>,
     /// Default TX framing applied when subsequent `write` calls omit `tx_framing`.
     #[serde(default)]
     pub tx_framing: Option<crate::framing::TxFramingConfig>,
@@ -51,32 +62,26 @@ pub struct OpenArgs {
     /// this much RX history between reads/subscribes. Default 256 KiB
     /// (~23s of 115200-baud traffic). Open-time only; reopen to resize.
     /// Validated against the buffer budget pool and a 16 MiB ceiling.
-    #[serde(default = "default_rx_buffer_size")]
-    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
-    pub rx_buffer_size: usize,
+    #[serde(default)]
+    #[schemars(schema_with = "crate::schema_helpers::option_uint_schema")]
+    pub rx_buffer_size: Option<usize>,
     /// Default max buffered bytes for `read` on this connection.
     /// Default 32768 (32 KiB).
-    #[serde(default = "default_max_buffered_bytes")]
-    #[schemars(schema_with = "crate::schema_helpers::read_max_buffered_bytes_schema")]
-    pub max_buffered_bytes: usize,
+    #[serde(default)]
+    #[schemars(schema_with = "crate::schema_helpers::option_uint_schema")]
+    pub max_buffered_bytes: Option<usize>,
     /// Default poll interval for `subscribe` in milliseconds.
     /// Default 200.
-    #[serde(default = "default_subscribe_poll_ms")]
-    #[schemars(schema_with = "crate::schema_helpers::poll_interval_ms_schema")]
-    pub poll_interval_ms: u64,
-}
-
-fn default_rx_buffer_size() -> usize {
-    crate::limits::DEFAULT_RX_BUFFER_SIZE
-}
-fn default_log_capacity() -> usize {
-    1024
-}
-fn default_true() -> bool {
-    true
-}
-fn default_subscribe_poll_ms() -> u64 {
-    200
+    #[serde(default)]
+    #[schemars(schema_with = "crate::schema_helpers::option_uint_schema")]
+    pub poll_interval_ms: Option<u64>,
+    /// Automatic profile-session mode. Default `auto`: bare open reuses the
+    /// most recently used high-confidence profile or creates a durable
+    /// generated profile for a new high-confidence device; weak or ambiguous
+    /// identity gets a transient session. `none` disables automatic
+    /// selection/creation for deliberate troubleshooting.
+    #[serde(default)]
+    pub profile_mode: Option<crate::profiles::ProfileMode>,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -281,18 +286,19 @@ pub struct OpenProfileArgs {
     pub profile: String,
     #[serde(default)]
     pub name: Option<String>,
-    /// Log buffer capacity in events. 0 disables logging. Default: 1024.
-    #[serde(default = "default_log_capacity")]
-    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
-    pub log_capacity: usize,
-    /// Whether logging is enabled. Default: true (ignored when capacity is 0).
-    #[serde(default = "default_true")]
-    pub log_enabled: bool,
-    /// Per-connection RX ring buffer size in bytes. Overrides the profile's
-    /// `rx_buffer_size` default. Default: 256 KiB.
-    #[serde(default = "default_rx_buffer_size")]
-    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
-    pub rx_buffer_size: usize,
+    /// Log buffer capacity in events. Omitted values use the profile
+    /// default (1024). 0 disables logging.
+    #[serde(default)]
+    #[schemars(schema_with = "crate::schema_helpers::option_uint_schema")]
+    pub log_capacity: Option<usize>,
+    /// Whether logging is enabled. Omitted values use the profile default.
+    #[serde(default)]
+    pub log_enabled: Option<bool>,
+    /// Per-connection RX ring buffer size in bytes. Omitted values use the
+    /// profile default (256 KiB). Open-time only; reopen to resize.
+    #[serde(default)]
+    #[schemars(schema_with = "crate::schema_helpers::option_uint_schema")]
+    pub rx_buffer_size: Option<usize>,
 }
 
 // ---- Response structs ------------------------------------------------------
@@ -311,6 +317,10 @@ pub struct OpenResult {
     pub port: String,
     #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
     pub baud_rate: u32,
+    /// Active profile-session binding: how this connection was bound to a
+    /// profile (automatic/explicit/generated/transient/disabled), the
+    /// profile name, confidence, dirty state, and any persistence error.
+    pub profile: Option<crate::profiles::ProfileSessionResult>,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -667,6 +677,9 @@ pub struct GetStatusResult {
     /// Lifetime total of bytes lost to ring wrap.
     #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
     pub rx_bytes_wrapped_total: u64,
+    /// Active profile-session binding. `null` for connections inserted
+    /// directly by low-level tests.
+    pub profile: Option<crate::profiles::ProfileSessionResult>,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -688,6 +701,11 @@ pub struct ProfileSummary {
     pub name: String,
     pub selector: crate::profiles::ProfileSelector,
     pub defaults: crate::profiles::ProfileDefaults,
+    /// Bookkeeping metadata (generated flag, revision, timestamps, usage).
+    pub metadata: crate::profiles::ProfileMetadata,
+    /// Bounded history of prior selector/defaults snapshots (for future
+    /// rollback). Empty for profiles that were never overwritten.
+    pub revisions: Vec<crate::profiles::ProfileRevision>,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -699,32 +717,14 @@ pub struct ListProfilesResult {
 
 // ---- Default helpers -------------------------------------------------------
 
-pub fn default_data_bits() -> String {
-    "8".into()
-}
-pub fn default_stop_bits() -> String {
-    "1".into()
-}
-pub fn default_parity() -> String {
-    "none".into()
-}
-pub fn default_flow_control() -> String {
-    "none".into()
-}
 pub fn default_encoding() -> String {
     "utf8".into()
-}
-pub fn default_max_buffered_bytes() -> usize {
-    32768
 }
 pub fn default_flush_target() -> FlushTarget {
     FlushTarget::Both
 }
 pub fn default_break_duration_ms() -> u64 {
     250
-}
-pub fn default_subscribe_buffered_bytes() -> usize {
-    2048
 }
 
 // ---- Profile management tools ----------------------------------------------

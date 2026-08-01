@@ -29,9 +29,11 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, RwLock};
 
 use crate::profiles::{
-    Profile, ProfileDefaults, ProfileMetadata, ProfileRevision, ProfileSelector,
-    MAX_PROFILE_REVISIONS,
+    allocate_generated_name, high_identity, normalize_generated_label, rank_candidates,
+    selector_matches_high_identity, Profile, ProfileDefaults, ProfileMetadata, ProfileRevision,
+    ProfileSelector, MAX_PROFILE_REVISIONS,
 };
+use crate::serial::PortInfo;
 
 /// Current on-disk schema version. Version 1 was the legacy unversioned
 /// format; version 2 adds `schema_version`, `ProfileMetadata`, and
@@ -52,6 +54,18 @@ struct ProfilesFile {
 
 fn legacy_schema_version() -> u32 {
     LEGACY_SCHEMA_VERSION
+}
+
+/// Outcome of automatic profile resolution for one target port.
+#[derive(Debug, Clone, Default)]
+pub struct AutomaticResolution {
+    /// The uniquely most-recently-used matching profile, when one exists.
+    pub selected: Option<Profile>,
+    /// `true` when candidates exist but no unique winner (equal top
+    /// `last_used_at_ms`) — the caller must use a transient session.
+    pub ambiguous: bool,
+    /// Names of all candidate profiles that matched the target identity.
+    pub candidates: Vec<String>,
 }
 
 /// Process-wide store of named profiles.
@@ -145,6 +159,172 @@ impl ProfileStore {
         let name = name.to_string();
         self.run_mutation(move |profiles, _now| apply_delete(profiles, name))
             .await
+    }
+
+    /// Fresh automatic resolution for one high-confidence target port.
+    ///
+    /// Acquires the file lock, reloads the profile file from disk (never
+    /// cache-only — another process may have changed profiles), republishes
+    /// the cache, and resolves candidates whose selectors carry the target's
+    /// high identity fields. Returns the unique most-recently-used profile,
+    /// or an ambiguity marker when no unique winner exists.
+    ///
+    /// Callers must already have verified the target has a high-confidence
+    /// identity that is unique among live ports.
+    pub async fn resolve_automatic(
+        &self,
+        target: &PortInfo,
+    ) -> Result<AutomaticResolution, String> {
+        let identity = high_identity(target).ok_or_else(|| {
+            "Automatic resolution requires a high-confidence USB identity".to_string()
+        })?;
+        let target = target.clone();
+        self.run_read(move |profiles| {
+            let candidates: Vec<Profile> = profiles
+                .iter()
+                .filter(|p| {
+                    p.matches(&target) && selector_matches_high_identity(&p.selector, &identity)
+                })
+                .cloned()
+                .collect();
+            if candidates.is_empty() {
+                return Ok(AutomaticResolution::default());
+            }
+            let names = candidates.iter().map(|p| p.name.clone()).collect();
+            if candidates.len() == 1 {
+                return Ok(AutomaticResolution {
+                    selected: Some(candidates[0].clone()),
+                    ambiguous: false,
+                    candidates: names,
+                });
+            }
+            let ranked = rank_candidates(candidates);
+            let top_ts = ranked[0].metadata.last_used_at_ms.unwrap_or(0);
+            let next_ts = ranked[1].metadata.last_used_at_ms.unwrap_or(0);
+            if top_ts != next_ts {
+                Ok(AutomaticResolution {
+                    selected: Some(ranked[0].clone()),
+                    ambiguous: false,
+                    candidates: names,
+                })
+            } else {
+                Ok(AutomaticResolution {
+                    selected: None,
+                    ambiguous: true,
+                    candidates: names,
+                })
+            }
+        })
+        .await
+    }
+
+    /// Atomically allocate a generated profile name and create the profile
+    /// with generated metadata (revision 1, use count 1, timestamps set).
+    /// Never overwrites an existing profile. Returns the effective profile
+    /// from the same transaction.
+    pub async fn create_generated(
+        &self,
+        label: String,
+        selector: ProfileSelector,
+        defaults: ProfileDefaults,
+    ) -> Result<Profile, String> {
+        self.run_mutation(move |mut profiles, now| {
+            let base = format!("auto-{}", normalize_generated_label(&label));
+            let name = allocate_generated_name(&profiles, &base);
+            let profile = Profile {
+                name,
+                selector,
+                defaults,
+                metadata: ProfileMetadata {
+                    generated: true,
+                    revision: 1,
+                    created_at_ms: Some(now),
+                    updated_at_ms: Some(now),
+                    last_used_at_ms: Some(now),
+                    use_count: 1,
+                },
+                revisions: Vec::new(),
+            };
+            let effective = profile.clone();
+            profiles.push(profile);
+            Ok((effective, profiles))
+        })
+        .await
+    }
+
+    /// Mark a profile as used: increment `use_count` and update
+    /// `last_used_at_ms`. Does NOT bump the configuration revision or add
+    /// history. The timestamp is monotonically greater than any profile's
+    /// existing `last_used_at_ms` (`max(now, max_existing + 1)`) so this
+    /// server never creates same-millisecond ranking ties. Returns the
+    /// effective profile from the same transaction.
+    pub async fn mark_used(&self, name: &str) -> Result<Profile, String> {
+        let name = name.to_string();
+        self.run_mutation(move |mut profiles, now| {
+            let idx = profiles
+                .iter()
+                .position(|p| p.name == name)
+                .ok_or_else(|| format!("Profile '{name}' not found"))?;
+            let max_existing = profiles
+                .iter()
+                .filter_map(|p| p.metadata.last_used_at_ms)
+                .max()
+                .unwrap_or(0);
+            let ts = now.max(max_existing.saturating_add(1));
+            let old = profiles[idx].clone();
+            let updated = Profile {
+                metadata: ProfileMetadata {
+                    use_count: old.metadata.use_count.saturating_add(1),
+                    last_used_at_ms: Some(ts),
+                    ..old.metadata.clone()
+                },
+                ..old
+            };
+            let effective = updated.clone();
+            profiles[idx] = updated;
+            Ok((effective, profiles))
+        })
+        .await
+    }
+
+    /// Run one fresh read-only transaction.
+    ///
+    /// Persistent stores: the compute closure runs inside
+    /// [`tokio::task::spawn_blocking`] while holding the process-local
+    /// mutation mutex and the advisory file lock, on a fresh read of the
+    /// file; the in-memory cache is republished from inside the blocking
+    /// transaction so later cache reads see the same state.
+    ///
+    /// Ephemeral stores: the closure runs against the in-memory cache.
+    async fn run_read<T, F>(&self, compute: F) -> Result<T, String>
+    where
+        F: FnOnce(&[Profile]) -> Result<T, String> + Send + 'static,
+        T: Send + 'static,
+    {
+        let _guard = self.mutation_lock.lock().await;
+        let path = self.path.clone();
+        let cache = Arc::clone(&self.cache);
+        match path {
+            Some(path) => {
+                let result = tokio::task::spawn_blocking(move || {
+                    let lock = acquire_lock(&path)?;
+                    let outcome: Result<T, String> = (|| {
+                        let current = load_validated(&path)?;
+                        *cache.blocking_write() = current.clone();
+                        compute(&current)
+                    })();
+                    drop(lock);
+                    outcome
+                })
+                .await
+                .map_err(|e| format!("Profile store read task failed: {e}"))??;
+                Ok(result)
+            }
+            None => {
+                let current = self.cache.read().await.clone();
+                compute(&current)
+            }
+        }
     }
 
     /// Run one read-modify-write mutation.
@@ -817,6 +997,425 @@ use_count = 3
         );
         // End-to-end relative behavior (real process cwd) is covered by the
         // http_integration `relative_profiles_path` test.
+    }
+
+    // ── Phase 3A: automatic resolution, generated create, mark_used ──────
+
+    fn high_usb_port(name: &str, serial: &str, interface: Option<u8>) -> PortInfo {
+        PortInfo {
+            name: name.into(),
+            display_name: name.rsplit('/').next().unwrap_or(name).into(),
+            description: "Synthetic".into(),
+            hardware_id: Some("USB VID:1234 PID:5678".into()),
+            transport: crate::serial::PortTransport::Usb,
+            vid: Some(0x1234),
+            pid: Some(0x5678),
+            serial_number: Some(serial.into()),
+            manufacturer: Some("Synthetic".into()),
+            product: Some("Widget".into()),
+            interface,
+        }
+    }
+
+    #[tokio::test]
+    async fn resolve_automatic_fresh_read_and_unique_winner() {
+        let (_dir, path) = temp_path();
+        let store = ProfileStore::open(path).unwrap();
+        let target = high_usb_port("/dev/ttyACM0", "SN-1", None);
+
+        // No candidates yet.
+        let resolution = store.resolve_automatic(&target).await.unwrap();
+        assert!(resolution.selected.is_none());
+        assert!(!resolution.ambiguous);
+        assert!(resolution.candidates.is_empty());
+
+        // One matching profile (same high identity, differing path).
+        let p = Profile {
+            name: "dev-a".into(),
+            selector: crate::profiles::canonical_high_selector(&target).unwrap(),
+            defaults: ProfileDefaults::default(),
+            metadata: ProfileMetadata::default(),
+            revisions: Vec::new(),
+        };
+        store.upsert(p, false).await.unwrap();
+
+        let resolution = store.resolve_automatic(&target).await.unwrap();
+        assert!(!resolution.ambiguous);
+        assert_eq!(resolution.selected.unwrap().name, "dev-a");
+    }
+
+    #[tokio::test]
+    async fn resolve_automatic_ignores_weak_selector_profiles() {
+        let (_dir, path) = temp_path();
+        let store = ProfileStore::open(path).unwrap();
+        let target = high_usb_port("/dev/ttyACM0", "SN-1", None);
+
+        // Empty selector profile matches any port via matches(), but must
+        // NOT be an automatic candidate for a high-confidence device.
+        store
+            .upsert(
+                Profile {
+                    name: "any-device".into(),
+                    selector: ProfileSelector::default(),
+                    defaults: ProfileDefaults::default(),
+                    metadata: ProfileMetadata::default(),
+                    revisions: Vec::new(),
+                },
+                false,
+            )
+            .await
+            .unwrap();
+        let resolution = store.resolve_automatic(&target).await.unwrap();
+        assert!(resolution.selected.is_none());
+        assert!(resolution.candidates.is_empty());
+    }
+
+    #[tokio::test]
+    async fn resolve_automatic_picks_unique_max_last_used_and_ties_are_ambiguous() {
+        // Candidates are prewritten with explicit last-used timestamps
+        // (upsert owns metadata on create, so the file is the way to
+        // exercise ranking).
+        let (_dir, path) = temp_path();
+        std::fs::write(
+            &path,
+            r#"
+schema_version = 2
+
+[[profile]]
+name = "old"
+[profile.selector]
+vid = 0x1234
+pid = 0x5678
+serial_number = "SN-1"
+transport = "usb"
+[profile.metadata]
+generated = false
+revision = 1
+created_at_ms = 10
+updated_at_ms = 10
+last_used_at_ms = 100
+use_count = 1
+
+[[profile]]
+name = "never"
+[profile.selector]
+vid = 0x1234
+pid = 0x5678
+serial_number = "SN-1"
+transport = "usb"
+[profile.metadata]
+generated = false
+revision = 1
+created_at_ms = 10
+updated_at_ms = 10
+use_count = 0
+
+[[profile]]
+name = "new"
+[profile.selector]
+vid = 0x1234
+pid = 0x5678
+serial_number = "SN-1"
+transport = "usb"
+[profile.metadata]
+generated = false
+revision = 1
+created_at_ms = 10
+updated_at_ms = 10
+last_used_at_ms = 200
+use_count = 3
+"#,
+        )
+        .unwrap();
+        let store = ProfileStore::open(path).unwrap();
+        let target = high_usb_port("/dev/ttyACM0", "SN-1", None);
+
+        let resolution = store.resolve_automatic(&target).await.unwrap();
+        assert!(!resolution.ambiguous);
+        assert_eq!(resolution.selected.unwrap().name, "new");
+        assert_eq!(resolution.candidates.len(), 3, "all candidates named");
+
+        // Equal top timestamps → ambiguity, candidates named.
+        let (_dir2, path2) = temp_path();
+        std::fs::write(
+            &path2,
+            r#"
+schema_version = 2
+
+[[profile]]
+name = "tie-a"
+[profile.selector]
+vid = 0x1234
+pid = 0x5678
+serial_number = "SN-1"
+transport = "usb"
+[profile.metadata]
+generated = false
+revision = 1
+created_at_ms = 10
+updated_at_ms = 10
+last_used_at_ms = 300
+use_count = 1
+
+[[profile]]
+name = "tie-b"
+[profile.selector]
+vid = 0x1234
+pid = 0x5678
+serial_number = "SN-1"
+transport = "usb"
+[profile.metadata]
+generated = false
+revision = 1
+created_at_ms = 10
+updated_at_ms = 10
+last_used_at_ms = 300
+use_count = 1
+"#,
+        )
+        .unwrap();
+        let store2 = ProfileStore::open(path2).unwrap();
+        let resolution = store2.resolve_automatic(&target).await.unwrap();
+        assert!(resolution.ambiguous, "equal top timestamps must tie");
+        assert!(resolution.selected.is_none());
+        assert_eq!(resolution.candidates, vec!["tie-a", "tie-b"]);
+
+        // Both-None candidates also tie (None sorts oldest → equal rank).
+        let (_dir3, path3) = temp_path();
+        std::fs::write(
+            &path3,
+            r#"
+schema_version = 2
+
+[[profile]]
+name = "never-a"
+[profile.selector]
+vid = 0x1234
+pid = 0x5678
+serial_number = "SN-1"
+transport = "usb"
+[profile.metadata]
+generated = false
+revision = 1
+created_at_ms = 10
+updated_at_ms = 10
+use_count = 0
+
+[[profile]]
+name = "never-b"
+[profile.selector]
+vid = 0x1234
+pid = 0x5678
+serial_number = "SN-1"
+transport = "usb"
+[profile.metadata]
+generated = false
+revision = 1
+created_at_ms = 10
+updated_at_ms = 10
+use_count = 0
+"#,
+        )
+        .unwrap();
+        let store3 = ProfileStore::open(path3).unwrap();
+        let resolution = store3.resolve_automatic(&target).await.unwrap();
+        assert!(resolution.ambiguous, "None == None must tie");
+    }
+
+    #[tokio::test]
+    async fn resolve_automatic_requires_high_identity() {
+        let (_dir, path) = temp_path();
+        let store = ProfileStore::open(path).unwrap();
+        let weak = PortInfo {
+            transport: crate::serial::PortTransport::Unknown,
+            ..high_usb_port("/dev/pts/1", "SN-1", None)
+        };
+        let err = store.resolve_automatic(&weak).await.unwrap_err();
+        assert!(
+            err.contains("high-confidence"),
+            "weak identity must be rejected: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_generated_allocates_unique_names_and_sets_metadata() {
+        let (_dir, path) = temp_path();
+        let store = ProfileStore::open(path).unwrap();
+        let selector = ProfileSelector {
+            vid: Some(0x1234),
+            ..Default::default()
+        };
+        let first = store
+            .create_generated(
+                "Fake USB Serial".into(),
+                selector.clone(),
+                ProfileDefaults::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(first.name, "auto-fake-usb-serial");
+        assert!(first.metadata.generated);
+        assert_eq!(first.metadata.revision, 1);
+        assert_eq!(first.metadata.use_count, 1);
+        assert!(first.metadata.created_at_ms.is_some());
+        assert!(first.metadata.last_used_at_ms.is_some());
+
+        // Same label → suffix, never overwrite.
+        let second = store
+            .create_generated(
+                "Fake USB Serial".into(),
+                selector.clone(),
+                ProfileDefaults::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(second.name, "auto-fake-usb-serial-2");
+
+        // Allocator picks the first free suffix across gaps.
+        let third = store
+            .create_generated(
+                "Fake USB Serial".into(),
+                selector,
+                ProfileDefaults::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(third.name, "auto-fake-usb-serial-3");
+
+        let listed = store.list().await;
+        assert_eq!(listed.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn mark_used_bumps_usage_only_and_is_monotonic() {
+        // Prewritten metadata (revision 3, use_count 7, history) so the
+        // assertions prove mark_used touches ONLY usage fields.
+        let (_dir, path) = temp_path();
+        std::fs::write(
+            &path,
+            r#"
+schema_version = 2
+
+[[profile]]
+name = "dev-a"
+[profile.selector]
+vid = 0x1234
+[profile.metadata]
+generated = false
+revision = 3
+created_at_ms = 100
+updated_at_ms = 200
+last_used_at_ms = 1000
+use_count = 7
+
+[[profile.revisions]]
+revision = 2
+saved_at_ms = 500
+[profile.revisions.selector]
+vid = 0x1234
+[profile.revisions.defaults]
+"#,
+        )
+        .unwrap();
+        let store = ProfileStore::open(path).unwrap();
+
+        let used = store.mark_used("dev-a").await.unwrap();
+        assert_eq!(used.metadata.use_count, 8);
+        assert_eq!(used.metadata.revision, 3, "revision must not bump");
+        assert_eq!(used.metadata.created_at_ms, Some(100));
+        assert_eq!(
+            used.metadata.updated_at_ms,
+            Some(200),
+            "usage must not bump updated_at"
+        );
+        assert!(
+            used.metadata.last_used_at_ms.unwrap() > 1000,
+            "timestamp must exceed any existing last_used"
+        );
+
+        // Second mark_used is strictly greater than the first (no ties).
+        let used2 = store.mark_used("dev-a").await.unwrap();
+        assert!(
+            used2.metadata.last_used_at_ms.unwrap() > used.metadata.last_used_at_ms.unwrap(),
+            "mark_used must be monotonic"
+        );
+        assert_eq!(used2.metadata.use_count, 9);
+        assert_eq!(used2.metadata.revision, 3);
+        assert_eq!(used2.revisions.len(), 1, "no new history");
+        assert_eq!(
+            used2.revisions[0].defaults.baud_rate, 115200,
+            "history untouched"
+        );
+    }
+
+    #[tokio::test]
+    async fn mark_used_missing_profile_errors() {
+        let (_dir, path) = temp_path();
+        let store = ProfileStore::open(path).unwrap();
+        let err = store.mark_used("no-such").await.unwrap_err();
+        assert!(err.contains("not found"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn concurrent_generated_allocations_never_overwrite() {
+        // Two concurrent create_generated calls on the same store must
+        // produce distinct names (serialized by the mutation lock + file
+        // lock) and persist both.
+        let (_dir, path) = temp_path();
+        let store = Arc::new(ProfileStore::open(path).unwrap());
+        let s1 = Arc::clone(&store);
+        let s2 = Arc::clone(&store);
+        let (r1, r2) = tokio::join!(
+            s1.create_generated(
+                "Widget".into(),
+                ProfileSelector::default(),
+                ProfileDefaults::default()
+            ),
+            s2.create_generated(
+                "Widget".into(),
+                ProfileSelector::default(),
+                ProfileDefaults::default()
+            ),
+        );
+        let (p1, p2) = (r1.unwrap(), r2.unwrap());
+        assert_ne!(p1.name, p2.name, "concurrent allocation must not collide");
+
+        let listed = store.list().await;
+        assert_eq!(listed.len(), 2);
+        let names: Vec<&str> = listed.iter().map(|p| p.name.as_str()).collect();
+        assert!(names.contains(&p1.name.as_str()));
+        assert!(names.contains(&p2.name.as_str()));
+    }
+
+    #[tokio::test]
+    async fn resolve_automatic_observes_other_writers_via_fresh_read() {
+        // The fresh-read path must see profiles written by a DIFFERENT
+        // store instance (simulating another process), not a stale cache.
+        let (_dir, path) = temp_path();
+        let store = ProfileStore::open(path.clone()).unwrap();
+        let target = high_usb_port("/dev/ttyACM0", "SN-1", None);
+
+        let other = ProfileStore::open(path.clone()).unwrap();
+        other
+            .upsert(
+                Profile {
+                    name: "from-other-process".into(),
+                    selector: crate::profiles::canonical_high_selector(&target).unwrap(),
+                    defaults: ProfileDefaults::default(),
+                    metadata: ProfileMetadata::default(),
+                    revisions: Vec::new(),
+                },
+                false,
+            )
+            .await
+            .unwrap();
+
+        let resolution = store.resolve_automatic(&target).await.unwrap();
+        assert_eq!(
+            resolution.selected.unwrap().name,
+            "from-other-process",
+            "resolve must read the file fresh, not a stale cache"
+        );
     }
 
     #[tokio::test]

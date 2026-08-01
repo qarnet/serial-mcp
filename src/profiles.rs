@@ -6,13 +6,251 @@
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::path::PathBuf;
 
-use crate::serial::PortInfo;
+use crate::serial::{PortInfo, PortTransport};
 
 /// Maximum number of prior selector/defaults snapshots retained per profile.
 /// Oldest snapshots are dropped first; the newest five prior states survive.
 pub const MAX_PROFILE_REVISIONS: usize = 5;
+
+/// How confidently a port's identity can be used for automatic profile
+/// reuse. Automatic persistent reuse is allowed only for [`High`](IdentityConfidence::High):
+///
+/// - transport is USB
+/// - VID exists
+/// - PID exists
+/// - non-empty serial number exists
+/// - interface participates when available
+///
+/// USB VID/PID without a serial number is `Medium` and auto-ineligible.
+/// Other useful identity is `Low`; path-only/unknown is `None`.
+/// Medium/low/none sessions are transient and never persisted automatically.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum IdentityConfidence {
+    /// USB transport with VID, PID, and a non-empty serial number.
+    High,
+    /// USB VID/PID without a serial number.
+    Medium,
+    /// Some other useful identity (non-USB transport with identity fields).
+    Low,
+    /// Path-only or unknown identity.
+    None,
+}
+
+/// How an active connection's profile session was selected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ProfileSelectionSource {
+    /// Automatically selected as the unique most-recently-used
+    /// high-confidence profile for the device.
+    Automatic,
+    /// Explicitly selected via `open_profile`.
+    Explicit,
+    /// Automatically created durable profile for a new high-confidence
+    /// device.
+    Generated,
+    /// Non-persistent session (weak/ambiguous identity, disabled store
+    /// interaction, or a failed profile persistence).
+    Transient,
+    /// Automatic selection/creation disabled via `profile_mode="none"`.
+    Disabled,
+}
+
+/// Profile-session binding shape exposed on open/status/connection results.
+/// `ActiveProfileBinding` (stored on `SerialConnection`) converts losslessly
+/// into this wire type via `to_session_result`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ProfileSessionResult {
+    /// Name of the bound profile. Empty for transient/disabled sessions.
+    pub profile_name: String,
+    /// How the binding was selected.
+    pub source: ProfileSelectionSource,
+    /// Identity confidence that drove automatic behavior.
+    pub confidence: IdentityConfidence,
+    /// Whether the session is backed by a durable profile.
+    pub persistent: bool,
+    /// Whether the bound profile was auto-generated (Phase 3A).
+    pub generated: bool,
+    /// Bound profile's revision at selection time. `null` for
+    /// transient/disabled sessions.
+    #[schemars(schema_with = "crate::schema_helpers::option_uint_schema")]
+    pub revision: Option<u64>,
+    /// `true` when explicit open fields override the selected profile's
+    /// defaults (3B will persist the effective settings).
+    pub dirty: bool,
+    /// Candidate profile names when selection was ambiguous; empty
+    /// otherwise.
+    pub candidates: Vec<String>,
+    /// Last profile persistence error, when a metadata write failed after
+    /// hardware open succeeded. The connection stays open.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_persistence_error: Option<String>,
+}
+
+/// Automatic profile-session mode for bare `open`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ProfileMode {
+    /// Automatically reuse the most recently used high-confidence profile
+    /// or create a durable generated profile for a new high-confidence
+    /// device. Weak/ambiguous identity gets a transient session.
+    Auto,
+    /// Disable automatic profile selection/creation for deliberate
+    /// troubleshooting. Every open gets a non-persistent disabled binding.
+    None,
+}
+
+/// Canonical high-confidence device identity used for automatic profile
+/// matching and duplicate detection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HighIdentity {
+    /// Transport as displayed by `PortTransport` (`"usb"` for USB ports).
+    pub transport: String,
+    pub vid: u16,
+    pub pid: u16,
+    pub serial_number: String,
+    pub interface: Option<u8>,
+}
+
+/// Compute the canonical high-confidence identity of a port, or `None` when
+/// the port is not a uniquely identified USB device.
+pub fn high_identity(port: &PortInfo) -> Option<HighIdentity> {
+    if port.transport != PortTransport::Usb {
+        return None;
+    }
+    let vid = port.vid?;
+    let pid = port.pid?;
+    let serial_number = port
+        .serial_number
+        .as_deref()
+        .filter(|s| !s.is_empty())?
+        .to_string();
+    Some(HighIdentity {
+        transport: port.transport.to_string(),
+        vid,
+        pid,
+        serial_number,
+        interface: port.interface,
+    })
+}
+
+/// Classify a port's identity confidence for automatic profile behavior.
+pub fn identity_confidence(port: &PortInfo) -> IdentityConfidence {
+    if port.transport == PortTransport::Usb
+        && port.vid.is_some()
+        && port.pid.is_some()
+        && port.serial_number.as_deref().is_some_and(|s| !s.is_empty())
+    {
+        return IdentityConfidence::High;
+    }
+    if port.transport == PortTransport::Usb && port.vid.is_some() && port.pid.is_some() {
+        return IdentityConfidence::Medium;
+    }
+    let has_any_identity = port.vid.is_some()
+        || port.pid.is_some()
+        || port.serial_number.as_deref().is_some_and(|s| !s.is_empty())
+        || port.manufacturer.is_some()
+        || port.product.is_some()
+        || port.interface.is_some()
+        || port.hardware_id.is_some();
+    if has_any_identity {
+        IdentityConfidence::Low
+    } else {
+        IdentityConfidence::None
+    }
+}
+
+/// Canonical generated selector for a high-confidence port: only transport,
+/// VID, PID, serial number, and optional interface. Path, description,
+/// manufacturer, product, and formatted hardware ID are deliberately
+/// excluded so the profile survives port path changes.
+pub fn canonical_high_selector(port: &PortInfo) -> Option<ProfileSelector> {
+    let id = high_identity(port)?;
+    Some(ProfileSelector {
+        vid: Some(id.vid),
+        pid: Some(id.pid),
+        serial_number: Some(id.serial_number),
+        manufacturer: None,
+        product: None,
+        interface: id.interface,
+        port_pattern: None,
+        description_pattern: None,
+        transport: Some(id.transport),
+        hardware_id: None,
+    })
+}
+
+/// Whether a profile selector carries the same high identity fields as the
+/// target device (transport, VID, PID, serial, and interface when present).
+/// Used together with [`Profile::matches`] to filter automatic candidates.
+pub fn selector_matches_high_identity(selector: &ProfileSelector, id: &HighIdentity) -> bool {
+    selector.transport.as_deref() == Some(id.transport.as_str())
+        && selector.vid == Some(id.vid)
+        && selector.pid == Some(id.pid)
+        && selector.serial_number.as_deref() == Some(id.serial_number.as_str())
+        && id
+            .interface
+            .is_none_or(|iface| selector.interface == Some(iface))
+}
+
+/// Rank candidate profiles by `last_used_at_ms`, newest first. `None`
+/// timestamps sort oldest (ranked as 0).
+pub fn rank_candidates(mut candidates: Vec<Profile>) -> Vec<Profile> {
+    candidates.sort_by(|a, b| {
+        let a_ts = a.metadata.last_used_at_ms.unwrap_or(0);
+        let b_ts = b.metadata.last_used_at_ms.unwrap_or(0);
+        b_ts.cmp(&a_ts)
+    });
+    candidates
+}
+
+/// Normalize a product/manufacturer label for generated profile names:
+/// lowercase ASCII, each non-alphanumeric run becomes `-`, trimmed of
+/// leading/trailing `-`, capped at 32 chars, `serial-device` fallback when
+/// nothing usable remains.
+pub fn normalize_generated_label(label: &str) -> String {
+    let mut out = String::new();
+    let mut pending_sep = false;
+    for c in label.chars() {
+        if c.is_ascii_alphanumeric() {
+            if pending_sep && !out.is_empty() {
+                out.push('-');
+            }
+            pending_sep = false;
+            out.push(c.to_ascii_lowercase());
+        } else {
+            pending_sep = true;
+        }
+    }
+    let out = out.trim_matches('-');
+    let capped: String = out.chars().take(32).collect();
+    let capped = capped.trim_end_matches('-');
+    if capped.is_empty() {
+        "serial-device".to_string()
+    } else {
+        capped.to_string()
+    }
+}
+
+/// Choose the first free generated profile name for `base`: `base`, then
+/// `base-2`, `base-3`, ... — never overwriting an existing profile.
+pub fn allocate_generated_name(existing: &[Profile], base: &str) -> String {
+    let taken: HashSet<&str> = existing.iter().map(|p| p.name.as_str()).collect();
+    if !taken.contains(base) {
+        return base.to_string();
+    }
+    let mut suffix = 2u32;
+    loop {
+        let candidate = format!("{base}-{suffix}");
+        if !taken.contains(candidate.as_str()) {
+            return candidate;
+        }
+        suffix += 1;
+    }
+}
 
 /// A single named profile.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -608,5 +846,245 @@ mod tests {
             .expect("serialized ProfileDefaults must be an object");
         assert!(!obj.contains_key("decoder"));
         assert!(!obj.contains_key("safety_policy"));
+    }
+
+    // ── Phase 3A: identity confidence / canonical selector ────────────────
+
+    fn usb_port(name: &str, vid: Option<u16>, pid: Option<u16>, serial: Option<&str>) -> PortInfo {
+        let mut port = make_port(name, vid, pid, serial);
+        port.transport = crate::serial::PortTransport::Usb;
+        port
+    }
+
+    #[test]
+    fn confidence_tiers() {
+        let high = usb_port("/dev/ttyACM0", Some(0x1234), Some(0x5678), Some("SN-1"));
+        assert_eq!(identity_confidence(&high), IdentityConfidence::High);
+
+        let empty_serial = usb_port("/dev/ttyACM0", Some(0x1234), Some(0x5678), Some(""));
+        assert_eq!(
+            identity_confidence(&empty_serial),
+            IdentityConfidence::Medium
+        );
+
+        let no_serial = usb_port("/dev/ttyACM0", Some(0x1234), Some(0x5678), None);
+        assert_eq!(identity_confidence(&no_serial), IdentityConfidence::Medium);
+
+        // USB without VID/PID: only description-ish identity → Low.
+        let partial = usb_port("/dev/ttyACM0", None, None, Some("SN-1"));
+        assert_eq!(identity_confidence(&partial), IdentityConfidence::Low);
+
+        // PCI with hardware id → Low.
+        let mut pci = make_port("/dev/ttyS0", None, None, None);
+        pci.transport = crate::serial::PortTransport::Pci;
+        pci.hardware_id = Some("PCI".into());
+        assert_eq!(identity_confidence(&pci), IdentityConfidence::Low);
+
+        // Path-only/unknown → None.
+        let unknown = make_port("/dev/pts/3", None, None, None);
+        assert_eq!(identity_confidence(&unknown), IdentityConfidence::None);
+    }
+
+    #[test]
+    fn high_identity_requires_full_usb_identity() {
+        let high = usb_port("/dev/ttyACM0", Some(0x1234), Some(0x5678), Some("SN-1"));
+        assert!(high_identity(&high).is_some());
+
+        assert!(
+            high_identity(&usb_port("/dev/ttyACM0", Some(0x1234), Some(0x5678), None)).is_none()
+        );
+        assert!(
+            high_identity(&usb_port("/dev/ttyACM0", Some(0x1234), None, Some("SN-1"))).is_none()
+        );
+        assert!(high_identity(&make_port("/dev/ttyS0", None, None, None)).is_none());
+    }
+
+    #[test]
+    fn canonical_high_selector_survives_path_change() {
+        let mut port = usb_port("/dev/ttyACM0", Some(0x1234), Some(0x5678), Some("SN-1"));
+        port.interface = Some(2);
+        port.product = Some("Widget".into());
+        port.manufacturer = Some("Acme".into());
+        port.hardware_id = Some("USB VID:1234 PID:5678".into());
+
+        let selector = canonical_high_selector(&port).expect("high identity selector");
+
+        // Path/description/manufacturer/product/hardware_id must NOT be in
+        // the canonical selector.
+        assert_eq!(selector.port_pattern, None);
+        assert_eq!(selector.description_pattern, None);
+        assert_eq!(selector.manufacturer, None);
+        assert_eq!(selector.product, None);
+        assert_eq!(selector.hardware_id, None);
+
+        // Identity fields must be present.
+        assert_eq!(selector.vid, Some(0x1234));
+        assert_eq!(selector.pid, Some(0x5678));
+        assert_eq!(selector.serial_number.as_deref(), Some("SN-1"));
+        assert_eq!(selector.interface, Some(2));
+        assert_eq!(selector.transport.as_deref(), Some("usb"));
+
+        // A different OS path with the same identity still matches.
+        let mut same_device = port.clone();
+        same_device.name = "/dev/ttyACM7".into();
+        same_device.display_name = "ttyACM7".into();
+        let selector = canonical_high_selector(&same_device).unwrap();
+        let id = high_identity(&same_device).unwrap();
+        assert!(selector_matches_high_identity(&selector, &id));
+        assert!(Profile {
+            name: "x".into(),
+            selector,
+            defaults: ProfileDefaults::default(),
+            metadata: ProfileMetadata::default(),
+            revisions: Vec::new(),
+        }
+        .matches(&port));
+    }
+
+    #[test]
+    fn selector_matches_high_identity_rejects_weak_and_foreign_selectors() {
+        let id = HighIdentity {
+            transport: "usb".into(),
+            vid: 0x1234,
+            pid: 0x5678,
+            serial_number: "SN-1".into(),
+            interface: Some(2),
+        };
+
+        // Exact canonical selector matches (port carries the interface).
+        let mut port = usb_port("/dev/ttyACM0", Some(0x1234), Some(0x5678), Some("SN-1"));
+        port.interface = Some(2);
+        assert!(selector_matches_high_identity(
+            &canonical_high_selector(&port).unwrap(),
+            &id
+        ));
+
+        // Empty selector (matches any port) must NOT count as high identity.
+        assert!(!selector_matches_high_identity(
+            &ProfileSelector::default(),
+            &id
+        ));
+
+        // Different serial / pid / transport all fail.
+        let wrong_serial = ProfileSelector {
+            vid: Some(0x1234),
+            pid: Some(0x5678),
+            transport: Some("usb".into()),
+            serial_number: Some("OTHER".into()),
+            ..Default::default()
+        };
+        assert!(!selector_matches_high_identity(&wrong_serial, &id));
+
+        // Missing interface while the device has one fails.
+        let no_interface = ProfileSelector {
+            vid: Some(0x1234),
+            pid: Some(0x5678),
+            transport: Some("usb".into()),
+            serial_number: Some("SN-1".into()),
+            ..Default::default()
+        };
+        assert!(!selector_matches_high_identity(&no_interface, &id));
+
+        // Device without interface: interface does not participate.
+        let no_iface_id = HighIdentity {
+            interface: None,
+            ..id.clone()
+        };
+        assert!(selector_matches_high_identity(&no_interface, &no_iface_id));
+    }
+
+    // ── Phase 3A: candidate ranking ───────────────────────────────────────
+
+    fn ranked_profile(name: &str, last_used: Option<u64>) -> Profile {
+        Profile {
+            name: name.into(),
+            selector: ProfileSelector::default(),
+            defaults: ProfileDefaults::default(),
+            metadata: ProfileMetadata {
+                last_used_at_ms: last_used,
+                ..Default::default()
+            },
+            revisions: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn ranking_picks_unique_newest_first_and_none_sorts_oldest() {
+        let ranked = rank_candidates(vec![
+            ranked_profile("old", Some(100)),
+            ranked_profile("never", None),
+            ranked_profile("new", Some(200)),
+        ]);
+        let names: Vec<&str> = ranked.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, vec!["new", "old", "never"]);
+    }
+
+    #[test]
+    fn ranking_equal_timestamps_tie() {
+        let ranked = rank_candidates(vec![
+            ranked_profile("a", Some(500)),
+            ranked_profile("b", Some(500)),
+        ]);
+        // Both candidates have the same top timestamp: no unique winner.
+        assert_eq!(ranked.len(), 2);
+        let top_ts = ranked[0].metadata.last_used_at_ms;
+        let next_ts = ranked[1].metadata.last_used_at_ms;
+        assert_eq!(top_ts, next_ts, "equal top timestamps must tie");
+    }
+
+    // ── Phase 3A: generated name normalization / allocation ───────────────
+
+    #[test]
+    fn generated_label_normalization() {
+        assert_eq!(
+            normalize_generated_label("Fake USB Serial"),
+            "fake-usb-serial"
+        );
+        assert_eq!(normalize_generated_label("  Acme  Widget  "), "acme-widget");
+        assert_eq!(normalize_generated_label("USB__Port_1"), "usb-port-1");
+        assert_eq!(normalize_generated_label("---"), "serial-device");
+        assert_eq!(normalize_generated_label(""), "serial-device");
+        // Non-ASCII runs collapse to a single dash between ASCII runs.
+        assert_eq!(normalize_generated_label("Ünïcode"), "n-code");
+        assert_eq!(normalize_generated_label("A###B"), "a-b");
+    }
+
+    #[test]
+    fn generated_label_truncation_caps_at_32_and_trims_dash() {
+        let long = normalize_generated_label(&"x".repeat(60));
+        assert_eq!(long.len(), 32, "label capped at 32 chars: {long:?}");
+        let cut_dash = normalize_generated_label(&format!("{}!!!", "a".repeat(30)));
+        assert_eq!(cut_dash.len(), 30, "cap must not leave a trailing dash");
+        assert!(!cut_dash.ends_with('-'));
+    }
+
+    #[test]
+    fn generated_label_usb_vid_pid_fallback() {
+        // The usb-{vid:04x}-{pid:04x} label path lives in the tool layer;
+        // normalization must keep the hex digits and dashes.
+        assert_eq!(normalize_generated_label("usb-1234-5678"), "usb-1234-5678");
+    }
+
+    #[test]
+    fn generated_name_allocation_never_overwrites() {
+        let existing = vec![
+            ranked_profile("auto-device", None),
+            ranked_profile("auto-device-2", None),
+            ranked_profile("auto-device-3", None),
+        ];
+        assert_eq!(
+            allocate_generated_name(&existing, "auto-device"),
+            "auto-device-4"
+        );
+        assert_eq!(allocate_generated_name(&[], "auto-fresh"), "auto-fresh");
+        // An existing suffix does not block a higher one.
+        let with_gap = vec![
+            ranked_profile("auto-device", None),
+            ranked_profile("auto-device-2", None),
+        ];
+        assert_eq!(
+            allocate_generated_name(&with_gap, "auto-device"),
+            "auto-device-3"
+        );
     }
 }

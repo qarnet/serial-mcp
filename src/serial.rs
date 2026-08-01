@@ -278,7 +278,7 @@ impl ConnectionState {
 /// Reconnect policy for a connection. When enabled and the port
 /// disappears, the server will try to re-establish the connection
 /// automatically with exponential backoff.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct ReconnectPolicy {
     /// Enable automatic reconnect. Default: false.
     #[serde(default)]
@@ -447,6 +447,27 @@ impl PortInfo {
     }
 }
 
+// ---- Port enumeration provider ----------------------------------------------
+
+/// Abstraction over OS port enumeration, so tools, resources, and the
+/// automatic profile-session machinery share one consistent view of live
+/// ports. Production uses [`SystemPortProvider`]; tests inject a static
+/// provider whose `PortInfo.name` points at a real PTY slave while identity
+/// fields describe a synthetic USB device.
+pub trait PortProvider: Send + Sync {
+    fn list_available(&self) -> crate::error::Result<Vec<PortInfo>>;
+}
+
+/// Production port provider: delegates to OS-level enumeration.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SystemPortProvider;
+
+impl PortProvider for SystemPortProvider {
+    fn list_available(&self) -> crate::error::Result<Vec<PortInfo>> {
+        PortInfo::list_available()
+    }
+}
+
 /// Extract the last path component or the full name when no separator exists.
 fn short_display_name(port_name: &str) -> String {
     port_name
@@ -603,6 +624,43 @@ fn io_error_from_serialport(err: serialport::Error) -> std::io::Error {
 
 // ---- Single open connection --------------------------------------------------
 
+/// Active profile-session binding stored on a connection.
+///
+/// Every connection opened through the public `open`/`open_profile` tools
+/// carries one. Connections inserted directly by low-level tests may have
+/// `None`. Converts losslessly into the wire type
+/// [`crate::profiles::ProfileSessionResult`] for open/status/connection
+/// summaries.
+#[derive(Debug, Clone)]
+pub struct ActiveProfileBinding {
+    pub profile_name: String,
+    pub source: crate::profiles::ProfileSelectionSource,
+    pub confidence: crate::profiles::IdentityConfidence,
+    pub persistent: bool,
+    pub generated: bool,
+    pub revision: Option<u64>,
+    pub dirty: bool,
+    pub candidates: Vec<String>,
+    pub last_persistence_error: Option<String>,
+}
+
+impl ActiveProfileBinding {
+    /// Lossless conversion to the serializable session-result shape.
+    pub fn to_session_result(&self) -> crate::profiles::ProfileSessionResult {
+        crate::profiles::ProfileSessionResult {
+            profile_name: self.profile_name.clone(),
+            source: self.source,
+            confidence: self.confidence,
+            persistent: self.persistent,
+            generated: self.generated,
+            revision: self.revision,
+            dirty: self.dirty,
+            candidates: self.candidates.clone(),
+            last_persistence_error: self.last_persistence_error.clone(),
+        }
+    }
+}
+
 /// A single open serial port. Cheap to clone via [`Arc`] because all state lives
 /// behind a [`Mutex`].
 pub struct SerialConnection {
@@ -656,6 +714,13 @@ pub struct SerialConnection {
     max_buffered_bytes_default: AtomicUsize,
     /// Default poll interval for `subscribe` in ms (from profile/open, mutable live).
     poll_interval_ms_default: AtomicU64,
+    /// Active profile-session binding (Phase 3A). `None` for connections
+    /// inserted directly by low-level tests.
+    active_profile: StdMutex<Option<ActiveProfileBinding>>,
+    /// Effective RX ring buffer size from the open config, so profile
+    /// snapshots never depend on whichever handler-local `RxSessionManager`
+    /// receives a later request.
+    rx_buffer_size: usize,
 }
 
 impl fmt::Debug for SerialConnection {
@@ -726,7 +791,7 @@ impl SerialConnection {
             truncation_count: AtomicU64::new(0),
             notification_drop_count: AtomicU64::new(0),
             port_info: config.port_info,
-            log: crate::log_buffer::LogBuffer::new_shared(config.log_capacity, config.log_enabled),
+            log,
             state: StdMutex::new(ConnectionState::Open),
             reconnect_policy: StdMutex::new(ReconnectPolicy::default()),
             reconnect_attempts: AtomicU64::new(0),
@@ -737,6 +802,8 @@ impl SerialConnection {
             protocol_default: StdMutex::new(config.protocol),
             max_buffered_bytes_default: AtomicUsize::new(config.max_buffered_bytes),
             poll_interval_ms_default: AtomicU64::new(config.poll_interval_ms),
+            active_profile: StdMutex::new(None),
+            rx_buffer_size: config.rx_buffer_size,
         }
     }
 
@@ -820,6 +887,22 @@ impl SerialConnection {
     pub fn poll_interval_ms_default(&self) -> u64 {
         self.poll_interval_ms_default
             .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// The active profile-session binding, if this connection was opened
+    /// through a public open path.
+    pub fn active_profile_binding(&self) -> Option<ActiveProfileBinding> {
+        self.active_profile.lock().expect("poisoned").clone()
+    }
+
+    /// Attach (or clear) the active profile-session binding.
+    pub(crate) fn set_active_profile_binding(&self, binding: Option<ActiveProfileBinding>) {
+        *self.active_profile.lock().expect("poisoned") = binding;
+    }
+
+    /// The effective RX ring buffer size configured at open time.
+    pub fn rx_buffer_size(&self) -> usize {
+        self.rx_buffer_size
     }
 
     // ── Live mutators (pub(crate); exposed via `configure` tool) ──────────
@@ -966,7 +1049,7 @@ impl SerialConnection {
             rx_framing: self.rx_framing_default(),
             rx_parser: self.rx_parser_default(),
             protocol: self.protocol_default(),
-            rx_buffer_size: crate::limits::DEFAULT_RX_BUFFER_SIZE,
+            rx_buffer_size: self.rx_buffer_size(),
             max_buffered_bytes: self.max_buffered_bytes_default(),
             poll_interval_ms: self.poll_interval_ms_default(),
         }
@@ -1041,6 +1124,7 @@ impl SerialConnection {
                 .expect("poisoned")
                 .as_ref()
                 .map(|(_, msg)| msg.clone()),
+            profile: self.active_profile_binding().map(|b| b.to_session_result()),
         }
     }
 
@@ -1055,6 +1139,7 @@ impl SerialConnection {
             port: self.port().to_string(),
             baud_rate: self.baud_rate(),
             flow_control: self.flow_control(),
+            profile: self.active_profile_binding().map(|b| b.to_session_result()),
         }
     }
 
@@ -1561,6 +1646,9 @@ pub struct ConnectionSummary {
     #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
     pub baud_rate: u32,
     pub flow_control: FlowControl,
+    /// Active profile-session binding. `null` for connections inserted
+    /// directly by low-level tests.
+    pub profile: Option<crate::profiles::ProfileSessionResult>,
 }
 
 /// Full status snapshot of a connection used by the `get_status` tool.
@@ -1602,6 +1690,9 @@ pub struct ConnectionStatus {
     pub reconnect_attempts: u64,
     /// Last fatal error message, or null.
     pub last_error: Option<String>,
+    /// Active profile-session binding. `null` for connections inserted
+    /// directly by low-level tests.
+    pub profile: Option<crate::profiles::ProfileSessionResult>,
 }
 
 fn find_connection_by_port<'a>(
@@ -2199,7 +2290,9 @@ mod schema {
     use crate::framing::{
         Frame, ParsedFrame, RxFramingConfig, RxFramingMode, TxFramingConfig, TxFramingMode,
     };
-    use crate::profiles::{Profile, ProfileMetadata, ProfileRevision, ProfileSelector};
+    use crate::profiles::{
+        Profile, ProfileMetadata, ProfileRevision, ProfileSelector, ProfileSessionResult,
+    };
     use crate::serial::{ConnectionStatus, PortInfo};
     use crate::tools::types::{
         ClearLogResult, CloseResult, ComputeChecksumResult, ConfigureResult, DeleteProfileResult,
@@ -2280,6 +2373,12 @@ mod schema {
     check_schema!(profile_selector_has_no_uint_formats, ProfileSelector);
     check_schema!(profile_metadata_has_no_uint_formats, ProfileMetadata);
     check_schema!(profile_revision_has_no_uint_formats, ProfileRevision);
+    // Phase 3A session-result shape exposed on open/status/connection
+    // summaries (guards the Option<u64> revision field).
+    check_schema!(
+        profile_session_result_has_no_uint_formats,
+        ProfileSessionResult
+    );
 
     // Tool result types reachable by clients.
     // Keep this list in sync with the `#[tool]` methods in `src/server.rs`

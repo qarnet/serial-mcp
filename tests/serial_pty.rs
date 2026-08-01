@@ -1599,3 +1599,834 @@ async fn pty_transact_cancellation_aborts_read() {
         }
     }
 }
+
+// ── Phase 3A: automatic profile sessions ────────────────────────────────────
+//
+// These tests exercise the full public `open`/`open_profile` path with a
+// REAL PTY slave as the hardware port while an injected StaticPortProvider
+// describes synthetic USB identity. They prove the profile-session behavior
+// is observable through public MCP results — not just field wiring.
+
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use common::StaticPortProvider;
+
+const VID: u16 = 0x1234;
+const PID: u16 = 0x5678;
+
+/// Extract the textual error payload of a failed tool call.
+fn tool_error_text(result: &rmcp::model::CallToolResult) -> String {
+    result
+        .content
+        .iter()
+        .filter_map(|c| match &c.raw {
+            rmcp::model::RawContent::Text(t) => Some(t.text.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Snapshot use_count/revision/defaults of one profile through the public
+/// `list_profiles` tool.
+async fn session_profile_snapshot<H: rmcp::handler::client::ClientHandler>(
+    client: &rmcp::service::RunningService<rmcp::service::RoleClient, H>,
+    profile_name: &str,
+) -> (serde_json::Value, serde_json::Value, serde_json::Value) {
+    let listed = client
+        .peer()
+        .call_tool(tool_request("list_profiles", json!({})))
+        .await
+        .unwrap();
+    let s = listed.structured_content.as_ref().unwrap();
+    let p = s["profiles"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["name"] == json!(profile_name))
+        .expect("profile present")
+        .clone();
+    (
+        p["metadata"]["use_count"].clone(),
+        p["metadata"]["revision"].clone(),
+        p["defaults"].clone(),
+    )
+}
+
+/// Open a port through the public MCP tool with the given extra JSON fields.
+async fn open_port(
+    client: &rmcp::service::RunningService<
+        rmcp::service::RoleClient,
+        common::NotificationCollector,
+    >,
+    port: &str,
+    extra: serde_json::Value,
+) -> serde_json::Value {
+    let mut body = serde_json::Map::new();
+    body.insert("port".into(), serde_json::Value::String(port.into()));
+    if let serde_json::Value::Object(map) = extra {
+        for (k, v) in map {
+            body.insert(k, v);
+        }
+    }
+    let result = client
+        .peer()
+        .call_tool(tool_request("open", serde_json::Value::Object(body)))
+        .await
+        .unwrap();
+    assert_ne!(result.is_error, Some(true), "open failed: {result:?}");
+    result.structured_content.expect("structured")
+}
+
+async fn close_port(
+    client: &rmcp::service::RunningService<
+        rmcp::service::RoleClient,
+        common::NotificationCollector,
+    >,
+    connection_id: &str,
+) {
+    let result = client
+        .peer()
+        .call_tool(tool_request(
+            "close",
+            json!({ "connection_id": connection_id }),
+        ))
+        .await
+        .unwrap();
+    assert_ne!(result.is_error, Some(true), "close failed: {result:?}");
+}
+
+/// One PTY + provider + server + client wired for profile-session tests.
+struct SessionHarness {
+    _server: TestServer,
+    _client:
+        rmcp::service::RunningService<rmcp::service::RoleClient, common::NotificationCollector>,
+    _dir: tempfile::TempDir,
+    profiles_path: PathBuf,
+}
+
+async fn session_harness(provider: Arc<StaticPortProvider>) -> SessionHarness {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let profiles_path = dir.path().join("profiles.toml");
+    let server = TestServer::start_with_provider_and_profiles_path(
+        Arc::new(serial_mcp::serial::ConnectionManager::new()),
+        provider,
+        profiles_path.clone(),
+    )
+    .await;
+    let (client, _rx) = connect_client(&server).await.unwrap();
+    SessionHarness {
+        _server: server,
+        _client: client,
+        _dir: dir,
+        profiles_path,
+    }
+}
+
+/// 1. First high-confidence bare open creates a generated persistent
+///    profile; open result, list_profiles, get_status, and list_connections
+///    all agree — and real serial traffic flows.
+#[tokio::test]
+async fn auto_session_first_open_creates_generated_profile_and_pty_traffic_flows() {
+    let mut pty = PtyPair::open().expect("openpty");
+    let slave = pty.slave_path.to_string_lossy().into_owned();
+    let provider = StaticPortProvider::new(vec![StaticPortProvider::usb_port(
+        &slave,
+        VID,
+        PID,
+        "SN-1",
+        Some("Fake USB Serial"),
+        Some(2),
+    )]);
+    let harness = session_harness(provider).await;
+    let client = &harness._client;
+
+    // Bare open: no baud, no defaults — built-in 115200 fallback.
+    let opened = open_port(client, &slave, json!({})).await;
+    let connection_id = opened["connection_id"].as_str().unwrap().to_string();
+    assert_eq!(opened["baud_rate"], json!(115200), "built-in baud fallback");
+    let profile = &opened["profile"];
+    assert_eq!(profile["source"], json!("generated"));
+    assert_eq!(profile["profile_name"], json!("auto-fake-usb-serial"));
+    assert_eq!(profile["confidence"], json!("high"));
+    assert_eq!(profile["persistent"], json!(true));
+    assert_eq!(profile["generated"], json!(true));
+    assert_eq!(profile["revision"], json!(1));
+    assert_eq!(profile["dirty"], json!(false));
+    assert!(profile["candidates"].as_array().unwrap().is_empty());
+
+    // Real serial traffic through the generated session.
+    pty.write_device(b"HELLO-SESSION").await.unwrap();
+    let result = client
+        .peer()
+        .call_tool(tool_request(
+            "read",
+            json!({ "connection_id": connection_id, "timeout_ms": 1000 }),
+        ))
+        .await
+        .unwrap();
+    assert_ne!(result.is_error, Some(true), "{result:?}");
+    assert_eq!(
+        result.structured_content.as_ref().unwrap()["data"],
+        json!("HELLO-SESSION")
+    );
+
+    // list_profiles agrees.
+    let listed = client
+        .peer()
+        .call_tool(tool_request("list_profiles", json!({})))
+        .await
+        .unwrap();
+    let s = listed.structured_content.as_ref().unwrap();
+    assert_eq!(s["count"], json!(1));
+    assert_eq!(s["profiles"][0]["name"], json!("auto-fake-usb-serial"));
+    assert_eq!(s["profiles"][0]["metadata"]["generated"], json!(true));
+    assert_eq!(s["profiles"][0]["metadata"]["revision"], json!(1));
+    assert_eq!(s["profiles"][0]["metadata"]["use_count"], json!(1));
+    assert_eq!(s["profiles"][0]["selector"]["serial_number"], json!("SN-1"));
+    // Generated selector must NOT carry path/description/manufacturer.
+    assert!(s["profiles"][0]["selector"]["port_pattern"].is_null());
+    assert!(s["profiles"][0]["selector"]["manufacturer"].is_null());
+
+    // get_status agrees.
+    let status = client
+        .peer()
+        .call_tool(tool_request(
+            "get_status",
+            json!({ "connection_id": connection_id }),
+        ))
+        .await
+        .unwrap();
+    let st = status.structured_content.as_ref().unwrap();
+    assert_eq!(st["profile"]["profile_name"], json!("auto-fake-usb-serial"));
+    assert_eq!(st["profile"]["source"], json!("generated"));
+
+    // list_connections agrees.
+    let conns = client
+        .peer()
+        .call_tool(tool_request("list_connections", json!({})))
+        .await
+        .unwrap();
+    let cs = conns.structured_content.as_ref().unwrap();
+    assert_eq!(
+        cs["connections"][0]["profile"]["profile_name"],
+        json!("auto-fake-usb-serial")
+    );
+
+    harness._client.cancel().await.ok();
+}
+
+/// 2. Close/reopen automatically selects the same profile and increments
+///    usage without bumping revision; real traffic still flows.
+#[tokio::test]
+async fn auto_session_close_reopen_selects_same_profile_and_increments_usage() {
+    let mut pty = PtyPair::open().expect("openpty");
+    let slave = pty.slave_path.to_string_lossy().into_owned();
+    let provider = StaticPortProvider::new(vec![StaticPortProvider::usb_port(
+        &slave,
+        VID,
+        PID,
+        "SN-1",
+        Some("Fake USB Serial"),
+        None,
+    )]);
+    let harness = session_harness(provider).await;
+    let client = &harness._client;
+
+    let first = open_port(client, &slave, json!({})).await;
+    let first_id = first["connection_id"].as_str().unwrap().to_string();
+    let profile_name = first["profile"]["profile_name"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(first["profile"]["source"], json!("generated"));
+
+    close_port(client, &first_id).await;
+
+    let second = open_port(client, &slave, json!({})).await;
+    let second_id = second["connection_id"].as_str().unwrap().to_string();
+    assert_eq!(second["profile"]["profile_name"], json!(profile_name));
+    assert_eq!(second["profile"]["source"], json!("automatic"));
+    assert_eq!(second["profile"]["generated"], json!(true));
+    assert_eq!(
+        second["profile"]["revision"],
+        json!(1),
+        "usage must not bump revision"
+    );
+
+    // Real traffic in the automatically selected session.
+    pty.write_device(b"REUSED").await.unwrap();
+    let result = client
+        .peer()
+        .call_tool(tool_request(
+            "read",
+            json!({ "connection_id": second_id, "timeout_ms": 1000 }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        result.structured_content.as_ref().unwrap()["data"],
+        json!("REUSED")
+    );
+
+    let listed = client
+        .peer()
+        .call_tool(tool_request("list_profiles", json!({})))
+        .await
+        .unwrap();
+    let s = listed.structured_content.as_ref().unwrap();
+    assert_eq!(s["count"], json!(1));
+    assert_eq!(s["profiles"][0]["metadata"]["use_count"], json!(2));
+    assert_eq!(s["profiles"][0]["metadata"]["revision"], json!(1));
+    assert!(
+        s["profiles"][0]["metadata"]["last_used_at_ms"]
+            .as_u64()
+            .unwrap()
+            > 0
+    );
+
+    harness._client.cancel().await.ok();
+}
+
+/// 3. A different serial number with the same VID/PID gets a different
+///    generated profile.
+#[tokio::test]
+async fn auto_session_different_serial_same_vid_pid_gets_different_profile() {
+    let pty1 = PtyPair::open().expect("openpty");
+    let pty2 = PtyPair::open().expect("openpty");
+    let slave1 = pty1.slave_path.to_string_lossy().into_owned();
+    let slave2 = pty2.slave_path.to_string_lossy().into_owned();
+    let provider = StaticPortProvider::new(vec![
+        StaticPortProvider::usb_port(&slave1, VID, PID, "SN-1", Some("Fake USB Serial"), None),
+        StaticPortProvider::usb_port(&slave2, VID, PID, "SN-2", Some("Fake USB Serial"), None),
+    ]);
+    let harness = session_harness(provider).await;
+    let client = &harness._client;
+
+    let a = open_port(client, &slave1, json!({})).await;
+    let b = open_port(client, &slave2, json!({})).await;
+    let name_a = a["profile"]["profile_name"].as_str().unwrap().to_string();
+    let name_b = b["profile"]["profile_name"].as_str().unwrap().to_string();
+    assert_ne!(
+        name_a, name_b,
+        "different serials must get different profiles"
+    );
+    assert_eq!(a["profile"]["source"], json!("generated"));
+    assert_eq!(b["profile"]["source"], json!("generated"));
+
+    let listed = client
+        .peer()
+        .call_tool(tool_request("list_profiles", json!({})))
+        .await
+        .unwrap();
+    let s = listed.structured_content.as_ref().unwrap();
+    assert_eq!(s["count"], json!(2));
+
+    harness._client.cancel().await.ok();
+}
+
+/// 4. Two live ports with a duplicate high fingerprint produce a transient
+///    ambiguity session — settings are never applied to an
+///    indistinguishable device.
+#[tokio::test]
+async fn auto_session_duplicate_fingerprint_two_ports_is_transient() {
+    let pty1 = PtyPair::open().expect("openpty");
+    let pty2 = PtyPair::open().expect("openpty");
+    let slave1 = pty1.slave_path.to_string_lossy().into_owned();
+    let slave2 = pty2.slave_path.to_string_lossy().into_owned();
+    let provider = StaticPortProvider::new(vec![
+        StaticPortProvider::usb_port(&slave1, VID, PID, "SAME-SN", Some("Fake USB Serial"), None),
+        StaticPortProvider::usb_port(&slave2, VID, PID, "SAME-SN", Some("Fake USB Serial"), None),
+    ]);
+    let harness = session_harness(provider).await;
+    let client = &harness._client;
+
+    let opened = open_port(client, &slave1, json!({})).await;
+    let profile = &opened["profile"];
+    assert_eq!(profile["source"], json!("transient"));
+    assert_eq!(profile["profile_name"], json!(""));
+    assert_eq!(profile["persistent"], json!(false));
+    assert!(profile["candidates"].as_array().unwrap().is_empty());
+
+    let listed = client
+        .peer()
+        .call_tool(tool_request("list_profiles", json!({})))
+        .await
+        .unwrap();
+    assert_eq!(
+        listed.structured_content.as_ref().unwrap()["count"],
+        json!(0)
+    );
+
+    harness._client.cancel().await.ok();
+}
+
+/// 5. Weak PTY identity opens with a transient session and leaves the
+///    profile store untouched (no durable profile, no file).
+#[tokio::test]
+async fn auto_session_weak_pty_identity_is_transient_and_store_stays_empty() {
+    let pty = PtyPair::open().expect("openpty");
+    let slave = pty.slave_path.to_string_lossy().into_owned();
+    let provider = StaticPortProvider::new(vec![StaticPortProvider::weak_port(&slave)]);
+    let harness = session_harness(provider).await;
+    let client = &harness._client;
+
+    let opened = open_port(client, &slave, json!({})).await;
+    assert_eq!(opened["profile"]["source"], json!("transient"));
+    assert_eq!(opened["profile"]["confidence"], json!("none"));
+    assert_eq!(opened["profile"]["persistent"], json!(false));
+
+    let listed = client
+        .peer()
+        .call_tool(tool_request("list_profiles", json!({})))
+        .await
+        .unwrap();
+    assert_eq!(
+        listed.structured_content.as_ref().unwrap()["count"],
+        json!(0)
+    );
+
+    // No durable profile was written — the file must not exist.
+    assert!(
+        !harness.profiles_path.exists(),
+        "weak identity must not create a profiles file"
+    );
+
+    harness._client.cancel().await.ok();
+}
+
+/// 6. `profile_mode="none"` disables automatic selection/creation and
+///    returns an observable disabled binding.
+#[tokio::test]
+async fn auto_session_profile_mode_none_disables_selection_and_creation() {
+    let pty = PtyPair::open().expect("openpty");
+    let slave = pty.slave_path.to_string_lossy().into_owned();
+    let provider = StaticPortProvider::new(vec![StaticPortProvider::usb_port(
+        &slave,
+        VID,
+        PID,
+        "SN-1",
+        Some("Fake USB Serial"),
+        None,
+    )]);
+    let harness = session_harness(provider).await;
+    let client = &harness._client;
+
+    let opened = open_port(client, &slave, json!({ "profile_mode": "none" })).await;
+    let profile = &opened["profile"];
+    assert_eq!(profile["source"], json!("disabled"));
+    assert_eq!(profile["profile_name"], json!(""));
+    assert_eq!(profile["persistent"], json!(false));
+    assert_eq!(profile["generated"], json!(false));
+
+    let listed = client
+        .peer()
+        .call_tool(tool_request("list_profiles", json!({})))
+        .await
+        .unwrap();
+    assert_eq!(
+        listed.structured_content.as_ref().unwrap()["count"],
+        json!(0)
+    );
+    assert!(
+        !harness.profiles_path.exists(),
+        "profile_mode none must not write a profiles file"
+    );
+
+    harness._client.cancel().await.ok();
+}
+
+/// 7. An explicit open field overrides the selected profile's default for
+///    the live connection and marks the binding dirty.
+#[tokio::test]
+async fn auto_session_explicit_open_field_overrides_profile_and_marks_dirty() {
+    let pty = PtyPair::open().expect("openpty");
+    let slave = pty.slave_path.to_string_lossy().into_owned();
+    let provider = StaticPortProvider::new(vec![StaticPortProvider::usb_port(
+        &slave,
+        VID,
+        PID,
+        "SN-1",
+        Some("Fake USB Serial"),
+        None,
+    )]);
+    let harness = session_harness(provider).await;
+    let client = &harness._client;
+
+    // First open generates the profile at the built-in 115200.
+    let first = open_port(client, &slave, json!({})).await;
+    let first_id = first["connection_id"].as_str().unwrap().to_string();
+    let profile_name = first["profile"]["profile_name"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    close_port(client, &first_id).await;
+
+    // Reopen with an explicit baud override (profile default is 115200).
+    let second = open_port(client, &slave, json!({ "baud_rate": 9600 })).await;
+    let second_id = second["connection_id"].as_str().unwrap().to_string();
+    assert_eq!(second["profile"]["profile_name"], json!(profile_name));
+    assert_eq!(second["profile"]["source"], json!("automatic"));
+    assert_eq!(
+        second["profile"]["dirty"],
+        json!(true),
+        "explicit override → dirty"
+    );
+
+    // The live connection actually runs at the overridden baud.
+    let status = client
+        .peer()
+        .call_tool(tool_request(
+            "get_status",
+            json!({ "connection_id": second_id }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        status.structured_content.as_ref().unwrap()["baud_rate"],
+        json!(9600)
+    );
+
+    harness._client.cancel().await.ok();
+}
+
+/// 8. A separate HTTP client observes the same active binding and the
+///    generated profile.
+#[tokio::test]
+async fn auto_session_second_http_client_observes_binding_and_profile() {
+    let pty = PtyPair::open().expect("openpty");
+    let slave = pty.slave_path.to_string_lossy().into_owned();
+    let provider = StaticPortProvider::new(vec![StaticPortProvider::usb_port(
+        &slave,
+        VID,
+        PID,
+        "SN-1",
+        Some("Fake USB Serial"),
+        None,
+    )]);
+    let dir = tempfile::tempdir().expect("tempdir");
+    let profiles_path = dir.path().join("profiles.toml");
+    let server = TestServer::start_with_provider_and_profiles_path(
+        Arc::new(serial_mcp::serial::ConnectionManager::new()),
+        provider,
+        profiles_path,
+    )
+    .await;
+    let (client_a, _rx_a) = connect_client(&server).await.unwrap();
+    let (client_b, _rx_b) = connect_client(&server).await.unwrap();
+
+    let opened = open_port(&client_a, &slave, json!({})).await;
+    let connection_id = opened["connection_id"].as_str().unwrap().to_string();
+    let profile_name = opened["profile"]["profile_name"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Client B sees the binding...
+    let status = client_b
+        .peer()
+        .call_tool(tool_request(
+            "get_status",
+            json!({ "connection_id": connection_id }),
+        ))
+        .await
+        .unwrap();
+    let st = status.structured_content.as_ref().unwrap();
+    assert_eq!(st["profile"]["profile_name"], json!(profile_name));
+    assert_eq!(st["profile"]["source"], json!("generated"));
+
+    // ...and the generated profile.
+    let listed = client_b
+        .peer()
+        .call_tool(tool_request("list_profiles", json!({})))
+        .await
+        .unwrap();
+    let s = listed.structured_content.as_ref().unwrap();
+    assert_eq!(s["profiles"][0]["name"], json!(profile_name));
+    assert_eq!(s["profiles"][0]["metadata"]["generated"], json!(true));
+
+    // list_connections from client B exposes the same active binding.
+    let conns = client_b
+        .peer()
+        .call_tool(tool_request("list_connections", json!({})))
+        .await
+        .unwrap();
+    let cs = conns.structured_content.as_ref().unwrap();
+    assert_eq!(
+        cs["connections"][0]["profile"]["profile_name"],
+        json!(profile_name)
+    );
+    assert_eq!(
+        cs["connections"][0]["profile"]["source"],
+        json!("generated")
+    );
+
+    client_a.cancel().await.ok();
+    client_b.cancel().await.ok();
+}
+
+/// 9. `open_profile` with two matching ports returns a tool error; exactly
+///    one match works and becomes the last-used winner for a later bare
+///    open.
+#[tokio::test]
+async fn open_profile_two_matching_ports_errors_and_exact_one_becomes_last_used_winner() {
+    let pty1 = PtyPair::open().expect("openpty");
+    let pty2 = PtyPair::open().expect("openpty");
+    let slave1 = pty1.slave_path.to_string_lossy().into_owned();
+    let slave2 = pty2.slave_path.to_string_lossy().into_owned();
+    let provider = StaticPortProvider::new(vec![
+        StaticPortProvider::usb_port(&slave1, VID, PID, "SN-1", Some("Fake USB Serial"), None),
+        StaticPortProvider::usb_port(&slave2, VID, PID, "SN-2", Some("Fake USB Serial"), None),
+    ]);
+    let harness = session_harness(provider).await;
+    let client = &harness._client;
+
+    // Empty-selector profile matches BOTH live ports → tool error.
+    let cfg = client
+        .peer()
+        .call_tool(tool_request(
+            "configure",
+            json!({ "profile": "multi", "defaults": {} }),
+        ))
+        .await
+        .unwrap();
+    assert_ne!(cfg.is_error, Some(true), "{cfg:?}");
+    let result = client
+        .peer()
+        .call_tool(tool_request("open_profile", json!({ "profile": "multi" })))
+        .await
+        .unwrap();
+    assert_eq!(
+        result.is_error,
+        Some(true),
+        "ambiguous open_profile must error: {result:?}"
+    );
+    let err = tool_error_text(&result);
+    assert!(
+        err.contains("live ports") && err.contains("refusing"),
+        "error must explain the ambiguity: {err}"
+    );
+
+    // Bare open of pty1 creates the generated profile for SN-1.
+    let first = open_port(client, &slave1, json!({})).await;
+    let first_id = first["connection_id"].as_str().unwrap().to_string();
+    let generated_name = first["profile"]["profile_name"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Name the same device explicitly via save_profile (while the first
+    // connection is still open — save_profile snapshots it).
+    let saved = client
+        .peer()
+        .call_tool(tool_request(
+            "save_profile",
+            json!({ "connection_id": first_id, "profile_name": "named-p1" }),
+        ))
+        .await
+        .unwrap();
+    assert_ne!(saved.is_error, Some(true), "{saved:?}");
+
+    // Close the first connection, then open_profile the same port with
+    // exactly one match works and marks the profile used.
+    close_port(client, &first_id).await;
+
+    let explicit = client
+        .peer()
+        .call_tool(tool_request(
+            "open_profile",
+            json!({ "profile": "named-p1" }),
+        ))
+        .await
+        .unwrap();
+    assert_ne!(explicit.is_error, Some(true), "{explicit:?}");
+    let explicit_result = explicit.structured_content.as_ref().unwrap();
+    assert_eq!(explicit_result["profile"]["source"], json!("explicit"));
+    assert_eq!(
+        explicit_result["profile"]["profile_name"],
+        json!("named-p1")
+    );
+    assert_eq!(explicit_result["profile"]["revision"], json!(1));
+    let explicit_id = explicit_result["connection_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    close_port(client, &explicit_id).await;
+
+    // A later bare open must select the explicitly used profile, not the
+    // older generated one.
+    let reopened = open_port(client, &slave1, json!({})).await;
+    assert_eq!(reopened["profile"]["source"], json!("automatic"));
+    assert_eq!(
+        reopened["profile"]["profile_name"],
+        json!("named-p1"),
+        "most-recently-used profile must win (generated was {generated_name})"
+    );
+
+    harness._client.cancel().await.ok();
+}
+
+/// 10. Equal top-ranked profile timestamps produce observable ambiguity.
+#[tokio::test]
+async fn open_auto_equal_top_ranked_timestamps_produce_ambiguity() {
+    let pty = PtyPair::open().expect("openpty");
+    let slave = pty.slave_path.to_string_lossy().into_owned();
+    let provider = StaticPortProvider::new(vec![StaticPortProvider::usb_port(
+        &slave,
+        VID,
+        PID,
+        "SN-1",
+        Some("Fake USB Serial"),
+        None,
+    )]);
+    let dir = tempfile::tempdir().expect("tempdir");
+    let profiles_path = dir.path().join("profiles.toml");
+    std::fs::write(
+        &profiles_path,
+        r#"
+schema_version = 2
+
+[[profile]]
+name = "ambig-a"
+[profile.selector]
+vid = 0x1234
+pid = 0x5678
+serial_number = "SN-1"
+transport = "usb"
+[profile.metadata]
+generated = false
+revision = 1
+created_at_ms = 10
+updated_at_ms = 10
+last_used_at_ms = 12345
+use_count = 1
+
+[[profile]]
+name = "ambig-b"
+[profile.selector]
+vid = 0x1234
+pid = 0x5678
+serial_number = "SN-1"
+transport = "usb"
+[profile.metadata]
+generated = false
+revision = 1
+created_at_ms = 10
+updated_at_ms = 10
+last_used_at_ms = 12345
+use_count = 1
+"#,
+    )
+    .unwrap();
+
+    let server = TestServer::start_with_provider_and_profiles_path(
+        Arc::new(serial_mcp::serial::ConnectionManager::new()),
+        provider,
+        profiles_path.clone(),
+    )
+    .await;
+    let (client, _rx) = connect_client(&server).await.unwrap();
+
+    let opened = open_port(&client, &slave, json!({})).await;
+    let profile = &opened["profile"];
+    assert_eq!(profile["source"], json!("transient"));
+    assert_eq!(profile["profile_name"], json!(""));
+    assert_eq!(profile["persistent"], json!(false));
+    let candidates: Vec<&str> = profile["candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    assert_eq!(candidates, vec!["ambig-a", "ambig-b"]);
+
+    // Neither profile was applied or bumped.
+    let listed = client
+        .peer()
+        .call_tool(tool_request("list_profiles", json!({})))
+        .await
+        .unwrap();
+    let s = listed.structured_content.as_ref().unwrap();
+    assert_eq!(s["count"], json!(2));
+    assert_eq!(s["profiles"][0]["metadata"]["use_count"], json!(1));
+    assert_eq!(s["profiles"][1]["metadata"]["use_count"], json!(1));
+
+    client.cancel().await.ok();
+}
+
+/// 11. Per-call read/write/transact options do not alter usage, revision,
+///     or defaults of the bound profile.
+#[tokio::test]
+async fn per_call_io_does_not_alter_usage_revision_or_defaults() {
+    let mut pty = PtyPair::open().expect("openpty");
+    let slave = pty.slave_path.to_string_lossy().into_owned();
+    let provider = StaticPortProvider::new(vec![StaticPortProvider::usb_port(
+        &slave,
+        VID,
+        PID,
+        "SN-1",
+        Some("Fake USB Serial"),
+        None,
+    )]);
+    let harness = session_harness(provider).await;
+    let client = &harness._client;
+
+    let opened = open_port(client, &slave, json!({})).await;
+    let connection_id = opened["connection_id"].as_str().unwrap().to_string();
+    let profile_name = opened["profile"]["profile_name"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let before = session_profile_snapshot(client, &profile_name).await;
+
+    // Write (device drains), read, transact with per-call options.
+    client
+        .peer()
+        .call_tool(tool_request(
+            "write",
+            json!({ "connection_id": connection_id, "data": "PING\r\n" }),
+        ))
+        .await
+        .unwrap();
+    let mut drain = [0u8; 8];
+    let _ = pty.read_device(&mut drain).await;
+
+    pty.write_device(b"READY\r\n").await.unwrap();
+    client
+        .peer()
+        .call_tool(tool_request(
+            "read",
+            json!({
+                "connection_id": connection_id,
+                "timeout_ms": 500,
+                "match": { "pattern": "READY" },
+            }),
+        ))
+        .await
+        .unwrap();
+
+    let tx = client
+        .peer()
+        .call_tool(tool_request(
+            "transact",
+            json!({
+                "connection_id": connection_id,
+                "data": "STATUS\r\n",
+                "timeout_ms": 300,
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_ne!(tx.is_error, Some(true), "{tx:?}");
+    let _ = pty.read_device(&mut drain).await;
+
+    let after = session_profile_snapshot(client, &profile_name).await;
+    assert_eq!(after.0, before.0, "per-call I/O must not bump use_count");
+    assert_eq!(after.1, before.1, "per-call I/O must not bump revision");
+    assert_eq!(after.2, before.2, "per-call I/O must not alter defaults");
+
+    harness._client.cancel().await.ok();
+}
