@@ -143,7 +143,11 @@ generated, revision, dirty, candidates, last persistence error):
 - `open_profile` remains explicit selection; it now requires exactly one
   matching live port (multiple matches are a tool error) and marks the
   profile most recently used. `list_profiles` exposes each profile's
-  metadata and bounded revision history.
+  metadata and bounded revision history. Explicit bindings report the
+  matched port's own identity confidence.
+- `save_profile` on a connection bound to an auto-generated profile
+  deliberately promotes it to a user-owned profile (`generated=false`)
+  under the new name.
 
 ## Transports
 

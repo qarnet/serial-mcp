@@ -2430,3 +2430,168 @@ async fn per_call_io_does_not_alter_usage_revision_or_defaults() {
 
     harness._client.cancel().await.ok();
 }
+
+/// 12. Review gate: explicit `open_profile` on a weak-identity port reports
+///     the matched port's OWN confidence (none/low), not a hardcoded high,
+///     while keeping source=explicit.
+#[tokio::test]
+async fn open_profile_explicit_binding_reports_matched_port_confidence() {
+    // Phase 1: path-only PTY (unknown transport, no identity) → None.
+    let pty_none = PtyPair::open().expect("openpty");
+    let slave_none = pty_none.slave_path.to_string_lossy().into_owned();
+    let provider_none = StaticPortProvider::new(vec![StaticPortProvider::weak_port(&slave_none)]);
+    let harness_none = session_harness(provider_none).await;
+    let client = &harness_none._client;
+
+    // Empty-selector profile matches the single live port exactly once.
+    let cfg = client
+        .peer()
+        .call_tool(tool_request(
+            "configure",
+            json!({ "profile": "weak-pro", "defaults": {} }),
+        ))
+        .await
+        .unwrap();
+    assert_ne!(cfg.is_error, Some(true), "{cfg:?}");
+
+    let opened = client
+        .peer()
+        .call_tool(tool_request(
+            "open_profile",
+            json!({ "profile": "weak-pro" }),
+        ))
+        .await
+        .unwrap();
+    assert_ne!(opened.is_error, Some(true), "{opened:?}");
+    let profile = &opened.structured_content.as_ref().unwrap()["profile"];
+    assert_eq!(profile["source"], json!("explicit"));
+    assert_eq!(
+        profile["confidence"],
+        json!("none"),
+        "path-only identity must report none, not high: {profile:?}"
+    );
+    assert_eq!(profile["profile_name"], json!("weak-pro"));
+    harness_none._client.cancel().await.ok();
+
+    // Phase 2: PCI-synthetic PTY (hardware id only) → Low.
+    let pty_low = PtyPair::open().expect("openpty");
+    let slave_low = pty_low.slave_path.to_string_lossy().into_owned();
+    let mut low_port = StaticPortProvider::weak_port(&slave_low);
+    low_port.transport = serial_mcp::serial::PortTransport::Pci;
+    low_port.hardware_id = Some("PCI".into());
+    let provider_low = StaticPortProvider::new(vec![low_port]);
+    let harness_low = session_harness(provider_low).await;
+    let client = &harness_low._client;
+
+    let cfg = client
+        .peer()
+        .call_tool(tool_request(
+            "configure",
+            json!({ "profile": "pci-pro", "defaults": {} }),
+        ))
+        .await
+        .unwrap();
+    assert_ne!(cfg.is_error, Some(true), "{cfg:?}");
+
+    let opened = client
+        .peer()
+        .call_tool(tool_request(
+            "open_profile",
+            json!({ "profile": "pci-pro" }),
+        ))
+        .await
+        .unwrap();
+    assert_ne!(opened.is_error, Some(true), "{opened:?}");
+    let profile = &opened.structured_content.as_ref().unwrap()["profile"];
+    assert_eq!(profile["source"], json!("explicit"));
+    assert_eq!(
+        profile["confidence"],
+        json!("low"),
+        "hardware-id-only identity must report low: {profile:?}"
+    );
+    assert_eq!(profile["profile_name"], json!("pci-pro"));
+
+    // get_status agrees with the binding.
+    let connection_id = opened.structured_content.as_ref().unwrap()["connection_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let status = client
+        .peer()
+        .call_tool(tool_request(
+            "get_status",
+            json!({ "connection_id": connection_id }),
+        ))
+        .await
+        .unwrap();
+    let st = status.structured_content.as_ref().unwrap();
+    assert_eq!(st["profile"]["source"], json!("explicit"));
+    assert_eq!(st["profile"]["confidence"], json!("low"));
+
+    harness_low._client.cancel().await.ok();
+}
+
+/// 13. Review gate (M6): explicit `save_profile` of a generated-bound
+///     connection creates a USER-owned profile (`generated=false`) — a
+///     deliberate promotion, not a blind copy of the generated flag.
+#[tokio::test]
+async fn save_profile_on_generated_bound_connection_promotes_to_user_owned() {
+    let pty = PtyPair::open().expect("openpty");
+    let slave = pty.slave_path.to_string_lossy().into_owned();
+    let provider = StaticPortProvider::new(vec![StaticPortProvider::usb_port(
+        &slave,
+        VID,
+        PID,
+        "SN-1",
+        Some("Fake USB Serial"),
+        None,
+    )]);
+    let harness = session_harness(provider).await;
+    let client = &harness._client;
+
+    let opened = open_port(client, &slave, json!({})).await;
+    let connection_id = opened["connection_id"].as_str().unwrap().to_string();
+    assert_eq!(opened["profile"]["source"], json!("generated"));
+    assert_eq!(opened["profile"]["generated"], json!(true));
+
+    // Explicit user snapshot of the same device under a new name.
+    let saved = client
+        .peer()
+        .call_tool(tool_request(
+            "save_profile",
+            json!({ "connection_id": connection_id, "profile_name": "promoted" }),
+        ))
+        .await
+        .unwrap();
+    assert_ne!(saved.is_error, Some(true), "{saved:?}");
+
+    let listed = client
+        .peer()
+        .call_tool(tool_request("list_profiles", json!({})))
+        .await
+        .unwrap();
+    let s = listed.structured_content.as_ref().unwrap();
+    assert_eq!(s["count"], json!(2), "auto-generated + promoted profile");
+
+    let promoted = s["profiles"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["name"] == json!("promoted"))
+        .expect("promoted profile exists");
+    assert_eq!(
+        promoted["metadata"]["generated"],
+        json!(false),
+        "save_profile must create a user-owned profile, not copy generated=true"
+    );
+
+    let auto = s["profiles"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["name"] == json!("auto-fake-usb-serial"))
+        .expect("auto-generated profile still exists");
+    assert_eq!(auto["metadata"]["generated"], json!(true));
+
+    harness._client.cancel().await.ok();
+}

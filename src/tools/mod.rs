@@ -11,6 +11,7 @@ pub mod utility_ops;
 mod tests {
     use schemars::schema_for;
     use serde_json;
+    use serde_json::json;
 
     use crate::server::SerialHandler;
     use crate::tools::types::OpenArgs;
@@ -170,6 +171,77 @@ mod tests {
             vec![serde_json::json!("profile")],
             "only `profile` must be required on open_profile: {required:?}"
         );
+    }
+
+    /// Phase 3A review gate: the optional override fields must genuinely
+    /// accept null (and omission) against the GENERATED schema — not merely
+    /// be absent from the `required` list. Validates public schema behavior
+    /// via the jsonschema validator, like the tool schema guards do.
+    #[test]
+    fn open_and_open_profile_schemas_accept_null_overrides() {
+        use jsonschema::validator_for;
+
+        let open_schema = serde_json::to_value(schema_for!(OpenArgs)).unwrap();
+        let open_validator = validator_for(&open_schema).unwrap();
+        let open_instances = [
+            json!({ "port": "/dev/ttyACM0" }),
+            json!({
+                "port": "/dev/ttyACM0",
+                "baud_rate": null,
+                "data_bits": null,
+                "stop_bits": null,
+                "parity": null,
+                "flow_control": null,
+                "log_capacity": null,
+                "log_enabled": null,
+                "reconnect_policy": null,
+                "rx_buffer_size": null,
+                "max_buffered_bytes": null,
+                "poll_interval_ms": null,
+                "profile_mode": null,
+            }),
+        ];
+        for instance in &open_instances {
+            let errors: Vec<String> = open_validator
+                .iter_errors(instance)
+                .map(|e| e.to_string())
+                .collect();
+            assert!(
+                errors.is_empty(),
+                "open schema must accept {instance}: {errors:?}"
+            );
+        }
+
+        let profile_schema =
+            serde_json::to_value(schema_for!(crate::tools::types::OpenProfileArgs)).unwrap();
+        let profile_validator = validator_for(&profile_schema).unwrap();
+        let profile_instances = [
+            json!({ "profile": "dev" }),
+            json!({
+                "profile": "dev",
+                "name": null,
+                "log_capacity": null,
+                "log_enabled": null,
+                "rx_buffer_size": null,
+            }),
+            json!({
+                "profile": "dev",
+                "name": "renamed",
+                "log_capacity": 512,
+                "log_enabled": false,
+                "rx_buffer_size": 4096,
+            }),
+        ];
+        for instance in &profile_instances {
+            let errors: Vec<String> = profile_validator
+                .iter_errors(instance)
+                .map(|e| e.to_string())
+                .collect();
+            assert!(
+                errors.is_empty(),
+                "open_profile schema must accept {instance}: {errors:?}"
+            );
+        }
     }
 
     #[test]

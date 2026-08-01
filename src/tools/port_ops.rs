@@ -120,21 +120,25 @@ async fn plan_session(
 }
 
 /// Shared post-open plumbing: attach the session binding computed from the
-/// resolved settings and the session plan.
+/// resolved settings and the session plan to the already-open connection.
+///
+/// Post-open PROFILE-METADATA failures (mark used / create generated) keep
+/// the connection open and surface as `last_persistence_error` — they are
+/// partial success, not open failure. The only error return is the
+/// unreachable case where a `Generate` plan has no high identity.
 async fn attach_session_binding(
-    connections: &Arc<ConnectionManager>,
     store: &Arc<crate::profile_store::ProfileStore>,
-    connection_id: &str,
+    conn: &Arc<crate::serial::SerialConnection>,
     plan: SessionPlan,
     resolved: &ResolvedOpenSettings,
     port_info: Option<&PortInfo>,
-) {
-    let conn = match connections.get(connection_id).await {
-        Ok(c) => c,
-        Err(_) => return,
-    };
+    dirty: Option<bool>,
+) -> Result<crate::serial::ActiveProfileBinding, String> {
+    let confidence = port_info
+        .map(identity_confidence)
+        .unwrap_or(IdentityConfidence::None);
     let binding = match plan {
-        SessionPlan::Disabled { confidence } => Some(crate::serial::ActiveProfileBinding {
+        SessionPlan::Disabled { confidence } => crate::serial::ActiveProfileBinding {
             profile_name: String::new(),
             source: ProfileSelectionSource::Disabled,
             confidence,
@@ -144,11 +148,11 @@ async fn attach_session_binding(
             dirty: false,
             candidates: Vec::new(),
             last_persistence_error: None,
-        }),
+        },
         SessionPlan::Transient {
             confidence,
             candidates,
-        } => Some(crate::serial::ActiveProfileBinding {
+        } => crate::serial::ActiveProfileBinding {
             profile_name: String::new(),
             source: ProfileSelectionSource::Transient,
             confidence,
@@ -158,11 +162,11 @@ async fn attach_session_binding(
             dirty: false,
             candidates,
             last_persistence_error: None,
-        }),
+        },
         SessionPlan::Selected { profile } => {
-            let dirty = profile_only_differs(resolved, &profile);
+            let dirty = dirty.unwrap_or(false);
             match store.mark_used(&profile.name).await {
-                Ok(used) => Some(crate::serial::ActiveProfileBinding {
+                Ok(used) => crate::serial::ActiveProfileBinding {
                     profile_name: used.name.clone(),
                     source: ProfileSelectionSource::Automatic,
                     confidence: IdentityConfidence::High,
@@ -172,8 +176,8 @@ async fn attach_session_binding(
                     dirty,
                     candidates: Vec::new(),
                     last_persistence_error: None,
-                }),
-                Err(e) => Some(crate::serial::ActiveProfileBinding {
+                },
+                Err(e) => crate::serial::ActiveProfileBinding {
                     profile_name: profile.name.clone(),
                     source: ProfileSelectionSource::Automatic,
                     confidence: IdentityConfidence::High,
@@ -183,47 +187,47 @@ async fn attach_session_binding(
                     dirty,
                     candidates: Vec::new(),
                     last_persistence_error: Some(e),
-                }),
+                },
             }
         }
         SessionPlan::Explicit { profile } => {
-            let dirty = profile_only_differs(resolved, &profile);
+            let dirty = dirty.unwrap_or(false);
+            // Explicit selection reports the matched port's own identity
+            // confidence — weak selectors are an explicit caller choice.
             match store.mark_used(&profile.name).await {
-                Ok(used) => Some(crate::serial::ActiveProfileBinding {
+                Ok(used) => crate::serial::ActiveProfileBinding {
                     profile_name: used.name.clone(),
                     source: ProfileSelectionSource::Explicit,
-                    confidence: IdentityConfidence::High,
+                    confidence,
                     persistent: true,
                     generated: used.metadata.generated,
                     revision: Some(used.metadata.revision),
                     dirty,
                     candidates: Vec::new(),
                     last_persistence_error: None,
-                }),
-                Err(e) => Some(crate::serial::ActiveProfileBinding {
+                },
+                Err(e) => crate::serial::ActiveProfileBinding {
                     profile_name: profile.name.clone(),
                     source: ProfileSelectionSource::Explicit,
-                    confidence: IdentityConfidence::High,
+                    confidence,
                     persistent: true,
                     generated: profile.metadata.generated,
                     revision: Some(profile.metadata.revision),
                     dirty,
                     candidates: Vec::new(),
                     last_persistence_error: Some(e),
-                }),
+                },
             }
         }
         SessionPlan::Generate => {
             // Generated profile defaults equal the effective live settings.
             let defaults = resolved.as_profile_defaults();
-            let selector = port_info.and_then(canonical_high_selector);
+            let selector = port_info.and_then(canonical_high_selector).ok_or_else(|| {
+                "Cannot create generated profile: no high-confidence identity".to_string()
+            })?;
             let label = generated_label(port_info);
-            let Some(selector) = selector else {
-                // Cannot happen: Generate requires a high identity.
-                return;
-            };
             match store.create_generated(label, selector, defaults).await {
-                Ok(created) => Some(crate::serial::ActiveProfileBinding {
+                Ok(created) => crate::serial::ActiveProfileBinding {
                     profile_name: created.name.clone(),
                     source: ProfileSelectionSource::Generated,
                     confidence: IdentityConfidence::High,
@@ -233,11 +237,11 @@ async fn attach_session_binding(
                     dirty: false,
                     candidates: Vec::new(),
                     last_persistence_error: None,
-                }),
+                },
                 // Keep the connection open and bind a transient session
                 // carrying the error: do not report open failure or
                 // pretend the profile persisted.
-                Err(e) => Some(crate::serial::ActiveProfileBinding {
+                Err(e) => crate::serial::ActiveProfileBinding {
                     profile_name: String::new(),
                     source: ProfileSelectionSource::Transient,
                     confidence: IdentityConfidence::High,
@@ -247,20 +251,24 @@ async fn attach_session_binding(
                     dirty: false,
                     candidates: Vec::new(),
                     last_persistence_error: Some(e),
-                }),
+                },
             }
         }
     };
-    conn.set_active_profile_binding(binding);
+    conn.set_active_profile_binding(Some(binding.clone()));
+    Ok(binding)
 }
 
-/// `true` when the resolved effective settings differ from what the
-/// selected profile alone would produce (explicit overrides → dirty).
-fn profile_only_differs(resolved: &ResolvedOpenSettings, profile: &Profile) -> bool {
-    match ResolvedOpenSettings::from_profile(resolved.port.clone(), profile) {
-        Ok(profile_only) => resolved != &profile_only,
-        Err(_) => false,
-    }
+/// Whether the resolved effective settings differ from what the selected
+/// profile alone would produce (explicit overrides → dirty). Parse failures
+/// in the profile's defaults (invalid data bits etc.) propagate as errors so
+/// they surface BEFORE hardware open instead of silently mapping to clean.
+fn profile_only_differs(
+    resolved: &ResolvedOpenSettings,
+    profile: &Profile,
+) -> Result<bool, String> {
+    let profile_only = ResolvedOpenSettings::from_profile(resolved.port.clone(), profile)?;
+    Ok(resolved != &profile_only)
 }
 
 /// Generated-profile label: product, else manufacturer, else
@@ -290,10 +298,13 @@ struct OpenContext<'a> {
     store: &'a Arc<crate::profile_store::ProfileStore>,
 }
 
-/// Shared hardware-open step: allowlist check, resolve settings, open the
-/// port, set reconnect policy, start the RX session, then attach the
-/// profile-session binding (create/mark profile only after hardware open
-/// succeeds).
+/// Shared hardware-open step: allowlist check, resolve settings, compute
+/// the selected-profile dirty flag (invalid profile defaults are a tool
+/// error BEFORE opening), open the port, set reconnect policy, start the RX
+/// session, then attach the profile-session binding (create/mark profile
+/// only after hardware open succeeds). Every successful open carries a
+/// binding; a missing connection or binding is an operational error, never
+/// a silently `None` result.
 async fn open_connection(
     ctx: OpenContext<'_>,
     port: String,
@@ -310,6 +321,16 @@ async fn open_connection(
     }
 
     let resolved = ResolvedOpenSettings::resolve(port.clone(), overlay, profile_defaults)?;
+
+    // Dirty comparison happens BEFORE hardware open so invalid profile
+    // defaults fail the call instead of producing a wrong binding.
+    let dirty = match &plan {
+        SessionPlan::Selected { profile } | SessionPlan::Explicit { profile } => {
+            Some(profile_only_differs(&resolved, profile)?)
+        }
+        _ => None,
+    };
+
     let config = resolved.clone().into_connection_config(port_info.clone());
 
     let connection_id = ctx
@@ -318,55 +339,53 @@ async fn open_connection(
         .await
         .map_err(|e| log_tool_err("open", &format!("Failed to open port {port}"), e))?;
 
+    // Obtain the connection exactly once; absence after a successful open
+    // is an operational error, not a silent binding loss.
+    let connection = ctx.connections.get(&connection_id).await.map_err(|e| {
+        log_tool_err(
+            "open",
+            &format!("Failed to access opened connection {connection_id}"),
+            e,
+        )
+    })?;
+
     // Set reconnect policy on the newly opened connection.
-    if let Ok(conn) = ctx.connections.get(&connection_id).await {
-        *conn.reconnect_policy.lock().expect("poisoned") = resolved.reconnect_policy.clone();
-    }
+    *connection.reconnect_policy.lock().expect("poisoned") = resolved.reconnect_policy.clone();
 
     // Create the RX session and start the always-on pump with a budgeted ring.
     // The session is idempotent — if another code path created one first, this
     // returns the existing session.
-    if let Ok(conn) = ctx.connections.get(&connection_id).await {
-        let session = ctx
-            .rx_sessions
-            .get_or_create(conn, resolved.rx_buffer_size)
-            .await
-            .map_err(|e| log_tool_err("open", "Failed to create RX session", e))?;
-        debug!(
-            "rx_session: pump started for {} (ring={} bytes)",
-            session.connection_id(),
-            session.ring_capacity()
-        );
-    }
+    let session = ctx
+        .rx_sessions
+        .get_or_create(Arc::clone(&connection), resolved.rx_buffer_size)
+        .await
+        .map_err(|e| log_tool_err("open", "Failed to create RX session", e))?;
+    debug!(
+        "rx_session: pump started for {} (ring={} bytes)",
+        session.connection_id(),
+        session.ring_capacity()
+    );
 
     // Post-open profile work: never close a working port merely because
     // profile metadata failed — failures surface as `last_persistence_error`.
-    attach_session_binding(
-        ctx.connections,
+    let binding = attach_session_binding(
         ctx.store,
-        &connection_id,
+        &connection,
         plan,
         &resolved,
         port_info.as_ref(),
+        dirty,
     )
-    .await;
+    .await?;
 
     info!("Opened connection {} -> {}", connection_id, port);
-
-    let binding = ctx
-        .connections
-        .get(&connection_id)
-        .await
-        .ok()
-        .and_then(|c| c.active_profile_binding())
-        .map(|b| b.to_session_result());
 
     Ok(Json(OpenResult {
         connection_id,
         name: resolved.name,
         port: resolved.port,
         baud_rate: resolved.baud_rate,
-        profile: binding,
+        profile: Some(binding.to_session_result()),
     }))
 }
 
@@ -427,7 +446,7 @@ pub async fn open_profile(
         .list_available()
         .map_err(|e| log_tool_err("open_profile", "Failed to list ports", e))?;
 
-    let matched: Vec<PortInfo> = ports
+    let mut matched: Vec<PortInfo> = ports
         .iter()
         .filter(|p| profile.matches(p))
         .cloned()
@@ -450,7 +469,12 @@ pub async fn open_profile(
         ));
     }
 
-    let port = matched.into_iter().next().expect("exactly one match");
+    let port = matched.pop().ok_or_else(|| {
+        format!(
+            "No port matches profile '{}' selector: {:?}",
+            args.profile, profile.selector
+        )
+    })?;
     let overlay = OpenOverlay::from_open_profile_args(&args);
     let defaults = profile.defaults.clone();
 
