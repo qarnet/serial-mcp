@@ -128,8 +128,11 @@
 - split framing into config/codecs/decoder/parsers modules;
 - split serial into config/connection/manager/port-info/test-support modules;
 - split RX tool validation/read-loop/result-builder modules;
-- public flat paths, tool count (27), tool schemas, lifecycle, and wire shapes
-  preserved except approved documentation/effective-encoding clarification;
+- flat Rust paths, 27-tool count, MCP tool input/result data-field sets, and
+  lifecycle behavior stayed stable;
+- matched-context subscribe stop notification additively reports effective
+  `encoding` alongside `data` (omitted when no data);
+- MCP tool output-schema size changes are documentation descriptions only;
 - evaluator current catalog 27 tools / 288177 bytes; +1892 versus pre-refinement
   from approved output-schema descriptions only;
 - roadmap/docs reconciled; UInt/schemars, long-loop decomposition, continuous
