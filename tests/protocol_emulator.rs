@@ -122,8 +122,8 @@ async fn emulator_task(mut master: File) {
 // Full agent workflow test
 // ------------------------------------------------------------------
 
-// Ignored: the read stages (3-6, 8, 10-13) now work with ring-based read.
-// The subscribe stages (2, 7, 9) use ring-based subscribe (Phase 2).
+// Ignored: the read and subscribe stages now run through the ring-based
+// read/subscribe pipeline.
 #[tokio::test]
 async fn protocol_emulator_workflow() {
     // ---- Stage 0: Open PTY, spawn emulator, start server, open port ----
@@ -200,7 +200,7 @@ async fn protocol_emulator_workflow() {
         "expected >=9 bytes written"
     );
 
-    // Subscribe is always background after PLAN 1b. Data arrives as
+    // Subscribe is always background. Data arrives as
     // notifications rather than inline in the tool result.
     // Use from: "buffer_start" to replay the emulator's response that
     // was already captured in the ring after the write.
@@ -219,7 +219,7 @@ async fn protocol_emulator_workflow() {
         .await
         .unwrap();
     assert_ne!(sub_result.is_error, Some(true), "{sub_result:?}");
-    // Subscribe ack is always immediate after PLAN 1b.
+    // Subscribe ack is always immediate.
 
     // Collect data from background notifications.
     let mut collected = String::new();
@@ -573,7 +573,7 @@ async fn protocol_emulator_workflow() {
         ))
         .await
         .unwrap();
-    // Subscribe ack is always immediate after PLAN 1b.
+    // Subscribe ack is always immediate.
     assert_ne!(empty_sub.is_error, Some(true), "{empty_sub:?}");
     // The stream will auto-stop after timeout in background, emitting a
     // stop notification with bytes_read=0.

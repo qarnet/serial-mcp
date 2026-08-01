@@ -93,7 +93,7 @@ pub fn parse_encoding(raw: &str) -> Result<Encoding, String> {
 }
 
 // ------------------------------------------------------------------
-// Open-settings resolution (Phase 3A)
+// Open-settings resolution
 // ------------------------------------------------------------------
 
 /// Optional open-field overlay shared by `open` and `open_profile`.
@@ -427,7 +427,7 @@ mod tests {
         assert!(err.contains("data_bits"));
     }
 
-    // ── Phase 3A: open-settings resolution precedence ─────────────────────
+    // ── Open-settings resolution precedence ───────────────────────────────
 
     #[test]
     fn omitted_open_fields_fall_back_to_builtin_defaults() {

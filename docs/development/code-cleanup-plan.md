@@ -2,8 +2,14 @@
 
 ## Status
 
-Active follow-up to the 0.9.1 release. Work runs on
-`refactor/code-cleanup`, branched from merged `main` after PR #37.
+Implementation complete on `refactor/code-cleanup` (branched from merged
+`main` after PR #37). All six phases delivered and committed; the final
+gate (fmt/build/test/clippy, xtask test-all, `nix flake check`,
+agent-eval) passed. Awaiting delivery review of the single follow-up PR.
+
+Consumed phase handoffs were deleted after each phase shipped; this plan
+is retained as the single current record of the cleanup's scope,
+invariants, and verification.
 
 ## Goal
 
@@ -128,6 +134,8 @@ Acceptance: existing write/transact bytes, errors, counters, framing, cursor,
 and cancellation behavior remain unchanged; duplicated transformation and
 accounting blocks are gone.
 
+Status: complete.
+
 ## Phase 2 — Private read-loop state and finalization
 
 ### Goal
@@ -165,6 +173,8 @@ cargo clippy --all-targets --locked -- -D warnings
 Acceptance: all existing offsets, bytes-lost values, context-shaped payloads,
 framing-error tails, partial frames, and shared/private cursor behavior match
 the pre-refactor tests.
+
+Status: complete.
 
 ## Phase 3 — Profile and local production cleanup
 
@@ -204,6 +214,8 @@ cargo clippy --all-targets --locked -- -D warnings
 Acceptance: profile selection, candidate ordering, dirty/stale state, revision,
 and partial-persistence behavior remain unchanged.
 
+Status: complete.
+
 ## Phase 4 — Subscription readability
 
 ### Goal
@@ -241,6 +253,8 @@ cargo clippy --all-targets --locked -- -D warnings
 
 Acceptance: notification order, logger names, payload schemas, drop counters,
 peer-disconnect stops, match reporting, and encoding fallback remain unchanged.
+
+Status: complete.
 
 ## Phase 5 — Cross-platform test infrastructure cleanup
 
@@ -294,6 +308,8 @@ passes, no platform gate changes unintentionally, and final PR CI passes every
 OS matrix entry. Local environment has no `rustup`, so Windows cross-compilation
 cannot substitute for GitHub's Windows runner.
 
+Status: complete.
+
 ## Phase 6 — Comment reconciliation and final gate
 
 ### Goal
@@ -328,8 +344,12 @@ cargo test --locked
 cargo clippy --all-targets --locked -- -D warnings
 cargo run --manifest-path xtask/Cargo.toml -- test-all
 nix flake check --accept-flake-config --print-build-logs
+cargo run --manifest-path xtask/Cargo.toml -- agent-eval \
+  --baseline docs/development/agent-interface-baseline.json
 git status --short
 ```
+
+Status: complete — executed and passed in Phase 6.
 
 Final PR acceptance also requires green GitHub CI for Linux x64, Linux ARM64,
 macOS ARM64, Windows, native_sim, Nix, and CodeQL.

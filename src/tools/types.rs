@@ -303,7 +303,7 @@ pub struct OpenProfileArgs {
 
 // ---- Response structs ------------------------------------------------------
 
-/// Preview outcome of automatic profile selection for one port (Phase 4).
+/// Preview outcome of automatic profile selection for one port.
 ///
 /// Mirrors what a bare `open(port=...)` would do, WITHOUT marking any
 /// profile used or mutating the store:
@@ -334,7 +334,7 @@ pub enum ProfileMatchOutcome {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ProfileMatchCandidate {
     pub profile_name: String,
-    /// Whether the profile was auto-generated (Phase 3A).
+    /// Whether the profile was auto-generated.
     pub generated: bool,
     /// Profile revision at preview time.
     #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
@@ -924,7 +924,7 @@ pub struct DeleteProfileResult {
     pub profile_name: String,
 }
 
-/// Roll a profile back to a prior retained revision (Phase 3B).
+/// Roll a profile back to a prior retained revision.
 ///
 /// Restores the snapshot's selector/defaults as a NEW monotonic revision;
 /// active connections bound to the profile remain unchanged and become
@@ -1132,7 +1132,7 @@ pub struct TransactResult {
     pub read: ReadResult,
 }
 
-// ---- Atomic boot capture (Phase 5) -----------------------------------------
+// ---- Atomic boot capture ---------------------------------------------------
 
 /// Optional DTR/RTS reset pulse for `capture_boot`.
 ///

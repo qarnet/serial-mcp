@@ -1019,7 +1019,7 @@ async fn pty_subscribe_slip_malformed_escape_emits_framing_error() {
     client.cancel().await.ok();
 }
 
-// ── Phase 1.3: ring-based read tests ────────────────────────────────────
+// ── Ring-based read tests ────────────────────────────────────────────────
 
 /// Cat semantics: write then read returns buffered bytes immediately
 /// with stop_reason="drained".
@@ -1934,7 +1934,7 @@ async fn pty_transact_cancellation_aborts_read() {
     }
 }
 
-// ── Phase 3A: automatic profile sessions ────────────────────────────────────
+// ── Automatic profile sessions ──────────────────────────────────────────────
 //
 // These tests exercise the full public `open`/`open_profile` path with a
 // REAL PTY slave as the hardware port while an injected StaticPortProvider
@@ -2372,7 +2372,7 @@ async fn auto_session_profile_mode_none_disables_selection_and_creation() {
 
 /// 7. An explicit open field overrides the selected profile's default for
 ///    the live connection AND is persisted write-through immediately
-///    (Phase 3B open-override learning): the binding comes back clean with
+///    (open-override learning): the binding comes back clean with
 ///    a bumped revision, and the next bare reopen applies the override.
 #[tokio::test]
 async fn learning_explicit_open_override_persists_immediately_and_next_reopen_uses_it() {
@@ -2792,7 +2792,7 @@ async fn per_call_io_does_not_alter_usage_revision_or_defaults() {
 ///     while keeping source=explicit.
 #[tokio::test]
 async fn open_profile_explicit_binding_reports_matched_port_confidence() {
-    // Phase 1: path-only PTY (unknown transport, no identity) → None.
+    // Case 1: path-only PTY (unknown transport, no identity) → None.
     let pty_none = PtyPair::open().expect("openpty");
     let slave_none = pty_none.slave_path.to_string_lossy().into_owned();
     let provider_none = StaticPortProvider::new(vec![StaticPortProvider::weak_port(&slave_none)]);
@@ -2829,7 +2829,7 @@ async fn open_profile_explicit_binding_reports_matched_port_confidence() {
     assert_eq!(profile["profile_name"], json!("weak-pro"));
     harness_none._client.cancel().await.ok();
 
-    // Phase 2: PCI-synthetic PTY (hardware id only) → Low.
+    // Case 2: PCI-synthetic PTY (hardware id only) → Low.
     let pty_low = PtyPair::open().expect("openpty");
     let slave_low = pty_low.slave_path.to_string_lossy().into_owned();
     let mut low_port = StaticPortProvider::weak_port(&slave_low);
@@ -2952,12 +2952,12 @@ async fn save_profile_on_generated_bound_connection_promotes_to_user_owned() {
     harness._client.cancel().await.ok();
 }
 
-// ── Phase 3B: write-through learning, conflicts, rollback ────────────────────
+// ── Write-through learning, conflicts, rollback ──────────────────────────────
 //
-// Same harness as Phase 3A: real PTY + injected high-confidence
-// StaticPortProvider. These tests prove learning, partial-failure honesty,
-// CAS/stale behavior, rollback, and deletion protection through public MCP
-// results and real serial traffic.
+// Same harness as the profile-session tests: real PTY + injected
+// high-confidence StaticPortProvider. These tests prove learning,
+// partial-failure honesty, CAS/stale behavior, rollback, and deletion
+// protection through public MCP results and real serial traffic.
 
 /// Reconfigure one connection and return the structured result.
 async fn reconfigure_baud(
@@ -3965,7 +3965,7 @@ async fn rollback_with_no_active_connections_reports_zero() {
     harness._client.cancel().await.ok();
 }
 
-// ── Phase 4: list_ports profile discovery preview ───────────────────────────
+// ── `list_ports` profile discovery preview ──────────────────────────────────
 //
 // Behavior-first tests for `ListPortsResult.profile_matches`: real PTY slave
 // paths, injected StaticPortProvider identity, and public MCP calls only.
@@ -4396,15 +4396,15 @@ async fn list_ports_preview_fresh_read_sees_second_store_write() {
 }
 
 /// 8. A real `list_ports` response (with candidates and a selection)
-///    validates against the generated schema's Phase 4 wire types, and the
+///    validates against the generated schema's wire types, and the
 ///    catalog schema carries no non-standard uint formats.
 ///
 /// Note: the FULL generated `ListPortsResult` schema cannot validate raw OS
 /// enumeration output because schemars marks `PortInfo.vid`/`pid`/`interface`
 /// `required` while serde `skip_serializing_if` omits them when `None` — a
-/// pre-existing `PortInfo` schema quirk that Phase 4 must not touch (see the
-/// "Do not change `PortInfo`" non-scope). The new Phase 4 wire types
-/// (`PortProfileMatch`/`ProfileMatchCandidate`) validate cleanly.
+/// pre-existing `PortInfo` schema quirk that the preview wire types must not
+/// touch (see the "Do not change `PortInfo`" non-scope). The preview wire
+/// types (`PortProfileMatch`/`ProfileMatchCandidate`) validate cleanly.
 #[tokio::test]
 async fn list_ports_preview_output_validates_against_generated_schema() {
     let pty = PtyPair::open().expect("openpty");
@@ -4444,7 +4444,7 @@ async fn list_ports_preview_output_validates_against_generated_schema() {
         );
     }
 
-    // Validate the Phase 4 match entries against their generated $defs
+    // Validate the preview match entries against their generated $defs
     // (def + sibling $defs kept together so internal $refs resolve).
     let defs = schema_value["$defs"].clone();
     let match_schema = serde_json::json!({
@@ -4481,7 +4481,7 @@ async fn list_ports_preview_output_validates_against_generated_schema() {
     harness._client.cancel().await.ok();
 }
 
-// ── Phase 5: capture_boot arm-only over a real PTY ─────────────────────────
+// ── capture_boot arm-only over a real PTY ────────────────────────────────────
 //
 // PTYs expose no modem-line callbacks, so DTR/RTS assertion cannot be
 // observed here (the atomic reset proof lives in the controlled backend in

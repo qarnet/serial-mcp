@@ -1,6 +1,6 @@
 //! Sliding-window ring buffer with absolute u64 offsets and Notify-based wakeups.
 //!
-//! [`RxRing`] is the foundation for the Phase 1-3 RX rewrite. It provides a
+//! [`RxRing`] is the foundation of the RX subsystem. It provides a
 //! fixed-capacity circular buffer for received bytes, exposed through absolute
 //! stream offsets rather than raw indices. The pump task appends without
 //! blocking; reader tasks read by offset and optionally wait for new data

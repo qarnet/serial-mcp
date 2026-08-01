@@ -1,4 +1,4 @@
-//! Controlled `SerialIo` backend for Phase 5 `capture_boot` tests.
+//! Controlled `SerialIo` backend for `capture_boot` tests.
 //!
 //! A real in-memory byte stream (like `QueuedTxIo`) plus observability hooks
 //! that let tests prove reset-pulse atomicity through the PUBLIC MCP surface

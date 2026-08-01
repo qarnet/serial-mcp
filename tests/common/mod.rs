@@ -92,7 +92,7 @@ use serial_mcp::serial::PortProvider;
 use serial_mcp::server::StreamRegistry;
 use serial_mcp::SerialHandler;
 
-/// Static [`PortProvider`] used by Phase 3A tests: returns a fixed list of
+/// Static [`PortProvider`]: returns a fixed list of
 /// ports. `PortInfo.name` typically points at a real PTY slave so the full
 /// public `open` path and real serial I/O run while identity fields
 /// describe a synthetic USB device.
@@ -303,14 +303,14 @@ impl TestServerBuilder {
         self
     }
 
-    /// Inject a static port provider (Phase 3A: synthetic USB identity over
+    /// Inject a static port provider (synthetic USB identity over
     /// a real PTY slave path) instead of the system provider default.
     pub fn port_provider(mut self, provider: Arc<dyn PortProvider>) -> Self {
         self.provider = Some(provider);
         self
     }
 
-    /// Inject a capture store (Phase 6 export_log tests) instead of the
+    /// Inject a capture store (for `export_log` tests) instead of the
     /// disabled default.
     pub fn capture_store(mut self, store: Arc<CaptureStore>) -> Self {
         self.capture_store = Some(store);

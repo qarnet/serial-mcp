@@ -229,7 +229,7 @@ pub async fn transact(
         encoding: encoding.to_string(),
     };
 
-    // --- Read half (inlined from read handler, default from="now") ---
+    // --- Read half: transact reads from the live edge by default ---
     let max_buffered_bytes = connection.max_buffered_bytes_default();
     let _reservation = budget
         .try_reserve(max_buffered_bytes)

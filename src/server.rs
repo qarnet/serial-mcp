@@ -73,7 +73,7 @@ pub struct SerialHandler {
     tx_sessions: Arc<TxSessionManager>,
     budget: Arc<dyn BufferBudget>,
     profile_store: Arc<crate::profile_store::ProfileStore>,
-    /// Process-wide capture store (Phase 6). Disabled unless production
+    /// Process-wide capture store. Disabled unless production
     /// `main.rs` configured `--capture-dir`; shared by every stdio/HTTP
     /// session handler.
     capture_store: Arc<CaptureStore>,

@@ -154,7 +154,7 @@ fn non_empty_string() -> impl Strategy<Value = String> {
     r"[A-Za-z0-9_\r\n\t ]{1,256}"
 }
 
-// ── Phase A.1: Schema roundtrips — all argument types ────────────────────────
+// ── Schema roundtrips — all argument types ──────────────────────────────────
 
 proptest! {
     #[test]
@@ -310,7 +310,7 @@ proptest! {
     }
 }
 
-// ── Phase A.2: Schema validation — all result types against their schemas ────
+// ── Schema validation — all result types against their schemas ──────────────
 
 proptest! {
     #[test]
@@ -375,7 +375,7 @@ proptest! {
         id in opaque_id(), enc in valid_encoding(),
         max_buffered_bytes in any_usize(), poll in any_u64(), replaced: bool,
     ) {
-        // SubscribeResult — subscribe is always background (PLAN 1b).
+        // SubscribeResult — subscribe is always background.
         let r = SubscribeResult {
             connection_id: id.clone(), name: None, encoding: enc.clone(),
             max_buffered_bytes, poll_interval_ms: poll,
@@ -393,7 +393,7 @@ proptest! {
     }
 }
 
-// ── Phase A.3: Encoding roundtrips ───────────────────────────────────────────
+// ── Encoding roundtrips ─────────────────────────────────────────────────────
 
 proptest! {
     #[test]
@@ -491,7 +491,7 @@ proptest! {
     }
 }
 
-// ── Phase A.3b: Framing/parser roundtrips & no-panic — NMEA / Modbus ─────────
+// ── Framing/parser roundtrips & no-panic — NMEA / Modbus ─────────────────────
 
 proptest! {
     #[test]
@@ -644,7 +644,7 @@ proptest! {
     }
 }
 
-// ── Phase A.4: Boundary values — clamp helpers never panic ───────────────────
+// ── Boundary values — clamp helpers never panic ──────────────────────────────
 
 proptest! {
     #[test]
@@ -759,7 +759,7 @@ proptest! {
     }
 }
 
-// ── Phase A.6: JSON schema covers every known tool outputSchema ─────────────
+// ── JSON schema covers every known tool outputSchema ────────────────────────
 
 #[test]
 fn all_result_types_have_valid_schema() {
@@ -800,11 +800,11 @@ fn all_result_types_have_valid_schema() {
     }
 }
 
-// ── Phase A.7: SubscribeResult null-data is valid per schema ────────────────
+// ── SubscribeResult null-data is valid per schema ───────────────────────────
 
 #[test]
 fn subscribe_result_ff_null_fields_match_schema() {
-    // Subscribe is always background after PLAN 1b; no nullable vestigial fields remain.
+    // Subscribe is always background; no nullable vestigial fields remain.
     let r = SubscribeResult {
         connection_id: "abc".into(),
         name: None,
@@ -833,7 +833,7 @@ fn subscribe_result_blocking_filled_fields_match_schema() {
     roundtrip_stable(&r);
 }
 
-// ── Phase C.1: Stateful connection lifecycle ────────────────────────────────
+// ── Stateful connection lifecycle ───────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Op {
@@ -1023,7 +1023,7 @@ fn rx_framing_config_roundtrip_all_modes() {
     assert!(c12.skip_empty);
 }
 
-// ── Phase 3A: generated-name and ranking properties ─────────────────────────
+// ── Generated-name and ranking properties ───────────────────────────────────
 
 proptest! {
     #[test]

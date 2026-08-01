@@ -1180,7 +1180,7 @@ async fn native_unsubscribe_then_resubscribe() {
     drop(fw);
 }
 
-// ── Phase 1 gap-fill: get_status on PTY ─────────────────────────────────────
+// ── get_status on PTY ───────────────────────────────────────────────────────
 
 #[tokio::test]
 #[ignore = "requires native_sim firmware binary"]
@@ -1247,7 +1247,7 @@ async fn native_get_status_after_write_increments_tx_counter() {
     drop(fw);
 }
 
-// ── Phase 1 gap-fill: reconfigure on PTY ─────────────────────────────────────
+// ── reconfigure on PTY ──────────────────────────────────────────────────────
 
 #[tokio::test]
 #[ignore = "requires native_sim firmware binary"]
@@ -3015,7 +3015,7 @@ async fn native_read_explicit_rx_framing_overrides_protocol() {
     drop(fw);
 }
 
-// ── Connection-default e2e tests (Phase 5 layer 3-4) ────────────────────────
+// ── Connection-default e2e tests ─────────────────────────────────────────────
 
 #[tokio::test]
 #[ignore = "requires native_sim firmware binary"]
@@ -4104,7 +4104,7 @@ async fn native_read_modbus_ascii_preset_decodes_parsed_frame() {
     drop(fw);
 }
 
-// ── Phase 5: capture_boot arm-only over the real firmware pipeline ──────────
+// ── capture_boot arm-only over the real firmware pipeline ───────────────────
 //
 // native_sim's PTY UART has no modem-line callbacks, so DTR/RTS assertion
 // cannot be observed here (the atomic reset proof lives in the controlled

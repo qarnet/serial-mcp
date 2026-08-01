@@ -250,7 +250,7 @@ fn stdio_profiles_path_consumes_version_as_value() {
     );
 }
 
-// ── Phase 6: capture CLI surface ─────────────────────────────────────────────
+// ── Capture CLI surface ─────────────────────────────────────────────────────
 
 #[test]
 fn stdio_help_documents_capture_options() {

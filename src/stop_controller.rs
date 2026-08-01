@@ -1,11 +1,11 @@
 //! Shared stop-decision controller for all RX operations.
 //!
-//! PLAN 5 introduces a single `RxStopController` that evaluates stop conditions
-//! for both `read` and `subscribe`. Same inputs must yield the same stop reason
-//! regardless of which tool calls in.
+//! A single `RxStopController` evaluates stop conditions for both `read` and
+//! `subscribe`. Same inputs yield the same stop reason regardless of which
+//! tool calls in.
 //!
-//! PLAN 6 adds silence-timeout support (`no_new_rx_timeout_ms`) so operations
-//! can stop after a period of no incoming data.
+//! Silence-timeout support (`no_new_rx_timeout_ms`) lets operations stop
+//! after a period of no incoming data.
 //!
 //! The controller is *stateless* regarding event sourcing — it does not own
 //! channels, loops, or notification logic. It only tracks counters and deadlines

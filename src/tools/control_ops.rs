@@ -209,7 +209,7 @@ pub async fn capture_boot(
     let has_reset = args.reset.is_some();
 
     // ── 3. Serialize line control when a reset is configured. The lock is
-    //        scoped to the ASSERT/HOLD/RELEASE pulse only (handoff spec) —
+    //        scoped to the ASSERT/HOLD/RELEASE pulse only —
     //        it is dropped below, before the settle and read phases, so
     //        other line-control callers are not blocked for the whole
     //        capture duration. ─────────────────────────────────────────────

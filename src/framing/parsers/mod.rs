@@ -1302,7 +1302,7 @@ mod tests {
         // Verify the XOR checksum of the body between ! and * (exclusive).
         let checksum_body = b"AIVDM,2,1,3,B,55?MbV02;H0000,0";
         let computed = xor_checksum(checksum_body);
-        // The handoff documented checksum 0x5C but the correct XOR is 0x22.
+        // Correct XOR is 0x22 (an earlier draft claimed 0x5C).
         assert_eq!(computed, 0x22, "AIS sentence checksum is 0x22, not 0x5C");
 
         let sentence = b"!AIVDM,2,1,3,B,55?MbV02;H0000,0*22";

@@ -310,7 +310,7 @@ async fn configure_profile_creates_new_profile() {
     // TempDir cleanup: profiles_dir dropped here, deletes profiles.toml.
 }
 
-/// Phase 3A: `list_profiles` exposes metadata and bounded revision history
+/// `list_profiles` exposes metadata and bounded revision history
 /// so agents can understand selection and future rollback revisions.
 #[tokio::test]
 async fn list_profiles_exposes_metadata_and_revisions() {
@@ -661,7 +661,7 @@ async fn call_tool_list_ports_returns_structured_result() {
         .expect("list_ports must produce structuredContent");
     assert!(structured.get("count").is_some());
     assert!(structured.get("ports").is_some());
-    // Phase 4: the parallel profile-match preview is always present.
+    // The parallel profile-match preview is always present.
     let ports = structured["ports"].as_array().unwrap();
     let matches = structured["profile_matches"]
         .as_array()
@@ -675,7 +675,7 @@ async fn call_tool_list_ports_returns_structured_result() {
     client.cancel().await.ok();
 }
 
-/// Phase 4: the `serial://ports` resource serves the same profile-match map
+/// The `serial://ports` resource serves the same profile-match map
 /// as the `list_ports` tool (same fresh store read, same pure computation).
 #[tokio::test]
 async fn ports_resource_includes_profile_match_map() {
@@ -979,7 +979,7 @@ async fn subscribe_with_timeout_auto_stops_in_background() {
         .unwrap();
 
     assert_ne!(result.is_error, Some(true), "{result:?}");
-    // Subscribe ack is always immediate after PLAN 1b.
+    // Subscribe ack is always immediate.
 
     // Data arrives as a background notification.
     let event = next_notification(&mut rx, Duration::from_secs(2))
@@ -1015,7 +1015,7 @@ async fn subscribe_without_timeout_is_fire_and_forget() {
         .unwrap();
     assert_ne!(result.is_error, Some(true), "{result:?}");
 
-    // Subscribe ack is always immediate after PLAN 1b.
+    // Subscribe ack is always immediate.
 
     // Background stream still runs: write something and it arrives as notification
     peer.write_all(b"post-subscribe").await.unwrap();
@@ -1082,7 +1082,7 @@ async fn subscribe_closed_from_other_session_stops_streaming_task() {
     client_b.cancel().await.ok();
 }
 
-// ── Phase 4: lossless RX encoding fallback ────────────────────────────────
+// ── Lossless RX encoding fallback ─────────────────────────────────────────
 
 #[tokio::test]
 async fn read_invalid_utf8_falls_back_to_exact_hex() {
@@ -2486,7 +2486,7 @@ async fn reconfigure_invalid_stop_bits_returns_error() {
     client.cancel().await.ok();
 }
 
-// ── Phase 2: shared persistent profile store ────────────────────────────────
+// ── Shared persistent profile store ─────────────────────────────────────────
 //
 // These tests prove user-observable persistence behavior through public MCP
 // calls: real process restart, shared HTTP sessions, concurrent writers
@@ -2916,7 +2916,7 @@ async fn relative_profiles_path_resolves_against_server_cwd() {
 }
 
 // =============================================================================
-// Phase 5 — capture_boot (controlled `SerialIo` through public HTTP MCP)
+// capture_boot — controlled `SerialIo` through public HTTP MCP
 //
 // These tests drive the REAL MCP surface (HTTP transport, tool router,
 // RxSession pump, stop controller) against a controlled in-memory backend
@@ -4017,7 +4017,7 @@ fn capture_boot_schemas_have_no_nonstandard_uint_formats() {
     }
 }
 
-// ── Phase 6: safe persistent capture (export_log) ────────────────────────────
+// ── Safe persistent capture (export_log) ─────────────────────────────────────
 
 use serial_mcp::capture_store::{CaptureLimits, CaptureStore};
 use serial_mcp::log_buffer::LogEntry;

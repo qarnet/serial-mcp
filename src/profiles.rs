@@ -40,7 +40,7 @@ pub enum IdentityConfidence {
     None,
 }
 
-/// Outcome of a write-through profile persistence attempt (Phase 3B).
+/// Outcome of a write-through profile persistence attempt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ProfilePersistenceState {
@@ -124,14 +124,14 @@ pub struct ProfileSessionResult {
     pub confidence: IdentityConfidence,
     /// Whether the session is backed by a durable profile.
     pub persistent: bool,
-    /// Whether the bound profile was auto-generated (Phase 3A).
+    /// Whether the bound profile was auto-generated.
     pub generated: bool,
     /// Bound profile's revision at selection time. `null` for
     /// transient/disabled sessions.
     #[schemars(schema_with = "crate::schema_helpers::option_uint_schema")]
     pub revision: Option<u64>,
     /// `true` when explicit open fields override the selected profile's
-    /// defaults (3B persists the effective settings on durable operations).
+    /// defaults (durable operations persist the effective settings).
     pub dirty: bool,
     /// `true` when the durable profile revision changed externally (CAS
     /// conflict or rollback) and this connection must not overwrite it.
@@ -317,7 +317,7 @@ pub struct Profile {
     #[serde(default)]
     pub defaults: ProfileDefaults,
     /// Bookkeeping metadata (revision, timestamps, generated flag).
-    /// Phase 3 uses `last_used_at_ms`/`use_count` for selection ranking.
+    /// Selection ranking uses `last_used_at_ms`/`use_count`.
     #[serde(default)]
     pub metadata: ProfileMetadata,
     /// Bounded history of prior selector/defaults snapshots. Empty for
@@ -329,8 +329,8 @@ pub struct Profile {
 /// Per-profile bookkeeping metadata.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 pub struct ProfileMetadata {
-    /// True when the profile was created by automatic session machinery
-    /// (Phase 3), false for profiles created by explicit tools.
+    /// True when the profile was created by automatic session machinery,
+    /// false for profiles created by explicit tools.
     pub generated: bool,
     /// Monotonic revision number. Legacy/unversioned profiles default to 0
     /// and become 1 on their first update.
@@ -342,10 +342,10 @@ pub struct ProfileMetadata {
     /// Last mutation timestamp (ms since Unix epoch).
     #[schemars(schema_with = "crate::schema_helpers::option_uint_schema")]
     pub updated_at_ms: Option<u64>,
-    /// Last open/selection timestamp (ms since Unix epoch). Phase 3 only.
+    /// Last open/selection timestamp (ms since Unix epoch).
     #[schemars(schema_with = "crate::schema_helpers::option_uint_schema")]
     pub last_used_at_ms: Option<u64>,
-    /// Number of times the profile was used/selected. Phase 3 only.
+    /// Number of times the profile was used/selected.
     #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
     pub use_count: u64,
 }
@@ -393,7 +393,7 @@ pub struct ProfileSelector {
 impl ProfileSelector {
     /// Whether every selector field is `None` — an empty selector matches
     /// ANY port and must never appear as a weak candidate in `list_ports`
-    /// profile previews (Phase 4). Empty selectors remain valid for
+    /// profile previews. Empty selectors remain valid for
     /// `Profile::matches` (used by tests and the `configure` profile mode
     /// creation path), but they carry no discoverable device knowledge.
     pub fn is_empty(&self) -> bool {
@@ -944,7 +944,7 @@ mod tests {
         assert!(!obj.contains_key("safety_policy"));
     }
 
-    // ── Phase 3A: identity confidence / canonical selector ────────────────
+    // ── Identity confidence / canonical selector ─────────────────────────
 
     fn usb_port(name: &str, vid: Option<u16>, pid: Option<u16>, serial: Option<&str>) -> PortInfo {
         let mut port = make_port(name, vid, pid, serial);
@@ -1089,7 +1089,7 @@ mod tests {
         assert!(selector_matches_high_identity(&no_interface, &no_iface_id));
     }
 
-    // ── Phase 3A: candidate ranking ───────────────────────────────────────
+    // ── Candidate ranking ─────────────────────────────────────────────────
 
     fn ranked_profile(name: &str, last_used: Option<u64>) -> Profile {
         Profile {
@@ -1128,7 +1128,7 @@ mod tests {
         assert_eq!(top_ts, next_ts, "equal top timestamps must tie");
     }
 
-    // ── Phase 3A: generated name normalization / allocation ───────────────
+    // ── Generated name normalization / allocation ────────────────────────
 
     #[test]
     fn generated_label_normalization() {

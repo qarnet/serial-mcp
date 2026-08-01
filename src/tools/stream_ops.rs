@@ -344,12 +344,9 @@ impl RxFrameSink for SubscribeFrameSink<'_> {
         let emit = self.peer.notify_logging_message(param).await;
 
         if matched {
-            // Quirk: a failed emit of the matching frame still reports the match
-            // (logs + record_notification_drop only), distinct from the non-matching
-            // path below which returns PeerDisconnected. Intentional — see the
-            // read/subscribe framing invariants in AGENTS.md.
-            // KNOWN GAP: not characterization-tested (requires a peer disconnect
-            // mid-emit on the matching frame); preserved by faithful translation.
+            // Matching-frame notification failure records a drop but match
+            // remains the stop reason; nonmatching failure stops as peer
+            // disconnected.
             if let Err(e) = emit {
                 error!("RX frame stream peer disconnected: {e}");
                 self.conn.record_notification_drop();

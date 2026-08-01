@@ -215,7 +215,7 @@ async fn protocol_emulator_binary_workflow() {
         ))
         .await
         .unwrap();
-    // Phase 4 contract: invalid UTF-8 no longer fails the read — the same
+    // Contract: invalid UTF-8 no longer fails the read — the same
     // bytes are re-encoded as exact spaced hex with effective encoding "hex".
     assert_tool_ok(&utf8_result, "utf8_encoding_binary_hex_fallback");
     let utf8_structured = utf8_result.structured_content.expect("structured");
