@@ -290,22 +290,6 @@ Non-feature work, roughly in suggested order. From the 2026-07-05 repo review.
   (`cargo fuzz run codec_roundtrip -- -max_total_time=300`)
 - follows the `schema-drift.yml` precedent for scheduled jobs
 
-### Release-flow guard: version bump ⇒ CHANGELOG roll
-- releases key off the `Cargo.toml` version on main, but nothing enforces
-  that a bump comes with a rolled `[Unreleased]` section — a stale changelog
-  can ship silently
-- small CI check: if `Cargo.toml` version changed vs the last release tag,
-  `CHANGELOG.md` must contain a section for that version
-
-### Explicit `doc_drift` gate in CI
-- `tests/doc_drift.rs` (tool-count and preset-list guards across README,
-  Cargo.toml, server.json) already runs implicitly via `cargo test --locked`
-  in CI, but nothing names it — a failure shows up as a generic test failure,
-  and a future test-filtering change could silently drop it
-- add an explicit named step (`cargo test --locked --test doc_drift`)
-  following the `config_schema_validation` precedent in `ci.yml`, so doc
-  drift is its own visible, required check
-
 ### Windows e2e test path — investigate
 - CI builds and unit-tests Windows, but the native_sim e2e suite is
   Unix-only (PTY-based; 57 tests ignored on the Windows runner)

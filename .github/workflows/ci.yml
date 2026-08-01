@@ -94,6 +94,10 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: cargo test --locked --test config_schema_validation
 
+      - name: Validate release and documentation consistency
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo test --locked --test doc_drift
+
   native-sim:
     name: native_sim firmware + test
     runs-on: ubuntu-latest
