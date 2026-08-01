@@ -53,9 +53,10 @@
             || pkgs.lib.hasPrefix "/schemas" relPath
             || pkgs.lib.hasPrefix "/example-configs" relPath
             # Test fixtures read via CARGO_MANIFEST_DIR must survive the
-            # source filter: doc_drift reads README.md, server.json, and
-            # docs/ (agent-config.md, development/FEATURES.md, future
-            # evaluations); config_schema_validation reads schemas/ and
+            # source filter: doc_drift reads README.md, server.json,
+            # CHANGELOG.md, and docs/ (agent-config.md,
+            # development/FEATURES.md, future evaluations);
+            # config_schema_validation reads schemas/ and
             # example-configs/ and REQUIRES them — a pruned fixture fails
             # the build. relPath keeps a leading "/", hence the explicit
             # "/" in every prefix below; a directory must itself match the
@@ -68,6 +69,7 @@
             # in memory under its original URI, so nothing here needs
             # network access.
             || pkgs.lib.hasSuffix "README.md" relPath
+            || pkgs.lib.hasSuffix "CHANGELOG.md" relPath
             || pkgs.lib.hasSuffix "server.json" relPath
             || pkgs.lib.hasPrefix "/docs" relPath;
         };

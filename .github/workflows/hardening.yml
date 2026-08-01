@@ -1,0 +1,120 @@
+name: Hardening
+
+# Scheduled/manual hardening only — NOT a PR-required gate. Runs a short
+# fuzz smoke per existing fuzz target and focused mutation testing on
+# checksums/parsers, with hard wall-clock bounds and failure artifact
+# upload. See docs/development/windows-serial-e2e-investigation.md and
+# AGENTS.md "Hardening (scheduled)" for the full contract.
+on:
+  schedule:
+    # Weekly: Sunday 06:00 UTC.
+    - cron: "0 6 * * 0"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+concurrency:
+  group: hardening
+  cancel-in-progress: true
+
+jobs:
+  fuzz:
+    name: fuzz smoke (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [tool_call_json, codec_roundtrip, clamp_bounds]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev pkg-config
+
+      - name: Install pinned nightly toolchain
+        uses: dtolnay/rust-toolchain@nightly-2026-07-15
+
+      - name: Report Rust toolchain
+        run: rustc --version --verbose
+
+      - name: Cache cargo registry + fuzz build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz
+
+      - name: Install pinned cargo-fuzz
+        run: cargo install cargo-fuzz --locked --version 0.13.2
+
+      - name: Fuzz ${{ matrix.target }} (5 min)
+        working-directory: fuzz
+        # libFuzzer budget of 300s per target; GNU timeout 360s as an outer
+        # hard cap so a hung target fails the job instead of idling.
+        run: timeout 360 cargo fuzz run "${{ matrix.target }}" -- -max_total_time=300
+
+      - name: Upload fuzz artifacts and corpus
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifacts-${{ matrix.target }}
+          path: |
+            fuzz/artifacts/${{ matrix.target }}
+            fuzz/corpus/${{ matrix.target }}
+          # Paths may not exist (no crash); warn but never mask the original
+          # failing step's exit status.
+          if-no-files-found: warn
+          retention-days: 7
+
+  mutate:
+    name: mutation (checksums + parsers)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev pkg-config
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@1.88.0
+
+      - name: Report Rust toolchain
+        run: rustc --version --verbose
+
+      - name: Cache cargo registry + build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install pinned cargo-mutants
+        run: cargo install cargo-mutants --locked --version 27.1.0
+
+      - name: Mutate checksums + parsers
+        # Focused scope only: src/checksums.rs and src/framing/parsers/**.
+        # Baseline enabled; 120s per-mutant timeout; 2 parallel jobs; only
+        # library tests. GNU timeout 1500s as the outer hard cap. Missed or
+        # timed-out mutants fail the job — exit status is NOT suppressed.
+        run: |
+          timeout 1500 cargo mutants \
+            --file src/checksums.rs \
+            --file 'src/framing/parsers/**' \
+            --cargo-arg=--locked \
+            --timeout 120 \
+            --jobs 2 \
+            -- --lib
+
+      - name: Upload mutants.out
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutants-out
+          path: mutants.out
+          # May not exist if the run failed before producing output; warn but
+          # never mask the original failing step's exit status.
+          if-no-files-found: warn
+          retention-days: 7

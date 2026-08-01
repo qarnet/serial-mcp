@@ -249,19 +249,3 @@ Non-feature work, roughly in suggested order. From the 2026-07-05 repo review.
   the per-struct `check_schema!` maintenance burden
 - coordinate with any schemars 2.x migration if one is on the roadmap;
   the upstream fix may make the newtype redundant
-
-### Scheduled mutation testing + fuzz smoke in CI
-- `cargo-mutants` and the `fuzz/` targets exist but run only on demand — the
-  NMEA parser panic found in review is exactly the class a scheduled fuzz
-  run would have caught first
-- weekly `cargo-mutants` job (scope to `framing/` + `checksums.rs` to keep
-  runtime sane) + a short scheduled fuzz smoke
-  (`cargo fuzz run codec_roundtrip -- -max_total_time=300`)
-- follows the `schema-drift.yml` precedent for scheduled jobs
-
-### Windows e2e test path — investigate
-- CI builds and unit-tests Windows, but the native_sim e2e suite is
-  Unix-only (PTY-based; 57 tests ignored on the Windows runner)
-- investigate whether a Windows equivalent exists (e.g. com0com-style
-  virtual port pairs, or a named-pipe loopback backend); there may be a
-  sound reason this was skipped — document it if so, close the gap if not

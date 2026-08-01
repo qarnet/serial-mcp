@@ -186,6 +186,37 @@ fw-run-native
 - Release artifacts are built for: `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`, `aarch64-apple-darwin`, `x86_64-pc-windows-msvc`.
 - `server.json` is a registry template: it carries name/description/version only. The `packages` array (release-asset URLs + `fileSha256`) is generated at publish time by `publish-mcp-registry.yml` from the actual release binaries — never commit one (`tests/doc_drift.rs::server_json_omits_packages` enforces this). Version bump = `Cargo.toml` + the single top-level `server.json` version.
 
+## Hardening (scheduled, not PR-gated)
+
+`.github/workflows/hardening.yml` runs weekly (Sunday 06:00 UTC) and on
+`workflow_dispatch` only — no push/PR trigger, `permissions: contents: read`,
+`concurrency: { group: hardening, cancel-in-progress: true }`. Both jobs are
+bounded; a hung or slow run must fail the job, not idle.
+
+- **Fuzz smoke** — matrix over the three existing targets (`tool_call_json`,
+  `codec_roundtrip`, `clamp_bounds`), `fail-fast: false`. Pinned toolchain
+  `dtolnay/rust-toolchain@nightly-2026-07-15` (no floating nightly) + pinned
+  `cargo install cargo-fuzz --locked --version 0.13.2`. Per target:
+  libFuzzer `-max_total_time=300` wrapped in GNU `timeout 360`, job
+  `timeout-minutes: 12`. Ubuntu + `libudev-dev pkg-config`. On failure,
+  upload `fuzz/artifacts/<target>/` + `fuzz/corpus/<target>/` via
+  `actions/upload-artifact@v4` (`if-no-files-found: warn`, `retention-days: 7`)
+  — missing paths warn but never mask the original failure.
+- **Mutation** — project Rust `dtolnay/rust-toolchain@1.88.0` (NOT nightly;
+  cargo-fuzz/nightly are isolated fuzz tooling, not an MSRV bump) + pinned
+  `cargo install cargo-mutants --locked --version 27.1.0`. Focused scope only:
+  `--file src/checksums.rs` and `--file 'src/framing/parsers/**'` (quote the
+  glob), with `--cargo-arg=--locked`, `--timeout 120`, `--jobs 2`, `-- --lib`.
+  Baseline stays enabled. Whole command wrapped in GNU `timeout 1500`, job
+  `timeout-minutes: 30`. Missed/time-out mutants fail the job — exit status is
+  never suppressed. On failure upload `mutants.out/` (same warn/no-mask rule).
+- These jobs are NOT a PR-required gate.
+- Windows serial E2E is **deferred**: no privileged virtual-port driver
+  installation on GitHub-hosted runners (com0com-style drivers are
+  kernel-mode, typically test-signed, admin/reboot-sensitive). Decision and
+  sources: `docs/development/windows-serial-e2e-investigation.md`. Revisit
+  only with a pre-provisioned signed-driver runner or an approved design.
+
 ## Repo workflow
 
 - Rust toolchain policy: CI, release, and schema-drift workflows install Rust 1.88.0 (`dtolnay/rust-toolchain@1.88.0`, each followed by a `rustc --version --verbose` report step); Nix derives the same version from `rust-toolchain.toml`. Bump both together.
