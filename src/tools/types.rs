@@ -15,26 +15,37 @@ pub struct OpenArgs {
     pub port: String,
     #[serde(default)]
     pub name: Option<String>,
-    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
-    pub baud_rate: u32,
-    #[serde(default = "default_data_bits")]
-    pub data_bits: String,
-    #[serde(default = "default_stop_bits")]
-    pub stop_bits: String,
-    #[serde(default = "default_parity")]
-    pub parity: String,
-    #[serde(default = "default_flow_control")]
-    pub flow_control: String,
+    /// Baud rate. Omitted values resolve to the selected profile's default,
+    /// else 115200.
+    #[serde(default)]
+    #[schemars(schema_with = "crate::schema_helpers::option_uint_schema")]
+    pub baud_rate: Option<u32>,
+    /// Data bits. Omitted values resolve to the selected profile's default,
+    /// else 8.
+    #[serde(default)]
+    pub data_bits: Option<String>,
+    /// Stop bits. Omitted values resolve to the selected profile's default,
+    /// else 1.
+    #[serde(default)]
+    pub stop_bits: Option<String>,
+    /// Parity. Omitted values resolve to the selected profile's default,
+    /// else none.
+    #[serde(default)]
+    pub parity: Option<String>,
+    /// Flow control. Omitted values resolve to the selected profile's
+    /// default, else none.
+    #[serde(default)]
+    pub flow_control: Option<String>,
     /// Log buffer capacity in events. 0 disables logging. Default: 1024.
-    #[serde(default = "default_log_capacity")]
-    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
-    pub log_capacity: usize,
+    #[serde(default)]
+    #[schemars(schema_with = "crate::schema_helpers::option_uint_schema")]
+    pub log_capacity: Option<usize>,
     /// Whether logging is enabled. Default: true (ignored when capacity is 0).
-    #[serde(default = "default_true")]
-    pub log_enabled: bool,
+    #[serde(default)]
+    pub log_enabled: Option<bool>,
     /// Reconnect policy for this connection. Default: disabled.
     #[serde(default)]
-    pub reconnect_policy: crate::serial::ReconnectPolicy,
+    pub reconnect_policy: Option<crate::serial::ReconnectPolicy>,
     /// Default TX framing applied when subsequent `write` calls omit `tx_framing`.
     #[serde(default)]
     pub tx_framing: Option<crate::framing::TxFramingConfig>,
@@ -51,32 +62,26 @@ pub struct OpenArgs {
     /// this much RX history between reads/subscribes. Default 256 KiB
     /// (~23s of 115200-baud traffic). Open-time only; reopen to resize.
     /// Validated against the buffer budget pool and a 16 MiB ceiling.
-    #[serde(default = "default_rx_buffer_size")]
-    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
-    pub rx_buffer_size: usize,
+    #[serde(default)]
+    #[schemars(schema_with = "crate::schema_helpers::option_uint_schema")]
+    pub rx_buffer_size: Option<usize>,
     /// Default max buffered bytes for `read` on this connection.
     /// Default 32768 (32 KiB).
-    #[serde(default = "default_max_buffered_bytes")]
-    #[schemars(schema_with = "crate::schema_helpers::read_max_buffered_bytes_schema")]
-    pub max_buffered_bytes: usize,
+    #[serde(default)]
+    #[schemars(schema_with = "crate::schema_helpers::option_uint_schema")]
+    pub max_buffered_bytes: Option<usize>,
     /// Default poll interval for `subscribe` in milliseconds.
     /// Default 200.
-    #[serde(default = "default_subscribe_poll_ms")]
-    #[schemars(schema_with = "crate::schema_helpers::poll_interval_ms_schema")]
-    pub poll_interval_ms: u64,
-}
-
-fn default_rx_buffer_size() -> usize {
-    crate::limits::DEFAULT_RX_BUFFER_SIZE
-}
-fn default_log_capacity() -> usize {
-    1024
-}
-fn default_true() -> bool {
-    true
-}
-fn default_subscribe_poll_ms() -> u64 {
-    200
+    #[serde(default)]
+    #[schemars(schema_with = "crate::schema_helpers::option_uint_schema")]
+    pub poll_interval_ms: Option<u64>,
+    /// Automatic profile-session mode. Default `auto`: bare open reuses the
+    /// most recently used high-confidence profile or creates a durable
+    /// generated profile for a new high-confidence device; weak or ambiguous
+    /// identity gets a transient session. `none` disables automatic
+    /// selection/creation for deliberate troubleshooting.
+    #[serde(default)]
+    pub profile_mode: Option<crate::profiles::ProfileMode>,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -108,10 +113,11 @@ pub struct WriteArgs {
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct ReadArgs {
     pub connection_id: String,
-    /// Where to start reading from. `"cursor"` (default) — shared read cursor,
-    /// `"now"` — live edge (skip buffered backlog), `"buffer_start"` — replay
-    /// everything retained in the ring, or `{"offset": N}` — absolute stream
-    /// offset from a prior result's `from_offset`/`next_offset`.
+    /// Where to start reading from. `{"type":"cursor"}` (default) — shared
+    /// read cursor, `{"type":"now"}` — live edge (skip buffered backlog),
+    /// `{"type":"buffer_start"}` — replay everything retained in the ring,
+    /// or `{"type":"offset","offset":N}` — absolute stream offset from a
+    /// prior result's `from_offset`/`next_offset`.
     #[serde(default)]
     pub from: Option<ReadFrom>,
     #[serde(default)]
@@ -205,11 +211,11 @@ pub enum ReadFrom {
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct SubscribeArgs {
     pub connection_id: String,
-    /// Where to start reading from. `"now"` (default) — live edge,
-    /// `"cursor"` — shared read cursor, `"buffer_start"` — oldest
-    /// retained byte, or `{"offset": N}` — absolute stream offset.
-    /// Replayed history flows through the same framing/match pipeline
-    /// as live data.
+    /// Where to start reading from. `{"type":"now"}` (default) — live edge,
+    /// `{"type":"cursor"}` — shared read cursor, `{"type":"buffer_start"}` —
+    /// oldest retained byte, or `{"type":"offset","offset":N}` — absolute
+    /// stream offset. Replayed history flows through the same framing/match
+    /// pipeline as live data.
     #[serde(default)]
     pub from: Option<ReadFrom>,
     #[serde(default)]
@@ -280,27 +286,92 @@ pub struct OpenProfileArgs {
     pub profile: String,
     #[serde(default)]
     pub name: Option<String>,
-    /// Log buffer capacity in events. 0 disables logging. Default: 1024.
-    #[serde(default = "default_log_capacity")]
-    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
-    pub log_capacity: usize,
-    /// Whether logging is enabled. Default: true (ignored when capacity is 0).
-    #[serde(default = "default_true")]
-    pub log_enabled: bool,
-    /// Per-connection RX ring buffer size in bytes. Overrides the profile's
-    /// `rx_buffer_size` default. Default: 256 KiB.
-    #[serde(default = "default_rx_buffer_size")]
-    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
-    pub rx_buffer_size: usize,
+    /// Log buffer capacity in events. Omitted values use the profile
+    /// default (1024). 0 disables logging.
+    #[serde(default)]
+    #[schemars(schema_with = "crate::schema_helpers::option_uint_schema")]
+    pub log_capacity: Option<usize>,
+    /// Whether logging is enabled. Omitted values use the profile default.
+    #[serde(default)]
+    pub log_enabled: Option<bool>,
+    /// Per-connection RX ring buffer size in bytes. Omitted values use the
+    /// profile default (256 KiB). Open-time only; reopen to resize.
+    #[serde(default)]
+    #[schemars(schema_with = "crate::schema_helpers::option_uint_schema")]
+    pub rx_buffer_size: Option<usize>,
 }
 
 // ---- Response structs ------------------------------------------------------
+
+/// Preview outcome of automatic profile selection for one port (Phase 4).
+///
+/// Mirrors what a bare `open(port=...)` would do, WITHOUT marking any
+/// profile used or mutating the store:
+///
+/// - `selected`: a bare open would reuse `selected_profile` (unique
+///   high-confidence winner, or the single matching high profile).
+/// - `ambiguous`: multiple equally-ranked high-confidence profiles; a bare
+///   open stays transient — pick explicitly with `open_profile`.
+/// - `ineligible`: the port's identity is too weak for automatic selection,
+///   but the listed candidates match explicitly — use `open_profile` for a
+///   deliberate choice.
+/// - `duplicate`: another live port shares this port's high fingerprint, so
+///   settings are never applied automatically to an indistinguishable
+///   device.
+/// - `none`: no matching profile; a bare open starts a fresh generated
+///   session for a high-confidence device.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ProfileMatchOutcome {
+    Selected,
+    Ambiguous,
+    Ineligible,
+    Duplicate,
+    None,
+}
+
+/// One profile that matched a port in the `list_ports` preview.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ProfileMatchCandidate {
+    pub profile_name: String,
+    /// Whether the profile was auto-generated (Phase 3A).
+    pub generated: bool,
+    /// Profile revision at preview time.
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub revision: u64,
+    /// Last open/selection timestamp (ms since Unix epoch), `null` when the
+    /// profile was never used. `null` sorts oldest for selection.
+    #[schemars(schema_with = "crate::schema_helpers::option_uint_schema")]
+    pub last_used_at_ms: Option<u64>,
+}
+
+/// Parallel per-port profile-match preview carried by `list_ports` and the
+/// `serial://ports` resource.
+///
+/// `profile_matches` always has the same length and order as `ports` and is
+/// additionally keyed by the exact `port` name. Preview is read-only: no
+/// profile is marked used and no file is mutated.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct PortProfileMatch {
+    pub port: String,
+    pub confidence: crate::profiles::IdentityConfidence,
+    pub outcome: ProfileMatchOutcome,
+    /// The profile a bare `open(port=...)` would select, `null` unless
+    /// `outcome == "selected"`.
+    pub selected_profile: Option<String>,
+    /// Matching candidates, newest-first for high identity (name is display
+    /// only and never breaks a selection tie); empty for `none`/`duplicate`.
+    pub candidates: Vec<ProfileMatchCandidate>,
+}
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct ListPortsResult {
     #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
     pub count: usize,
     pub ports: Vec<PortInfo>,
+    /// Parallel profile-match preview, same length/order as `ports`
+    /// (always serialized, even when empty).
+    pub profile_matches: Vec<PortProfileMatch>,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -310,6 +381,15 @@ pub struct OpenResult {
     pub port: String,
     #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
     pub baud_rate: u32,
+    /// Active profile-session binding: how this connection was bound to a
+    /// profile (automatic/explicit/generated/transient/disabled), the
+    /// profile name, confidence, dirty state, and any persistence error.
+    pub profile: Option<crate::profiles::ProfileSessionResult>,
+    /// Write-through persistence outcome for a dirty selected-profile
+    /// overlay (open override learning). `null` when the open had nothing
+    /// to persist (clean/generated/transient/disabled sessions).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile_persistence: Option<crate::profiles::ProfilePersistenceResult>,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -323,6 +403,16 @@ pub struct ListConnectionsResult {
 pub struct CloseResult {
     pub connection_id: String,
     pub name: Option<String>,
+    /// Active profile-session binding captured before clean close (with
+    /// any dirty/stale state after the close snapshot/retry).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<crate::profiles::ProfileSessionResult>,
+    /// Close-snapshot persistence outcome. Always present on a successful
+    /// close: a connection without a durable binding reports
+    /// `state = "transient"`; dirty/differing persistent bindings are
+    /// retried and report `persisted`/`not_needed`/`failed`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile_persistence: Option<crate::profiles::ProfilePersistenceResult>,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -438,14 +528,14 @@ pub struct ReadResult {
     #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
     pub buffered_remaining: u64,
     /// Absolute stream offset of the oldest byte retained in the ring at result
-    /// time. Use with `from: {offset: start_offset}` to replay from the oldest
-    /// retained byte.
+    /// time. Use with `from: {"type":"offset","offset":start_offset}` to replay
+    /// from the oldest retained byte.
     #[serde(default)]
     #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
     pub start_offset: u64,
     /// Absolute stream offset of the newest byte retained in the ring at result
-    /// time (the live edge). Equals the cursor position `from: "now"` would
-    /// resolve to.
+    /// time (the live edge). Equals the cursor position `from: {"type":"now"}`
+    /// would resolve to.
     #[serde(default)]
     #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
     pub end_offset: u64,
@@ -471,6 +561,12 @@ pub struct SetFlowControlResult {
     pub connection_id: String,
     pub name: Option<String>,
     pub flow_control: FlowControl,
+    /// Active profile-session binding after write-through learning.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<crate::profiles::ProfileSessionResult>,
+    /// Write-through persistence outcome for the flow-control change.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile_persistence: Option<crate::profiles::ProfilePersistenceResult>,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -666,6 +762,9 @@ pub struct GetStatusResult {
     /// Lifetime total of bytes lost to ring wrap.
     #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
     pub rx_bytes_wrapped_total: u64,
+    /// Active profile-session binding. `null` for connections inserted
+    /// directly by low-level tests.
+    pub profile: Option<crate::profiles::ProfileSessionResult>,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -679,6 +778,12 @@ pub struct ReconfigureResult {
     pub stop_bits: String,
     pub parity: String,
     pub flow_control: String,
+    /// Active profile-session binding after write-through learning.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<crate::profiles::ProfileSessionResult>,
+    /// Write-through persistence outcome for the reconfigure.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile_persistence: Option<crate::profiles::ProfilePersistenceResult>,
 }
 
 /// Summary of a single profile returned by `list_profiles`.
@@ -687,6 +792,11 @@ pub struct ProfileSummary {
     pub name: String,
     pub selector: crate::profiles::ProfileSelector,
     pub defaults: crate::profiles::ProfileDefaults,
+    /// Bookkeeping metadata (generated flag, revision, timestamps, usage).
+    pub metadata: crate::profiles::ProfileMetadata,
+    /// Bounded history of prior selector/defaults snapshots (for future
+    /// rollback). Empty for profiles that were never overwritten.
+    pub revisions: Vec<crate::profiles::ProfileRevision>,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -698,32 +808,14 @@ pub struct ListProfilesResult {
 
 // ---- Default helpers -------------------------------------------------------
 
-pub fn default_data_bits() -> String {
-    "8".into()
-}
-pub fn default_stop_bits() -> String {
-    "1".into()
-}
-pub fn default_parity() -> String {
-    "none".into()
-}
-pub fn default_flow_control() -> String {
-    "none".into()
-}
 pub fn default_encoding() -> String {
     "utf8".into()
-}
-pub fn default_max_buffered_bytes() -> usize {
-    32768
 }
 pub fn default_flush_target() -> FlushTarget {
     FlushTarget::Both
 }
 pub fn default_break_duration_ms() -> u64 {
     250
-}
-pub fn default_subscribe_buffered_bytes() -> usize {
-    2048
 }
 
 // ---- Profile management tools ----------------------------------------------
@@ -764,6 +856,14 @@ pub struct ConfigureResult {
     /// For connection mode: always null.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created: Option<bool>,
+    /// Active profile-session binding after connection-mode write-through
+    /// learning. `null` in profile mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<crate::profiles::ProfileSessionResult>,
+    /// Write-through persistence outcome for connection mode. `null` in
+    /// profile mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile_persistence: Option<crate::profiles::ProfilePersistenceResult>,
 }
 
 /// Save a profile by snapshotting an open connection's identity and config.
@@ -796,6 +896,49 @@ pub struct DeleteProfileArgs {
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct DeleteProfileResult {
     pub profile_name: String,
+}
+
+/// Roll a profile back to a prior retained revision (Phase 3B).
+///
+/// Restores the snapshot's selector/defaults as a NEW monotonic revision;
+/// active connections bound to the profile remain unchanged and become
+/// stale. A wrong `expected_revision` (concurrent modification) or an
+/// evicted target `revision` is a tool error that leaves the file
+/// unchanged.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct RollbackProfileArgs {
+    pub profile_name: String,
+    /// Prior retained revision to restore (see `list_profiles` revisions).
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub revision: u64,
+    /// Revision the profile currently has (from `list_profiles` metadata).
+    /// Guards against rolling back a concurrently modified profile.
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub expected_revision: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct RollbackProfileResult {
+    pub profile_name: String,
+    /// The retained revision whose snapshot was restored.
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub restored_from_revision: u64,
+    /// The revision the profile had before this rollback
+    /// (`expected_revision`).
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub previous_revision: u64,
+    /// The new monotonic revision after the rollback (never moves
+    /// backward).
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub revision: u64,
+    pub selector: crate::profiles::ProfileSelector,
+    pub defaults: crate::profiles::ProfileDefaults,
+    pub metadata: crate::profiles::ProfileMetadata,
+    /// Number of same-process open connections bound to the profile whose
+    /// live state was left unchanged (marked stale).
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub active_connections_unchanged: usize,
+    pub persistence: crate::profiles::ProfilePersistenceResult,
 }
 
 // ---- Log tools -------------------------------------------------------------
@@ -840,16 +983,37 @@ pub struct ClearLogResult {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ExportLogArgs {
     pub connection_id: String,
-    /// File path to write the JSONL log to.
+    /// Portable `.jsonl` filename for the export, relative to the configured
+    /// capture directory (`--capture-dir`). Not an arbitrary path: no
+    /// separators, no subdirectories, no absolute/relative traversal, ASCII
+    /// 1-120 chars ending `.jsonl`. The server rejects existing files (no
+    /// overwrite) and enforces per-file, total-byte, and file-count quotas.
     pub path: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct ExportLogResult {
     pub connection_id: String,
+    /// Canonical absolute path of the committed file inside the capture root.
     pub path: String,
     #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
     pub events_written: usize,
+    /// Exact bytes committed (the full snapshot).
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub bytes_written: u64,
+    /// Committed managed files in the root after this export.
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub files_used: usize,
+    /// Total managed bytes in the root after this export.
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub total_bytes_used: u64,
+    /// POST-commit durability warning. Present only when the file was
+    /// committed but the root-directory sync failed on Unix (crash
+    /// durability of the rename could not be confirmed). The export
+    /// otherwise succeeded; the committed file is never deleted. Absent on
+    /// Windows (documented portable limitation: no root sync is attempted).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub durability_warning: Option<String>,
 }
 
 // ---- Reconnect tool --------------------------------------------------------
@@ -906,9 +1070,10 @@ pub struct TransactArgs {
     pub data: String,
     #[serde(default = "default_encoding")]
     pub encoding: String,
-    /// Where the read half starts. "now" (default) — live edge, skip
-    /// pre-write buffered backlog; "cursor" — shared read cursor;
-    /// "buffer_start" — replay everything retained; or {"offset": N}.
+    /// Where the read half starts. `{"type":"now"}` (default) — live edge,
+    /// skip pre-write buffered backlog; `{"type":"cursor"}` — shared read
+    /// cursor; `{"type":"buffer_start"}` — replay everything retained; or
+    /// `{"type":"offset","offset":N}`.
     #[serde(default)]
     pub from: Option<ReadFrom>,
     #[serde(default)]
@@ -938,5 +1103,124 @@ pub struct TransactResult {
     pub connection_id: String,
     pub name: Option<String>,
     pub write: WriteResult,
+    pub read: ReadResult,
+}
+
+// ---- Atomic boot capture (Phase 5) -----------------------------------------
+
+/// Optional DTR/RTS reset pulse for `capture_boot`.
+///
+/// When present, the server asserts the configured lines (DTR first, then
+/// RTS, like `set_dtr_rts`), holds them for `hold_ms`, then always releases
+/// them — on normal completion, cancellation, assertion/release failure, or
+/// disconnect. The release guard is armed BEFORE the assertion so a partial
+/// assertion failure still restores the configured release state.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct CaptureBootReset {
+    /// DTR level to assert (hold) during the pulse.
+    pub assert_dtr: bool,
+    /// RTS level to assert (hold) during the pulse.
+    pub assert_rts: bool,
+    /// DTR level to restore after the hold (release state).
+    pub release_dtr: bool,
+    /// RTS level to restore after the hold (release state).
+    pub release_rts: bool,
+    /// How long to hold the asserted lines in milliseconds.
+    /// Default 100; minimum 1; bounded by the tool timeout ceiling.
+    #[serde(default = "default_capture_hold_ms")]
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub hold_ms: u64,
+}
+
+fn default_capture_hold_ms() -> u64 {
+    100
+}
+
+/// `capture_boot` arguments.
+///
+/// One bounded operation: purge unread OS input, mark the RX live edge
+/// atomically (under the pump gate, so no pre-mark byte can leak in), pulse
+/// DTR/RTS when `reset` is configured, then capture only post-mark bytes
+/// through the existing match/framing/parser/timeout/silence pipeline.
+///
+/// `reset = null` (or omitted) performs an arm-only capture for externally
+/// reset or power-cycled devices: no line is touched and the capture stays
+/// armed until a stop condition (match, timeout, silence, size cap,
+/// disconnect, cancellation) fires.
+///
+/// There is deliberately no `from` field — capture always begins at its
+/// atomic mark. The connection's `max_buffered_bytes` default bounds the
+/// in-memory result. `settle_ms` delays consumption, not capture: the
+/// always-on pump still appends bytes from the mark during settle. The read
+/// phase timeout defaults to 5000ms (omitted or explicit null both resolve
+/// to this bounded default); the total operation is bounded by
+/// hold + settle + read timeout.
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct CaptureBootArgs {
+    pub connection_id: String,
+    /// Optional DTR/RTS reset pulse. `null` = arm-only capture; lines are
+    /// never touched.
+    #[serde(default)]
+    pub reset: Option<CaptureBootReset>,
+    /// Delay in milliseconds between the reset pulse and consumption.
+    /// The pump keeps appending bytes from the mark during this window.
+    /// Default: no settle delay.
+    #[serde(default)]
+    #[schemars(schema_with = "crate::schema_helpers::option_uint_schema")]
+    pub settle_ms: Option<u64>,
+    /// Total wall-clock budget for the read phase in milliseconds, after the
+    /// pulse and settle. Omitted (or explicit null) defaults to 5000.
+    #[serde(default)]
+    #[schemars(schema_with = "crate::schema_helpers::option_timeout_ms_schema")]
+    pub timeout_ms: Option<u64>,
+    /// Silence timeout in milliseconds for the read phase. When set, capture
+    /// stops if no new data arrives within this window. `0` is invalid.
+    #[serde(default)]
+    #[schemars(schema_with = "crate::schema_helpers::option_positive_timeout_ms_schema")]
+    pub no_new_rx_timeout_ms: Option<u64>,
+    #[serde(default = "default_encoding")]
+    pub encoding: String,
+    /// Optional match configuration; capture stops when the pattern is found
+    /// (checks buffered post-mark history first, then waits).
+    #[serde(default)]
+    pub r#match: Option<crate::match_config::MatchRequest>,
+    /// Optional RX frame decoder configuration, applied to the post-mark
+    /// stream exactly like `read`.
+    #[serde(default)]
+    pub rx_framing: Option<crate::framing::RxFramingConfig>,
+    /// Optional RX parser configuration; sibling to `rx_framing`.
+    #[serde(default)]
+    pub rx_parser: Option<crate::framing::ParserConfig>,
+    /// Optional protocol preset; fills in framing/parser gaps.
+    #[serde(default)]
+    pub protocol: Option<crate::framing::ProtocolPreset>,
+}
+
+/// `capture_boot` result.
+///
+/// The nested `read` carries the full existing read result shape
+/// (`stop_reason`, offsets, `bytes_lost`, frames, match, framing-error
+/// fields). `read.from_offset` equals `mark_offset` unless the ring wrapped
+/// before the consumer caught up; `mark_offset` always records the original
+/// atomic boundary.
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct CaptureBootResult {
+    pub connection_id: String,
+    pub name: Option<String>,
+    /// The configured reset pulse, `null` for arm-only capture.
+    pub reset: Option<CaptureBootReset>,
+    /// Absolute stream offset of the atomic live-edge mark: no byte before
+    /// this offset can appear in `read.data`.
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub mark_offset: u64,
+    /// Total bytes appended to the ring before the mark (`mark_offset` in
+    /// stream bytes; offsets are monotonic from open).
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub pre_mark_bytes: u64,
+    /// `true` when the unread OS input buffer was successfully purged before
+    /// the mark. A purge failure is a tool error that occurs before any line
+    /// assertion, so this field is always `true` on a successful result.
+    pub os_input_flushed: bool,
+    /// The capture read: post-mark bytes through the existing read pipeline.
     pub read: ReadResult,
 }

@@ -1,7 +1,7 @@
 //! Buffer budget manager for RX tools.
 //!
 //! Provides a trait-based interface for reserving buffer space from a shared
-//! program pool. RX tools (`read`, `wait_for`, `subscribe`) reserve their
+//! program pool. RX tools (`read`, `transact`, `subscribe`) reserve their
 //! full requested `max_buffered_bytes` up front and release it on
 //! completion/cancellation/error via RAII.
 

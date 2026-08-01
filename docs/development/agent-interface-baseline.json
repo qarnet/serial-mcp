@@ -1,0 +1,590 @@
+{
+  "schema": "serial-mcp-agent-interface-eval/v1",
+  "catalog": {
+    "tool_count": 26,
+    "aggregate_bytes": 258964,
+    "per_tool_bytes": [
+      {
+        "name": "clear_log",
+        "total_bytes": 522,
+        "description_bytes": 69,
+        "input_schema_bytes": 152,
+        "output_schema_bytes": 152
+      },
+      {
+        "name": "close",
+        "total_bytes": 6805,
+        "description_bytes": 36,
+        "input_schema_bytes": 152,
+        "output_schema_bytes": 6463
+      },
+      {
+        "name": "compute_checksum",
+        "total_bytes": 1723,
+        "description_bytes": 366,
+        "input_schema_bytes": 714,
+        "output_schema_bytes": 483
+      },
+      {
+        "name": "configure",
+        "total_bytes": 39117,
+        "description_bytes": 584,
+        "input_schema_bytes": 16480,
+        "output_schema_bytes": 21895
+      },
+      {
+        "name": "delete_profile",
+        "total_bytes": 534,
+        "description_bytes": 75,
+        "input_schema_bytes": 150,
+        "output_schema_bytes": 150
+      },
+      {
+        "name": "export_log",
+        "total_bytes": 754,
+        "description_bytes": 117,
+        "input_schema_bytes": 237,
+        "output_schema_bytes": 249
+      },
+      {
+        "name": "flush",
+        "total_bytes": 1817,
+        "description_bytes": 375,
+        "input_schema_bytes": 628,
+        "output_schema_bytes": 654
+      },
+      {
+        "name": "get_log",
+        "total_bytes": 5399,
+        "description_bytes": 228,
+        "input_schema_bytes": 469,
+        "output_schema_bytes": 4560
+      },
+      {
+        "name": "get_status",
+        "total_bytes": 9234,
+        "description_bytes": 241,
+        "input_schema_bytes": 152,
+        "output_schema_bytes": 8682
+      },
+      {
+        "name": "list_connections",
+        "total_bytes": 4649,
+        "description_bytes": 52,
+        "input_schema_bytes": 33,
+        "output_schema_bytes": 4399
+      },
+      {
+        "name": "list_ports",
+        "total_bytes": 7224,
+        "description_bytes": 607,
+        "input_schema_bytes": 33,
+        "output_schema_bytes": 6429
+      },
+      {
+        "name": "list_profiles",
+        "total_bytes": 19368,
+        "description_bytes": 181,
+        "input_schema_bytes": 33,
+        "output_schema_bytes": 19000
+      },
+      {
+        "name": "open",
+        "total_bytes": 24010,
+        "description_bytes": 496,
+        "input_schema_bytes": 16788,
+        "output_schema_bytes": 6574
+      },
+      {
+        "name": "open_profile",
+        "total_bytes": 7784,
+        "description_bytes": 280,
+        "input_schema_bytes": 771,
+        "output_schema_bytes": 6574
+      },
+      {
+        "name": "read",
+        "total_bytes": 23555,
+        "description_bytes": 748,
+        "input_schema_bytes": 14382,
+        "output_schema_bytes": 8220
+      },
+      {
+        "name": "reconfigure",
+        "total_bytes": 7322,
+        "description_bytes": 233,
+        "input_schema_bytes": 454,
+        "output_schema_bytes": 6470
+      },
+      {
+        "name": "reconnect",
+        "total_bytes": 941,
+        "description_bytes": 207,
+        "input_schema_bytes": 152,
+        "output_schema_bytes": 432
+      },
+      {
+        "name": "rollback_profile",
+        "total_bytes": 22022,
+        "description_bytes": 445,
+        "input_schema_bytes": 504,
+        "output_schema_bytes": 20909
+      },
+      {
+        "name": "save_profile",
+        "total_bytes": 17802,
+        "description_bytes": 212,
+        "input_schema_bytes": 474,
+        "output_schema_bytes": 16961
+      },
+      {
+        "name": "send_break",
+        "total_bytes": 896,
+        "description_bytes": 160,
+        "input_schema_bytes": 228,
+        "output_schema_bytes": 318
+      },
+      {
+        "name": "set_dtr_rts",
+        "total_bytes": 773,
+        "description_bytes": 136,
+        "input_schema_bytes": 214,
+        "output_schema_bytes": 248
+      },
+      {
+        "name": "set_flow_control",
+        "total_bytes": 6864,
+        "description_bytes": 125,
+        "input_schema_bytes": 200,
+        "output_schema_bytes": 6354
+      },
+      {
+        "name": "subscribe",
+        "total_bytes": 15461,
+        "description_bytes": 484,
+        "input_schema_bytes": 14320,
+        "output_schema_bytes": 427
+      },
+      {
+        "name": "transact",
+        "total_bytes": 26394,
+        "description_bytes": 475,
+        "input_schema_bytes": 16800,
+        "output_schema_bytes": 8914
+      },
+      {
+        "name": "unsubscribe",
+        "total_bytes": 656,
+        "description_bytes": 82,
+        "input_schema_bytes": 152,
+        "output_schema_bytes": 231
+      },
+      {
+        "name": "write",
+        "total_bytes": 7301,
+        "description_bytes": 542,
+        "input_schema_bytes": 6104,
+        "output_schema_bytes": 502
+      }
+    ],
+    "top_largest": [
+      {
+        "name": "configure",
+        "total_bytes": 39117,
+        "description_bytes": 584,
+        "input_schema_bytes": 16480,
+        "output_schema_bytes": 21895
+      },
+      {
+        "name": "transact",
+        "total_bytes": 26394,
+        "description_bytes": 475,
+        "input_schema_bytes": 16800,
+        "output_schema_bytes": 8914
+      },
+      {
+        "name": "open",
+        "total_bytes": 24010,
+        "description_bytes": 496,
+        "input_schema_bytes": 16788,
+        "output_schema_bytes": 6574
+      },
+      {
+        "name": "read",
+        "total_bytes": 23555,
+        "description_bytes": 748,
+        "input_schema_bytes": 14382,
+        "output_schema_bytes": 8220
+      },
+      {
+        "name": "rollback_profile",
+        "total_bytes": 22022,
+        "description_bytes": 445,
+        "input_schema_bytes": 504,
+        "output_schema_bytes": 20909
+      }
+    ]
+  },
+  "scenarios": [
+    {
+      "id": "first_console_discovery_open",
+      "label": "First console: discovery + open",
+      "tool_calls": 2,
+      "request_bytes": 203,
+      "invalid_calls": 0,
+      "retries": 0,
+      "advanced_fields": 0,
+      "stale_race": false,
+      "completion_ref": "tests/serial_pty.rs::auto_session_first_open_creates_generated_profile_and_pty_traffic_flows",
+      "common": true
+    },
+    {
+      "id": "returning_known_console_automatic",
+      "label": "Returning device: automatic profile reuse",
+      "tool_calls": 2,
+      "request_bytes": 383,
+      "invalid_calls": 0,
+      "retries": 0,
+      "advanced_fields": 1,
+      "stale_race": false,
+      "completion_ref": "tests/serial_pty.rs::list_ports_preview_selected_winner_matches_later_bare_open",
+      "common": true
+    },
+    {
+      "id": "explicit_profile_management",
+      "label": "Returning device: explicit profile management",
+      "tool_calls": 3,
+      "request_bytes": 490,
+      "invalid_calls": 0,
+      "retries": 0,
+      "advanced_fields": 1,
+      "stale_race": false,
+      "completion_ref": "tests/serial_pty.rs::open_profile_explicit_binding_reports_matched_port_confidence",
+      "common": true
+    },
+    {
+      "id": "command_response_transact",
+      "label": "Command/response via transact",
+      "tool_calls": 2,
+      "request_bytes": 383,
+      "invalid_calls": 0,
+      "retries": 0,
+      "advanced_fields": 1,
+      "stale_race": false,
+      "completion_ref": "tests/serial_pty.rs::pty_transact_writes_then_reads_response",
+      "common": true,
+      "modeled": {
+        "kind": "shorthand",
+        "label": "transact with string shorthand (match/from)",
+        "tool_calls": 2,
+        "request_bytes": 320,
+        "expansion_calls": 2,
+        "expansion_bytes": 383,
+        "note": "String forms for `match`/`from` would expand to the current tagged objects."
+      }
+    },
+    {
+      "id": "command_response_write_read",
+      "label": "Command/response via write + read",
+      "tool_calls": 3,
+      "request_bytes": 522,
+      "invalid_calls": 0,
+      "retries": 0,
+      "advanced_fields": 1,
+      "stale_race": false,
+      "completion_ref": "tests/serial_pty.rs::pty_transact_writes_then_reads_response",
+      "common": true
+    },
+    {
+      "id": "line_capture",
+      "label": "Line capture",
+      "tool_calls": 2,
+      "request_bytes": 314,
+      "invalid_calls": 0,
+      "retries": 0,
+      "advanced_fields": 1,
+      "stale_race": false,
+      "completion_ref": "tests/native_sim_validation/unix.rs::native_read_line_framing_splits_lines",
+      "common": true
+    },
+    {
+      "id": "at_modem",
+      "label": "AT modem (protocol preset)",
+      "tool_calls": 2,
+      "request_bytes": 408,
+      "invalid_calls": 0,
+      "retries": 0,
+      "advanced_fields": 2,
+      "stale_race": false,
+      "completion_ref": "tests/native_sim_validation/unix.rs::native_read_at_parser_parses_pong",
+      "common": false,
+      "modeled": {
+        "kind": "shorthand",
+        "label": "open with string protocol shorthand",
+        "tool_calls": 2,
+        "request_bytes": 399,
+        "expansion_calls": 2,
+        "expansion_bytes": 408,
+        "note": "A bare string `protocol` would expand to the current tagged preset object."
+      }
+    },
+    {
+      "id": "at_modem_recipe",
+      "label": "AT modem via connection recipe (modeled)",
+      "tool_calls": 2,
+      "request_bytes": 408,
+      "invalid_calls": 0,
+      "retries": 0,
+      "advanced_fields": 2,
+      "stale_race": false,
+      "completion_ref": "tests/native_sim_validation/unix.rs::native_read_at_parser_parses_pong",
+      "common": false,
+      "modeled": {
+        "kind": "recipe",
+        "label": "open with recipe instead of protocol object",
+        "tool_calls": 2,
+        "request_bytes": 404,
+        "expansion_calls": 2,
+        "expansion_bytes": 408,
+        "note": "A `recipe` would replace the repeated protocol-preset object (at_modem = at_command preset + bounded timeouts)."
+      }
+    },
+    {
+      "id": "ndjson_stream",
+      "label": "NDJSON stream (protocol preset)",
+      "tool_calls": 2,
+      "request_bytes": 298,
+      "invalid_calls": 0,
+      "retries": 0,
+      "advanced_fields": 1,
+      "stale_race": false,
+      "completion_ref": "tests/native_sim_validation/unix.rs::native_read_ndjson_preset_decodes_json_frames",
+      "common": false,
+      "modeled": {
+        "kind": "recipe",
+        "label": "open with ndjson_stream recipe instead of protocol object",
+        "tool_calls": 2,
+        "request_bytes": 303,
+        "expansion_calls": 2,
+        "expansion_bytes": 298,
+        "note": "ndjson_stream recipe = ndjson preset (line framing + JSON parser, skip_empty)."
+      }
+    },
+    {
+      "id": "rollback_recovery",
+      "label": "Rollback recovery after a bad learned setting",
+      "tool_calls": 6,
+      "request_bytes": 787,
+      "invalid_calls": 0,
+      "retries": 0,
+      "advanced_fields": 0,
+      "stale_race": false,
+      "completion_ref": "tests/serial_pty.rs::rollback_with_no_active_connections_reports_zero",
+      "common": false
+    },
+    {
+      "id": "boot_reset_prompt_capture",
+      "label": "Boot-reset prompt capture (current multi-call composition)",
+      "tool_calls": 5,
+      "request_bytes": 886,
+      "invalid_calls": 0,
+      "retries": 0,
+      "advanced_fields": 1,
+      "stale_race": true,
+      "completion_ref": "tests/serial_pty.rs::pty_transact_from_now_skips_pre_write_buffer",
+      "common": false,
+      "modeled": {
+        "kind": "capture_boot",
+        "label": "atomic capture_boot (armed reset + capture in one call)",
+        "tool_calls": 1,
+        "request_bytes": 216,
+        "expansion_calls": 5,
+        "expansion_bytes": 886,
+        "note": "One server-side operation would snapshot the live edge, pulse DTR/RTS, and capture only post-reset bytes — removing the arm/reset race between the seek and the reset."
+      }
+    },
+    {
+      "id": "permission_busy_disconnected",
+      "label": "Permission/busy/disconnected errors with retry",
+      "tool_calls": 4,
+      "request_bytes": 525,
+      "invalid_calls": 0,
+      "retries": 1,
+      "advanced_fields": 0,
+      "stale_race": false,
+      "completion_ref": "tests/native_sim_validation/unix.rs::native_auto_reconnect_preserves_connection",
+      "common": false
+    },
+    {
+      "id": "command_response_facade",
+      "label": "Command/response via facade `command` (modeled)",
+      "tool_calls": 2,
+      "request_bytes": 383,
+      "invalid_calls": 0,
+      "retries": 0,
+      "advanced_fields": 1,
+      "stale_race": false,
+      "completion_ref": "tests/serial_pty.rs::pty_transact_writes_then_reads_response",
+      "common": true,
+      "modeled": {
+        "kind": "facade",
+        "label": "concise `command` tool (transact alias)",
+        "tool_calls": 2,
+        "request_bytes": 306,
+        "expansion_calls": 2,
+        "expansion_bytes": 383,
+        "note": "A facade `command` would be a 1:1 alias of `transact` with string `match` — same call count, fewer bytes."
+      }
+    }
+  ],
+  "metrics": {
+    "automatic_profiles": {
+      "scenario": "explicit_profile_management",
+      "label": "Returning device: explicit profile management",
+      "current_calls": 3,
+      "alternative_calls": 2,
+      "current_bytes": 490,
+      "alternative_bytes": 383,
+      "call_savings": 1,
+      "byte_reduction_pct": 21.836734693877553,
+      "reduced_advanced_objects": 0,
+      "completion_ref": "tests/serial_pty.rs::list_ports_preview_selected_winner_matches_later_bare_open",
+      "invalid_calls": 0
+    },
+    "transact_vs_write_read": {
+      "scenario": "command_response_write_read",
+      "label": "Command/response via write + read",
+      "current_calls": 3,
+      "alternative_calls": 2,
+      "current_bytes": 522,
+      "alternative_bytes": 383,
+      "call_savings": 1,
+      "byte_reduction_pct": 26.62835249042146,
+      "reduced_advanced_objects": 0,
+      "completion_ref": "tests/serial_pty.rs::pty_transact_writes_then_reads_response",
+      "invalid_calls": 0
+    },
+    "shorthand_comparisons": [
+      {
+        "scenario": "command_response_transact",
+        "label": "Command/response via transact",
+        "current_calls": 2,
+        "alternative_calls": 2,
+        "current_bytes": 383,
+        "alternative_bytes": 320,
+        "call_savings": 0,
+        "byte_reduction_pct": 16.449086161879894,
+        "reduced_advanced_objects": 0,
+        "completion_ref": "modeled",
+        "invalid_calls": 0
+      },
+      {
+        "scenario": "at_modem",
+        "label": "AT modem (protocol preset)",
+        "current_calls": 2,
+        "alternative_calls": 2,
+        "current_bytes": 408,
+        "alternative_bytes": 399,
+        "call_savings": 0,
+        "byte_reduction_pct": 2.2058823529411766,
+        "reduced_advanced_objects": 0,
+        "completion_ref": "modeled",
+        "invalid_calls": 0
+      }
+    ],
+    "recipe_comparisons": [
+      {
+        "scenario": "at_modem_recipe",
+        "label": "AT modem via connection recipe (modeled)",
+        "current_calls": 2,
+        "alternative_calls": 2,
+        "current_bytes": 408,
+        "alternative_bytes": 404,
+        "call_savings": 0,
+        "byte_reduction_pct": 0.9803921568627451,
+        "reduced_advanced_objects": 1,
+        "completion_ref": "modeled",
+        "invalid_calls": 0
+      },
+      {
+        "scenario": "ndjson_stream",
+        "label": "NDJSON stream (protocol preset)",
+        "current_calls": 2,
+        "alternative_calls": 2,
+        "current_bytes": 298,
+        "alternative_bytes": 303,
+        "call_savings": 0,
+        "byte_reduction_pct": -1.6778523489932886,
+        "reduced_advanced_objects": 1,
+        "completion_ref": "modeled",
+        "invalid_calls": 0
+      }
+    ],
+    "facade_comparisons": [
+      {
+        "scenario": "command_response_facade",
+        "label": "Command/response via facade `command` (modeled)",
+        "current_calls": 2,
+        "alternative_calls": 2,
+        "current_bytes": 383,
+        "alternative_bytes": 306,
+        "call_savings": 0,
+        "byte_reduction_pct": 20.10443864229765,
+        "reduced_advanced_objects": 0,
+        "completion_ref": "modeled",
+        "invalid_calls": 0
+      }
+    ],
+    "capture_boot": {
+      "scenario": "boot_reset_prompt_capture",
+      "label": "Boot-reset prompt capture (current multi-call composition)",
+      "current_calls": 5,
+      "alternative_calls": 1,
+      "current_bytes": 886,
+      "alternative_bytes": 216,
+      "call_savings": 4,
+      "byte_reduction_pct": 75.62076749435666,
+      "reduced_advanced_objects": 0,
+      "completion_ref": "modeled",
+      "invalid_calls": 0
+    },
+    "boot_stale_race": true,
+    "common_median_calls": 2.0,
+    "common_median_facade_call_savings": 0.0,
+    "common_median_facade_byte_reduction_pct": 20.10443864229765,
+    "total_scenario_request_bytes": 5990
+  },
+  "decisions": {
+    "automatic_profiles": {
+      "decision": "yes",
+      "thresholds_met": true,
+      "reason": "automatic reuse saves 1 call(s) (need >=1) and 21.8% request bytes (need >=20%) vs explicit management; identity rules unchanged"
+    },
+    "shorthand_now": {
+      "decision": "no",
+      "thresholds_met": false,
+      "reason": "0 of 2 shorthand scenarios reach >=20% request-byte reduction (need >=3); projected catalog growth 0.0% (limit 3%)"
+    },
+    "initial_recipes_now": {
+      "decision": "no",
+      "thresholds_met": false,
+      "reason": "2 of 2 recipe scenarios meet the reduction/advanced-object rule (need >=3) with no extra calls; projected catalog growth 0.0% (limit 2%)"
+    },
+    "versioned_facade_now": {
+      "decision": "no",
+      "thresholds_met": false,
+      "reason": "common-task median facade call savings 0.0 (need >=1), byte reduction 20.1% (need >=30%), modeled completion 100%: yes"
+    },
+    "phase5_capture_boot": {
+      "decision": "yes",
+      "thresholds_met": true,
+      "reason": "boot capture composition has a stale-data/arm-reset race: true; capture_boot reduces 5 calls to 1"
+    }
+  },
+  "dominant_friction": "schema size",
+  "regression": {
+    "status": "no_baseline",
+    "aggregate_growth_pct": null,
+    "per_tool_regressions": []
+  }
+}

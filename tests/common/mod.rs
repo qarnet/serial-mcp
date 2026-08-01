@@ -10,6 +10,7 @@
 #![allow(dead_code)]
 
 pub mod binaries;
+pub mod controlled;
 pub mod firmware;
 pub mod spawned;
 
@@ -33,10 +34,76 @@ use serde_json::Map;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+use serial_mcp::capture_store::CaptureStore;
 use serial_mcp::security::SecurityManager;
 use serial_mcp::serial::ConnectionManager;
+use serial_mcp::serial::PortProvider;
 use serial_mcp::server::StreamRegistry;
 use serial_mcp::SerialHandler;
+
+/// Static [`PortProvider`] used by Phase 3A tests: returns a fixed list of
+/// ports. `PortInfo.name` typically points at a real PTY slave so the full
+/// public `open` path and real serial I/O run while identity fields
+/// describe a synthetic USB device.
+#[derive(Debug, Clone)]
+pub struct StaticPortProvider {
+    pub ports: Vec<serial_mcp::serial::PortInfo>,
+}
+
+impl PortProvider for StaticPortProvider {
+    fn list_available(&self) -> serial_mcp::error::Result<Vec<serial_mcp::serial::PortInfo>> {
+        Ok(self.ports.clone())
+    }
+}
+
+impl StaticPortProvider {
+    pub fn new(ports: Vec<serial_mcp::serial::PortInfo>) -> Arc<Self> {
+        Arc::new(Self { ports })
+    }
+
+    /// Build a synthetic high-confidence USB `PortInfo` pointing at a real
+    /// port path (a PTY slave in tests).
+    pub fn usb_port(
+        name: &str,
+        vid: u16,
+        pid: u16,
+        serial: &str,
+        product: Option<&str>,
+        interface: Option<u8>,
+    ) -> serial_mcp::serial::PortInfo {
+        serial_mcp::serial::PortInfo {
+            name: name.into(),
+            display_name: name.rsplit('/').next().unwrap_or(name).into(),
+            description: "Synthetic USB device".into(),
+            hardware_id: Some(format!("USB VID:{vid:04X} PID:{pid:04X}")),
+            transport: serial_mcp::serial::PortTransport::Usb,
+            vid: Some(vid),
+            pid: Some(pid),
+            serial_number: Some(serial.into()),
+            manufacturer: Some("Synthetic".into()),
+            product: product.map(str::to_string),
+            interface,
+        }
+    }
+
+    /// Build a weak-identity `PortInfo` (no USB identity) pointing at a
+    /// real port path.
+    pub fn weak_port(name: &str) -> serial_mcp::serial::PortInfo {
+        serial_mcp::serial::PortInfo {
+            name: name.into(),
+            display_name: name.rsplit('/').next().unwrap_or(name).into(),
+            description: "PTY".into(),
+            hardware_id: None,
+            transport: serial_mcp::serial::PortTransport::Unknown,
+            vid: None,
+            pid: None,
+            serial_number: None,
+            manufacturer: None,
+            product: None,
+            interface: None,
+        }
+    }
+}
 
 /// In-process HTTP MCP server bound to `127.0.0.1` on an OS-assigned
 /// port. The shared [`ConnectionManager`] is exposed so tests can insert
@@ -68,38 +135,29 @@ impl TestServer {
         manager: Arc<ConnectionManager>,
         security: SecurityManager,
     ) -> Self {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let url = format!("http://{addr}/mcp");
-        let shutdown = CancellationToken::new();
+        Self::start_inner(manager, security, None, None, None).await
+    }
 
-        let streams: StreamRegistry = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
-        let manager_for_service = Arc::clone(&manager);
-        let streams_for_service = Arc::clone(&streams);
-        let shutdown_for_service = shutdown.child_token();
-        let service = StreamableHttpService::new(
-            move || {
-                Ok(SerialHandler::builder()
-                    .connections(Arc::clone(&manager_for_service))
-                    .streams(Arc::clone(&streams_for_service))
-                    .security(security.clone())
-                    .build())
-            },
-            LocalSessionManager::default().into(),
-            StreamableHttpServerConfig::default().with_cancellation_token(shutdown_for_service),
-        );
-        let router = axum::Router::new().nest_service("/mcp", service);
+    /// Start a server with a custom [`ConnectionManager`] and an injected
+    /// capture store (Phase 6 export_log tests). The default profile store
+    /// is ephemeral.
+    pub async fn start_with_capture_store(
+        manager: Arc<ConnectionManager>,
+        capture_store: Arc<CaptureStore>,
+    ) -> Self {
+        let security = SecurityManager::from_patterns::<[&str; 0]>([]);
+        Self::start_inner(manager, security, None, None, Some(capture_store)).await
+    }
 
-        let handle = tokio::spawn(async move {
-            let _ = axum::serve(listener, router).await;
-        });
-
-        TestServer {
-            url,
-            manager,
-            shutdown,
-            handle,
-        }
+    /// Start a server with a custom [`ConnectionManager`] and an injected
+    /// static port provider (Phase 3A: synthetic USB identity over a real
+    /// PTY slave path). The default profile store is ephemeral.
+    pub async fn start_with_provider(
+        manager: Arc<ConnectionManager>,
+        provider: Arc<dyn PortProvider>,
+    ) -> Self {
+        let security = SecurityManager::from_patterns::<[&str; 0]>([]);
+        Self::start_inner(manager, security, None, Some(provider), None).await
     }
 
     /// Start a server with a custom profiles path (for tests that exercise
@@ -121,24 +179,70 @@ impl TestServer {
         profiles_path: std::path::PathBuf,
         security: SecurityManager,
     ) -> Self {
+        // A pre-written file (legacy migration tests, restart tests) is
+        // loaded and validated like production startup would.
+        let store = Arc::new(
+            serial_mcp::profile_store::ProfileStore::open(profiles_path)
+                .expect("open profiles store for test server"),
+        );
+        Self::start_inner(manager, security, Some(store), None, None).await
+    }
+
+    /// Start a server with a custom profiles path AND an injected static
+    /// port provider (Phase 3A profile-session tests).
+    pub async fn start_with_provider_and_profiles_path(
+        manager: Arc<ConnectionManager>,
+        provider: Arc<dyn PortProvider>,
+        profiles_path: std::path::PathBuf,
+    ) -> Self {
+        let security = SecurityManager::from_patterns::<[&str; 0]>([]);
+        let store = Arc::new(
+            serial_mcp::profile_store::ProfileStore::open(profiles_path)
+                .expect("open profiles store for test server"),
+        );
+        Self::start_inner(manager, security, Some(store), Some(provider), None).await
+    }
+
+    /// Shared construction: one `Arc<ProfileStore>` per server, cloned into
+    /// every session handler factory so all HTTP MCP sessions observe the
+    /// same profile state. `None` selects the ephemeral store default. An
+    /// injected `provider` (defaults to the system provider) is shared the
+    /// same way.
+    async fn start_inner(
+        manager: Arc<ConnectionManager>,
+        security: SecurityManager,
+        profile_store: Option<Arc<serial_mcp::profile_store::ProfileStore>>,
+        provider: Option<Arc<dyn PortProvider>>,
+        capture_store: Option<Arc<CaptureStore>>,
+    ) -> Self {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let url = format!("http://{addr}/mcp");
         let shutdown = CancellationToken::new();
 
         let streams: StreamRegistry = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+        let profile_store = profile_store
+            .unwrap_or_else(|| Arc::new(serial_mcp::profile_store::ProfileStore::ephemeral()));
+        let provider = provider.unwrap_or_else(|| {
+            Arc::new(serial_mcp::serial::SystemPortProvider) as Arc<dyn PortProvider>
+        });
+        let capture_store = capture_store.unwrap_or_else(|| Arc::new(CaptureStore::disabled()));
         let manager_for_service = Arc::clone(&manager);
         let streams_for_service = Arc::clone(&streams);
+        let profile_store_for_service = Arc::clone(&profile_store);
+        let provider_for_service = Arc::clone(&provider);
+        let capture_store_for_service = Arc::clone(&capture_store);
         let shutdown_for_service = shutdown.child_token();
-        let profiles_path_for_service = profiles_path.clone();
         let service = StreamableHttpService::new(
             move || {
                 Ok(SerialHandler::builder()
                     .connections(Arc::clone(&manager_for_service))
                     .streams(Arc::clone(&streams_for_service))
                     .security(security.clone())
-                    .build()
-                    .with_profiles(profiles_path_for_service.clone(), Vec::new()))
+                    .profile_store(Arc::clone(&profile_store_for_service))
+                    .capture_store(Arc::clone(&capture_store_for_service))
+                    .port_provider(Arc::clone(&provider_for_service))
+                    .build())
             },
             LocalSessionManager::default().into(),
             StreamableHttpServerConfig::default().with_cancellation_token(shutdown_for_service),

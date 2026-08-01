@@ -19,11 +19,11 @@ client flash, reset, and talk to a board on their own.
 
 ## Capabilities
 
-**25 tools:** list_ports, list_connections, open, close, read, write, transact, flush, set_dtr_rts, set_flow_control, send_break, subscribe, unsubscribe, get_status, reconfigure, list_profiles, open_profile, save_profile, delete_profile, configure, get_log, clear_log, export_log, reconnect, compute_checksum  
+**27 tools:** list_ports, list_connections, open, close, read, write, transact, capture_boot, flush, set_dtr_rts, set_flow_control, send_break, subscribe, unsubscribe, get_status, reconfigure, list_profiles, open_profile, save_profile, delete_profile, configure, rollback_profile, get_log, clear_log, export_log, reconnect, compute_checksum
 **5 resources:** `serial://ports`, `serial://connections`, `serial://connections/{id}`, `serial://connections/{id}/raw`, `serial://connections/{id}/log` (3 resource templates plus 2 static)  
 **2 prompt templates:** `diagnose_port`, `interactive_terminal`  
 
-The RX side uses an always-on ring buffer with absolute stream offsets: every byte from `open` to `close` is captured, so `read` behaves like `cat` (returns buffered-but-unread bytes immediately) and `subscribe` like `tail -f` (with optional history replay via `from`). `read`'s `from` parameter (`"cursor"` default / `"now"` / `"buffer_start"` / `{"offset": N}`) resolves the start position non-destructively — pass `from: "now"` to skip buffered backlog to the live edge, or re-pass the same `from` to re-read the same bytes. Pattern matching checks buffered history first. Data loss from ring wrap is always observable via `bytes_lost`, never silent. **Note:** with hardware flow control (RTS/CTS) enabled, the always-on pump drains the kernel RX buffer continuously, so the kernel never deasserts RTS and the device streams freely — a setup that relied on flow control to pause a device until the host reads will behave differently (the device no longer pauses).
+The RX side uses an always-on ring buffer with absolute stream offsets: every byte from `open` to `close` is captured, so `read` behaves like `cat` (returns buffered-but-unread bytes immediately) and `subscribe` like `tail -f` (with optional history replay via `from`). `read`'s `from` parameter (`{"type":"cursor"}` default / `{"type":"now"}` / `{"type":"buffer_start"}` / `{"type":"offset","offset":N}`) resolves the start position non-destructively — pass `from: {"type":"now"}` to skip buffered backlog to the live edge, or re-pass the same `from` to re-read the same bytes. Pattern matching checks buffered history first. Data loss from ring wrap is always observable via `bytes_lost`, never silent. **Note:** with hardware flow control (RTS/CTS) enabled, the always-on pump drains the kernel RX buffer continuously, so the kernel never deasserts RTS and the device streams freely — a setup that relied on flow control to pause a device until the host reads will behave differently (the device no longer pauses).
 
 ## Install
 
@@ -98,11 +98,139 @@ serial-mcp [OPTIONS]
   --bind <addr>                     HTTP bind address (default: 127.0.0.1:8000)
   --max-program-buffered-bytes <N>  Global budget for all in-flight RX tools
   --max-tool-buffered-bytes <N>     Per-tool ceiling for max_buffered_bytes
+  --profiles-path <path>            Profile store file path (default: OS user
+                                    config dir + serial-mcp/profiles.toml)
+  --capture-dir <absolute-dir>      Enable persistent export_log capture into an
+                                    existing absolute directory (disabled by
+                                    default; no fallback to cwd/config/temp)
+  --capture-max-file-bytes <N>      Per-file quota for a capture JSONL snapshot
+                                    (default: 16777216 / 16 MiB)
+  --capture-max-total-bytes <N>     Total-byte quota across committed capture
+                                    files (default: 268435456 / 256 MiB)
+  --capture-max-files <N>           File-count quota across committed capture
+                                    files (default: 256)
   -V, --version                     Print version and exit (also: `serial-mcp version`)
   -h, --help                        Print help
 
   RUST_LOG                   Log level env var (error/warn/info/debug/trace)
 ```
+
+Profiles are persisted to a single TOML store shared by every session of the
+server process. The default location follows your OS user config directory
+(e.g. `~/.config/serial-mcp/profiles.toml`), so device knowledge follows you
+across repositories. Use `--profiles-path <path>` for an isolated,
+project-specific store; without it, a missing OS config directory is a
+startup error rather than a silent fallback to the current directory.
+
+### Persistent capture (`--capture-dir`)
+
+`export_log` persists a connection's event log as JSONL, but only when the
+server starts with an explicit absolute `--capture-dir`. Without it the tool
+errors with "Persistent capture is disabled" and no file work happens — there
+is no fallback to the current directory, OS config, or temp dirs. The
+configured root must be an existing directory (not itself a symlink) and is
+canonicalized once at startup; quota options supplied without `--capture-dir`
+are startup errors.
+
+`export_log`'s `path` field is a **portable `.jsonl` filename relative to the
+capture root** — never an arbitrary path. It must be ASCII, 1–120 characters,
+start alphanumeric, contain only alphanumeric/`.`/`_`/`-`, end `.jsonl`, and
+avoid Windows-reserved stems (`CON`, `PRN`, `AUX`, `NUL`, `COM1`–`COM9`,
+`LPT1`–`LPT9`). No separators, no subdirectories, no traversal, no absolute
+paths.
+
+Every export is a complete point-in-time snapshot committed atomically with
+`persist_noclobber`: an existing file (regular, symlink, directory, or
+special) is rejected — `export_log` **never overwrites** and never follows
+symlinks. Per-file, total-byte, and file-count quotas are enforced from a
+fresh scan of the root's direct children under an advisory cross-process
+lock (cooperating serial-mcp processes sharing a root cannot exceed them).
+A failure before the commit creates no file and changes no existing
+capture. Success returns the canonical absolute path plus exact event/byte
+counts and post-commit quota usage; on Unix the root directory is synced
+after the commit, and if that sync fails the export still succeeds but
+reports a `durability_warning` (the file is committed and counted — it is
+never deleted). Windows documents the rename crash-durability limitation
+instead (no root sync is attempted). Internal entries
+(`.serial-mcp-captures.lock`, `.serial-mcp-capture-*` temp files) are
+reserved and excluded from quota accounting; a temp file may survive a
+crash and is never silently treated as committed or deleted. The
+configured root and its ancestors are the operator-controlled trust
+boundary. (Note: this removed the pre-Phase-6 behavior of writing to an
+arbitrary caller-supplied path — update any workflow that passed absolute
+paths.)
+
+### Automatic profile sessions
+
+Every successful `open`/`open_profile` binds the connection to an observable
+profile session reported in the open result, `get_status`, and
+`list_connections` (`profile`: name, selection source, confidence, persistent,
+generated, revision, dirty, candidates, last persistence error):
+
+- **`list_ports` previews profile selection.** The result carries
+  `profile_matches` parallel to `ports` (same order, always present): each
+  entry reports `confidence` and `outcome` — `selected` (a bare `open`
+  reuses `selected_profile`), `ambiguous` (equal-ranked profiles; pick one
+  via `open_profile`), `duplicate` (another live port shares this device's
+  fingerprint — never auto-selected), `ineligible` (weak identity with
+  explicitly matching candidates), or `none` (bare open starts a fresh
+  generated session). The preview is read-only: nothing is marked used and
+  no file is written. The `serial://ports` resource carries the same map.
+- **First bare `open` of a uniquely identified USB device** (transport + VID +
+  PID + non-empty serial number, interface when available) creates a durable
+  generated profile (name `auto-{label}`) whose defaults equal the effective
+  open settings.
+- **Close/reopen automatically selects the most recently used profile** for
+  the same device. Multiple profiles for one device resolve to the unique
+  newest `last_used_at_ms`; an equal top rank is reported as ambiguity
+  (`candidates`), never vector-order selection, and the session stays
+  transient.
+- **Explicit open fields override the selected profile's defaults**
+  (baud, data bits, stop bits, parity, flow control, log, reconnect policy,
+  framing/parser/protocol, ring size, read/subscribe defaults). Omitted
+  fields come from the profile, then built-in 115200/8-N-1 defaults.
+- **Automatic write-through learning:** a dirty open override is persisted
+  right after the successful hardware open, and durable live changes
+  (`reconfigure`, `set_flow_control`, connection-mode `configure`) persist
+  the full effective defaults through the bound profile after the live
+  change succeeds. The result carries `profile_persistence` (`persisted` /
+  `not_needed` / `transient` / `failed`) plus the updated `profile`
+  binding. Reopen/restart applies the learned settings. Clean close is a
+  safety net: a dirty or differing binding is retried on close
+  (`close_snapshot`).
+- **Partial failure is honest:** if the live change succeeds but the
+  profile write fails, the tool result stays successful, `state` is
+  `failed` with the error, the binding turns `dirty`, and the next durable
+  mutation or clean close retries. Transient line control (DTR/RTS, BREAK),
+  per-call read/write/transact framing, payloads, cursors, and subscription
+  lifecycle never touch profile defaults or revisions.
+- **Revision-CAS conflicts:** persistence is guarded by the bound
+  revision. If another client bumps or rolls back the profile, the next
+  learning attempt reports an explicit conflict (`failed`, binding
+  `stale`) instead of silently overwriting the newer profile; a stale
+  binding keeps reporting the conflict until reopened.
+- **`rollback_profile`** restores any retained prior revision (see
+  `list_profiles` `revisions`, newest five snapshots) as a new monotonic
+  revision. Active connections bound to the profile stay on their live
+  state and become stale; reopen applies the restored defaults. A wrong
+  `expected_revision` or an evicted revision is a tool error that leaves
+  the file unchanged.
+- **`delete_profile` is refused while a same-process open connection
+  binds the profile** (the error lists the connection IDs).
+- **Weak identity** (no USB serial number, non-USB, or path-only) opens with
+  a non-persistent transient session and never writes a durable profile.
+  Duplicate live fingerprints also degrade to transient — settings are never
+  applied to an indistinguishable device.
+- **`profile_mode="none"`** disables automatic selection/creation for
+  deliberate troubleshooting.
+- `open_profile` remains explicit selection; it now requires exactly one
+  matching live port (multiple matches are a tool error) and marks the
+  profile most recently used. `list_profiles` exposes each profile's
+  metadata and bounded revision history. Explicit bindings report the
+  matched port's own identity confidence.
+- `save_profile` on a connection bound to an auto-generated profile
+  deliberately promotes it to a user-owned profile (`generated=false`)
+  under the new name.
 
 ## Transports
 
@@ -113,18 +241,54 @@ serial-mcp [OPTIONS]
 
 ## Example Agent Flow
 
+The normal workflow is a short decision tree: discover (`list_ports`), open
+(bare `open`), talk (`transact`/`read`/`write`), verify the learned profile,
+escalate to advanced tools only when needed. For boot/reset capture
+(Arduino auto-reset, power-cycle banner, boot prompt) use `capture_boot` —
+one atomic call instead of the racy arm-then-reset-then-read composition:
+
 ```
-1. list_ports → ["/dev/ttyUSB0", "/dev/ttyACM0"]
-2. open(port="/dev/ttyACM0", name="board-uart", baud_rate=115200) → { connection_id: "9f...", name: "board-uart" }
-3. list_connections() → [{ connection_id: "9f...", name: "board-uart", port: "/dev/ttyACM0" }]
-4. set_dtr_rts(id, dtr=false, rts=false)  # Arduino reset
-   set_dtr_rts(id, dtr=true,  rts=true)
-5. read(id, match={ pattern: "OK>" }, timeout_ms=3000)
-   → { stop_reason: "match_found", matched: true, match_index: 0,
-       bytes_observed: 37, bytes_returned: 37, truncated: false,
-       data: "...OK>" }
-6. write(id, data="status\r\n")
-7. close(id)
+capture_boot(connection_id="9f...",
+             reset={ assert_dtr: false, assert_rts: false,
+                     release_dtr: true, release_rts: true, hold_ms: 100 },
+             match={ pattern: "boot>", config: { mode: "literal_substring",
+             pattern_encoding: "utf8" } }, timeout_ms=5000)
+   → { mark_offset: 0, pre_mark_bytes: 0, os_input_flushed: true,
+       read: { stop_reason: "match_found", data: "...boot>", ... } }
+   # one call = purge unread OS input + atomic live-edge mark (no pre-mark
+   # byte can leak in) + optional DTR/RTS pulse (release guaranteed) +
+   # capture of ONLY post-mark bytes; private read cursor, shared `read`
+   # cursor and ring history untouched; in-memory result only
+```
+
+```
+1. list_ports()
+   → ports: [{ name: "/dev/ttyACM0", ... }]
+     profile_matches: [{ port: "/dev/ttyACM0", confidence: "high",
+                         outcome: "selected",
+                         selected_profile: "auto-fake-usb-serial", ... }]
+   # the preview says a bare open will reuse the auto-generated profile
+2. open(port="/dev/ttyACM0")
+   → { connection_id: "9f...", baud_rate: 115200,
+       profile: { profile_name: "auto-fake-usb-serial", source: "generated",
+                  confidence: "high", persistent: true, revision: 1, ... } }
+   # bare open(port=...) only: baud defaults to 115200/8-N-1 and the server
+   # reuses the most recently used high-confidence profile for a known
+   # device, or creates a durable generated profile for a new one
+3. transact(connection_id="9f...", data="status\r\n",
+            match={ pattern: "OK>", config: { mode: "literal_substring",
+            pattern_encoding: "utf8" } }, timeout_ms=3000)
+   → { stop_reason: "match_found", data: "status\r\n...OK>", ... }
+   # one call = write + awaited response (prefer over write+read);
+   # use read() for buffered or unsolicited data, subscribe() only for
+   # ongoing notifications
+4. reconfigure(connection_id="9f...", baud_rate=230400)
+   → { baud_rate: 230400,
+       profile: { profile_name: "auto-fake-usb-serial", dirty: false, ... },
+       profile_persistence: { state: "persisted", ... } }
+   # durable changes are learned into the bound profile automatically;
+   # a later bare open of the same device applies them
+5. close(connection_id="9f...")
 ```
 
 ## Development
@@ -148,7 +312,7 @@ serial-mcp is actively developed, and the [roadmap](docs/development/FEATURES.md
 - [Protocol Guide](docs/protocols.md) — framing, parsers, presets, precedence, checksum behavior
 - [Protocol References](docs/protocols/references.md) — normative spec citations for implemented protocols
 - [Agent Configuration](docs/agent-config.md)
-- [Roadmap](docs/development/FEATURES.md)
+- [Development Notes](docs/development/README.md) — roadmap, protocol support matrix, agent-interface evaluation, capture design
 - [CHANGELOG.md](CHANGELOG.md)
 - [AGENTS.md](AGENTS.md), contributor guidelines
 

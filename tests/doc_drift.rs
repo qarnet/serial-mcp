@@ -143,6 +143,39 @@ fn readme_mentions_every_protocol_preset() {
 }
 
 #[test]
+fn readme_readfrom_examples_use_tagged_wire_form() {
+    // The `ReadFrom` wire format is a tagged object (`{"type":"now"}`), not a
+    // bare string. README prose that teaches the `from` parameter must not
+    // regress to string shorthand — agents copy these examples verbatim.
+    let readme = repo_file("README.md");
+    let line = readme
+        .lines()
+        .find(|l| l.contains("`from` parameter"))
+        .expect("README.md must describe the `from` parameter");
+    for tagged in [
+        r#"{"type":"cursor"}"#,
+        r#"{"type":"now"}"#,
+        r#"{"type":"buffer_start"}"#,
+        r#"{"type":"offset","offset":N}"#,
+    ] {
+        assert!(
+            line.contains(tagged),
+            "README `from` line must contain {tagged}: {line}"
+        );
+    }
+    for shorthand in [
+        "from: \"now\"",
+        "from: \"cursor\"",
+        "from: \"buffer_start\"",
+    ] {
+        assert!(
+            !line.contains(shorthand),
+            "README `from` line must not advertise {shorthand}: {line}"
+        );
+    }
+}
+
+#[test]
 fn server_json_versions_match_cargo_toml() {
     let cargo_version = cargo_toml_version();
     let server_json = repo_file("server.json");
@@ -185,6 +218,227 @@ fn server_json_omits_packages() {
          generated per-release by publish-mcp-registry.yml (committed entries \
          inevitably go stale)"
     );
+}
+
+#[test]
+fn readme_teaches_capture_boot_boot_path_and_semantics() {
+    // Phase 5: the README must teach capture_boot as the boot/reset path,
+    // and the tool description must state the private cursor, OS-input
+    // purge, optional line pulse, bounded in-memory result, and no file
+    // output.
+    let readme = repo_file("README.md");
+    assert!(
+        readme.contains("capture_boot"),
+        "README must teach capture_boot as the boot/reset path"
+    );
+    let server = repo_file("src/server.rs");
+    let desc_start = server
+        .find("Atomic boot/reset capture")
+        .expect("capture_boot tool description");
+    let desc = &server[desc_start..desc_start + 1200];
+    for needle in [
+        "private read cursor",
+        "purges unread OS input",
+        "pulses DTR/RTS",
+        "no file output",
+        "bounded in memory",
+    ] {
+        assert!(
+            desc.contains(needle),
+            "capture_boot tool description must state {needle:?}"
+        );
+    }
+    // The decision-tree instructions teach the boot path too.
+    let instructions = server
+        .split("with_instructions(")
+        .nth(1)
+        .and_then(|s| s.split("to_string()").next())
+        .expect("server.rs must contain with_instructions");
+    assert!(
+        instructions.contains("capture_boot"),
+        "server instructions must teach capture_boot"
+    );
+}
+
+#[test]
+fn readme_teaches_profile_discovery_and_common_flow() {
+    // Phase 4: the normal workflow is discover → bare open → transact →
+    // inspect the learned profile → escalate. Positive guidance assertions.
+    let readme = repo_file("README.md");
+    assert!(
+        readme.contains("profile_matches"),
+        "README must teach the list_ports profile-match preview"
+    );
+    assert!(
+        readme.contains("transact"),
+        "README must teach transact as the command/response primitive"
+    );
+    assert!(
+        readme.contains("bare `open`") || readme.contains("bare open"),
+        "README must teach bare open as the common call"
+    );
+    assert!(
+        readme.contains("profile_persistence"),
+        "README must teach inspecting profile persistence after durable changes"
+    );
+}
+
+#[test]
+fn prompts_teach_current_decision_tree_without_stale_references() {
+    // The diagnose prompt must teach list_ports → bare open → transact →
+    // rollback, and neither prompt may reference removed tools or removed
+    // per-call fields.
+    let diagnose = repo_file("src/prompts/diagnose.rs");
+    assert!(
+        diagnose.contains("`list_ports`") && diagnose.contains("profile_matches"),
+        "diagnose prompt must teach the profile-match preview"
+    );
+    assert!(
+        diagnose.contains("`open(port="),
+        "diagnose prompt must teach the bare open call"
+    );
+    assert!(
+        diagnose.contains("`transact("),
+        "diagnose prompt must use transact for probes"
+    );
+    assert!(
+        diagnose.contains("rollback_profile"),
+        "diagnose prompt must teach rollback after bad learned settings"
+    );
+    assert!(
+        diagnose.contains("capture_boot"),
+        "diagnose prompt must teach capture_boot for boot/reset capture"
+    );
+    let interactive = repo_file("src/prompts/interactive.rs");
+    assert!(
+        interactive.contains("`transact("),
+        "interactive prompt must drive commands via transact"
+    );
+    for prompt_src in [&diagnose, &interactive] {
+        assert!(
+            !prompt_src.contains("wait_for"),
+            "prompts must not reference the removed wait_for tool"
+        );
+        assert!(
+            !prompt_src.contains("max_buffered_bytes"),
+            "prompts must not use the removed per-call max_buffered_bytes"
+        );
+    }
+}
+
+#[test]
+fn server_instructions_teach_decision_tree() {
+    // The server `instructions` string (served on initialize) must carry the
+    // Phase 4 decision tree, not a flat tool list.
+    let server = repo_file("src/server.rs");
+    let instructions = server
+        .split("with_instructions(")
+        .nth(1)
+        .and_then(|s| s.split("to_string()").next())
+        .expect("server.rs must contain with_instructions");
+    for needle in [
+        "list_ports",
+        "bare",
+        "transact",
+        "profile_matches",
+        "rollback_profile",
+        "open_profile",
+    ] {
+        assert!(
+            instructions.contains(needle),
+            "server instructions must teach {needle}"
+        );
+    }
+}
+
+#[test]
+fn agent_config_readme_anchor_is_valid() {
+    // docs/agent-config.md referenced the removed `#how-rx-works` anchor.
+    let config = repo_file("docs/agent-config.md");
+    assert!(
+        !config.contains("#how-rx-works"),
+        "agent-config.md must not reference the removed README anchor"
+    );
+    assert!(
+        config.contains("../README.md#capabilities"),
+        "agent-config.md must link a valid README anchor"
+    );
+}
+
+#[test]
+fn features_md_does_not_relist_shipped_items() {
+    // FEATURES.md is the roadmap/tech-debt file only. Shipped items
+    // (configure, transact, compute_checksum, reconnect policy, ...) must not
+    // be re-added there — CHANGELOG.md and AGENTS.md own shipped truth, and a
+    // shipped marker in the roadmap reads as unbuilt or goes stale.
+    let features = repo_file("docs/development/FEATURES.md");
+    assert!(
+        !features.contains("✅ **Shipped"),
+        "FEATURES.md must not relist shipped items with a shipped marker"
+    );
+    assert!(
+        !features.contains("pure wiring: profile field"),
+        "FEATURES.md must not still describe the reconnect-policy item as unwired"
+    );
+}
+
+#[test]
+fn readme_teaches_capture_export_contract() {
+    // Phase 6: README must teach the disabled-by-default capture store,
+    // the filename-only export_log contract, and the no-overwrite rule.
+    let readme = repo_file("README.md");
+    assert!(
+        readme.contains("--capture-dir"),
+        "README must document --capture-dir"
+    );
+    assert!(
+        readme.contains("--capture-max-file-bytes")
+            && readme.contains("--capture-max-total-bytes")
+            && readme.contains("--capture-max-files"),
+        "README must document all three capture quotas"
+    );
+    let export_section = readme
+        .find("`export_log`")
+        .map(|i| &readme[i..i + 3000])
+        .unwrap_or_default();
+    assert!(
+        export_section.contains("filename"),
+        "README export_log teaching must say path is a filename: {export_section}"
+    );
+    assert!(
+        export_section.contains("never overwrites") || export_section.contains("no overwrite"),
+        "README export_log teaching must state the no-overwrite rule"
+    );
+}
+
+#[test]
+fn capture_cli_options_synced_between_value_list_and_help() {
+    // The VALUE_TAKING_OPTIONS const and the --help block must both list
+    // every capture option, or `--capture-dir --version` style detection
+    // silently drifts (see the CROSS-REFERENCE comment in main.rs).
+    let main = repo_file("src/main.rs");
+    let value_list = main
+        .split("const VALUE_TAKING_OPTIONS: &[&str] = &[")
+        .nth(1)
+        .and_then(|s| s.split("];").next())
+        .unwrap_or_default();
+    let help_block = main
+        .split("Usage: serial-mcp [OPTIONS]")
+        .nth(1)
+        .and_then(|s| s.split("Commands:").next())
+        .unwrap_or_default();
+    for opt in [
+        "--capture-dir",
+        "--capture-max-file-bytes",
+        "--capture-max-total-bytes",
+        "--capture-max-files",
+    ] {
+        assert!(
+            value_list.contains(opt),
+            "VALUE_TAKING_OPTIONS must contain {opt}"
+        );
+        assert!(help_block.contains(opt), "--help block must document {opt}");
+    }
 }
 
 fn collect_versions(v: &serde_json::Value, out: &mut Vec<String>) {

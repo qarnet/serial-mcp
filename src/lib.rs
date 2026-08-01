@@ -1,12 +1,15 @@
 pub mod buffer_budget;
+pub mod capture_store;
 pub(crate) mod checksums;
 pub mod codec;
 pub mod error;
 pub mod framing;
+pub(crate) mod learning;
 pub mod limits;
 pub mod log_buffer;
 pub mod match_config;
 pub(crate) mod precedence;
+pub mod profile_store;
 pub mod profiles;
 pub mod prompts;
 pub mod resources;

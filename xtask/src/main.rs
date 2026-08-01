@@ -31,11 +31,20 @@
 //!   Print the on-disk paths the test orchestrator resolves for the
 //!   serial-mcp binary and the firmware binary.
 //!   Useful for debugging test wiring and for AGENTS.md cross-checks.
+//!
+//! - `xtask agent-eval [--output-dir PATH] [--baseline PATH] [--write-baseline PATH]`
+//!   Run the deterministic agent-interface evaluation (Phase 4): catalog
+//!   bytes from the live `tools/list` catalog plus fixed call-shape
+//!   scenarios, then fixed decision thresholds. Writes `report.json` and
+//!   `report.md` under `target/agent-interface-eval/` by default. No
+//!   network, user config, or timestamps.
 
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result};
+
+mod agent_eval;
 
 const SERIAL_MCP_BIN: &str = "serial-mcp";
 const PLAIN_VARIANT: &str = "native_sim";
@@ -56,6 +65,7 @@ fn real_main() -> Result<()> {
         "test" => test(rest, false),
         "test-all" => test(rest, true),
         "print-paths" => print_paths(),
+        "agent-eval" => agent_eval(rest),
         "help" | "-h" | "--help" => {
             print_help();
             Ok(())
@@ -66,6 +76,35 @@ fn real_main() -> Result<()> {
             std::process::exit(2);
         }
     }
+}
+
+/// Parse `agent-eval` flags: `--output-dir <path>`, `--baseline <path>`,
+/// `--write-baseline <path>` (each optionally `--flag=<path>`).
+fn agent_eval(rest: &[String]) -> Result<()> {
+    let mut options = agent_eval::EvalOptions::default();
+    let mut it = rest.iter();
+    while let Some(arg) = it.next() {
+        let (flag, inline) = arg
+            .split_once('=')
+            .map(|(f, v)| (f, Some(v.to_string())))
+            .unwrap_or((arg.as_str(), None));
+        let mut value = || -> Result<String> {
+            match inline.clone() {
+                Some(v) => Ok(v),
+                None => it
+                    .next()
+                    .cloned()
+                    .with_context(|| format!("{flag} requires a value")),
+            }
+        };
+        match flag {
+            "--output-dir" => options.output_dir = Some(PathBuf::from(value()?)),
+            "--baseline" => options.baseline = Some(PathBuf::from(value()?)),
+            "--write-baseline" => options.write_baseline = Some(PathBuf::from(value()?)),
+            other => anyhow::bail!("unknown agent-eval flag: {other}"),
+        }
+    }
+    agent_eval::run(&options)
 }
 
 fn print_help() {
@@ -80,6 +119,9 @@ SUBCOMMANDS:
     test                Run unit + process-level integration tests
     test-all            Like 'test', plus the spawned-binary HTTP suite
     print-paths         Print the resolved test-asset paths
+    agent-eval          Run the deterministic agent-interface evaluation
+                        (--output-dir PATH, --baseline PATH,
+                        --write-baseline PATH)
     help                Print this message
 "
     );

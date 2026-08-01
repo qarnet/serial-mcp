@@ -17,42 +17,25 @@
 
 ## Near-term
 
-### `configure` tool + option-surface trim ✅ **Shipped in v0.8.1**
-- The `configure` tool landed with two modes: profile (persist to TOML) and connection (live mutation of framing/parser/protocol/reconnect_policy/max_buffered_bytes/poll_interval_ms defaults). `log_capacity`/`log_enabled`/`rx_buffer_size`/serial-line params are profile-only (LogBuffer has no live setters; ring is fixed at open).
-- `max_buffered_bytes` (read) and `poll_interval_ms` (subscribe) are now connection defaults, removed from per-call `ReadArgs`/`SubscribeArgs`.
-- `ProfileDefaults` extended with `max_buffered_bytes` (32768), `poll_interval_ms` (200), `reconnect_policy`, `log_capacity` (1024), `log_enabled` (true).
-- `rx_framing`/`rx_parser`/`protocol` remain per-call on `ReadArgs`/`SubscribeArgs` (can still override per call).
-- `save_profile` `rx_buffer_size` snapshot bug fixed — now reads from live `RxSession` ring capacity.
-
 ### Local-only usage statistics for development
 - collect local metadata on tool-call frequency, stop-reason
   distribution, option-usage frequency (which `from` variants agents
   actually pick, how often `match`/`framing` options get used, average
-  `max_buffered_bytes` actually requested, etc.) to drive evidence-based
-  decisions on which options to keep, trim, or default differently
+  `max_buffered_bytes` / `poll_interval_ms` actually configured, etc.) to
+  drive evidence-based decisions on which options to keep, trim, or default
+  differently
 - strictly local: write to a file on the host (e.g. under
   `~/.local/share/serial-mcp/` or a configured path), never transmit
   over the network, no telemetry, no remote endpoint, opt-out by
   default with an explicit enable
 - the goal is development insight (which tools/options are dead weight,
   which defaults are wrong), not user tracking — design the schema
-  around questions we actually want to answer ("is `from: now` used
+  around questions we actually want to answer ("is `from: {"type":"now"}` used
   enough to justify keeping it?", "do agents ever set
   `poll_interval_ms`?")
-- pairs with the `configure` tool + option-surface trim above: the
-  stats inform which fields to cut, and cutting fields makes the
-  remaining stats cleaner
-
-### `transact` tool (write-then-await-response) ✅ **Shipped in v0.8.1**
-- one tool call: write, then await match/frames/timeout — the
-  request/response primitive for AT, Modbus, GRBL-style traffic
-- default `from: "now"` skips pre-write buffered backlog; composes existing
-  write + read plumbing in `src/tools/io_ops.rs`
-
-### `compute_checksum` utility tool ✅ **Shipped in v0.8.1**
-- pure tool: compute xor (NMEA-0183) and lrc (Modbus ASCII) checksums over
-  caller-supplied bytes (utf8/hex/base64 in, hex + integer out)
-- lives in `src/tools/utility_ops.rs`; uses `crate::checksums::` primitives
+- pairs with the shipped `configure` tool + connection-default trim (the
+  stats inform which fields to cut, and cutting fields makes the remaining
+  stats cleaner)
 
 ### Declarative checksums on generic framing
 - a `checksum: { algorithm, ... }` option on `Delimiter` / `LengthPrefixed` /
@@ -89,12 +72,6 @@
   wants the validation outcome (drop+count vs. stream-fatal vs. emit-with-
   flag) driven by the parser's declared checksum width, not a match on the
   error variant.
-
-### Profile-configurable reconnect policy
-- let profiles set the (already shipped and enforced) per-connection
-  `ReconnectPolicy` — carried over from the removed `ProfileDefaults.reconnect_policy`
-  string field, which was never wired up
-- pure wiring: profile field → `open_profile` → existing policy
 
 ### Config import/export
 - likely pairs with profiles (already shipped)
@@ -165,8 +142,8 @@
 ### GRBL / G-code preset
 - line-based `ok`/`error` protocol; popular real-world target (CNC, laser,
   3D-printer controllers)
-- becomes nearly free once TX pacing and the `transact` tool (§ Near-term)
-  exist — implement after those
+- becomes nearly free once TX pacing lands — the `transact` tool already
+  ships; implement after pacing
 
 ### Multiple public subscriptions per connection
 - useful if explicit session model grows later
@@ -185,8 +162,8 @@
 - can become huge if designed poorly; can conflict with simpler read/write model
 - conservative first design if pursued: JSON transaction steps only, bounded
   step types, no shell access, deterministic transcript output
-- the `transact` tool (§ Near-term) is the minimal kernel of this — ship it
-  first and revisit whether scripting is still needed
+- the shipped `transact` tool is the minimal kernel of this — revisit
+  whether scripting is still needed
 
 ### Filtering/search across captures
 - unclear value — maybe an LLM can use grep/glob instead
@@ -195,6 +172,12 @@
 ### Recording + replay
 - useful but niche: reproducible bugs, test fixtures from real hardware,
   decoder/parser regression tests
+- **The safe persistent capture foundation shipped** (disabled-by-default
+  `--capture-dir` store, portable filename-only `export_log`, quotas,
+  no-overwrite atomic commits, advisory locks) — a prerequisite, not the
+  feature. Continuous raw capture lifecycle is specified (NOT implemented)
+  in [safe-continuous-capture-design.md](safe-continuous-capture-design.md);
+  recommendation: do not implement until concrete task evidence.
 
 ### RS-485 options
 - half-duplex bus semantics, direction control timing, RTS-based send control
@@ -246,32 +229,32 @@
 Non-feature work, roughly in suggested order. From the 2026-07-05 repo review.
 
 ### Split `src/framing.rs` into a module tree
-- at ~5.5k lines (config types, two codecs, six parsers, decoder state
-  machine, ~3.4k lines of tests) the single file is past its scaling limit
+- a single file holds config types, two codecs, six parsers, the decoder
+  state machine, and a test region of its own — past its scaling limit
 - target shape: `framing/` with `config.rs`, `decoder.rs`, `codecs.rs`,
   `parsers/`, tests alongside their subjects
 - major rework — sequence AFTER the review-hardening work that rewrites
   chunks of the same file; a split first would create painful conflicts
 
 ### Split `src/serial.rs` and `src/tools/helpers.rs`
-- `src/serial.rs` (~2.2k lines) holds `SerialConnection` (29 fields),
-  `ConnectionManager`, `ConnectionConfig`, six enums, `PortInfo`, the
-  `SerialIo` trait, and a `test_support` module — god-file; split into
-  `serial/config.rs`, `serial/connection.rs`, `serial/manager.rs`,
-  `serial/port_info.rs`, `serial/test_support.rs`
-- `src/tools/helpers.rs` (~1.5k lines) mixes validation, ring driving,
-  result building, sinks, encoding fallback, and open-arg parsing —
-  split into `tools/rx_validate.rs`, `tools/read_loop.rs`,
-  `tools/result_builders.rs`; the 0.8.0 `frame_outcome_to_stop` and
-  `advance_cursor` helpers are the first step in that direction
-- `read_bytes_from_ring` (~674 lines pre-polish, now leaner) and
-  `stream_rx_from_ring` (~395 lines) are the longest functions in the
-  codebase; further decompose into `read_initial_slice` /
-  `read_wait_loop` / `handle_frame_outcome` once the god-file split
-  unblocks finer module boundaries
+- `src/serial.rs` holds `SerialConnection`, `ConnectionManager`,
+  `ConnectionConfig`, six enums, `PortInfo`, the `SerialIo` trait, and a
+  `test_support` module — god-file; split into `serial/config.rs`,
+  `serial/connection.rs`, `serial/manager.rs`, `serial/port_info.rs`,
+  `serial/test_support.rs`
+- `src/tools/helpers.rs` mixes validation, ring driving, result building,
+  sinks, encoding fallback, and open-arg parsing — split into
+  `tools/rx_validate.rs`, `tools/read_loop.rs`, `tools/result_builders.rs`;
+  `frame_outcome_to_stop` and the shared-cursor wrapper around
+  `read_from_private_cursor` are the first step in that direction
+- `read_from_private_cursor` (the extracted read core in `helpers.rs`) and
+  `stream_rx_from_ring` (`stream_ops.rs`) are the longest functions in the
+  codebase; further decompose into `read_initial_slice` / `read_wait_loop` /
+  `handle_frame_outcome` once the god-file split unblocks finer module
+  boundaries
 
 ### `UInt` newtype to kill schemars `uint_schema` boilerplate
-- 112 `#[schemars(schema_with = "crate::schema_helpers::uint_schema")]`
+- per-field `#[schemars(schema_with = "crate::schema_helpers::uint_schema")]`
   annotations are sprinkled across the tree, with a documented
   regression history (b12b09fd, bc37a0b0, PortInfo miss) — missing one
   is a known bug vector
@@ -329,6 +312,19 @@ Non-feature work, roughly in suggested order. From the 2026-07-05 repo review.
   following the `config_schema_validation` precedent in `ci.yml`, so doc
   drift is its own visible, required check
 
+### Vendor the `models.dev` model schema for hermetic schema tests
+- `schemas/opencode.schema.json` refs
+  `https://models.dev/model-schema.json#/$defs/Model` externally; the
+  `jsonschema` crate resolves external refs eagerly in `validator_for`, so
+  the network-less Nix build sandbox cannot compile it
+- until vendored, `flake.nix`'s source filter excludes
+  `schemas/opencode.schema.json` from the Nix source — that fixture still
+  silently skips in `nix flake check` (network-enabled CI covers it), while
+  the self-contained Claude Code / Codex fixtures now validate for real
+- follow-up: vendor `model-schema.json` under `schemas/`, rewrite the four
+  `$ref`s to a local resource, and register it in the validator so the test
+  is hermetic on every runner (see the filter comment in `flake.nix`)
+
 ### Toolchain single source of truth
 - `rust-toolchain.toml` pins 1.88.0 while workflows install
   `dtolnay/rust-toolchain@stable`; rustup resolves the pin correctly but the
@@ -339,7 +335,7 @@ Non-feature work, roughly in suggested order. From the 2026-07-05 repo review.
 
 ### Windows e2e test path — investigate
 - CI builds and unit-tests Windows, but the native_sim e2e suite is
-  Unix-only (PTY-based; 56 tests ignored on the Windows runner)
+  Unix-only (PTY-based; 57 tests ignored on the Windows runner)
 - investigate whether a Windows equivalent exists (e.g. com0com-style
   virtual port pairs, or a named-pipe loopback backend); there may be a
   sound reason this was skipped — document it if so, close the gap if not

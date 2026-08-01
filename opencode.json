@@ -28,11 +28,7 @@
     "serial-mcp": {
       "type": "local",
       "command": [
-        "./scripts/opencode-mcp-clean-env",
-        "nix",
-        "run",
-        ".#serial-mcp-dev",
-        "--",
+        "serial-mcp-dev",
         "--allowlist=/dev/ttyACM*,/dev/ttyUSB*,/dev/pts/*"
       ],
       "enabled": true
@@ -40,7 +36,6 @@
     "searxng": {
       "type": "local",
       "command": [
-        "./scripts/opencode-mcp-clean-env",
         "npx",
         "-y",
         "mcp-searxng@v1.0.5"

@@ -35,11 +35,18 @@ use super::binaries::{ensure_serial_mcp_built, serial_mcp_bin};
 
 /// A real `serial-mcp` HTTP server running in a child process on
 /// `127.0.0.1:<chosen>`. The child is killed on `Drop`.
+///
+/// Unless the caller supplies an explicit profiles path, the server runs
+/// against its own temporary profile directory (owned here and retained
+/// for the child's lifetime) so real-server tests never touch the user's
+/// actual default profile config.
 pub struct SpawnedServer {
     pub url: String,
     pub port: u16,
     child: Option<Child>,
     shutdown: CancellationToken,
+    /// Owned isolated profile directory when `start()` created one.
+    _profiles_dir: Option<tempfile::TempDir>,
 }
 
 /// Serializes the pick-port → spawn → wait-listening window across
@@ -54,13 +61,52 @@ static SPAWN_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 impl SpawnedServer {
     /// Build the binary if necessary, then spawn the server on a free
-    /// local port. Returns the URL (`http://127.0.0.1:<port>/mcp`) and
-    /// the chosen port.
+    /// local port with an isolated temporary `--profiles-path` (owned by
+    /// this struct for the child's lifetime). Returns the URL
+    /// (`http://127.0.0.1:<port>/mcp`) and the chosen port.
     pub async fn start() -> Self {
+        let dir = tempfile::TempDir::new().expect("temp dir for isolated profile store");
+        let path = dir.path().join("profiles.toml");
+        let mut server = Self::start_with_profiles_path(Some(&path)).await;
+        server._profiles_dir = Some(dir);
+        server
+    }
+
+    /// Like [`SpawnedServer::start`], but passes `--profiles-path <path>`
+    /// so the child uses the caller's isolated persistent profile store.
+    /// `None` leaves the default path resolution untouched (use only when
+    /// the caller explicitly wants the OS user-config default). The caller
+    /// owns the path's lifetime.
+    pub async fn start_with_profiles_path(profiles_path: Option<&std::path::Path>) -> Self {
+        Self::start_inner(profiles_path, None, None).await
+    }
+
+    /// Like [`SpawnedServer::start_with_profiles_path`], but runs the
+    /// child with `cwd` as its working directory — for relative
+    /// `--profiles-path` resolution tests.
+    pub async fn start_with_cwd(
+        cwd: &std::path::Path,
+        profiles_path: Option<&std::path::Path>,
+    ) -> Self {
+        Self::start_inner(profiles_path, Some(cwd), None).await
+    }
+
+    /// Like [`SpawnedServer::start`], but passes `--capture-dir <path>` so
+    /// the child enables persistent capture into the caller's directory.
+    /// The caller owns the directory's lifetime.
+    pub async fn start_with_capture_dir(capture_dir: &std::path::Path) -> Self {
+        Self::start_inner(None, None, Some(capture_dir)).await
+    }
+
+    async fn start_inner(
+        profiles_path: Option<&std::path::Path>,
+        cwd: Option<&std::path::Path>,
+        capture_dir: Option<&std::path::Path>,
+    ) -> Self {
         ensure_serial_mcp_built().expect("serial-mcp binary available for spawned server");
         let _guard = SPAWN_LOCK.lock().await;
         let port = pick_free_port().expect("find a free local TCP port for the spawned server");
-        let child = spawn_serial_mcp_http(port)
+        let child = spawn_serial_mcp_http(port, profiles_path, cwd, capture_dir)
             .await
             .expect("spawn serial-mcp --transport=http");
         // Wait until the listener is actually accepting. axum binds and
@@ -75,7 +121,22 @@ impl SpawnedServer {
             port,
             child: Some(child),
             shutdown,
+            _profiles_dir: None,
         }
+    }
+
+    /// Kill the child process and await its exit (reap the zombie).
+    /// After this the server is shut down; use it when a test must prove
+    /// that a fresh process can continue the same profile store.
+    pub async fn stop(&mut self) -> anyhow::Result<()> {
+        self.shutdown.cancel();
+        if let Some(mut child) = self.child.take() {
+            child
+                .start_kill()
+                .context("kill spawned serial-mcp process")?;
+            let _ = child.wait().await;
+        }
+        Ok(())
     }
 }
 
@@ -104,15 +165,31 @@ fn pick_free_port() -> Option<u16> {
     Some(port)
 }
 
-async fn spawn_serial_mcp_http(port: u16) -> Result<Child> {
+async fn spawn_serial_mcp_http(
+    port: u16,
+    profiles_path: Option<&std::path::Path>,
+    cwd: Option<&std::path::Path>,
+    capture_dir: Option<&std::path::Path>,
+) -> Result<Child> {
     let bin = serial_mcp_bin();
-    let child = Command::new(&bin)
+    let mut command = Command::new(&bin);
+    command
         .args(["--transport=http", &format!("--bind=127.0.0.1:{port}")])
         .env("RUST_LOG", "off")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .kill_on_drop(true)
+        .kill_on_drop(true);
+    if let Some(path) = profiles_path {
+        command.arg("--profiles-path").arg(path);
+    }
+    if let Some(dir) = capture_dir {
+        command.arg("--capture-dir").arg(dir);
+    }
+    if let Some(cwd) = cwd {
+        command.current_dir(cwd);
+    }
+    let child = command
         .spawn()
         .with_context(|| format!("failed to spawn {} for HTTP tests", bin.display()))?;
     Ok(child)

@@ -2,6 +2,7 @@
 
 | Version | Date | Highlights |
 |---|---|---|
+| [0.9.0](#090) | 2026-08-01 | process-wide versioned `ProfileStore` + automatic high-confidence profile sessions (generated/reused, open overlay, observable bindings); write-through profile learning with revision-CAS/conflict/stale/close retry; `rollback_profile` + deletion guard; `list_ports` `profile_matches` discovery; decision-tree teaching + deterministic agent evaluator; atomic pump-gated cancellation-safe `capture_boot`; disabled-by-default `CaptureStore` with CLI quotas + no-clobber `export_log` (breaking: arbitrary paths removed); `flush(both)` RX backlog fix; tool count 25 → 27 |
 | [0.8.1](#081) | 2026-07-19 | `configure` tool (profile + live-connection modes), `compute_checksum` tool (xor + lrc), `transact` tool (write-then-read); `max_buffered_bytes` and `poll_interval_ms` moved from per-call to connection defaults (via `ProfileDefaults` + `configure`); `save_profile` `rx_buffer_size` snapshot bug fixed; tool count 22 → 25 |
 | [0.8.0](#080) | 2026-07-08 | RX ring buffer redesign: always-on pump + `RxRing` capture from open to close; `read` cat semantics (buffered bytes immediately + `peek` + offset fields); `seek` tool (non-destructive cursor move); `subscribe` cursor follower with `from` history replay + `bytes_lost` gap reporting; `flush(input)` ring clear; `get_status` ring fields; `open` `rx_buffer_size` (256 KiB default); `ConsumerRegistry`/`RxEvent` fanout deleted; unified read/subscribe semantics; budget ring at open |
 | [0.7.4](#074) | 2026-07-07 | `server.json` becomes a packages-less registry template (publish workflow generates release URLs + hashes; drift guard forbids committed `packages`) |
@@ -92,6 +93,176 @@
 - `StreamHandle` `unsafe` block replaced with `Option<JoinHandle>::take()`.
 - `advance_cursor` helper extracts the 16× cursor-clamp duplication.
 - Tool count drops from 23 → 22 (`seek` removed, folded into `read`).
+
+## [Unreleased]
+
+## [0.9.0]
+
+**Breaking (pre-1.0) — `export_log` no longer accepts arbitrary output paths.**
+
+### Added
+- **Process-wide versioned `ProfileStore`** — profiles move from a
+  handler-local vector to one `Arc<ProfileStore>` shared by every stdio and
+  HTTP session. Persistent mutations serialize behind a process-local async
+  mutex, run in `spawn_blocking` under an advisory `<file>.lock`, reload the
+  file under that lock (separate server processes cannot lose each other's
+  updates), and commit atomically (`NamedTempFile` + `sync_all` + rename);
+  the in-memory cache is published from inside the transaction only after
+  the durable write succeeds. The file format gains `schema_version` (legacy
+  unversioned TOML migrates as v1; version 0 or > 2 rejects startup).
+  `Profile` gains metadata (revision, created/updated/last-used timestamps,
+  generated flag, use count) and a bounded 5-snapshot revision history. New
+  `--profiles-path` CLI option; the OS user-config default no longer
+  silently falls back to the current working directory.
+- **Automatic high-confidence profile sessions** — a bare `open` of a
+  uniquely identified USB device (transport + VID + PID + non-empty serial,
+  interface when available) creates a durable generated profile
+  (`auto-{label}`, revision 1, use count 1) whose defaults equal the
+  effective open settings; close/reopen automatically selects the unique
+  most-recently-used profile for the same device. Equal top ranks are
+  reported as ambiguity with candidates, never vector-order selection;
+  weak identity and duplicate live fingerprints open transient and never
+  write a durable profile; `profile_mode="none"` disables selection/
+  creation for troubleshooting. `open_profile` requires exactly one
+  matching live port (multiple matches are a tool error) and marks the
+  profile used.
+- **Open overlay and observable bindings** — `open` fields are an overlay
+  (explicit field > selected profile default > built-in 115200/8-N-1
+  defaults; omitted baud still resolves to 115200). Every successful
+  `open`/`open_profile` binds the connection to an observable profile
+  session reported in `OpenResult`, `GetStatusResult`, and
+  `ConnectionSummary` (`profile`: name, selection source, confidence,
+  persistent, generated, revision, dirty, candidates, last persistence
+  error).
+- **Write-through profile learning** — durable live changes
+  (`reconfigure`, `set_flow_control`, connection-mode `configure`, dirty
+  open overrides, clean close retry) hold a per-connection learning lock
+  across live mutation → `effective_defaults()` snapshot → revision-CAS
+  store update → binding update. Hardware success + persistence failure
+  stays a successful result with `state="failed"`, the binding turns
+  dirty, and the next durable mutation or clean close retries; hardware
+  failure keeps the tool error and never calls the store. Revision
+  conflicts are reported with profile + expected/actual revision; a stale
+  binding keeps reporting the conflict until reopened. Results carry
+  additive `profile` + `profile_persistence`
+  (`persisted`/`not_needed`/`transient`/`failed`).
+- **`rollback_profile` tool** (25 → 26) — restores any retained prior
+  revision (newest five snapshots, exposed via `list_profiles`
+  `revisions`) as a new monotonic revision with CAS on
+  `expected_revision`; a wrong or evicted revision is a tool error that
+  leaves the file unchanged. Same-process bound connections are marked
+  stale+dirty and counted in `active_connections_unchanged`.
+  `delete_profile` refuses while any same-process open connection binds
+  the profile (error lists connection IDs). `save_profile` promotes a
+  generated-bound connection to a user-owned profile (`generated=false`).
+- **`list_ports` discovery preview** — the result carries
+  `profile_matches` parallel to `ports` (same order, always present):
+  per-port `confidence` + `outcome`
+  (`selected`/`ambiguous`/`ineligible`/`duplicate`/`none`) and ordered
+  candidates. Read-only — no `mark_used`, no file writes; the
+  `serial://ports` resource serves the same map.
+- **Decision-tree teaching + deterministic agent evaluator** — server
+  `instructions`, the 12 common tool descriptions, README flow, and both
+  prompts teach the discover (`list_ports`) → open (bare `open`) →
+  talk (`transact`/`read`/`write`) → verify learned `profile`/
+  `profile_persistence` → escalate-on-demand decision tree. New xtask
+  `agent-eval` subcommand measures the tool surface deterministically (no
+  network, user config, or timestamps): catalog + fixed scenarios with
+  byte metrics and fixed acceptance thresholds against a committed
+  baseline. Decisions: automatic profiles, `transact`, and atomic
+  `capture_boot` accepted; string shorthand, initial recipes, and a
+  versioned facade rejected (modeled, not implemented).
+- **`capture_boot` tool** (26 → 27) — one bounded, cancellation-safe
+  operation replacing the racy arm-reset-read composition: purge unread OS
+  input, mark the RX live edge atomically under the pump gate (an
+  in-flight pre-reset pump read can never append after the mark), optionally
+  pulse DTR/RTS under the per-connection control lock with guaranteed
+  release (`ResetReleaseGuard`, drop-time retry through the public
+  `set_dtr_rts`; closed ports count as released), then capture only
+  post-mark bytes through the existing read pipeline with a private
+  cursor. Bounded in-memory result, no file output; omitted/null
+  `timeout_ms` resolves to 5000 ms; capture is transient (no profile
+  learning).
+- **Safe persistent capture foundation** — `export_log` now persists the
+  event log as a bounded, atomic JSONL snapshot through a disabled-by-default
+  `CaptureStore` (`src/capture_store.rs`), enabled only with an explicit
+  absolute `--capture-dir`. Per-file (`--capture-max-file-bytes`, default
+  16 MiB), total-byte (`--capture-max-total-bytes`, default 256 MiB), and
+  file-count (`--capture-max-files`, default 256) quotas are enforced from a
+  fresh scan of the root's direct children under a process-local mutex and an
+  advisory cross-process lock (`.serial-mcp-captures.lock`). Startup validates
+  the root (absolute, existing directory, not a symlink, working lock) and the
+  quota relation; quota options without `--capture-dir` are startup errors.
+  Tool count unchanged (27).
+
+### Changed
+- **Breaking:** `export_log` no longer writes to an arbitrary caller-supplied
+  path. `path` is now a portable `.jsonl` filename (ASCII, 1–120 chars,
+  alphanumeric/`.`/`_`/`-`, `.jsonl` suffix, no separators/traversal,
+  Windows-reserved stems rejected) relative to the configured capture
+  directory. Existing destinations are never overwritten (`persist_noclobber`,
+  symlinks rejected). Result is additive: `bytes_written`, `files_used`, and
+  `total_bytes_used` join `events_written`, `path` reports the canonical
+  absolute final file, and a POST-commit Unix root-directory sync failure
+  is reported in optional `durability_warning` (the file is committed and
+  counted, never deleted); pre-commit failures still create no file.
+- The profile file format is now schema-versioned.
+  Legacy unversioned TOML migrates in memory to v1; a missing/unavailable
+  config dir, corrupt file, or unsupported future version fails startup
+  instead of silently starting empty.
+
+### Fixed
+- `flush(target="both")` now also discards the retained RX ring and clamps
+  the shared read cursor to the live edge — identical RX semantics to
+  `flush(target="input")`, routed through one shared helper.
+- Profile store race and cancellation hardening: `configure(profile)` no
+  longer has a TOCTOU window against concurrent deletes
+  (`update_defaults_preserving_selector` returns the effective profile from
+  the same locked transaction); the shared cache is an
+  `Arc<RwLock<Vec<Profile>>>` published from inside the blocking
+  transaction, so a cancelled awaiting tool can never leave disk updated
+  with a stale in-memory view.
+- Binding fixes: `open_profile` reports the matched port's own identity
+  confidence; selected-profile `dirty` is computed before hardware open
+  (invalid defaults fail the call instead of mapping to clean); a missing
+  binding after a successful open errors instead of silently losing the
+  profile.
+- Learning review fixes: learned no-ops (CAS no-op) republish the fresh
+  disk state to the cache without rewriting the file; `save_profile` holds
+  the connection learning lock across snapshot + upsert so concurrent
+  reconfigure/configure cannot yield a mixed snapshot.
+- Capture review fixes: the release guard is disarmed only on a successful
+  release, so a cancelled capture with a failed release attempt retries at
+  drop through the public `set_dtr_rts` (queued on the control lock); the
+  control lock is scoped to the pulse only, dropped before settle/read;
+  the per-file quota is checked before the mutex + blocking work;
+  `persist_noclobber` failures report the OS error cause-neutrally
+  (the existing-destination precheck still identifies that case); a
+  root-sync failure after a successful commit is a POST-commit
+  `durability_warning`, never a false failure.
+- Generated tool schemas now document the tagged `from` wire forms
+  (`{"type":"now"}` / `{"type":"cursor"}` / `{"type":"buffer_start"}` /
+  `{"type":"offset","offset":N}`) instead of bare string descriptions.
+
+### Documentation/Internal
+- Nix: the Nordic toolchain environment is scoped to the `nix-nrf-dev` dev
+  shell — the shell stays clean (no `LD_LIBRARY_PATH`/`PYTHONHOME`/
+  `PYTHONPATH`/`GIT_EXEC_PATH` pollution from the sdk-manager); the `west`
+  wrapper loads `nrfutil sdk-manager toolchain env` per command.
+- Nix source-filter fixes: the `docs/` tree is included in the flake source
+  filter so doc-drift fixtures build under `nix flake check`; the
+  `schemas`/`example-configs` prefixes match the leading-slash `relPath`
+  so vendored config fixtures actually validate in the sandbox (the
+  opencode schema stays excluded — eager network fetch, documented tech
+  debt).
+- Development docs consolidated: `docs/development/agent-interface-
+  evaluation.md` (current 27-tool catalog, 286285 bytes) replaces the
+  per-phase evaluation notes; the historical baseline remains for deterministic
+  comparisons. Phase handoffs, the
+  agent-interface simplification plan, and the nix-nrf-dev migration
+  plans are removed; README + AGENTS.md updated for the profile-session,
+  capture, and learning contracts.
+- Tool count 25 → 27 (`rollback_profile`, `capture_boot`).
 
 ## [0.8.1]
 

@@ -42,6 +42,11 @@ pub struct RxSession {
     connection: Arc<SerialConnection>,
     pump_task: StdMutex<Option<JoinHandle<()>>>,
     pump_token: StdMutex<CancellationToken>,
+    /// Async pump gate (Phase 5): the pump holds this across one complete
+    /// read + ring append. `capture_boot` acquires the same gate so its mark
+    /// cannot race an in-flight pump read/append — a byte physically read
+    /// before the reset can never append after the mark.
+    pump_gate: Arc<AsyncMutex<()>>,
     /// Per-connection ring buffer capturing all RX bytes from open to close.
     ring: Arc<RxRing>,
     /// Shared read cursor for `read`/`flush`. Absolute u64 offset.
@@ -80,6 +85,7 @@ impl RxSession {
             connection,
             pump_task: StdMutex::new(None),
             pump_token: StdMutex::new(CancellationToken::new()),
+            pump_gate: Arc::new(AsyncMutex::new(())),
             ring: Arc::new(RxRing::new(ring_capacity)),
             read_cursor: StdMutex::new(0),
             ring_capacity,
@@ -111,6 +117,15 @@ impl RxSession {
     /// Ring capacity in bytes.
     pub(crate) fn ring_capacity(&self) -> usize {
         self.ring_capacity
+    }
+
+    /// Acquire the pump gate (Phase 5): waits for any in-flight pump
+    /// read+append to finish, then blocks the pump from reading again until
+    /// the returned guard is dropped. `capture_boot` holds this across the
+    /// OS-input purge, the live-edge mark, and the reset-line assertion so
+    /// bytes predating the mark can never be appended after it.
+    pub(crate) async fn pump_gate_guard(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.pump_gate.lock().await
     }
 
     /// Ensure the pump task is running. Idempotent.
@@ -146,7 +161,8 @@ impl RxSession {
             .expect("pump_token mutex poisoned")
             .clone();
         let ring = Arc::clone(&self.ring);
-        let handle = tokio::spawn(pump_loop(connection, token, ring));
+        let pump_gate = Arc::clone(&self.pump_gate);
+        let handle = tokio::spawn(pump_loop(connection, token, ring, pump_gate));
         *task_slot = Some(handle);
         debug!("rx_session: pump started for {}", self.connection_id);
     }
@@ -205,7 +221,17 @@ impl RxSession {
 /// until the connection state returns to `Open` (reconnect succeeded) or
 /// `Closed` (reconnect exhausted/disabled). The ring persists across
 /// disconnect/reconnect cycles — `end_offset` is monotonic.
-async fn pump_loop(connection: Arc<SerialConnection>, token: CancellationToken, ring: Arc<RxRing>) {
+///
+/// The pump holds `pump_gate` across one complete read + ring append and
+/// releases it before the disconnect pause/sleep. `capture_boot` acquires
+/// the same gate to establish an atomic live-edge mark (Phase 5): a byte
+/// physically read before the mark can never be appended after it.
+async fn pump_loop(
+    connection: Arc<SerialConnection>,
+    token: CancellationToken,
+    ring: Arc<RxRing>,
+    pump_gate: Arc<AsyncMutex<()>>,
+) {
     let conn_id = connection.id().to_string();
     let mut buf = vec![0u8; RxSession::PUMP_READ_SIZE];
     info!("rx_session: pump entered for {conn_id}");
@@ -214,6 +240,9 @@ async fn pump_loop(connection: Arc<SerialConnection>, token: CancellationToken, 
         if token.is_cancelled() {
             break;
         }
+        // Gate held across the read AND the ring append: this is the
+        // atomic unit capture_boot waits on.
+        let gate = pump_gate.lock().await;
         let read_result = tokio::select! {
             _ = token.cancelled() => break,
             res = connection.read(&mut buf, Some(100)) => res,
@@ -221,6 +250,7 @@ async fn pump_loop(connection: Arc<SerialConnection>, token: CancellationToken, 
         match read_result {
             Ok(0) | Err(crate::error::SerialError::ReadTimeout) => {
                 // No data this cycle. Keep running.
+                drop(gate);
                 continue;
             }
             Ok(n) => {
@@ -229,6 +259,7 @@ async fn pump_loop(connection: Arc<SerialConnection>, token: CancellationToken, 
 
                 // Append to the ring (capture all bytes).
                 ring.append(&chunk);
+                drop(gate);
             }
             Err(e) => {
                 error!("rx_session: read error on {conn_id}: {e}");
@@ -241,7 +272,9 @@ async fn pump_loop(connection: Arc<SerialConnection>, token: CancellationToken, 
                     connection
                         .mark_disconnected(format!("Read error: {e}"))
                         .await;
-
+                    // Release the gate before the pause/sleep loop so
+                    // capture_boot cannot block behind a paused pump.
+                    drop(gate);
                     // Pause: wait for reconnect or close. The ring persists
                     // across disconnect/reconnect — offsets stay monotonic.
                     let pause_start = std::time::Instant::now();

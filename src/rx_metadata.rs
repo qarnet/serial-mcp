@@ -1,6 +1,6 @@
 //! Shared RX stop metadata for all serial data tools.
 //!
-//! Every tool that consumes from the RX session (`read`, `wait_for`,
+//! Every tool that consumes from the RX session (`read`, `transact`,
 //! `subscribe`) produces the same stop metadata vocabulary so clients can
 //! reason about why an operation ended and whether the result was truncated.
 
@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "snake_case")]
 pub enum RxStopReason {
     /// Operation completed its data collection window (first-byte settle for
-    /// `read`, or pattern found / max_bytes reached for `wait_for`).
+    /// `read`, or pattern found / max_bytes reached for `read(match=...)`).
     DataComplete,
     /// The requested timeout elapsed before the operation could finish normally.
     Timeout,

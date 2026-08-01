@@ -1,11 +1,11 @@
 [package]
 name = "serial-mcp"
-version = "0.8.1"
+version = "0.9.0"
 edition = "2021"
 authors = [
     "Thomas Kirschner <thomaskirschner85@yahoo.de>",
 ]
-description = "MCP server for serial port communication. 25 tools (list/open/read/write/transact/subscribe/get_status/reconfigure/list_profiles/open_profile/save_profile/delete_profile/configure/get_log/clear_log/export_log/reconnect/compute_checksum/...), resources, prompts, task cancellation, stdio + streamable-HTTP transports."
+description = "MCP server for serial port communication. 27 tools (list/open/read/write/transact/capture_boot/subscribe/get_status/reconfigure/list_profiles/open_profile/save_profile/delete_profile/configure/rollback_profile/get_log/clear_log/export_log/reconnect/compute_checksum/...), resources, prompts, task cancellation, stdio + streamable-HTTP transports."
 license = "MIT"
 readme = "README.md"
 repository = "https://github.com/qarnet/serial-mcp"
@@ -35,6 +35,7 @@ pico-args = { version = "0.5.0", features = ["eq-separator"] }
 toml = "0.8"
 dirs = "6"
 tempfile = "3"
+fs2 = "0.4.3"
 
 [[bin]]
 name = "serial-mcp"

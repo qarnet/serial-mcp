@@ -374,16 +374,21 @@ async fn native_close_while_read_active_returns_close_error() {
     close_connection(&client, &id).await;
 
     let read_result = reader.await.unwrap().expect("read task join");
-    // Under the ring, the read returns normally (no error).
+    // Under the ring, the read returns a normal structured result (never a
+    // tool error). The stop reason depends on timing: buffered bytes ->
+    // "drained", a late timeout -> "timeout", or the close interrupting the
+    // wait loop -> "connection_closed" (the test's own docstring above).
     assert_eq!(
         read_result.is_error,
         Some(false),
-        "expected read to succeed (drained), got: {read_result:?}"
+        "expected a normal read result, got: {read_result:?}"
     );
     let s = read_result.structured_content.expect("structured");
     assert!(
-        s["stop_reason"] == json!("drained") || s["stop_reason"] == json!("timeout"),
-        "expected drained or timeout, got: {s:?}"
+        s["stop_reason"] == json!("drained")
+            || s["stop_reason"] == json!("timeout")
+            || s["stop_reason"] == json!("connection_closed"),
+        "expected a normal structured stop reason, got: {s:?}"
     );
 
     client.cancel().await.ok();

@@ -20,7 +20,7 @@ pub struct InteractiveTerminalArgs {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub line_ending: Option<String>,
     /// Optional prompt the device emits at the end of each response
-    /// (e.g. "OK>", "$ "). Used by `wait_for` between commands.
+    /// (e.g. "OK>", "$ "). Used by `read(match=...)` between commands.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub device_prompt: Option<String>,
 }
