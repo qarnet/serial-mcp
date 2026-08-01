@@ -366,13 +366,15 @@ fn agent_config_readme_anchor_is_valid() {
 }
 
 #[test]
-fn features_md_marks_reconnect_policy_shipped() {
-    // The reconnect-policy profile wiring shipped in v0.8.1; the near-term
-    // item must no longer read as unbuilt.
+fn features_md_does_not_relist_shipped_items() {
+    // FEATURES.md is the roadmap/tech-debt file only. Shipped items
+    // (configure, transact, compute_checksum, reconnect policy, ...) must not
+    // be re-added there — CHANGELOG.md and AGENTS.md own shipped truth, and a
+    // shipped marker in the roadmap reads as unbuilt or goes stale.
     let features = repo_file("docs/development/FEATURES.md");
     assert!(
-        features.contains("Profile-configurable reconnect policy ✅"),
-        "FEATURES.md must mark the shipped reconnect-policy item"
+        !features.contains("✅ **Shipped"),
+        "FEATURES.md must not relist shipped items with a shipped marker"
     );
     assert!(
         !features.contains("pure wiring: profile field"),
