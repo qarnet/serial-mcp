@@ -531,7 +531,11 @@ fn sync_root_dir(_root: &Path) -> Result<(), String> {
 /// Test-only injection point proving the post-commit durability contract:
 /// a forced root-sync failure must surface as
 /// [`CaptureWriteResult::durability_warning`], never as a failed commit.
-#[cfg(test)]
+///
+/// Unix-only: `sync_root_dir` is a no-op elsewhere, so only the Unix test
+/// path reads this static (keeping it compiled on non-Unix would trip
+/// `-D warnings` on an unused item).
+#[cfg(all(test, unix))]
 static FAIL_ROOT_SYNC: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 #[cfg(test)]
@@ -722,11 +726,16 @@ mod tests {
     async fn write_new_commits_and_reports_usage() {
         let dir = tempfile::tempdir().unwrap();
         let store = CaptureStore::open(dir.path().to_path_buf(), limits()).unwrap();
+        // The store canonicalizes its root once (e.g. macOS /var -> /private/var),
+        // so assert against the canonical path rather than the tempdir's raw path.
+        let canonical_root = std::fs::canonicalize(dir.path()).unwrap();
+        assert_eq!(store.root(), Some(canonical_root.as_path()));
         let res = store
             .write_new("boot.jsonl".into(), b"line1\n".to_vec())
             .await
             .unwrap();
-        assert!(res.path.starts_with(dir.path()));
+        assert_eq!(res.path.parent(), Some(canonical_root.as_path()));
+        assert!(res.path.starts_with(&canonical_root));
         assert_eq!(res.path.file_name().unwrap(), "boot.jsonl");
         assert_eq!(res.bytes_written, 6);
         assert_eq!(res.files_used, 1);
