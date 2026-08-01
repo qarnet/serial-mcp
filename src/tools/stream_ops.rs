@@ -377,12 +377,13 @@ enum RawChunkDelivery {
     /// Chunk delivered to the client; the caller adds its raw byte length to
     /// `total_returned`, then processes the existing stop outcome.
     Sent,
-    /// True encode+hex failure: the error notification was emitted (or the
-    /// peer failed while emitting it) and the chunk was dropped. The caller
-    /// continues without advancing the private cursor.
+    /// True encode+hex failure: the error notification was delivered and the
+    /// chunk was dropped. The caller continues without advancing the private
+    /// cursor.
     EncodingDropped,
-    /// Peer went away while emitting the chunk or the error notification.
-    /// The caller stops with `peer_disconnected`.
+    /// Peer went away while emitting either the normal chunk or the
+    /// encoding-error notification. The caller stops with
+    /// `peer_disconnected`.
     PeerDisconnected,
 }
 
