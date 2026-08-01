@@ -9,10 +9,11 @@ use crate::learning;
 use crate::profiles::ProfilePersistenceOperation;
 use crate::serial::{ConnectionManager, FlushTarget, SerialConnection};
 use crate::tools::helpers::{
-    build_read_result, clamp_or_err, clamp_timeout_or_err, log_tool_err, lookup_connection,
-    map_budget_err, parse_encoding, read_from_private_cursor, require_min_or_err, MAX_READ_BYTES,
-    MAX_TIMEOUT_MS, MIN_READ_BYTES,
+    clamp_or_err, clamp_timeout_or_err, log_tool_err, lookup_connection, map_budget_err,
+    parse_encoding, require_min_or_err, MAX_READ_BYTES, MAX_TIMEOUT_MS, MIN_READ_BYTES,
 };
+use crate::tools::read_loop::read_from_private_cursor;
+use crate::tools::result_builders::build_read_result;
 use crate::tools::types::{
     CaptureBootArgs, CaptureBootResult, SendBreakArgs, SendBreakResult, SetDtrRtsArgs,
     SetDtrRtsResult, SetFlowControlArgs, SetFlowControlResult,

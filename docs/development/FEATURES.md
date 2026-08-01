@@ -228,17 +228,13 @@
 
 Non-feature work, roughly in suggested order. From the 2026-07-05 repo review.
 
-### Split `src/tools/helpers.rs`
-- `src/tools/helpers.rs` mixes validation, ring driving, result building,
-  sinks, encoding fallback, and open-arg parsing — split into
-  `tools/rx_validate.rs`, `tools/read_loop.rs`, `tools/result_builders.rs`;
-  `frame_outcome_to_stop` and the shared-cursor wrapper around
-  `read_from_private_cursor` are the first step in that direction
-- `read_from_private_cursor` (the extracted read core in `helpers.rs`) and
-  `stream_rx_from_ring` (`stream_ops.rs`) are the longest functions in the
-  codebase; further decompose into `read_initial_slice` / `read_wait_loop` /
-  `handle_frame_outcome` once the god-file split unblocks finer module
-  boundaries
+### Decompose the longest read/stream functions
+- `read_from_private_cursor` (`src/tools/read_loop.rs`) and
+  `stream_rx_from_ring` (`src/tools/stream_ops.rs`) are the longest functions
+  in the codebase; further decompose into `read_initial_slice` /
+  `read_wait_loop` / `handle_frame_outcome` now that the tool-helper split
+  (`tools/rx_validate.rs`, `tools/read_loop.rs`, `tools/result_builders.rs`)
+  unblocked finer module boundaries
 
 ### `UInt` newtype to kill schemars `uint_schema` boilerplate
 - per-field `#[schemars(schema_with = "crate::schema_helpers::uint_schema")]`

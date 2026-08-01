@@ -135,7 +135,7 @@ pub fn disconnect_state(conn: &SerialConnection, ctrl: &mut RxStopController) ->
 /// corresponding `RxStopOutcome`. For `DecodeError`, records the error
 /// text in `frame_error_msg` and emits the `error!` log line.
 ///
-/// Shared by `read_bytes_from_ring` (helpers.rs) and
+/// Shared by `read_bytes_from_ring` (read_loop.rs) and
 /// `stream_rx_from_ring` (stream_ops.rs) so the FrameOutcome dispatch
 /// lives in one place.
 pub(crate) fn frame_outcome_to_stop(

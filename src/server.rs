@@ -689,7 +689,7 @@ impl SerialHandler {
     }
 }
 
-// ---- Tool helpers (extracted to src/tools/helpers.rs) -----------------------
+// ---- Tool catalog (tool logic extracted across src/tools/*.rs) -------------
 
 /// The full public MCP tool catalog exactly as served by `tools/list`.
 ///

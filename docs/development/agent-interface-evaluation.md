@@ -105,5 +105,5 @@ not modeled.
   real byte pipeline honestly, and the atomic-reset proof comes from the
   controlled `SerialIo` backend over the public HTTP MCP surface. rmcp's
   client discards post-cancel responses, so `stop_reason="cancelled"` is
-  proven at the unit level (`helpers.rs::cancelled_token_read_returns_structured_cancelled_outcome`)
+  proven at the unit level (`read_loop.rs::cancelled_token_read_returns_structured_cancelled_outcome`)
   while HTTP tests assert the observable release and control-lock release.

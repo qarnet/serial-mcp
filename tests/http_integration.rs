@@ -3282,7 +3282,7 @@ async fn capture_boot_cancellation_releases_lines_request_scoped() {
     // not whole-client teardown. Note: rmcp's client resolves its own
     // cancelled request handle with `Err(Cancelled)` and discards the server
     // response, so the structured `cancelled` outcome is proven at the unit
-    // level (helpers.rs) and the wire-level release is proven below.
+    // level (read_loop.rs) and the wire-level release is proven below.
     handle
         .peer
         .notify_cancelled(CancelledNotificationParam {
