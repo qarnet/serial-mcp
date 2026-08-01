@@ -1,14 +1,13 @@
 # Development Notes
 
-Index of the active development documentation. The post-0.9 refinement
-plan and its phase handoffs (Phases 1–8) were consumed and removed when the
-branch landed — commits preserve implementation history, and the
-consolidated evaluation below is the single current record.
+Index of active development documentation. Consumed implementation plans and
+phase handoffs are removed after their work completes; commits preserve that
+history, while durable behavior lives in `AGENTS.md`, the changelog, and the
+focused documents below.
 
 | Doc | What it is |
 |---|---|
 | [FEATURES.md](FEATURES.md) | Active roadmap + tech debt. Shipped items live in [CHANGELOG.md](../../CHANGELOG.md) and [AGENTS.md](../../AGENTS.md), not here. |
-| [code-cleanup-plan.md](code-cleanup-plan.md) | Completed behavior-preserving cleanup plan (implementation done, final gate passed, awaiting delivery review): shared TX transformations, RX readability, profile construction, and cross-platform test-harness consolidation. |
 | [protocol-matrix.md](protocol-matrix.md) | Support/status matrix for every protocol with a cited spec in `resources/`. |
 | [agent-interface-baseline.json](agent-interface-baseline.json) | Committed Phase 4 evaluator baseline (26 tools, 258964 bytes) — **historical**, kept so `xtask agent-eval --baseline` can diff the live catalog against it. |
 | [agent-interface-evaluation.md](agent-interface-evaluation.md) | Consolidated, current evaluator report: 27-tool catalog, accepted/rejected interface decisions with thresholds, limitations. |
