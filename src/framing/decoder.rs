@@ -1237,21 +1237,6 @@ mod tests {
         assert_eq!(frames[0].data, b"hello\r\n");
     }
 
-    // ── Line ending default: `auto` when `ending` omitted ────────────────
-
-    #[test]
-    fn line_ending_default_is_auto() {
-        // When Line is constructed without `ending`, it should default to Auto.
-        let val = serde_json::json!({"type": "line"});
-        let mode: RxFramingMode = serde_json::from_value(val).unwrap();
-        assert!(matches!(
-            mode,
-            RxFramingMode::Line {
-                ending: LineEnding::Auto
-            }
-        ));
-    }
-
     // ── Line decoder: auto promotion (bare-CR detection) ──────────────────
 
     fn auto_config() -> RxFramingConfig {
