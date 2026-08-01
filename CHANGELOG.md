@@ -115,8 +115,10 @@
   Windows-reserved stems rejected) relative to the configured capture
   directory. Existing destinations are never overwritten (`persist_noclobber`,
   symlinks rejected). Result is additive: `bytes_written`, `files_used`, and
-  `total_bytes_used` join `events_written`, and `path` reports the canonical
-  absolute final file.
+  `total_bytes_used` join `events_written`, `path` reports the canonical
+  absolute final file, and a POST-commit Unix root-directory sync failure
+  is reported in optional `durability_warning` (the file is committed and
+  counted, never deleted); pre-commit failures still create no file.
 
 ## [0.8.1]
 

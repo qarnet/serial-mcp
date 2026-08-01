@@ -29,11 +29,14 @@
 //!   sharing a root cannot exceed the quotas.
 //! - **Atomic no-clobber commit.** Bytes are written to a same-root temp
 //!   file (reserved internal prefix), `sync_all`-ed, then committed with
-//!   `persist_noclobber`. A failure leaves no final file and changes no
-//!   existing capture. A temp file may survive a process crash; this phase
-//!   never silently treats it as committed and never deletes arbitrary
-//!   files. On Unix the root directory is synced after commit; Windows
-//!   crash-durability of the rename is a documented portable limitation.
+//!   `persist_noclobber`. A PRE-commit failure leaves no final file and
+//!   changes no existing capture. A temp file may survive a process crash;
+//!   this phase never silently treats it as committed and never deletes
+//!   arbitrary files. On Unix the root directory is synced after commit; a
+//!   POST-commit root-sync failure is reported as a `durability_warning` on
+//!   the successful result (the file is committed and counted; it is never
+//!   deleted). Windows crash-durability of the rename is a documented
+//!   portable limitation (no root sync, so no warning is produced).
 
 use std::fs::File;
 use std::io::Write;
@@ -79,6 +82,12 @@ pub struct CaptureLimits {
 }
 
 /// Outcome of a successful [`CaptureStore::write_new`] commit.
+///
+/// A `Some` [`Self::durability_warning`] marks a POST-commit condition: the
+/// file is committed and counts toward quota, but crash-durability of the
+/// rename could not be confirmed on this filesystem (the only post-persist
+/// fallible step is the root-directory sync on Unix). Pre-commit failures
+/// are `Err` and never create a final file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CaptureWriteResult {
     /// Canonical absolute path of the committed file inside the root.
@@ -89,6 +98,11 @@ pub struct CaptureWriteResult {
     pub files_used: usize,
     /// Total managed bytes including this file.
     pub total_bytes_used: u64,
+    /// Post-commit durability warning (root-dir sync failure on Unix), or
+    /// `None` when durability was confirmed (or is not applicable, e.g.
+    /// Windows, where the limitation is documented). The commit itself
+    /// succeeded either way; the committed file is never deleted.
+    pub durability_warning: Option<String>,
 }
 
 /// Process-wide capture store, shared by every stdio/HTTP handler.
@@ -193,12 +207,16 @@ impl CaptureStore {
     /// Atomically commit `bytes` as a new file named `requested_name`
     /// inside the root.
     ///
-    /// Order: disabled/name validation, per-file quota, process-local
-    /// mutex, then blocking work under the exclusive advisory root lock:
+    /// Order: disabled/name validation, per-file quota (checked `usize` →
+    /// `u64` conversion) BEFORE the process-local mutex or any blocking
+    /// work, then blocking work under the exclusive advisory root lock:
     /// fresh scan of managed files, no-clobber destination check, count and
     /// total quotas (checked arithmetic), same-root temp write + `sync_all`,
-    /// `persist_noclobber`, root-dir sync on Unix. Failure creates no final
-    /// file and changes no existing capture.
+    /// `persist_noclobber`, root-dir sync on Unix. Pre-commit failure
+    /// creates no final file and changes no existing capture; a post-commit
+    /// root-sync failure is reported as [`CaptureWriteResult::durability_warning`]
+    /// on a successful commit (the file is committed and counted; it is
+    /// never deleted).
     pub async fn write_new(
         &self,
         requested_name: String,
@@ -208,6 +226,17 @@ impl CaptureStore {
             return Err(CAPTURE_DISABLED_ERROR.to_string());
         };
         validate_capture_filename(&requested_name)?;
+        // Per-file quota rejection runs before any mutex/spawn_blocking
+        // work; `commit_new_file` re-checks under the lock (defense in
+        // depth — limits are Copy, so the in-lock check can never disagree).
+        let bytes_len = u64::try_from(bytes.len())
+            .map_err(|_| "capture file size does not fit a u64 counter".to_string())?;
+        if bytes_len > self.limits.max_file_bytes {
+            return Err(format!(
+                "capture file exceeds per-file quota: {bytes_len} bytes > --capture-max-file-bytes {}",
+                self.limits.max_file_bytes
+            ));
+        }
         let limits = self.limits;
         let _guard = self.lock.lock().await;
         tokio::task::spawn_blocking(move || commit_new_file(&root, &requested_name, &bytes, limits))
@@ -395,7 +424,11 @@ fn commit_new_file(
     limits: CaptureLimits,
 ) -> Result<CaptureWriteResult, String> {
     validate_capture_filename(name)?;
-    let bytes_len = bytes.len() as u64;
+    // Defense in depth: `write_new` already rejected the per-file quota
+    // before the mutex; re-checking here under the lock cannot disagree
+    // (limits are Copy) but keeps the invariant local to the transaction.
+    let bytes_len = u64::try_from(bytes.len())
+        .map_err(|_| "capture file size does not fit a u64 counter".to_string())?;
     if bytes_len > limits.max_file_bytes {
         return Err(format!(
             "capture file exceeds per-file quota: {bytes_len} bytes > --capture-max-file-bytes {}",
@@ -458,23 +491,33 @@ fn commit_new_file(
         .map_err(|e| format!("cannot sync capture temp file: {e}"))?;
     let committed = tmp
         .persist_noclobber(&dest)
-        .map_err(|e| format!("capture commit refused (no-clobber): {}", e.error))?;
+        .map_err(|e| format!("capture commit failed: {}", e.error))?;
     drop(committed);
-    sync_root_dir(root)?;
+    // Post-commit step: the only fallible operation after the no-clobber
+    // persist succeeded. A failure here must NOT turn the commit into an
+    // error (the final file already exists and counts toward quota) — it is
+    // reported as a durability warning on the successful result.
+    let durability_warning = sync_root_dir(root).err();
 
     Ok(CaptureWriteResult {
         path: dest,
         bytes_written: bytes_len,
         files_used: new_files,
         total_bytes_used: new_total,
+        durability_warning,
     })
 }
 
 /// Sync the root directory so the rename is durable on crash. Portable
 /// std APIs cannot sync a directory on Windows; that crash-durability
-/// limitation is documented.
+/// limitation is documented. Callers must treat an `Err` as a POST-commit
+/// durability warning, never as a failed commit.
 #[cfg(unix)]
 fn sync_root_dir(root: &Path) -> Result<(), String> {
+    #[cfg(test)]
+    if FAIL_ROOT_SYNC.load(std::sync::atomic::Ordering::Relaxed) {
+        return Err("injected root directory sync failure".to_string());
+    }
     File::open(root)
         .and_then(|f| f.sync_all())
         .map_err(|e| format!("cannot sync capture dir {}: {e}", root.display()))
@@ -484,6 +527,12 @@ fn sync_root_dir(root: &Path) -> Result<(), String> {
 fn sync_root_dir(_root: &Path) -> Result<(), String> {
     Ok(())
 }
+
+/// Test-only injection point proving the post-commit durability contract:
+/// a forced root-sync failure must surface as
+/// [`CaptureWriteResult::durability_warning`], never as a failed commit.
+#[cfg(test)]
+static FAIL_ROOT_SYNC: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 #[cfg(test)]
 mod tests {
@@ -561,7 +610,11 @@ mod tests {
             "a😀b.jsonl",                    // non-ASCII
             ".serial-mcp-capture-foo.jsonl", // reserved prefix
             "a.serial-mcp-b.jsonl",          // internal reserved prefix
-            &format!("{}.jsonl", "a".repeat(MAX_CAPTURE_FILENAME_LEN)), // overlength
+            // Exactly MAX+1 characters (including '.jsonl') is rejected.
+            &format!(
+                "{}.jsonl",
+                "a".repeat(MAX_CAPTURE_FILENAME_LEN + 1 - CAPTURE_FILENAME_SUFFIX.len())
+            ), // 115 a's + '.jsonl' = 121 = MAX+1
         ] {
             assert!(
                 validate_capture_filename(name).is_err(),
@@ -572,6 +625,9 @@ mod tests {
         let max_len = MAX_CAPTURE_FILENAME_LEN - CAPTURE_FILENAME_SUFFIX.len();
         let at_limit = format!("{}.jsonl", "a".repeat(max_len));
         assert!(validate_capture_filename(&at_limit).is_ok());
+        // One character over the limit is rejected (exact boundary).
+        let over_limit = format!("{}.jsonl", "a".repeat(max_len + 1));
+        assert!(validate_capture_filename(&over_limit).is_err());
     }
 
     #[test]
@@ -756,6 +812,51 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.contains("file-count quota"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn post_commit_root_sync_failure_is_a_warning_not_a_failed_commit() {
+        // Forced post-persist root-sync failure: the file IS committed and
+        // counts toward quota; the failure surfaces as durability_warning
+        // on the successful result, and the committed file is never deleted.
+        #[cfg(unix)]
+        {
+            let dir = tempfile::tempdir().unwrap();
+            let store = CaptureStore::open(dir.path().to_path_buf(), limits()).unwrap();
+            FAIL_ROOT_SYNC.store(true, std::sync::atomic::Ordering::Relaxed);
+            let res = store
+                .write_new("sync.jsonl".into(), b"durable?\n".to_vec())
+                .await
+                .unwrap();
+            FAIL_ROOT_SYNC.store(false, std::sync::atomic::Ordering::Relaxed);
+            assert!(res.path.is_file(), "the committed file must exist");
+            assert_eq!(res.files_used, 1);
+            assert_eq!(res.total_bytes_used, 9);
+            let warning = res
+                .durability_warning
+                .expect("root-sync failure must be reported as a warning");
+            assert!(warning.contains("sync"), "got: {warning}");
+            assert_eq!(std::fs::read(&res.path).unwrap(), b"durable?\n");
+            // The lock was released: a follow-up commit still works.
+            let res2 = store
+                .write_new("after.jsonl".into(), b"ok\n".to_vec())
+                .await
+                .unwrap();
+            assert_eq!(res2.files_used, 2);
+            assert!(res2.durability_warning.is_none());
+        }
+        #[cfg(not(unix))]
+        {
+            // Windows documents the durability limitation instead; the
+            // post-commit step is a no-op, so no warning is ever produced.
+            let dir = tempfile::tempdir().unwrap();
+            let store = CaptureStore::open(dir.path().to_path_buf(), limits()).unwrap();
+            let res = store
+                .write_new("sync.jsonl".into(), b"ok\n".to_vec())
+                .await
+                .unwrap();
+            assert!(res.durability_warning.is_none());
+        }
     }
 
     #[tokio::test]

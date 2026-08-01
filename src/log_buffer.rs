@@ -169,9 +169,18 @@ impl LogBuffer {
         for entry in events.iter() {
             let line = serde_json::to_string(entry)
                 .map_err(|e| format!("Failed to serialize log entry: {e}"))?;
-            let needed = line.len() + 1; // line + trailing newline
-            let projected = (out.len() as u64)
-                .checked_add(needed as u64)
+            // Checked arithmetic before any projection: usize -> u64, then
+            // line + trailing newline, then cumulative size. Exact-limit
+            // behavior is preserved (projected == max_bytes is allowed).
+            let out_len =
+                u64::try_from(out.len()).map_err(|_| "log snapshot size overflow".to_string())?;
+            let line_len = u64::try_from(line.len())
+                .map_err(|_| "log snapshot line size overflow".to_string())?;
+            let needed = line_len
+                .checked_add(1)
+                .ok_or_else(|| "log snapshot line size overflow".to_string())?;
+            let projected = out_len
+                .checked_add(needed)
                 .ok_or_else(|| "log snapshot size overflow".to_string())?;
             if projected > max_bytes {
                 return Err(format!(

@@ -145,14 +145,20 @@ special) is rejected — `export_log` **never overwrites** and never follows
 symlinks. Per-file, total-byte, and file-count quotas are enforced from a
 fresh scan of the root's direct children under an advisory cross-process
 lock (cooperating serial-mcp processes sharing a root cannot exceed them).
-Success returns the canonical absolute path plus exact event/byte counts and
-post-commit quota usage; failure creates no file and changes no existing
-capture. Internal entries (`.serial-mcp-captures.lock`, `.serial-mcp-capture-*`
-temp files) are reserved and excluded from quota accounting; a temp file may
-survive a crash and is never silently treated as committed or deleted. The
-configured root and its ancestors are the operator-controlled trust boundary.
-(Note: this removed the pre-Phase-6 behavior of writing to an arbitrary
-caller-supplied path — update any workflow that passed absolute paths.)
+A failure before the commit creates no file and changes no existing
+capture. Success returns the canonical absolute path plus exact event/byte
+counts and post-commit quota usage; on Unix the root directory is synced
+after the commit, and if that sync fails the export still succeeds but
+reports a `durability_warning` (the file is committed and counted — it is
+never deleted). Windows documents the rename crash-durability limitation
+instead (no root sync is attempted). Internal entries
+(`.serial-mcp-captures.lock`, `.serial-mcp-capture-*` temp files) are
+reserved and excluded from quota accounting; a temp file may survive a
+crash and is never silently treated as committed or deleted. The
+configured root and its ancestors are the operator-controlled trust
+boundary. (Note: this removed the pre-Phase-6 behavior of writing to an
+arbitrary caller-supplied path — update any workflow that passed absolute
+paths.)
 
 ### Automatic profile sessions
 

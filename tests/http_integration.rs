@@ -3756,6 +3756,11 @@ async fn export_log_enabled_writes_valid_jsonl_matching_get_log() {
     assert_eq!(structured["total_bytes_used"], structured["bytes_written"]);
     let canonical = root.path().canonicalize().unwrap().join("boot.jsonl");
     assert_eq!(structured["path"], json!(canonical.display().to_string()));
+    // No durability warning on a normally-durable Unix commit.
+    assert!(
+        structured.get("durability_warning").is_none(),
+        "normal export must omit durability_warning: {structured:?}"
+    );
 
     let raw = std::fs::read(&canonical).unwrap();
     assert_eq!(

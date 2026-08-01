@@ -1007,6 +1007,13 @@ pub struct ExportLogResult {
     /// Total managed bytes in the root after this export.
     #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
     pub total_bytes_used: u64,
+    /// POST-commit durability warning. Present only when the file was
+    /// committed but the root-directory sync failed on Unix (crash
+    /// durability of the rename could not be confirmed). The export
+    /// otherwise succeeded; the committed file is never deleted. Absent on
+    /// Windows (documented portable limitation: no root sync is attempted).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub durability_warning: Option<String>,
 }
 
 // ---- Reconnect tool --------------------------------------------------------

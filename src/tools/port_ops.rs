@@ -1210,6 +1210,7 @@ pub async fn export_log(
         bytes_written: write.bytes_written,
         files_used: write.files_used,
         total_bytes_used: write.total_bytes_used,
+        durability_warning: write.durability_warning,
     }))
 }
 

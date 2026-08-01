@@ -28,6 +28,17 @@ the Phase 6 export schema/catalog delta against that baseline.
     `total_bytes_used`). Input schema still requires only
     `connection_id` + `path`.
   - all other 26 tools byte-identical to the Phase 4 baseline
+- **Phase 6 review polish** (follow-up commit): per-file quota rejection
+  moved before the process-local mutex, cause-neutral persist error text,
+  and the post-commit durability contract — a Unix root-directory sync
+  failure after `persist_noclobber` is now reported as an additive
+  optional `durability_warning` on an otherwise-successful export instead
+  of a false "no final file" error. Final delta: `export_log` **754 →
+  2736 bytes** (description 931, input schema 542, output schema 1111);
+  aggregate **286285 bytes** (+10.5% vs the Phase 4 baseline, of which
+  `capture_boot` accounts for 25338). `durability_warning` is
+  `skip_serializing_if`-omitted on success, so the committed-wire result
+  shape is unchanged unless a warning actually occurs.
 - the evaluator's per-tool regression rule flags `export_log` (>= some
   growth threshold) and reports overall status `warning` — the growth is
   the deliberate Phase 6 scope (public contract hardening), and the
@@ -65,10 +76,11 @@ the Phase 6 export schema/catalog delta against that baseline.
   relative / missing / file / symlink roots / zero limits / bad quota
   relation all reject startup.
 - Unit (`src/capture_store.rs`, `src/log_buffer.rs`): portable filename
-  validator table, quota boundaries, managed-file scanner classification
-  (symlink rejection, unknown/orphan ignoring), no-clobber commit,
-  cross-store advisory-lock concurrency, JSONL exact-limit and one-byte-over
-  snapshot.
+  validator table (incl. exact MAX+1 rejection), quota boundaries,
+  managed-file scanner classification (symlink rejection, unknown/orphan
+  ignoring), no-clobber commit, cross-store advisory-lock concurrency,
+  injected post-commit root-sync failure → `durability_warning` (file kept,
+  never deleted), JSONL exact-limit and one-byte-over snapshot.
 
 ## Decision
 
@@ -95,3 +107,4 @@ the Phase 6 export schema/catalog delta against that baseline.
 - `tests/http_integration.rs::export_log_independent_servers_sharing_root_cannot_exceed_quota`
 - `src/capture_store.rs::concurrent_independent_stores_cannot_exceed_quota`
 - `src/log_buffer.rs::jsonl_snapshot_exact_limit_and_one_byte_over`
+- `src/capture_store.rs::post_commit_root_sync_failure_is_a_warning_not_a_failed_commit`
