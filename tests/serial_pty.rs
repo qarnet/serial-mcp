@@ -881,6 +881,60 @@ async fn pty_subscribe_framing_match_stops_at_frame() {
 }
 
 #[tokio::test]
+async fn pty_subscribe_framing_match_context_second_frame_only() {
+    let (_server, client, mut rx, mut pty, connection_id) = setup().await;
+
+    client
+        .peer()
+        .call_tool(tool_request(
+            "subscribe",
+            json!({
+                "connection_id": connection_id,
+                "rx_framing": { "type": "line" },
+                "match": {
+                    "pattern": "beta",
+                    "config": { "context_amount_of_matched_bytes": 16 }
+                },
+            }),
+        ))
+        .await
+        .unwrap();
+
+    // Two frames; the match lands in the SECOND frame ("xxbeta"). Only 16
+    // requested context bytes, but only 2 exist inside the frame — the
+    // shaped payload must be exactly "xxbeta", never a mix with frame 0.
+    pty.write_device(b"alpha\nxxbeta\ngamma\n").await.unwrap();
+
+    // Drain until the final stop notification.
+    let mut stop: Option<serde_json::Value> = None;
+    for _ in 0..16 {
+        let n = next_notification(&mut rx, Duration::from_secs(2))
+            .await
+            .unwrap();
+        let obj = n.data.as_object().unwrap();
+        if obj.get("stop_reason").is_some() {
+            stop = Some(n.data.clone());
+            break;
+        }
+    }
+    let stop = stop.expect("received match_found stop notification");
+    assert_eq!(stop["stop_reason"], json!("match_found"));
+    assert_eq!(stop["matched"], json!(true));
+    // Matching frame is the second frame.
+    assert_eq!(stop["match_frame_index"], json!(1), "xxbeta is frame 1");
+    // Final stop data = requested pre-context + literal from the second
+    // frame only.
+    assert_eq!(stop["data"], json!("xxbeta"));
+    // Relative match_index equals the actual returned pre-context count.
+    assert_eq!(stop["match_index"], json!(2));
+    // Encoding remains the requested utf8.
+    assert_eq!(stop["encoding"], json!("utf8"));
+    // No cross-frame bytes: frame 0's "alpha" must not appear anywhere.
+    assert!(!stop["data"].as_str().unwrap().contains("alpha"));
+    client.cancel().await.ok();
+}
+
+#[tokio::test]
 async fn pty_subscribe_line_auto_promotes_on_bare_cr_and_flushes_pending() {
     let (_server, client, mut rx, mut pty, connection_id) = setup().await;
 

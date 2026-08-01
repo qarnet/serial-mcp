@@ -723,8 +723,9 @@ async fn stream_rx_from_ring(
 
     // Apply matcher-owned context shaping if configured (must be done before
     // building the struct since the shaped values differ from the raw
-    // outcome). The matcher shaped the payload over its retained window at
-    // match time; regex/glob store no shaped context.
+    // outcome). The matcher shaped the payload at match time — over its
+    // retained window on the raw path, over the matching frame's bytes on
+    // the framed path; regex/glob store no shaped context.
     let (shaped_match_index, shaped_data) = if outcome.matched {
         match outcome.match_index.and_then(|midx| {
             matcher

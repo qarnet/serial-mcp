@@ -31,9 +31,12 @@
 //!   removed, so match indexes stay stream-global for the lifetime of the
 //!   window. `reset_window` clears the window and resets the base to zero,
 //!   keeping framed (per-frame) matches frame-local.
-//! - Literal pre-match context is shaped by the matcher over the retained
-//!   window via [`Matcher::shape_literal_match_context`]; regex/glob store
-//!   no shaped context.
+//! - Literal pre-match context is shaped by the matcher at match time via
+//!   [`Matcher::shape_literal_match_context`]: bounded raw paths shape over
+//!   the retained window with pre-match context capped at
+//!   `min(configured_context, max_buffered_bytes)`, framed paths over the
+//!   matching frame's bytes (bounded naturally by the frame). Regex/glob
+//!   store no shaped context.
 //! - Glob truncation never creates a false whole-line match from a retained
 //!   suffix that starts mid-line: truncation marks the first retained line
 //!   partial when the byte before the new window start was not `\n`, and
@@ -161,19 +164,20 @@ impl From<PatternEncoding> for codec::Encoding {
 /// candidate that spans the boundary of the previous chunk is still seen.
 pub(crate) const REGEX_GLOB_OVERLAP_ALLOWANCE: usize = 256;
 
-/// Saved matcher-owned literal context for the most recent bounded push.
+/// Saved matcher-owned literal context for the most recent push.
 ///
-/// Stored so a later stop-outcome match index can be shaped over the
-/// retained window even after front truncation. The `global_index` lets the
-/// accessor verify it is answering for the most recent `Found`.
+/// Stored so a later stop-outcome match index can be shaped over the bytes
+/// retained at match time — the bounded retained window for raw paths, the
+/// frame bytes for framed paths. The `global_index` lets the accessor verify
+/// it is answering for the most recent `Found`.
 ///
 /// Internal matcher state; exposed only because `Matcher` is a public enum.
 #[doc(hidden)]
 #[derive(Debug, Clone)]
-pub struct BoundedMatchContext {
+pub struct SavedMatchContext {
     /// Global index (relative to last `reset_window`) of the saved match.
     global_index: usize,
-    /// Shaped payload computed over the pre-retention window.
+    /// Shaped payload computed at match time.
     payload: ShapedMatchPayload,
 }
 
@@ -189,7 +193,9 @@ pub struct BoundedMatchContext {
 /// and advances the global base offset by the bytes removed.
 ///
 /// Framed callers (`rx_consume`) keep using unbounded [`Matcher::push`] with a
-/// [`Matcher::reset_window`] per frame, so frame match indexes stay frame-local.
+/// [`Matcher::reset_window`] per frame, so frame match indexes stay frame-local;
+/// [`Matcher::push`] also saves frame-local literal context for the matching
+/// frame, bounded naturally by the frame's bytes.
 #[derive(Debug)]
 pub enum Matcher {
     /// Literal byte-substring match.
@@ -203,8 +209,8 @@ pub enum Matcher {
         /// Absolute bytes discarded from the front of this window since the
         /// last `reset_window`. `Found(index)` = `base + window-local index`.
         base: usize,
-        /// Saved literal context for the most recent bounded-push `Found`.
-        last_bounded_match_context: Option<BoundedMatchContext>,
+        /// Saved literal context for the most recent push `Found`.
+        last_match_context: Option<SavedMatchContext>,
     },
     /// Regular expression match on raw bytes.
     Regex {
@@ -253,7 +259,7 @@ impl Matcher {
             window: Vec::new(),
             context_amount: None,
             base: 0,
-            last_bounded_match_context: None,
+            last_match_context: None,
         })
     }
 
@@ -265,14 +271,14 @@ impl Matcher {
                 needle,
                 window,
                 base,
-                last_bounded_match_context,
+                last_match_context,
                 ..
             } => Self::Literal {
                 needle,
                 window,
                 context_amount,
                 base,
-                last_bounded_match_context,
+                last_match_context,
             },
             Self::Regex {
                 re, window, base, ..
@@ -370,7 +376,21 @@ impl Matcher {
     /// Append a chunk to the internal window and check for a match in the
     /// combined data. Returns the byte offset within the total accumulated
     /// buffer where the match starts, or `NoMatch`.
+    ///
+    /// For literal matchers with configured context, a `Found` also saves the
+    /// shaped payload over the current window. Framed callers reset the
+    /// window per frame, so the configured context is bounded naturally by
+    /// the bytes present in the matching frame. Each call first clears any
+    /// previously saved context, so the saved payload always corresponds to
+    /// the most recent push.
     pub fn push(&mut self, chunk: &[u8]) -> MatchResult {
+        // Each push invalidates any previously saved literal context.
+        if let Self::Literal {
+            last_match_context, ..
+        } = self
+        {
+            *last_match_context = None;
+        }
         match self {
             Self::Literal { window, .. }
             | Self::Regex { window, .. }
@@ -378,7 +398,11 @@ impl Matcher {
                 window.extend_from_slice(chunk);
             }
         }
-        self.check()
+        let result = self.check();
+        if let MatchResult::Found(global_index) = result {
+            self.save_literal_context(global_index, None);
+        }
+        result
     }
 
     /// Retention cap for this matcher given the connection's
@@ -393,52 +417,63 @@ impl Matcher {
         max_buffered_bytes.saturating_add(allowance)
     }
 
+    /// Save the shaped literal payload for a `Found` at `global_index`,
+    /// computed over the current window.
+    ///
+    /// `context_cap` optionally caps the pre-match context byte count:
+    /// bounded callers pass `max_buffered_bytes` (so requested context can
+    /// never bypass the connection memory/result bound), framed callers pass
+    /// `None` (full configured context, bounded naturally by the frame bytes
+    /// in the window). No-op for regex/glob matchers and for literal
+    /// matchers without configured context.
+    fn save_literal_context(&mut self, global_index: usize, context_cap: Option<usize>) {
+        if let Self::Literal {
+            needle,
+            window,
+            context_amount: Some(context),
+            base,
+            last_match_context,
+            ..
+        } = self
+        {
+            let effective_context = context_cap.map_or(*context, |cap| (*context).min(cap));
+            // Shape over the current window: translate the global index
+            // through the window base.
+            let local = global_index.saturating_sub(*base);
+            let pre_start = local.saturating_sub(effective_context);
+            let match_end = local.saturating_add(needle.len()).min(window.len());
+            let payload = ShapedMatchPayload {
+                data: window[pre_start..match_end].to_vec(),
+                match_index: local - pre_start,
+                needle_len: needle.len(),
+            };
+            *last_match_context = Some(SavedMatchContext {
+                global_index,
+                payload,
+            });
+        }
+    }
+
     /// Append and check a chunk under the bounded-window policy.
     ///
     /// The combined data is checked first so matches spanning the previous
     /// retention boundary are still found; the returned `Found(index)` is
     /// global (relative to the last [`Matcher::reset_window`]). For literal
     /// matchers with configured context, the shaped payload for this match is
-    /// saved (clearing any previous saved context) before retention is
-    /// enforced. The retained window after the call never exceeds
-    /// [`Matcher::retained_window_limit`], including after `NoMatch`.
+    /// saved with pre-match context capped at
+    /// `min(configured_context, max_buffered_bytes)` — the payload still
+    /// contains the full matched literal, but requested context can never
+    /// bypass the connection memory/result bound. The retained window after
+    /// the call never exceeds [`Matcher::retained_window_limit`], including
+    /// after `NoMatch`.
     pub fn push_bounded(&mut self, chunk: &[u8], max_buffered_bytes: usize) -> MatchResult {
-        // Each bounded push invalidates any previously saved context.
-        if let Self::Literal {
-            last_bounded_match_context,
-            ..
-        } = self
-        {
-            *last_bounded_match_context = None;
-        }
-
+        // `push` clears any previously saved context and saves the full
+        // configured-context shape on `Found`; overwrite that shape with the
+        // bounded-cap shape (min(configured, max_buffered_bytes)) below.
         let result = self.push(chunk);
 
         if let MatchResult::Found(global_index) = result {
-            if let Self::Literal {
-                needle,
-                window,
-                context_amount: Some(context),
-                base,
-                last_bounded_match_context,
-                ..
-            } = self
-            {
-                // Shape over the pre-retention window: translate the
-                // global index through the window base.
-                let local = global_index.saturating_sub(*base);
-                let pre_start = local.saturating_sub(*context);
-                let match_end = local.saturating_add(needle.len()).min(window.len());
-                let payload = ShapedMatchPayload {
-                    data: window[pre_start..match_end].to_vec(),
-                    match_index: local - pre_start,
-                    needle_len: needle.len(),
-                };
-                *last_bounded_match_context = Some(BoundedMatchContext {
-                    global_index,
-                    payload,
-                });
-            }
+            self.save_literal_context(global_index, Some(max_buffered_bytes));
         }
 
         // Enforce retention after capturing the global result.
@@ -506,12 +541,12 @@ impl Matcher {
             Self::Literal {
                 window,
                 base,
-                last_bounded_match_context,
+                last_match_context,
                 ..
             } => {
                 window.clear();
                 *base = 0;
-                *last_bounded_match_context = None;
+                *last_match_context = None;
             }
             Self::Regex { window, base, .. } => {
                 window.clear();
@@ -530,13 +565,13 @@ impl Matcher {
         }
     }
 
-    /// Return the matcher-owned literal context for the most recent bounded
-    /// `Found` at `global_match_index`, if the literal matcher has configured
-    /// context and the index matches the saved match.
+    /// Return the matcher-owned literal context for the most recent `Found`
+    /// at `global_match_index`, if the literal matcher has configured context
+    /// and the index matches the saved match.
     ///
     /// Returns `None` for regex/glob matchers and for any index other than
-    /// the most recent bounded-push `Found`. The shaped payload is a clone of
-    /// the bytes retained at match time.
+    /// the most recent push `Found`. The shaped payload is a clone of the
+    /// bytes retained at match time.
     pub fn shape_literal_match_context(
         &self,
         global_match_index: usize,
@@ -544,13 +579,13 @@ impl Matcher {
         match self {
             Self::Literal {
                 context_amount,
-                last_bounded_match_context,
+                last_match_context,
                 ..
             } => {
                 if context_amount.is_none() {
                     return None;
                 }
-                match last_bounded_match_context {
+                match last_match_context {
                     Some(ctx) if ctx.global_index == global_match_index => {
                         Some(ctx.payload.clone())
                     }
@@ -1081,6 +1116,77 @@ mod tests {
         assert_eq!(m.check(), MatchResult::NoMatch);
         // Frame-local again: fresh window, index restarts at zero.
         assert_eq!(m.push(b"OK>"), MatchResult::Found(0));
+    }
+
+    #[test]
+    fn push_bounded_literal_context_capped_at_max_buffered_bytes() {
+        // Configured context (4096) exceeds a small max (8): the saved
+        // pre-match context must be capped at min(4096, 8) = 8, never the
+        // full requested amount. The payload still contains the full matched
+        // literal.
+        let mut m = Matcher::new_literal(b"XYZ".to_vec())
+            .map(|m| m.with_context(Some(4096)))
+            .unwrap();
+        // 100 bytes of history, no match: retained window truncates to
+        // limit = 8 + 2 = 10 (last 10 a's), base 90.
+        let hist = vec![b'a'; 100];
+        assert_eq!(m.push_bounded(&hist, 8), MatchResult::NoMatch);
+        assert_eq!(m.len(), 10);
+        // Match at global 100 (window-local 10). Capped context 8 ->
+        // window[2..13] = 8 a's + "XYZ".
+        assert_eq!(m.push_bounded(b"XYZ", 8), MatchResult::Found(100));
+        let shaped = m.shape_literal_match_context(100).expect("saved context");
+        assert_eq!(shaped.data, b"aaaaaaaaXYZ");
+        assert_eq!(shaped.match_index, 8);
+        assert_eq!(shaped.needle_len, 3);
+        // A smaller cap (3) shrinks the saved pre-context accordingly.
+        let mut n = Matcher::new_literal(b"XYZ".to_vec())
+            .map(|m| m.with_context(Some(4096)))
+            .unwrap();
+        assert_eq!(n.push_bounded(&hist, 8), MatchResult::NoMatch);
+        assert_eq!(n.push_bounded(b"XYZ", 3), MatchResult::Found(100));
+        let shaped = n.shape_literal_match_context(100).expect("saved context");
+        assert_eq!(shaped.data, b"aaaXYZ");
+        assert_eq!(shaped.match_index, 3);
+        assert_eq!(shaped.needle_len, 3);
+    }
+
+    #[test]
+    fn push_saves_frame_local_literal_context() {
+        // Framed callers use unbounded `push` with `reset_window` per frame.
+        // The matching frame's own bytes bound the shaped context, so no
+        // cross-frame bytes can leak into the payload.
+        let mut m = Matcher::new_literal(b"beta".to_vec())
+            .map(|m| m.with_context(Some(16)))
+            .unwrap();
+        // Frame 1: no match. Saved context stays unset.
+        assert_eq!(m.push(b"alpha"), MatchResult::NoMatch);
+        assert!(m.shape_literal_match_context(0).is_none());
+        m.reset_window();
+        // Frame 2: match at frame-local index 2; only 2 pre-match bytes
+        // exist, so the saved payload is exactly "xxbeta".
+        assert_eq!(m.push(b"xxbeta"), MatchResult::Found(2));
+        let shaped = m.shape_literal_match_context(2).expect("saved context");
+        assert_eq!(shaped.data, b"xxbeta");
+        assert_eq!(shaped.match_index, 2);
+        assert_eq!(shaped.needle_len, 4);
+        // A different index does not match the saved context.
+        assert!(m.shape_literal_match_context(3).is_none());
+        // The next push clears the stale saved context when it returns
+        // NoMatch (front truncation first drops the old needle, so the
+        // re-check cannot re-find it).
+        m.truncate_front(2); // keep "ta", drop "xxbe", base 4
+        assert_eq!(m.push(b"zz"), MatchResult::NoMatch);
+        assert!(m.shape_literal_match_context(2).is_none());
+        // reset_window clears window + base + saved context.
+        m.reset_window();
+        assert!(m.shape_literal_match_context(2).is_none());
+        // Frame-local again: fresh window restarts indexes at zero.
+        assert_eq!(m.push(b"beta"), MatchResult::Found(0));
+        let shaped = m.shape_literal_match_context(0).expect("saved context");
+        assert_eq!(shaped.data, b"beta");
+        assert_eq!(shaped.match_index, 0);
+        assert_eq!(shaped.needle_len, 4);
     }
 
     #[test]
