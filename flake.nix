@@ -50,17 +50,28 @@
               relPath = pkgs.lib.removePrefix (toString ./.) (toString path);
             in
             craneLib.filterCargoSources path type
-            || pkgs.lib.hasPrefix "schemas" relPath
-            || pkgs.lib.hasPrefix "example-configs" relPath
-            # doc_drift tests read non-cargo fixtures via CARGO_MANIFEST_DIR
-            # (README.md, server.json, docs/agent-config.md,
-            # docs/development/FEATURES.md), and crane runs `cargo test`
-            # during `nix flake check` — every fixture must survive the
-            # source filter or the build fails on the missing file. docs/
-            # is included as a whole tree (the dir itself must match or
-            # cleanSource prunes the subtree) so future doc-drift fixtures
-            # under docs/ land without another filter edit. relPath keeps a
-            # leading "/", hence the "/docs" prefix below.
+            || (pkgs.lib.hasPrefix "/schemas" relPath && !pkgs.lib.hasSuffix "opencode.schema.json" relPath)
+            || pkgs.lib.hasPrefix "/example-configs" relPath
+            # Test fixtures read via CARGO_MANIFEST_DIR must survive the
+            # source filter: doc_drift reads README.md, server.json, and
+            # docs/ (agent-config.md, development/FEATURES.md, future
+            # evaluations); config_schema_validation reads schemas/ and
+            # example-configs/. crane runs `cargo test` during `nix flake
+            # check` — a pruned fixture fails the build (doc_drift) or
+            # silently skips the checks (config_schema_validation).
+            # relPath keeps a leading "/", hence the explicit "/" in every
+            # prefix below; a directory must itself match the filter or
+            # cleanSource prunes its whole subtree, so dirs are included
+            # as whole trees to spare future fixture edits.
+            #
+            # Exception: schemas/opencode.schema.json refs
+            # https://models.dev/model-schema.json, which jsonschema fetches
+            # eagerly — the network-less Nix sandbox can't resolve it, so
+            # that file stays out of the Nix source (its fixture still
+            # silently skips there; network-enabled CI covers it). Vendoring
+            # the models.dev schema is tracked in FEATURES.md
+            # (Infrastructure / tech debt); remove this exclusion when it
+            # lands.
             || pkgs.lib.hasSuffix "README.md" relPath
             || pkgs.lib.hasSuffix "server.json" relPath
             || pkgs.lib.hasPrefix "/docs" relPath;
