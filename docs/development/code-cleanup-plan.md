@@ -5,7 +5,8 @@
 Implementation complete on `refactor/code-cleanup` (branched from merged
 `main` after PR #37). All six phases delivered and committed; the final
 gate (fmt/build/test/clippy, xtask test-all, `nix flake check`,
-agent-eval) passed. Awaiting delivery review of the single follow-up PR.
+agent-eval) passed. Awaiting push of the branch and creation/review of
+the follow-up PR.
 
 Consumed phase handoffs were deleted after each phase shipped; this plan
 is retained as the single current record of the cleanup's scope,
@@ -106,11 +107,11 @@ user-visible behavior.
 
 ### Changes
 
-1. Extract a private TX preparation primitive used by `write` and `transact`.
-   It owns string decoding, decoded-size validation, framing application, and
-   framed-size validation. It returns prepared bytes, decoded byte count, and
-   resolved encoding metadata. It performs no I/O, logging, counter mutation,
-   connection lookup, or result construction.
+1. Extract two concise private TX preparation helpers used by `write` and
+   `transact`: decode + decoded-size validation returns the decoded bytes;
+   framing + final-size validation returns the prepared bytes. Callers retain
+   decoded length/encoding and all I/O policy. The helpers perform no I/O,
+   logging, counter mutation, connection lookup, or result construction.
 2. Preserve each caller's current error text and field labels. If exact error
    preservation requires a small typed internal error, prefer that over policy
    callbacks or passing tool names into transformation code.
@@ -231,15 +232,19 @@ notification semantics.
 
 ### Changes
 
-1. Add characterization coverage for matching-frame notification failure before
-   changing `SubscribeFrameSink` behavior or comments.
-2. Extract serialization and notification construction helpers where all
-   callers share identical behavior.
-3. Extract successful encoding-fallback warning mechanics only if it reduces
-   duplication without swallowing path-specific true-failure handling.
-4. Keep raw, framed, partial-frame, and final-stop accounting explicit.
-5. Build final stop notification in a named helper or state method when doing
-   so makes match-context shaping and encoding pairing clearer.
+1. Matching-frame emit-failure behavior remained unchanged (a failed emit of
+   the matching frame records a drop while match stays the stop reason; a
+   nonmatching emit failure stops as peer disconnected). No complex fake Peer
+   harness was added solely for comment cleanup.
+2. Serialization of a notification into a logging-message parameter is shared
+   via one helper (`logging_notification`).
+3. Raw chunk, partial-frame, and match-context delivery/encoding are named
+   helpers with distinct failure outcomes (encode+hex drop vs peer
+   disconnect), keeping encoding-fallback warning mechanics shared without
+   swallowing path-specific true-failure handling.
+4. Final `SubscribeStopNotification` assembly (including match-context
+   shaping and encoding pairing) remains visible in the main stream function;
+   only the serialization-to-param step is shared.
 
 ### Verification
 
