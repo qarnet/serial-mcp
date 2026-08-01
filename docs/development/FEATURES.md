@@ -267,17 +267,6 @@ Non-feature work, roughly in suggested order. From the 2026-07-05 repo review.
 - coordinate with any schemars 2.x migration if one is on the roadmap;
   the upstream fix may make the newtype redundant
 
-### Matcher-truncation parity between read and subscribe
-- `subscribe` bounds matcher memory with `truncate_front` when the
-  buffered window exceeds `max_buffered_bytes`; `read` does not —
-  asymmetric and undocumented
-- decide: unify matcher truncation (read learns it) or document why read is
-  unbounded; the encoding side of this item is DONE (Phase 4 of the
-  post-0.9 refinement — `read`/`subscribe`/`capture_boot` share
-  `codec::encode_or_hex` with per-payload effective encoding)
-- small behavior change, needs a design call before implementing
-  (tracked as Phase 5: matcher memory-bound parity)
-
 ### Scheduled mutation testing + fuzz smoke in CI
 - `cargo-mutants` and the `fuzz/` targets exist but run only on demand — the
   NMEA parser panic found in review is exactly the class a scheduled fuzz

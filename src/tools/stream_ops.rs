@@ -12,7 +12,7 @@ use tracing::{debug, error, info, warn};
 use crate::buffer_budget::BufferBudget;
 use crate::codec;
 use crate::limits::DEFAULT_RX_BUFFER_SIZE;
-use crate::match_config::{shape_match_context, Matcher};
+use crate::match_config::Matcher;
 use crate::rx_metadata::{RxStopMetadata, RxStopReason};
 use crate::rx_session::RxSessionManager;
 use crate::serial::ConnectionManager;
@@ -384,7 +384,7 @@ async fn stream_rx_from_ring(
     conn: Arc<crate::serial::SerialConnection>,
     session: Arc<crate::rx_session::RxSession>,
     encoding: crate::codec::Encoding,
-    _max_buffered_bytes: usize,
+    max_buffered_bytes: usize,
     poll_interval_ms: u64,
     timeout_ms: Option<u64>,
     no_new_rx_timeout_ms: Option<u64>,
@@ -420,11 +420,6 @@ async fn stream_rx_from_ring(
 
     // Track total bytes sent via per-chunk data notifications.
     let mut total_returned: usize = 0;
-
-    // Accumulated buffer for context shaping on match.
-    let context_amount = matcher.as_ref().and_then(|m| m.context_amount());
-    let needle_len = matcher.as_ref().and_then(|m| m.needle_len());
-    let mut accumulated: Vec<u8> = Vec::new();
 
     // Frame decoder state.
     let max_frames = framing.as_ref().and_then(|f| f.max_frames);
@@ -467,7 +462,7 @@ async fn stream_rx_from_ring(
         }
 
         // Read next data from the ring at the private cursor.
-        let slice = ring.read_from(private_cursor, _max_buffered_bytes);
+        let slice = ring.read_from(private_cursor, max_buffered_bytes);
 
         // Gap reporting: if bytes_lost > 0, include it and continue.
         if slice.bytes_lost > 0 {
@@ -502,13 +497,6 @@ async fn stream_rx_from_ring(
             from_offset = Some(slice.from_offset);
         }
         next_offset = slice.next_offset;
-
-        // Accumulate for context shaping if a matcher with context is active.
-        if context_amount.is_some() {
-            let room = _max_buffered_bytes.saturating_sub(accumulated.len());
-            let take = chunk.len().min(room);
-            accumulated.extend_from_slice(&chunk[..take]);
-        }
 
         // Feed to frame decoder.
         let mut suppress_chunk_notification = false;
@@ -549,17 +537,12 @@ async fn stream_rx_from_ring(
 
         // When framing is NOT active, match on raw chunk bytes.
         if !suppress_chunk_notification {
-            let match_result = matcher.as_mut().map(|m| m.push(&chunk));
-            if let Some(m) = matcher.as_mut() {
-                let keep = m
-                    .needle_len()
-                    .map(|n| n.max(1).saturating_add(1))
-                    .unwrap_or(256);
-                let cap = _max_buffered_bytes.max(keep);
-                if m.len() > cap {
-                    m.truncate_front(cap);
-                }
-            }
+            // Bounded push: matcher-owned window policy caps retained memory
+            // at max_buffered_bytes plus the mode overlap allowance, and
+            // keeps match indexes global across front truncation.
+            let match_result = matcher
+                .as_mut()
+                .map(|m| m.push_bounded(&chunk, max_buffered_bytes));
             if let RxStopDecision::Stop(outcome) = ctrl.push_data(n, total_returned, match_result) {
                 stop_outcome = Some(outcome);
             }
@@ -738,13 +721,19 @@ async fn stream_rx_from_ring(
         bytes_returned: total_returned,
     };
 
-    // Apply context shaping if configured (must be done before building the
-    // struct since the shaped values differ from the raw outcome).
-    let (shaped_match_index, shaped_data) = if let (Some(midx), Some(ca), Some(nlen)) =
-        (outcome.match_index, context_amount, needle_len)
-    {
-        let shaped = shape_match_context(&accumulated, midx, nlen, Some(ca));
-        (Some(shaped.match_index), Some(shaped.data))
+    // Apply matcher-owned context shaping if configured (must be done before
+    // building the struct since the shaped values differ from the raw
+    // outcome). The matcher shaped the payload over its retained window at
+    // match time; regex/glob store no shaped context.
+    let (shaped_match_index, shaped_data) = if outcome.matched {
+        match outcome.match_index.and_then(|midx| {
+            matcher
+                .as_ref()
+                .and_then(|m| m.shape_literal_match_context(midx))
+        }) {
+            Some(shaped) => (Some(shaped.match_index), Some(shaped.data)),
+            None => (outcome.match_index, None),
+        }
     } else {
         (outcome.match_index, None)
     };

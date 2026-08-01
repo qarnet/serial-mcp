@@ -458,7 +458,10 @@ pub(crate) async fn read_from_private_cursor(
     if matcher.is_some() && !initial_slice.bytes.is_empty() {
         let take = initial_slice.bytes.len().min(max_bytes);
         let hist = &initial_slice.bytes[..take];
-        let match_result = matcher.as_mut().map(|m| m.push(hist));
+        // Bounded push: same matcher-owned window policy as the live path and
+        // subscribe. The initial slice is at most `max_bytes`, so no
+        // truncation occurs here and the history match stays exact.
+        let match_result = matcher.as_mut().map(|m| m.push_bounded(hist, max_bytes));
         if let Some(MatchResult::Found(idx)) = match_result {
             let match_end = idx + needle_len.unwrap_or(0);
             let consumed = match_end as u64;
@@ -815,25 +818,41 @@ pub(crate) async fn read_from_private_cursor(
 
         // Raw matcher path (no framing).
         if decoder.is_none() {
-            let match_result = matcher.as_mut().map(|m| m.push(chunk));
+            // Bounded push: same matcher-owned window policy as the
+            // initial-history path and subscribe.
+            let match_result = matcher.as_mut().map(|m| m.push_bounded(chunk, max_bytes));
             let buffered_len = returned_bytes.len();
             let data_count = chunk.len();
             if let RxStopDecision::Stop(outcome) =
                 ctrl.push_data(data_count, buffered_len, match_result)
             {
+                // Live matches apply matcher-owned context shaping (same
+                // policy as subscribe). Only the returned payload and the
+                // relative match_index change — cursor consumption and the
+                // stream offsets stay based on the consumed bytes.
+                let (match_bytes, match_index) = match outcome.match_index {
+                    Some(idx) => match matcher
+                        .as_ref()
+                        .and_then(|m| m.shape_literal_match_context(idx))
+                    {
+                        Some(shaped) => (shaped.data, Some(shaped.match_index)),
+                        None => (returned_bytes.clone(), Some(idx)),
+                    },
+                    None => (returned_bytes.clone(), None),
+                };
                 cursor_state = slice
                     .from_offset
                     .wrapping_add(take as u64)
                     .min(ring.end_offset());
                 return Ok((
                     make_read_outcome(
-                        returned_bytes,
+                        match_bytes,
                         consumed_offset,
                         &ctrl,
                         read_start.elapsed().as_millis() as u64,
                         outcome.meta,
                         outcome.matched,
-                        outcome.match_index,
+                        match_index,
                         None,
                         std::mem::take(&mut collected_frames),
                         frames_dropped,

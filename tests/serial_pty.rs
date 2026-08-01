@@ -409,6 +409,250 @@ async fn pty_subscribe_match_with_context_includes_shaped_data() {
 }
 
 #[tokio::test]
+async fn pty_read_and_subscribe_report_same_literal_match_index() {
+    let (_server, client, mut rx, mut pty, connection_id) = setup().await;
+
+    // Same chunked sequence for both tools: two device writes, 100ms apart.
+    pty.write_device(b"warming up... ").await.unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    pty.write_device(b"OK> ready").await.unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // read: cross-chunk literal at global index 13.
+    let result = client
+        .peer()
+        .call_tool(tool_request(
+            "read",
+            json!({
+                "connection_id": connection_id,
+                "timeout_ms": 3000,
+                "match": { "pattern": "OK>" },
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_ne!(result.is_error, Some(true), "{result:?}");
+    let structured = result.structured_content.expect("structured");
+    assert_eq!(structured["matched"], json!(true), "{structured:?}");
+    assert_eq!(structured["match_index"], json!(14), "{structured:?}");
+
+    // subscribe replays the same retained stream from buffer_start and must
+    // report the same match outcome and index.
+    client
+        .peer()
+        .call_tool(tool_request(
+            "subscribe",
+            json!({
+                "connection_id": connection_id,
+                "from": { "type": "buffer_start" },
+                "timeout_ms": 3000,
+                "match": { "pattern": "OK>" },
+            }),
+        ))
+        .await
+        .unwrap();
+
+    let mut saw_match_stop = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while tokio::time::Instant::now() < deadline {
+        match next_notification(&mut rx, Duration::from_secs(2)).await {
+            Ok(event) => {
+                let data = event.data.as_object().unwrap();
+                if data.get("stop_reason").is_some() {
+                    saw_match_stop = true;
+                    assert_eq!(data["matched"], json!(true), "{data:?}");
+                    assert_eq!(data["match_index"], json!(14), "{data:?}");
+                    break;
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    assert!(
+        saw_match_stop,
+        "subscribe should emit a match stop notification"
+    );
+    client.cancel().await.ok();
+}
+
+#[tokio::test]
+async fn pty_subscribe_match_global_index_after_window_truncation() {
+    let (_server, client, mut rx, mut pty, connection_id) = setup().await;
+
+    // Small bounded window: 16 bytes + literal overlap (2) = 18 retained.
+    // 20 junk bytes then "OK>" force matcher front truncation mid-stream.
+    client
+        .peer()
+        .call_tool(tool_request(
+            "configure",
+            json!({
+                "connection_id": connection_id,
+                "defaults": { "max_buffered_bytes": 16 },
+            }),
+        ))
+        .await
+        .unwrap();
+
+    client
+        .peer()
+        .call_tool(tool_request(
+            "subscribe",
+            json!({
+                "connection_id": connection_id,
+                "match": { "pattern": "OK>" },
+            }),
+        ))
+        .await
+        .unwrap();
+
+    // Feed in small chunks so several bounded pushes happen.
+    for _ in 0..5 {
+        pty.write_device(b"AAAA").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(30)).await;
+    }
+    pty.write_device(b"OK>").await.unwrap();
+
+    let mut saw_match_stop = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+    while tokio::time::Instant::now() < deadline {
+        match next_notification(&mut rx, Duration::from_secs(2)).await {
+            Ok(event) => {
+                let data = event.data.as_object().unwrap();
+                if data.get("stop_reason").is_some() {
+                    saw_match_stop = true;
+                    // "OK>" starts at global byte 20 — a window-local index
+                    // would have been wrong after front truncation.
+                    assert_eq!(data["stop_reason"], json!("match_found"), "{data:?}");
+                    assert_eq!(data["matched"], json!(true), "{data:?}");
+                    assert_eq!(data["match_index"], json!(20), "{data:?}");
+                    break;
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    assert!(
+        saw_match_stop,
+        "subscribe should emit a match stop notification"
+    );
+    client.cancel().await.ok();
+}
+
+#[tokio::test]
+async fn pty_subscribe_match_context_shaped_after_window_truncation() {
+    let (_server, client, mut rx, mut pty, connection_id) = setup().await;
+
+    client
+        .peer()
+        .call_tool(tool_request(
+            "configure",
+            json!({
+                "connection_id": connection_id,
+                "defaults": { "max_buffered_bytes": 16 },
+            }),
+        ))
+        .await
+        .unwrap();
+
+    client
+        .peer()
+        .call_tool(tool_request(
+            "subscribe",
+            json!({
+                "connection_id": connection_id,
+                "match": {
+                    "pattern": "OK>",
+                    "config": {
+                        "mode": "literal_substring",
+                        "pattern_encoding": "utf8",
+                        "context_amount_of_matched_bytes": 8
+                    }
+                },
+            }),
+        ))
+        .await
+        .unwrap();
+
+    // 20 junk bytes then the match, crossing the retention boundary.
+    for _ in 0..5 {
+        pty.write_device(b"AAAA").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(30)).await;
+    }
+    pty.write_device(b"OK>").await.unwrap();
+
+    let mut saw_match_stop = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+    while tokio::time::Instant::now() < deadline {
+        match next_notification(&mut rx, Duration::from_secs(2)).await {
+            Ok(event) => {
+                let data = event.data.as_object().unwrap();
+                if data.get("stop_reason").is_some() {
+                    saw_match_stop = true;
+                    assert_eq!(data["matched"], json!(true), "{data:?}");
+                    // Exactly 8 requested context bytes before the match,
+                    // with a relative match_index of 8.
+                    assert_eq!(data["data"], json!("AAAAAAAAOK>"), "{data:?}");
+                    assert_eq!(data["match_index"], json!(8), "{data:?}");
+                    break;
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    assert!(
+        saw_match_stop,
+        "subscribe should emit a match stop notification"
+    );
+    client.cancel().await.ok();
+}
+
+#[tokio::test]
+async fn pty_read_live_match_applies_context_shaping() {
+    let (_server, client, _rx, mut pty, connection_id) = setup().await;
+
+    // Read starts BEFORE any device data: the match happens on the live
+    // (wait-loop) path, which must shape context like subscribe does.
+    let read_handle = {
+        let peer = client.peer().clone();
+        let id = connection_id.clone();
+        tokio::spawn(async move {
+            peer.call_tool(tool_request(
+                "read",
+                json!({
+                    "connection_id": id,
+                    "timeout_ms": 8000,
+                    "match": {
+                        "pattern": "OK>",
+                        "config": {
+                            "mode": "literal_substring",
+                            "pattern_encoding": "utf8",
+                            "context_amount_of_matched_bytes": 4
+                        }
+                    },
+                }),
+            ))
+            .await
+        })
+    };
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    pty.write_device(b"AAAA").await.unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    pty.write_device(b"BBBBOK>tail").await.unwrap();
+
+    let result = read_handle.await.unwrap().unwrap();
+    assert_ne!(result.is_error, Some(true), "{result:?}");
+    let structured = result.structured_content.expect("structured");
+    assert_eq!(structured["matched"], json!(true), "{structured:?}");
+    assert_eq!(structured["stop_reason"], json!("match_found"));
+    // "OK>" at global 8; context 4 -> shaped "BBBBOK>" with relative index 4.
+    assert_eq!(structured["data"], json!("BBBBOK>"), "{structured:?}");
+    assert_eq!(structured["match_index"], json!(4), "{structured:?}");
+    assert_eq!(structured["bytes_read"], json!(7), "{structured:?}");
+    client.cancel().await.ok();
+}
+
+#[tokio::test]
 async fn pty_close_then_use_returns_is_error() {
     let (_server, client, _rx, _pty, connection_id) = setup().await;
 

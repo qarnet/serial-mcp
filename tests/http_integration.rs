@@ -1422,6 +1422,132 @@ async fn subscribe_matched_binary_context_reports_hex_data_and_encoding() {
 }
 
 #[tokio::test]
+async fn read_and_subscribe_same_literal_match_index_over_chunked_stream() {
+    let manager = Arc::new(ConnectionManager::new());
+    let (conn, mut peer) = loopback_connection("loop-match-parity");
+    let connection_id = manager.insert(conn).await.unwrap();
+
+    let server = TestServer::start_with(manager).await;
+    let (client, mut rx) = connect_client(&server).await.unwrap();
+
+    // Chunked stream: the literal spans the boundary between two writes.
+    peer.write_all(b"ABCD").await.unwrap();
+    peer.flush().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    peer.write_all(b"EFOK>tail").await.unwrap();
+    peer.flush().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // read over the chunked stream: "OK>" at global index 6.
+    let result = client
+        .peer()
+        .call_tool(tool_request(
+            "read",
+            json!({
+                "connection_id": connection_id,
+                "timeout_ms": 2000,
+                "match": { "pattern": "OK>" },
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_ne!(result.is_error, Some(true), "{result:?}");
+    let s = result.structured_content.expect("structured");
+    assert_eq!(s["matched"], json!(true), "{s:?}");
+    assert_eq!(s["match_index"], json!(6), "{s:?}");
+
+    // subscribe replays the same retained bytes from buffer_start and must
+    // report the same match outcome and index.
+    client
+        .peer()
+        .call_tool(tool_request(
+            "subscribe",
+            json!({
+                "connection_id": connection_id,
+                "from": { "type": "buffer_start" },
+                "timeout_ms": 2000,
+                "match": { "pattern": "OK>" },
+            }),
+        ))
+        .await
+        .unwrap();
+
+    let mut saw_match_stop = false;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        match next_notification(&mut rx, Duration::from_secs(2)).await {
+            Ok(event) => {
+                let data = event.data.as_object().unwrap();
+                if data.get("stop_reason").is_some() {
+                    saw_match_stop = true;
+                    assert_eq!(data["matched"], json!(true), "{data:?}");
+                    assert_eq!(data["match_index"], json!(6), "{data:?}");
+                    break;
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    assert!(
+        saw_match_stop,
+        "subscribe should emit a match stop notification"
+    );
+
+    // No-match parity: a pattern absent from the stream times out without a
+    // match on both tools.
+    let result = client
+        .peer()
+        .call_tool(tool_request(
+            "read",
+            json!({
+                "connection_id": connection_id,
+                "from": { "type": "now" },
+                "timeout_ms": 400,
+                "match": never_match(),
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_ne!(result.is_error, Some(true), "{result:?}");
+    let s = result.structured_content.expect("structured");
+    assert_eq!(s["matched"], json!(false), "{s:?}");
+
+    client
+        .peer()
+        .call_tool(tool_request(
+            "subscribe",
+            json!({
+                "connection_id": connection_id,
+                "timeout_ms": 600,
+                "match": never_match(),
+            }),
+        ))
+        .await
+        .unwrap();
+    let mut saw_no_match_stop = false;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        match next_notification(&mut rx, Duration::from_secs(2)).await {
+            Ok(event) => {
+                let data = event.data.as_object().unwrap();
+                if data.get("stop_reason").is_some() {
+                    saw_no_match_stop = true;
+                    assert_ne!(data.get("matched"), Some(&json!(true)), "{data:?}");
+                    break;
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    assert!(
+        saw_no_match_stop,
+        "subscribe should emit a timeout stop notification"
+    );
+
+    client.cancel().await.ok();
+}
+
+#[tokio::test]
 async fn validation_limits_return_tool_errors_over_http() {
     let manager = Arc::new(ConnectionManager::new());
     let (conn, _peer) = loopback_connection("loop-validation");
