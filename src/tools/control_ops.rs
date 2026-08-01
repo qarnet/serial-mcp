@@ -13,7 +13,7 @@ use crate::tools::helpers::{
     parse_encoding, require_min_or_err, MAX_READ_BYTES, MAX_TIMEOUT_MS, MIN_READ_BYTES,
 };
 use crate::tools::read_loop::read_from_private_cursor;
-use crate::tools::result_builders::build_read_result;
+use crate::tools::result_builders::{build_read_result, record_read_completion};
 use crate::tools::types::{
     CaptureBootArgs, CaptureBootResult, SendBreakArgs, SendBreakResult, SetDtrRtsArgs,
     SetDtrRtsResult, SetFlowControlArgs, SetFlowControlResult,
@@ -343,18 +343,7 @@ pub async fn capture_boot(
         timeout_ms,
         args.no_new_rx_timeout_ms,
     )?;
-    connection.record_read_op();
-    let log = connection.log();
-    log.rx_data(result.0.bytes_read);
-    if result.0.truncated {
-        connection.record_truncation();
-        log.truncated(result.0.bytes_observed, result.0.bytes_returned);
-    }
-    if result.0.matched {
-        if let Some(ref m) = args.r#match {
-            log.match_found(&m.pattern, &m.config.mode.to_string());
-        }
-    }
+    record_read_completion(&connection, &result.0, args.r#match.as_ref());
 
     info!(
         "capture_boot {} mark={} pre_mark={} stop_reason={}",
