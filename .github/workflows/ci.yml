@@ -20,7 +20,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install Nix
-        uses: DeterminateSystems/nix-installer-action@v16
+        uses: DeterminateSystems/nix-installer-action@v22
 
       - name: Cache Nix store
         uses: nix-community/cache-nix-action@v7
@@ -141,7 +141,7 @@ jobs:
 
       - name: Cache NCS SDK and toolchain
         id: cache-ncs
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             /home/runner/ncs
@@ -189,7 +189,7 @@ jobs:
 
       # Remove the firmware build tree after tests so the post-step cache
       # upload (and any later steps) don't walk a stale build dir. The NCS
-      # cache at /home/runner/ncs is intentionally kept — actions/cache@v4
+      # cache at /home/runner/ncs is intentionally kept — actions/cache@v6
       # saves it post-job and a cache miss + skipped install would break the
       # next run. DO NOT rm -rf /home/runner/ncs.
       - name: Clean firmware build tree
