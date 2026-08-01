@@ -19,7 +19,10 @@ async fn empty_allowlist_allows_any_port() {
     let manager = Arc::new(ConnectionManager::new());
 
     let security = SecurityManager::from_patterns([] as [&str; 0]);
-    let server = TestServer::start_with_and_security(manager, security).await;
+    let server = TestServer::builder(manager)
+        .security(security)
+        .start()
+        .await;
     let (client, _rx) = connect_client(&server).await.unwrap();
 
     let result = client
@@ -61,7 +64,10 @@ async fn exact_match_blocks_unauthorized_port() {
     let manager = Arc::new(ConnectionManager::new());
 
     let security = SecurityManager::from_patterns(["/dev/ttyACM1"]);
-    let server = TestServer::start_with_and_security(manager, security).await;
+    let server = TestServer::builder(manager)
+        .security(security)
+        .start()
+        .await;
     let (client, _rx) = connect_client(&server).await.unwrap();
 
     let result = client
@@ -101,7 +107,10 @@ async fn exact_match_allows_authorized_port() {
     let manager = Arc::new(ConnectionManager::new());
 
     let security = SecurityManager::from_patterns(["/dev/ttyACM0"]);
-    let server = TestServer::start_with_and_security(manager, security).await;
+    let server = TestServer::builder(manager)
+        .security(security)
+        .start()
+        .await;
     let (client, _rx) = connect_client(&server).await.unwrap();
 
     let result = client
@@ -140,7 +149,10 @@ async fn glob_pattern_matches_multiple_ports() {
     let manager = Arc::new(ConnectionManager::new());
 
     let security = SecurityManager::from_patterns(["/dev/ttyACM*", "/dev/ttyUSB*"]);
-    let server = TestServer::start_with_and_security(manager, security).await;
+    let server = TestServer::builder(manager)
+        .security(security)
+        .start()
+        .await;
     let (client, _rx) = connect_client(&server).await.unwrap();
 
     // /dev/ttyACM0 matches /dev/ttyACM*
@@ -233,7 +245,10 @@ async fn comma_separated_multiple_exact_ports() {
     let manager = Arc::new(ConnectionManager::new());
 
     let security = SecurityManager::from_patterns(["COM1", "COM3", "COM5"]);
-    let server = TestServer::start_with_and_security(manager, security).await;
+    let server = TestServer::builder(manager)
+        .security(security)
+        .start()
+        .await;
     let (client, _rx) = connect_client(&server).await.unwrap();
 
     // COM3 is in the list

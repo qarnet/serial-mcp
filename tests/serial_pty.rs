@@ -2043,12 +2043,11 @@ struct SessionHarness {
 async fn session_harness(provider: Arc<StaticPortProvider>) -> SessionHarness {
     let dir = tempfile::tempdir().expect("tempdir");
     let profiles_path = dir.path().join("profiles.toml");
-    let server = TestServer::start_with_provider_and_profiles_path(
-        Arc::new(serial_mcp::serial::ConnectionManager::new()),
-        provider,
-        profiles_path.clone(),
-    )
-    .await;
+    let server = TestServer::builder(Arc::new(serial_mcp::serial::ConnectionManager::new()))
+        .port_provider(provider)
+        .profiles_path(profiles_path.clone())
+        .start()
+        .await;
     let (client, _rx) = connect_client(&server).await.unwrap();
     SessionHarness {
         _server: server,
@@ -2466,12 +2465,11 @@ async fn auto_session_second_http_client_observes_binding_and_profile() {
     )]);
     let dir = tempfile::tempdir().expect("tempdir");
     let profiles_path = dir.path().join("profiles.toml");
-    let server = TestServer::start_with_provider_and_profiles_path(
-        Arc::new(serial_mcp::serial::ConnectionManager::new()),
-        provider,
-        profiles_path,
-    )
-    .await;
+    let server = TestServer::builder(Arc::new(serial_mcp::serial::ConnectionManager::new()))
+        .port_provider(provider)
+        .profiles_path(profiles_path)
+        .start()
+        .await;
     let (client_a, _rx_a) = connect_client(&server).await.unwrap();
     let (client_b, _rx_b) = connect_client(&server).await.unwrap();
 
@@ -2680,12 +2678,11 @@ use_count = 1
     )
     .unwrap();
 
-    let server = TestServer::start_with_provider_and_profiles_path(
-        Arc::new(serial_mcp::serial::ConnectionManager::new()),
-        provider,
-        profiles_path.clone(),
-    )
-    .await;
+    let server = TestServer::builder(Arc::new(serial_mcp::serial::ConnectionManager::new()))
+        .port_provider(provider)
+        .profiles_path(profiles_path.clone())
+        .start()
+        .await;
     let (client, _rx) = connect_client(&server).await.unwrap();
 
     let opened = open_port(&client, &slave, json!({})).await;
@@ -3383,12 +3380,11 @@ async fn learning_partial_failure_reports_failed_and_clean_close_retries() {
     )]);
     let dir = tempfile::tempdir().expect("tempdir");
     let profiles_path = dir.path().join("profiles.toml");
-    let server = TestServer::start_with_provider_and_profiles_path(
-        Arc::new(serial_mcp::serial::ConnectionManager::new()),
-        provider,
-        profiles_path.clone(),
-    )
-    .await;
+    let server = TestServer::builder(Arc::new(serial_mcp::serial::ConnectionManager::new()))
+        .port_provider(provider)
+        .profiles_path(profiles_path.clone())
+        .start()
+        .await;
     let (client, _rx) = connect_client(&server).await.unwrap();
 
     // First open creates the generated profile while the dir is writable.

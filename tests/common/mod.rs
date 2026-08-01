@@ -169,89 +169,29 @@ pub struct TestServer {
 impl TestServer {
     /// Start a server with a fresh empty [`ConnectionManager`].
     pub async fn start() -> Self {
-        Self::start_with(Arc::new(ConnectionManager::new())).await
+        Self::builder(Arc::new(ConnectionManager::new()))
+            .start()
+            .await
     }
 
     /// Start a server reusing a caller-supplied [`ConnectionManager`].
     /// Useful when the test wants to insert a loopback connection before
     /// the server is up.
     pub async fn start_with(manager: Arc<ConnectionManager>) -> Self {
-        Self::start_with_and_security(manager, SecurityManager::from_patterns::<[&str; 0]>([]))
-            .await
+        Self::builder(manager).start().await
     }
 
-    /// Start a server with a custom [`ConnectionManager`] and [`SecurityManager`].
-    /// The security manager's allowlist will govern `open` calls during the test.
-    pub async fn start_with_and_security(
-        manager: Arc<ConnectionManager>,
-        security: SecurityManager,
-    ) -> Self {
-        Self::start_inner(manager, security, None, None, None).await
-    }
-
-    /// Start a server with a custom [`ConnectionManager`] and an injected
-    /// capture store (Phase 6 export_log tests). The default profile store
-    /// is ephemeral.
-    pub async fn start_with_capture_store(
-        manager: Arc<ConnectionManager>,
-        capture_store: Arc<CaptureStore>,
-    ) -> Self {
-        let security = SecurityManager::from_patterns::<[&str; 0]>([]);
-        Self::start_inner(manager, security, None, None, Some(capture_store)).await
-    }
-
-    /// Start a server with a custom [`ConnectionManager`] and an injected
-    /// static port provider (Phase 3A: synthetic USB identity over a real
-    /// PTY slave path). The default profile store is ephemeral.
-    pub async fn start_with_provider(
-        manager: Arc<ConnectionManager>,
-        provider: Arc<dyn PortProvider>,
-    ) -> Self {
-        let security = SecurityManager::from_patterns::<[&str; 0]>([]);
-        Self::start_inner(manager, security, None, Some(provider), None).await
-    }
-
-    /// Start a server with a custom profiles path (for tests that exercise
-    /// `configure`/`save_profile`/`delete_profile` without polluting the
-    /// user's real `$XDG_CONFIG_HOME/serial-mcp/profiles.toml`). The caller
-    /// owns the tempdir and must keep it alive for the test's duration.
-    pub async fn start_with_profiles_path(
-        manager: Arc<ConnectionManager>,
-        profiles_path: std::path::PathBuf,
-    ) -> Self {
-        let security = SecurityManager::from_patterns::<[&str; 0]>([]);
-        Self::start_with_profiles_path_and_security(manager, profiles_path, security).await
-    }
-
-    /// Start a server with a custom [`ConnectionManager`], [`SecurityManager`],
-    /// and profiles path (for tests that exercise multiple concerns at once).
-    pub async fn start_with_profiles_path_and_security(
-        manager: Arc<ConnectionManager>,
-        profiles_path: std::path::PathBuf,
-        security: SecurityManager,
-    ) -> Self {
-        // A pre-written file (legacy migration tests, restart tests) is
-        // loaded and validated like production startup would.
-        let store = Arc::new(
-            serial_mcp::profile_store::ProfileStore::open(profiles_path)
-                .expect("open profiles store for test server"),
-        );
-        Self::start_inner(manager, security, Some(store), None, None).await
-    }
-
-    /// Start a server with a custom profiles path AND an injected static
-    /// port provider (Phase 3A profile-session tests).
-    pub async fn start_with_provider_and_profiles_path(
-        manager: Arc<ConnectionManager>,
-        provider: Arc<dyn PortProvider>,
-        profiles_path: std::path::PathBuf,
-    ) -> Self {
-        let security = SecurityManager::from_patterns::<[&str; 0]>([]);
-        let store = Arc::new(
-            serial_mcp::profile_store::ProfileStore::open(profiles_path)
-                .expect("open profiles store for test server"),
-        );
-        Self::start_inner(manager, security, Some(store), Some(provider), None).await
+    /// Begin building a test server around a caller-supplied
+    /// [`ConnectionManager`]. See [`TestServerBuilder`] for the defaults
+    /// and injectable dependencies.
+    pub fn builder(manager: Arc<ConnectionManager>) -> TestServerBuilder {
+        TestServerBuilder {
+            manager,
+            security: SecurityManager::from_patterns::<[&str; 0]>([]),
+            profile_store: None,
+            provider: None,
+            capture_store: None,
+        }
     }
 
     /// Shared construction: one `Arc<ProfileStore>` per server, cloned into
@@ -317,6 +257,76 @@ impl Drop for TestServer {
     fn drop(&mut self) {
         self.shutdown.cancel();
         self.handle.abort();
+    }
+}
+
+/// Test-only builder for [`TestServer`] with injectable dependencies.
+///
+/// Defaults, all overridable via the builder methods:
+/// - caller-supplied [`ConnectionManager`] (constructor argument)
+/// - empty-allowlist [`SecurityManager`]
+/// - ephemeral profile store
+/// - system port provider
+/// - disabled [`CaptureStore`]
+///
+/// The profile store opened from a [`TestServerBuilder::profiles_path`]
+/// lives for the server's lifetime, exactly like production startup.
+pub struct TestServerBuilder {
+    manager: Arc<ConnectionManager>,
+    security: SecurityManager,
+    profile_store: Option<Arc<serial_mcp::profile_store::ProfileStore>>,
+    provider: Option<Arc<dyn PortProvider>>,
+    capture_store: Option<Arc<CaptureStore>>,
+}
+
+impl TestServerBuilder {
+    /// Inject a custom [`SecurityManager`]; its allowlist will govern
+    /// `open` calls during the test. Defaults to an empty allowlist.
+    pub fn security(mut self, security: SecurityManager) -> Self {
+        self.security = security;
+        self
+    }
+
+    /// Use the profile store at `profiles_path` (for tests that exercise
+    /// `configure`/`save_profile`/`delete_profile` without polluting the
+    /// user's real `$XDG_CONFIG_HOME/serial-mcp/profiles.toml`) instead of
+    /// the ephemeral default. A pre-written file (legacy migration tests,
+    /// restart tests) is loaded and validated like production startup
+    /// would. The caller owns the tempdir and must keep it alive for the
+    /// test's duration.
+    pub fn profiles_path(mut self, profiles_path: std::path::PathBuf) -> Self {
+        let store = Arc::new(
+            serial_mcp::profile_store::ProfileStore::open(profiles_path)
+                .expect("open profiles store for test server"),
+        );
+        self.profile_store = Some(store);
+        self
+    }
+
+    /// Inject a static port provider (Phase 3A: synthetic USB identity over
+    /// a real PTY slave path) instead of the system provider default.
+    pub fn port_provider(mut self, provider: Arc<dyn PortProvider>) -> Self {
+        self.provider = Some(provider);
+        self
+    }
+
+    /// Inject a capture store (Phase 6 export_log tests) instead of the
+    /// disabled default.
+    pub fn capture_store(mut self, store: Arc<CaptureStore>) -> Self {
+        self.capture_store = Some(store);
+        self
+    }
+
+    /// Build and start the server.
+    pub async fn start(self) -> TestServer {
+        TestServer::start_inner(
+            self.manager,
+            self.security,
+            self.profile_store,
+            self.provider,
+            self.capture_store,
+        )
+        .await
     }
 }
 
