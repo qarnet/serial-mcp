@@ -9,6 +9,7 @@ use rmcp::{
     transport::{child_process::TokioChildProcess, ConfigureCommandExt},
     ServiceExt,
 };
+use tempfile::TempDir;
 use tokio::process::Command;
 
 mod common;
@@ -46,21 +47,33 @@ fn build_stdio_server() {
     ensure_serial_mcp_built().expect("serial-mcp binary available for stdio tests");
 }
 
-async fn start_stdio_client() -> rmcp::service::RunningService<rmcp::service::RoleClient, ()> {
+/// Start a stdio server child with an isolated temporary `--profiles-path`
+/// so the test never touches the user's actual default profile config.
+/// Returns the running client plus the tempdir that must stay alive for
+/// the client's lifetime.
+async fn start_stdio_client() -> (
+    rmcp::service::RunningService<rmcp::service::RoleClient, ()>,
+    TempDir,
+) {
     build_stdio_server();
+
+    let profiles_dir = TempDir::new().expect("temp dir for isolated stdio profile store");
+    let profiles_path = profiles_dir.path().join("profiles.toml");
 
     let cmd = Command::new(common::binaries::serial_mcp_bin()).configure(|cmd| {
         cmd.env("RUST_LOG", "off");
+        cmd.arg("--profiles-path").arg(&profiles_path);
     });
 
     let transport = TokioChildProcess::new(cmd).expect("spawn stdio server");
 
-    ().serve(transport).await.expect("initialize client")
+    let client = ().serve(transport).await.expect("initialize client");
+    (client, profiles_dir)
 }
 
 #[tokio::test]
 async fn stdio_initialize_handshake_succeeds() {
-    let client = start_stdio_client().await;
+    let (client, _profiles_dir) = start_stdio_client().await;
     let info = client.peer_info();
     assert!(info.is_some(), "no peer_info returned");
     assert_eq!(info.unwrap().server_info.name, "serial-mcp");
@@ -69,7 +82,7 @@ async fn stdio_initialize_handshake_succeeds() {
 
 #[tokio::test]
 async fn stdio_list_tools_returns_all_twenty_five_tools() {
-    let client = start_stdio_client().await;
+    let (client, _profiles_dir) = start_stdio_client().await;
 
     let result = client
         .list_tools(Some(PaginatedRequestParams::default()))
@@ -89,7 +102,7 @@ async fn stdio_list_tools_returns_all_twenty_five_tools() {
 
 #[tokio::test]
 async fn stdio_list_resources_returns_statics_and_templates() {
-    let client = start_stdio_client().await;
+    let (client, _profiles_dir) = start_stdio_client().await;
 
     let resources = client
         .list_resources(Some(PaginatedRequestParams::default()))

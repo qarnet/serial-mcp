@@ -21,6 +21,7 @@
 use std::fs::File;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use fs2::FileExt;
@@ -62,7 +63,7 @@ fn legacy_schema_version() -> u32 {
 #[derive(Debug)]
 pub struct ProfileStore {
     path: Option<PathBuf>,
-    cache: RwLock<Vec<Profile>>,
+    cache: Arc<RwLock<Vec<Profile>>>,
     mutation_lock: Mutex<()>,
 }
 
@@ -75,7 +76,7 @@ impl ProfileStore {
         let profiles = load_validated(&path)?;
         Ok(Self {
             path: Some(path),
-            cache: RwLock::new(profiles),
+            cache: Arc::new(RwLock::new(profiles)),
             mutation_lock: Mutex::new(()),
         })
     }
@@ -84,7 +85,7 @@ impl ProfileStore {
     pub fn ephemeral() -> Self {
         Self {
             path: None,
-            cache: RwLock::new(Vec::new()),
+            cache: Arc::new(RwLock::new(Vec::new())),
             mutation_lock: Mutex::new(()),
         }
     }
@@ -124,14 +125,15 @@ impl ProfileStore {
     ///
     /// Profile mode of the `configure` tool. Creates the profile (with an
     /// empty selector) when it does not exist; replaces the defaults of an
-    /// existing profile only with `overwrite`. Returns whether the profile
-    /// was newly created.
+    /// existing profile only with `overwrite`. Returns the creation flag
+    /// together with the effective resulting profile (freshly read under
+    /// the lock), so the caller never needs a racy second lookup.
     pub async fn update_defaults_preserving_selector(
         &self,
         name: String,
         defaults: ProfileDefaults,
         overwrite: bool,
-    ) -> Result<bool, String> {
+    ) -> Result<(bool, Profile), String> {
         self.run_mutation(move |profiles, now| {
             apply_update_defaults(profiles, name, defaults, overwrite, now)
         })
@@ -150,8 +152,12 @@ impl ProfileStore {
     /// Persistent stores: the apply closure runs inside
     /// [`tokio::task::spawn_blocking`] while holding the process-local
     /// mutation mutex and the advisory file lock, on a fresh read of the
-    /// file. The in-memory cache is replaced with the full resulting
-    /// profile vector only after the durable write succeeds; any failure
+    /// file. The in-memory cache is replaced from inside the blocking
+    /// transaction — immediately after the durable write succeeds and
+    /// before the advisory lock is released — so a cancelled/dropped
+    /// awaiting task cannot leave disk updated but cache stale: the
+    /// blocking task finishes the cache publication regardless, and any
+    /// later mutation is serialized behind the advisory lock. Any failure
     /// leaves both the previous file and the cache unchanged.
     ///
     /// Ephemeral stores: the same closure runs against the in-memory
@@ -164,15 +170,20 @@ impl ProfileStore {
         let _guard = self.mutation_lock.lock().await;
         let now = now_ms();
         let path = self.path.clone();
+        let cache = Arc::clone(&self.cache);
         match path {
             Some(path) => {
                 let result = tokio::task::spawn_blocking(move || {
                     let lock = acquire_lock(&path)?;
-                    let outcome: Result<(T, Vec<Profile>), String> = (|| {
+                    let outcome: Result<T, String> = (|| {
                         let current = load_validated(&path)?;
                         let (value, next) = apply(current, now)?;
                         write_atomic(&path, &next)?;
-                        Ok((value, next))
+                        // Durable write succeeded: publish the full
+                        // resulting vector to the shared cache before
+                        // releasing the advisory lock.
+                        *cache.blocking_write() = next;
+                        Ok(value)
                     })();
                     // Dropping the lock file releases the advisory lock.
                     drop(lock);
@@ -180,9 +191,7 @@ impl ProfileStore {
                 })
                 .await
                 .map_err(|e| format!("Profile store write task failed: {e}"))??;
-                let (value, next) = result;
-                *self.cache.write().await = next;
-                Ok(value)
+                Ok(result)
             }
             None => {
                 let current = self.cache.read().await.clone();
@@ -381,14 +390,16 @@ fn apply_upsert(
 }
 
 /// `configure(profile=...)` store operation: replace defaults, preserve
-/// the selector (read fresh from the file under the lock).
+/// the selector (read fresh from the file under the lock). Returns the
+/// creation flag plus the effective resulting profile so callers can
+/// build tool results without a racy second lookup.
 fn apply_update_defaults(
     mut profiles: Vec<Profile>,
     name: String,
     defaults: ProfileDefaults,
     overwrite: bool,
     now: u64,
-) -> Result<(bool, Vec<Profile>), String> {
+) -> Result<((bool, Profile), Vec<Profile>), String> {
     let existing_idx = profiles.iter().position(|p| p.name == name);
     if existing_idx.is_some() && !overwrite {
         return Err(format!(
@@ -399,24 +410,26 @@ fn apply_update_defaults(
     match existing_idx {
         Some(idx) => {
             let old = profiles[idx].clone();
-            profiles[idx] = Profile {
+            let merged = Profile {
                 name: name.clone(),
                 selector: old.selector.clone(),
                 defaults,
                 metadata: bump_metadata(&old, now),
                 revisions: push_revision(&old, now, old.revisions.clone()),
             };
-            Ok((false, profiles))
+            profiles[idx] = merged.clone();
+            Ok(((false, merged), profiles))
         }
         None => {
-            profiles.push(Profile {
+            let created = Profile {
                 name: name.clone(),
                 selector: ProfileSelector::default(),
                 defaults,
                 metadata: create_metadata(now),
                 revisions: Vec::new(),
-            });
-            Ok((true, profiles))
+            };
+            profiles.push(created.clone());
+            Ok(((true, created), profiles))
         }
     }
 }
@@ -450,6 +463,19 @@ fn test_profile(name: &str) -> Profile {
         defaults: ProfileDefaults::default(),
         metadata: ProfileMetadata::default(),
         revisions: Vec::new(),
+    }
+}
+
+/// Test-only clone of a `ProfileStore` shareable across tasks (the store
+/// itself is not `Clone`).
+#[cfg(test)]
+impl ProfileStore {
+    fn clone_for_test(&self) -> Arc<ProfileStore> {
+        Arc::new(ProfileStore {
+            path: self.path.clone(),
+            cache: Arc::clone(&self.cache),
+            mutation_lock: Mutex::new(()),
+        })
     }
 }
 
@@ -641,8 +667,9 @@ baud_rate = 115200
         store.upsert(test_profile("dev-a"), false).await.unwrap();
 
         // configure() with overwrite replaces defaults but must keep the
-        // selector that was written to disk.
-        let created = store
+        // selector that was written to disk, and must return the effective
+        // profile atomically (no racy second lookup needed).
+        let (created, effective) = store
             .update_defaults_preserving_selector(
                 "dev-a".into(),
                 ProfileDefaults {
@@ -654,16 +681,19 @@ baud_rate = 115200
             .await
             .unwrap();
         assert!(!created);
+        assert_eq!(effective.selector.vid, Some(0x1234), "selector preserved");
+        assert_eq!(effective.defaults.baud_rate, 19200, "defaults replaced");
+        // The store's own view agrees with the returned profile.
         let p = store.get("dev-a").await.unwrap();
-        assert_eq!(p.selector.vid, Some(0x1234), "selector preserved");
-        assert_eq!(p.defaults.baud_rate, 19200, "defaults replaced");
+        assert_eq!(p.defaults.baud_rate, effective.defaults.baud_rate);
+        assert_eq!(p.selector.vid, effective.selector.vid);
     }
 
     #[tokio::test]
     async fn update_defaults_creates_with_empty_selector() {
         let (_dir, path) = temp_path();
         let store = ProfileStore::open(path).unwrap();
-        let created = store
+        let (created, p) = store
             .update_defaults_preserving_selector(
                 "new-pro".into(),
                 ProfileDefaults {
@@ -675,7 +705,6 @@ baud_rate = 115200
             .await
             .unwrap();
         assert!(created);
-        let p = store.get("new-pro").await.unwrap();
         assert_eq!(p.selector, ProfileSelector::default());
         assert_eq!(p.defaults.baud_rate, 9600);
         assert_eq!(p.metadata.revision, 1);
@@ -774,17 +803,77 @@ use_count = 3
     }
 
     #[test]
-    fn relative_filename_uses_current_directory() {
-        let dir = tempfile::tempdir().unwrap();
-        let relative = dir.path().join("profiles.toml");
-        let store = tokio::runtime::Runtime::new().unwrap();
-        store.block_on(async {
-            let store = ProfileStore::open(relative.clone()).unwrap();
-            store.upsert(test_profile("rel-dev"), false).await.unwrap();
+    fn parent_dir_resolves_bare_relative_names_to_cwd() {
+        // A bare relative `--profiles-path profiles.toml` must create files
+        // in the current working directory, not choke on an empty parent.
+        assert_eq!(parent_dir(Path::new("profiles.toml")), PathBuf::from("."));
+        assert_eq!(
+            parent_dir(Path::new("sub/dir/profiles.toml")),
+            PathBuf::from("sub/dir")
+        );
+        assert_eq!(
+            parent_dir(Path::new("/abs/profiles.toml")),
+            PathBuf::from("/abs")
+        );
+        // End-to-end relative behavior (real process cwd) is covered by the
+        // http_integration `relative_profiles_path` test.
+    }
+
+    #[tokio::test]
+    async fn cancelled_upsert_still_publishes_cache_and_disk() {
+        // Regression: a persistent mutation whose awaiting task is dropped
+        // (tool cancellation) must still complete its disk write AND its
+        // cache publication, because both happen inside the blocking
+        // transaction before the advisory lock is released.
+        let (_dir, path) = temp_path();
+        let lock_file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(lock_path(&path))
+            .unwrap();
+        lock_file.lock_exclusive().unwrap();
+
+        let store = ProfileStore::open(path.clone()).unwrap();
+        let store_for_task = store.clone_for_test();
+        let task = tokio::spawn(async move {
+            let _ = store_for_task
+                .upsert(test_profile("cancelled-dev"), false)
+                .await;
         });
+
+        // Give the task time to reach the blocking transaction, which is
+        // now parked on our exclusive lock.
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        task.abort();
+        let _ = task.await; // join handle drops the aborted future
+
+        // Nothing visible yet: the transaction is still blocked.
+        assert!(store.get("cancelled-dev").await.is_none());
+
+        // Release the lock; the abandoned blocking task now completes the
+        // durable write and the cache publication by itself.
+        FileExt::unlock(&lock_file).unwrap();
+        drop(lock_file);
+
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            if store.get("cancelled-dev").await.is_some() {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "mutation must appear in the live store even after the awaiting task was aborted"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+
+        // And it must be durably on disk for a fresh store.
+        let reloaded = ProfileStore::open(path).unwrap();
         assert!(
-            relative.exists(),
-            "relative-parent write must land next to the file"
+            reloaded.get("cancelled-dev").await.is_some(),
+            "aborted mutation must also appear in the reopened disk state"
         );
     }
 }

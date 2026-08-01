@@ -2,6 +2,7 @@
 
 use rmcp::transport::{child_process::TokioChildProcess, ConfigureCommandExt};
 use rmcp::ServiceExt;
+use tempfile::TempDir;
 use tokio::process::Command;
 
 mod common;
@@ -11,13 +12,23 @@ fn build_stdio_server() {
     ensure_serial_mcp_built().expect("serial-mcp binary available for blob resource tests");
 }
 
+/// A stdio server command isolated from the user's actual default profile
+/// config via a temporary `--profiles-path`.
+fn isolated_stdio_command() -> (tokio::process::Command, TempDir) {
+    let profiles_dir = TempDir::new().expect("temp dir for isolated blob profile store");
+    let profiles_path = profiles_dir.path().join("profiles.toml");
+    let cmd = Command::new(common::binaries::serial_mcp_bin()).configure(|cmd| {
+        cmd.env("RUST_LOG", "off");
+        cmd.arg("--profiles-path").arg(&profiles_path);
+    });
+    (cmd, profiles_dir)
+}
+
 #[tokio::test]
 async fn blob_resource_template_is_advertised() {
     build_stdio_server();
 
-    let cmd = Command::new(common::binaries::serial_mcp_bin()).configure(|cmd| {
-        cmd.env("RUST_LOG", "off");
-    });
+    let (cmd, _profiles_dir) = isolated_stdio_command();
 
     let transport = TokioChildProcess::new(cmd).expect("spawn stdio server");
     let client = ().serve(transport).await.expect("initialize client");
@@ -45,9 +56,7 @@ async fn blob_resource_template_is_advertised() {
 async fn resource_uri_parsing_includes_raw_suffix() {
     build_stdio_server();
 
-    let cmd = Command::new(common::binaries::serial_mcp_bin()).configure(|cmd| {
-        cmd.env("RUST_LOG", "off");
-    });
+    let (cmd, _profiles_dir) = isolated_stdio_command();
 
     let transport = TokioChildProcess::new(cmd).expect("spawn stdio server");
     let client = ().serve(transport).await.expect("initialize client");

@@ -2332,3 +2332,36 @@ async fn failed_profile_write_preserves_previous_state() {
     );
     client2.cancel().await.ok();
 }
+
+#[tokio::test]
+async fn relative_profiles_path_resolves_against_server_cwd() {
+    use common::spawned::{spawn_client, SpawnedServer};
+    let dir = TempDir::new().unwrap();
+    let relative = std::path::Path::new("profiles.toml");
+
+    // Launch the real binary with cwd = isolated temp dir and a bare
+    // relative profile filename.
+    let mut server = SpawnedServer::start_with_cwd(dir.path(), Some(relative)).await;
+    let (client, _rx) = spawn_client(&server).await.unwrap();
+    let created = configure_profile_via(&client, "rel-dev", 9600).await;
+    assert_ne!(created.is_error, Some(true), "{created:?}");
+    client.cancel().await.ok();
+    server.stop().await.unwrap();
+
+    // The file landed in the server's cwd.
+    let on_disk = dir.path().join("profiles.toml");
+    assert!(
+        on_disk.exists(),
+        "relative --profiles-path must create the file in the server's cwd"
+    );
+
+    // Restart with the same cwd + relative path proves persistence.
+    let server2 = SpawnedServer::start_with_cwd(dir.path(), Some(relative)).await;
+    let (client2, _rx2) = spawn_client(&server2).await.unwrap();
+    let names = list_profile_names_via(&client2).await;
+    assert!(
+        names.contains(&"rel-dev".to_string()),
+        "relative-path store must survive restart: {names:?}"
+    );
+    client2.cancel().await.ok();
+}

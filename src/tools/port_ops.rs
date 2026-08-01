@@ -356,22 +356,19 @@ pub async fn configure(
 
     if let Some(profile_name) = args.profile.as_ref() {
         // Profile mode: the store reloads under lock, preserves the
-        // on-disk selector, and persists before updating its cache.
-        let created = store
+        // on-disk selector, and persists before updating its cache. The
+        // effective profile (created flag + defaults) is returned from the
+        // same transaction — no racy second lookup.
+        let (created, profile) = store
             .update_defaults_preserving_selector(
                 profile_name.clone(),
                 args.defaults.clone(),
                 args.overwrite,
             )
             .await?;
-        let defaults = store
-            .get(profile_name)
-            .await
-            .map(|p| p.defaults)
-            .ok_or_else(|| format!("Profile '{profile_name}' not found after update"))?;
         Ok(Json(ConfigureResult {
             mode: "profile".into(),
-            defaults,
+            defaults: profile.defaults,
             created: Some(created),
         }))
     } else {
