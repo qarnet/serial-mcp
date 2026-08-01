@@ -16,23 +16,23 @@ mod tests {
     use crate::server::tool_catalog;
     use crate::tools::types::OpenArgs;
 
-    /// The exhaustive 26-tool catalog served by MCP (Phase 4: shared with
-    /// the xtask `agent-eval` catalog metrics via
+    /// The exhaustive 27-tool catalog served by MCP (Phase 5: `capture_boot`
+    /// added; shared with the xtask `agent-eval` catalog metrics via
     /// `crate::server::tool_catalog`). A missing tool would skip its
     /// `outputSchema`/`title` check and any uint-format scan, so the count
     /// is guarded explicitly.
     #[test]
-    fn tool_catalog_has_exactly_twenty_six_tools() {
+    fn tool_catalog_has_exactly_twenty_seven_tools() {
         let catalog = tool_catalog();
         assert_eq!(
             catalog.len(),
-            26,
-            "tool catalog must contain exactly 26 tools: {catalog:?}"
+            27,
+            "tool catalog must contain exactly 27 tools: {catalog:?}"
         );
         let mut names: Vec<String> = catalog.iter().map(|t| t.name.to_string()).collect();
         names.sort();
         names.dedup();
-        assert_eq!(names.len(), 26, "tool names must be unique");
+        assert_eq!(names.len(), 27, "tool names must be unique");
     }
 
     /// Regression guard: every MCP tool must carry `outputSchema` and `title`,
@@ -84,10 +84,10 @@ mod tests {
     #[test]
     fn tool_catalog_names_match_served_route_names() {
         // Every catalog entry must carry a non-empty name and the exact
-        // served count (26); duplicate names would make tools/list ambiguous.
+        // served count (27); duplicate names would make tools/list ambiguous.
         let catalog = tool_catalog();
         let names: Vec<&str> = catalog.iter().map(|t| t.name.as_ref()).collect();
-        assert_eq!(names.len(), 26);
+        assert_eq!(names.len(), 27);
         for n in &names {
             assert!(!n.is_empty());
         }

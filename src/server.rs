@@ -636,6 +636,31 @@ impl SerialHandler {
     }
 
     #[tool(
+        description = "Atomic boot/reset capture: purges unread OS input, marks the RX live edge under the pump gate (no pre-mark byte can leak in), optionally pulses DTR/RTS (release guaranteed on completion, cancellation, or failure), then captures ONLY post-mark bytes through the existing match/framing/parser/timeout/silence pipeline. Uses a private read cursor — the shared `read` cursor and ring history are untouched. `reset=null` = arm-only capture for externally reset devices (lines never touched). Result is bounded in memory by the connection's max_buffered_bytes; no file output. `read.from_offset` equals `mark_offset` unless the ring wrapped (then `bytes_lost` reports it). Destructive: configured reset lines may reboot hardware.",
+        title = "Capture Boot Output",
+        annotations(destructive_hint = true, open_world_hint = false),
+        execution(task_support = "optional")
+    )]
+    async fn capture_boot(
+        &self,
+        meta: Meta,
+        ct: tokio_util::sync::CancellationToken,
+        peer: rmcp::Peer<RoleServer>,
+        Parameters(args): Parameters<CaptureBootArgs>,
+    ) -> Result<Json<CaptureBootResult>, String> {
+        control_ops::capture_boot(
+            &self.connections,
+            &self.rx_sessions,
+            &self.budget,
+            meta,
+            ct,
+            peer,
+            args,
+        )
+        .await
+    }
+
+    #[tool(
         description = "Compute a checksum over caller-supplied bytes. Algorithms: xor (NMEA-0183 *XX), lrc (Modbus ASCII). Input data is decoded from the given encoding (utf8/hex/base64) before checksumming. Returns the checksum as a hex string and a raw integer. LLMs cannot reliably compute checksums by hand — use this when hand-crafting binary frames for a protocol without a preset.",
         title = "Compute Checksum",
         annotations(read_only_hint = true, open_world_hint = false)
@@ -655,8 +680,8 @@ impl SerialHandler {
 /// Every `#[tool]` method's generated attribute is collected here so schema
 /// tests (`src/tools/mod.rs`) and the xtask `agent-eval` catalog metrics
 /// consume the SAME tool attributes the MCP router serves — no duplicated
-/// 26-tool enumeration can drift from the router. Keep this list in sync
-/// with the `#[tool]` methods above; `tool_catalog_has_exactly_twenty_six_tools`
+/// 27-tool enumeration can drift from the router. Keep this list in sync
+/// with the `#[tool]` methods above; `tool_catalog_has_exactly_twenty_seven_tools`
 /// guards the count.
 pub fn tool_catalog() -> Vec<rmcp::model::Tool> {
     vec![
@@ -667,6 +692,7 @@ pub fn tool_catalog() -> Vec<rmcp::model::Tool> {
         SerialHandler::write_tool_attr(),
         SerialHandler::transact_tool_attr(),
         SerialHandler::read_tool_attr(),
+        SerialHandler::capture_boot_tool_attr(),
         SerialHandler::flush_tool_attr(),
         SerialHandler::set_dtr_rts_tool_attr(),
         SerialHandler::set_flow_control_tool_attr(),
@@ -814,12 +840,17 @@ impl ServerHandler for SerialHandler {
              3. Use `transact` for command/response, `read` for buffered or unsolicited \
              data (with `match` to wait for a pattern), `write` for send-only, and \
              `subscribe` only for ongoing notifications.\n\
-             4. After durable changes inspect `profile` / `profile_persistence` on the \
+             4. For boot/reset capture (Arduino auto-reset, power-cycle banner, boot \
+             prompt) use `capture_boot` — one call that atomically marks the live edge, \
+             optionally pulses DTR/RTS, and captures only post-mark bytes (private \
+             cursor; in-memory only). `reset=null` arms capture for externally reset \
+             devices.\n\
+             5. After durable changes inspect `profile` / `profile_persistence` on the \
              result, or `get_status` for the live binding.\n\
-             5. Use `open_profile` only for explicit choice or weak identity; \
+             6. Use `open_profile` only for explicit choice or weak identity; \
              `rollback_profile` restores a retained configuration after a bad learned \
              change.\n\
-             6. Escalate to framing/parser, cursor replay, reconnect, line control, and \
+             7. Escalate to framing/parser, cursor replay, reconnect, line control, and \
              log tools only when the common path needs them.\n\
              Resources: serial://ports (same preview as list_ports), serial://connections, \
              serial://connections/{id}. Prompts: diagnose_port, interactive_terminal."

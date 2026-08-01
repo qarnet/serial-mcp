@@ -4193,3 +4193,70 @@ async fn native_read_modbus_ascii_preset_decodes_parsed_frame() {
     client.cancel().await.ok();
     drop(fw);
 }
+
+// ── Phase 5: capture_boot arm-only over the real firmware pipeline ──────────
+//
+// native_sim's PTY UART has no modem-line callbacks, so DTR/RTS assertion
+// cannot be observed here (the atomic reset proof lives in the controlled
+// backend in http_integration.rs). Arm-only capture (reset=null) needs no
+// line control and exercises the real always-on pump + ring pipeline:
+// post-arm command output is captured, pre-arm boot banner bytes never are.
+
+#[tokio::test]
+#[ignore = "requires native_sim firmware binary"]
+async fn native_capture_boot_arm_only_captures_post_arm_command_output() {
+    let fw = NativeSimFirmware::spawn().await.expect("spawn zephyr.exe");
+    let pty_path = fw.pty_path().to_string();
+
+    let server = TestServer::start().await;
+    let (client, _rx) = connect_client(&server).await.unwrap();
+    let id = open_pty(&client, &pty_path).await;
+
+    // Consume the pre-arm boot banner so we know exactly what predates the
+    // capture (and where the shared cursor sits).
+    sync_boot(&client, &id).await;
+
+    // Arm-only capture waiting for the pong prompt.
+    let call = client.peer().call_tool(tool_request(
+        "capture_boot",
+        json!({
+            "connection_id": id,
+            "reset": null,
+            "match": {
+                "pattern": "pong",
+                "config": { "mode": "literal_substring", "pattern_encoding": "utf8" }
+            },
+            "timeout_ms": 3000,
+        }),
+    ));
+    let mut call = Box::pin(call);
+
+    // The command is issued while the capture is armed (an external actor
+    // reset/powered the device): only its response may land in the result.
+    tokio::select! {
+        res = call.as_mut() => {
+            panic!("arm-only capture completed before the command output: {res:?}");
+        }
+        _ = tokio::time::sleep(Duration::from_millis(300)) => {}
+    }
+    write_cmd(&client, &id, "ping").await;
+
+    let result = call.await.unwrap();
+    assert_ne!(result.is_error, Some(true), "{result:?}");
+    let s = result.structured_content.expect("structured");
+    assert!(s["reset"].is_null(), "arm-only capture reports reset=null");
+    assert_eq!(s["read"]["stop_reason"], json!("match_found"));
+    let data = s["read"]["data"].as_str().unwrap_or_default();
+    assert!(
+        data.contains("pong"),
+        "post-arm command output must be captured: {data:?}"
+    );
+    assert!(
+        !data.contains("test firmware ready"),
+        "pre-arm boot banner must never appear in the capture: {data:?}"
+    );
+
+    close_connection(&client, &id).await;
+    client.cancel().await.ok();
+    drop(fw);
+}

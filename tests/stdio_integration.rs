@@ -23,6 +23,7 @@ const EXPECTED_TOOLS: &[&str] = &[
     "write",
     "transact",
     "read",
+    "capture_boot",
     "flush",
     "set_dtr_rts",
     "set_flow_control",
@@ -82,7 +83,7 @@ async fn stdio_initialize_handshake_succeeds() {
 }
 
 #[tokio::test]
-async fn stdio_list_tools_returns_all_twenty_six_tools() {
+async fn stdio_list_tools_returns_all_twenty_seven_tools() {
     let (client, _profiles_dir) = start_stdio_client().await;
 
     let result = client

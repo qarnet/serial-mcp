@@ -7,6 +7,8 @@ use crate::prompts::types::DiagnosePortArgs;
 /// Teaches the Phase 4 common path: `list_ports` profile preview → bare
 /// `open` (automatic 115200 fallback + profile selection) → `transact`
 /// probes → inspect/roll back the learned profile when a probe misfired.
+/// Phase 5: `capture_boot` is the boot/reset capture path (atomic mark +
+/// optional DTR/RTS pulse + private-cursor capture).
 pub fn build_diagnose_prompt(args: DiagnosePortArgs) -> GetPromptResult {
     let starting = args
         .baud_rate
@@ -25,9 +27,11 @@ confidence) and report which profile session was selected or created. If open fa
 38400, 115200, 230400, 460800 explicitly until one succeeds.\n\
 3. Sample unsolicited output with `read(connection_id, timeout_ms=500)`. Many devices print a \
 banner on boot or when DTR toggles.\n\
-4. If silent, toggle DTR with `set_dtr_rts(connection_id, dtr=false, rts=false)` then \
-`set_dtr_rts(connection_id, dtr=true, rts=true)` to soft-reset Arduino-style boards, and \
-re-read.\n\
+4. For boot/reset capture use ONE `capture_boot(connection_id, reset={{assert_dtr=false, \
+assert_rts=false, release_dtr=true, release_rts=true, hold_ms=100}}, match=..., timeout_ms=5000)` \
+call: it atomically marks the live edge, pulses DTR/RTS (Arduino-style reset), and captures only \
+post-reset bytes with a private cursor — no arm/reset race, no stale bytes. `reset=null` arms \
+capture for externally reset/power-cycled devices.\n\
 5. Probe with `transact(connection_id, data=\"AT\\r\\n\", match={{pattern=\"OK\", \
 config={{mode=\"literal_substring\", pattern_encoding=\"utf8\"}}}}, timeout_ms=1000)` — one call \
 for write + awaited response. Try `?\\r\\n`, `help\\r\\n`, `\\r\\n` as alternatives.\n\

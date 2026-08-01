@@ -536,7 +536,33 @@ pub fn scenarios() -> Vec<Scenario> {
         },
         Scenario {
             id: "boot_reset_prompt_capture",
-            label: "Boot-reset prompt capture (current multi-call composition)",
+            label: "Boot-reset prompt capture (atomic capture_boot)",
+            calls: vec![call(
+                "capture_boot",
+                serde_json::json!({
+                    "connection_id": CID,
+                    "reset": {
+                        "assert_dtr": false,
+                        "assert_rts": false,
+                        "release_dtr": true,
+                        "release_rts": true,
+                        "hold_ms": 100,
+                    },
+                    "match": serde_json::json!({ "pattern": "boot>", "config": { "mode": "literal_substring", "pattern_encoding": "utf8" } }),
+                    "timeout_ms": 5000,
+                }),
+            )],
+            modeled: None,
+            completion_ref:
+                "tests/http_integration.rs::capture_boot_stale_bytes_excluded_boot_bytes_captured_cursor_preserved",
+            stale_race: false,
+            retries: 0,
+            invalid_calls: 0,
+            common: false,
+        },
+        Scenario {
+            id: "boot_reset_manual_composition",
+            label: "Boot-reset prompt capture (manual multi-call composition, pre-Phase 5)",
             calls: vec![
                 call("open", serde_json::json!({ "port": FIXED_PORT })),
                 call(
@@ -564,47 +590,7 @@ pub fn scenarios() -> Vec<Scenario> {
                     }),
                 ),
             ],
-            modeled: Some(ModeledVariant {
-                kind: "capture_boot",
-                label: "atomic capture_boot (armed reset + capture in one call)",
-                calls: vec![call(
-                    "capture_boot",
-                    serde_json::json!({
-                        "connection_id": CID,
-                        "reset": { "dtr": true, "rts": true },
-                        "match": "boot>",
-                        "timeout_ms": 5000,
-                    }),
-                )],
-                expansion_calls: vec![
-                    call("open", serde_json::json!({ "port": FIXED_PORT })),
-                    call(
-                        "read",
-                        serde_json::json!({
-                            "connection_id": CID,
-                            "from": { "type": "now" },
-                            "timeout_ms": 100,
-                        }),
-                    ),
-                    call(
-                        "set_dtr_rts",
-                        serde_json::json!({ "connection_id": CID, "dtr": false, "rts": false }),
-                    ),
-                    call(
-                        "set_dtr_rts",
-                        serde_json::json!({ "connection_id": CID, "dtr": true, "rts": true }),
-                    ),
-                    call(
-                        "read",
-                        serde_json::json!({
-                            "connection_id": CID,
-                            "match": serde_json::json!({ "pattern": "boot>", "config": { "mode": "literal_substring", "pattern_encoding": "utf8" } }),
-                            "timeout_ms": 5000,
-                        }),
-                    ),
-                ],
-                note: "One server-side operation would snapshot the live edge, pulse DTR/RTS, and capture only post-reset bytes — removing the arm/reset race between the seek and the reset.",
-            }),
+            modeled: None,
             completion_ref:
                 "tests/serial_pty.rs::pty_transact_from_now_skips_pre_write_buffer",
             stale_race: true,

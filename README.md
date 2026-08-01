@@ -19,7 +19,7 @@ client flash, reset, and talk to a board on their own.
 
 ## Capabilities
 
-**26 tools:** list_ports, list_connections, open, close, read, write, transact, flush, set_dtr_rts, set_flow_control, send_break, subscribe, unsubscribe, get_status, reconfigure, list_profiles, open_profile, save_profile, delete_profile, configure, rollback_profile, get_log, clear_log, export_log, reconnect, compute_checksum
+**27 tools:** list_ports, list_connections, open, close, read, write, transact, capture_boot, flush, set_dtr_rts, set_flow_control, send_break, subscribe, unsubscribe, get_status, reconfigure, list_profiles, open_profile, save_profile, delete_profile, configure, rollback_profile, get_log, clear_log, export_log, reconnect, compute_checksum
 **5 resources:** `serial://ports`, `serial://connections`, `serial://connections/{id}`, `serial://connections/{id}/raw`, `serial://connections/{id}/log` (3 resource templates plus 2 static)  
 **2 prompt templates:** `diagnose_port`, `interactive_terminal`  
 
@@ -196,7 +196,23 @@ generated, revision, dirty, candidates, last persistence error):
 
 The normal workflow is a short decision tree: discover (`list_ports`), open
 (bare `open`), talk (`transact`/`read`/`write`), verify the learned profile,
-escalate to advanced tools only when needed.
+escalate to advanced tools only when needed. For boot/reset capture
+(Arduino auto-reset, power-cycle banner, boot prompt) use `capture_boot` —
+one atomic call instead of the racy arm-then-reset-then-read composition:
+
+```
+capture_boot(connection_id="9f...",
+             reset={ assert_dtr: false, assert_rts: false,
+                     release_dtr: true, release_rts: true, hold_ms: 100 },
+             match={ pattern: "boot>", config: { mode: "literal_substring",
+             pattern_encoding: "utf8" } }, timeout_ms=5000)
+   → { mark_offset: 0, pre_mark_bytes: 0, os_input_flushed: true,
+       read: { stop_reason: "match_found", data: "...boot>", ... } }
+   # one call = purge unread OS input + atomic live-edge mark (no pre-mark
+   # byte can leak in) + optional DTR/RTS pulse (release guaranteed) +
+   # capture of ONLY post-mark bytes; private read cursor, shared `read`
+   # cursor and ring history untouched; in-memory result only
+```
 
 ```
 1. list_ports()

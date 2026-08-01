@@ -221,6 +221,46 @@ fn server_json_omits_packages() {
 }
 
 #[test]
+fn readme_teaches_capture_boot_boot_path_and_semantics() {
+    // Phase 5: the README must teach capture_boot as the boot/reset path,
+    // and the tool description must state the private cursor, OS-input
+    // purge, optional line pulse, bounded in-memory result, and no file
+    // output.
+    let readme = repo_file("README.md");
+    assert!(
+        readme.contains("capture_boot"),
+        "README must teach capture_boot as the boot/reset path"
+    );
+    let server = repo_file("src/server.rs");
+    let desc_start = server
+        .find("Atomic boot/reset capture")
+        .expect("capture_boot tool description");
+    let desc = &server[desc_start..desc_start + 1200];
+    for needle in [
+        "private read cursor",
+        "purges unread OS input",
+        "pulses DTR/RTS",
+        "no file output",
+        "bounded in memory",
+    ] {
+        assert!(
+            desc.contains(needle),
+            "capture_boot tool description must state {needle:?}"
+        );
+    }
+    // The decision-tree instructions teach the boot path too.
+    let instructions = server
+        .split("with_instructions(")
+        .nth(1)
+        .and_then(|s| s.split("to_string()").next())
+        .expect("server.rs must contain with_instructions");
+    assert!(
+        instructions.contains("capture_boot"),
+        "server instructions must teach capture_boot"
+    );
+}
+
+#[test]
 fn readme_teaches_profile_discovery_and_common_flow() {
     // Phase 4: the normal workflow is discover → bare open → transact →
     // inspect the learned profile → escalate. Positive guidance assertions.
@@ -264,6 +304,10 @@ fn prompts_teach_current_decision_tree_without_stale_references() {
     assert!(
         diagnose.contains("rollback_profile"),
         "diagnose prompt must teach rollback after bad learned settings"
+    );
+    assert!(
+        diagnose.contains("capture_boot"),
+        "diagnose prompt must teach capture_boot for boot/reset capture"
     );
     let interactive = repo_file("src/prompts/interactive.rs");
     assert!(

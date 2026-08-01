@@ -1084,3 +1084,122 @@ pub struct TransactResult {
     pub write: WriteResult,
     pub read: ReadResult,
 }
+
+// ---- Atomic boot capture (Phase 5) -----------------------------------------
+
+/// Optional DTR/RTS reset pulse for `capture_boot`.
+///
+/// When present, the server asserts the configured lines (DTR first, then
+/// RTS, like `set_dtr_rts`), holds them for `hold_ms`, then always releases
+/// them — on normal completion, cancellation, assertion/release failure, or
+/// disconnect. The release guard is armed BEFORE the assertion so a partial
+/// assertion failure still restores the configured release state.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct CaptureBootReset {
+    /// DTR level to assert (hold) during the pulse.
+    pub assert_dtr: bool,
+    /// RTS level to assert (hold) during the pulse.
+    pub assert_rts: bool,
+    /// DTR level to restore after the hold (release state).
+    pub release_dtr: bool,
+    /// RTS level to restore after the hold (release state).
+    pub release_rts: bool,
+    /// How long to hold the asserted lines in milliseconds.
+    /// Default 100; minimum 1; bounded by the tool timeout ceiling.
+    #[serde(default = "default_capture_hold_ms")]
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub hold_ms: u64,
+}
+
+fn default_capture_hold_ms() -> u64 {
+    100
+}
+
+/// `capture_boot` arguments.
+///
+/// One bounded operation: purge unread OS input, mark the RX live edge
+/// atomically (under the pump gate, so no pre-mark byte can leak in), pulse
+/// DTR/RTS when `reset` is configured, then capture only post-mark bytes
+/// through the existing match/framing/parser/timeout/silence pipeline.
+///
+/// `reset = null` (or omitted) performs an arm-only capture for externally
+/// reset or power-cycled devices: no line is touched and the capture stays
+/// armed until a stop condition (match, timeout, silence, size cap,
+/// disconnect, cancellation) fires.
+///
+/// There is deliberately no `from` field — capture always begins at its
+/// atomic mark. The connection's `max_buffered_bytes` default bounds the
+/// in-memory result. `settle_ms` delays consumption, not capture: the
+/// always-on pump still appends bytes from the mark during settle. The read
+/// phase timeout defaults to 5000ms (omitted or explicit null both resolve
+/// to this bounded default); the total operation is bounded by
+/// hold + settle + read timeout.
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct CaptureBootArgs {
+    pub connection_id: String,
+    /// Optional DTR/RTS reset pulse. `null` = arm-only capture; lines are
+    /// never touched.
+    #[serde(default)]
+    pub reset: Option<CaptureBootReset>,
+    /// Delay in milliseconds between the reset pulse and consumption.
+    /// The pump keeps appending bytes from the mark during this window.
+    /// Default: no settle delay.
+    #[serde(default)]
+    #[schemars(schema_with = "crate::schema_helpers::option_uint_schema")]
+    pub settle_ms: Option<u64>,
+    /// Total wall-clock budget for the read phase in milliseconds, after the
+    /// pulse and settle. Omitted (or explicit null) defaults to 5000.
+    #[serde(default)]
+    #[schemars(schema_with = "crate::schema_helpers::option_timeout_ms_schema")]
+    pub timeout_ms: Option<u64>,
+    /// Silence timeout in milliseconds for the read phase. When set, capture
+    /// stops if no new data arrives within this window. `0` is invalid.
+    #[serde(default)]
+    #[schemars(schema_with = "crate::schema_helpers::option_positive_timeout_ms_schema")]
+    pub no_new_rx_timeout_ms: Option<u64>,
+    #[serde(default = "default_encoding")]
+    pub encoding: String,
+    /// Optional match configuration; capture stops when the pattern is found
+    /// (checks buffered post-mark history first, then waits).
+    #[serde(default)]
+    pub r#match: Option<crate::match_config::MatchRequest>,
+    /// Optional RX frame decoder configuration, applied to the post-mark
+    /// stream exactly like `read`.
+    #[serde(default)]
+    pub rx_framing: Option<crate::framing::RxFramingConfig>,
+    /// Optional RX parser configuration; sibling to `rx_framing`.
+    #[serde(default)]
+    pub rx_parser: Option<crate::framing::ParserConfig>,
+    /// Optional protocol preset; fills in framing/parser gaps.
+    #[serde(default)]
+    pub protocol: Option<crate::framing::ProtocolPreset>,
+}
+
+/// `capture_boot` result.
+///
+/// The nested `read` carries the full existing read result shape
+/// (`stop_reason`, offsets, `bytes_lost`, frames, match, framing-error
+/// fields). `read.from_offset` equals `mark_offset` unless the ring wrapped
+/// before the consumer caught up; `mark_offset` always records the original
+/// atomic boundary.
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct CaptureBootResult {
+    pub connection_id: String,
+    pub name: Option<String>,
+    /// The configured reset pulse, `null` for arm-only capture.
+    pub reset: Option<CaptureBootReset>,
+    /// Absolute stream offset of the atomic live-edge mark: no byte before
+    /// this offset can appear in `read.data`.
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub mark_offset: u64,
+    /// Total bytes appended to the ring before the mark (`mark_offset` in
+    /// stream bytes; offsets are monotonic from open).
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub pre_mark_bytes: u64,
+    /// `true` when the unread OS input buffer was successfully purged before
+    /// the mark. A purge failure is a tool error that occurs before any line
+    /// assertion, so this field is always `true` on a successful result.
+    pub os_input_flushed: bool,
+    /// The capture read: post-mark bytes through the existing read pipeline.
+    pub read: ReadResult,
+}

@@ -141,12 +141,15 @@ pub fn aggregate(scenarios: &[ScenarioMetrics]) -> AggregateMetrics {
         .map(|id| Comparison::new(by_id(id), modeled_of(id), 0))
         .collect();
 
+    // capture_boot (Phase 5, implemented) vs the pre-Phase-5 manual
+    // composition: one atomic call removes the arm/reset race of the
+    // 5-call open+read+set_dtr_rts×2+read sequence.
     let capture_boot = Comparison::new(
+        by_id("boot_reset_manual_composition"),
         by_id("boot_reset_prompt_capture"),
-        modeled_of("boot_reset_prompt_capture"),
         0,
     );
-    let boot_stale_race = by_id("boot_reset_prompt_capture").stale_race;
+    let boot_stale_race = by_id("boot_reset_manual_composition").stale_race;
 
     // Common-task medians (facade decision).
     let common: Vec<&ScenarioMetrics> = scenarios.iter().filter(|s| s.common).collect();

@@ -10,6 +10,7 @@
 #![allow(dead_code)]
 
 pub mod binaries;
+pub mod controlled;
 pub mod firmware;
 pub mod spawned;
 

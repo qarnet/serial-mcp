@@ -727,6 +727,10 @@ pub struct SerialConnection {
     /// connection-mode `configure`/clean close so concurrent requests
     /// cannot snapshot each other's half-applied state.
     learning_lock: tokio::sync::Mutex<()>,
+    /// Serializes line-control operations (Phase 5): `set_dtr_rts` and the
+    /// `capture_boot` reset pulse both hold this so a concurrent line-control
+    /// request cannot interleave inside an assert/hold/release sequence.
+    control_lock: tokio::sync::Mutex<()>,
     /// Effective RX ring buffer size from the open config, so profile
     /// snapshots never depend on whichever handler-local `RxSessionManager`
     /// receives a later request.
@@ -814,6 +818,7 @@ impl SerialConnection {
             poll_interval_ms_default: AtomicU64::new(config.poll_interval_ms),
             active_profile: StdMutex::new(None),
             learning_lock: tokio::sync::Mutex::new(()),
+            control_lock: tokio::sync::Mutex::new(()),
             rx_buffer_size: config.rx_buffer_size,
         }
     }
@@ -928,6 +933,15 @@ impl SerialConnection {
     /// attempt, and the binding update.
     pub(crate) fn learning_lock(&self) -> &tokio::sync::Mutex<()> {
         &self.learning_lock
+    }
+
+    /// The per-connection line-control lock. `capture_boot` holds this
+    /// across its whole assert/hold/release sequence so a concurrent
+    /// `set_dtr_rts` cannot interleave inside the pulse. Callers acquiring
+    /// it must use the unlocked line setter
+    /// ([`Self::set_dtr_rts_unlocked`]).
+    pub(crate) fn control_lock(&self) -> &tokio::sync::Mutex<()> {
+        &self.control_lock
     }
 
     /// Snapshot the connection's full effective `ProfileDefaults`: current
@@ -1309,7 +1323,18 @@ impl SerialConnection {
     /// Drive the DTR and RTS control lines. Common use case: pulse DTR low
     /// to soft-reset an Arduino, or hold both low to enter the ESP32
     /// bootloader.
+    ///
+    /// Takes the per-connection line-control lock so the change cannot
+    /// interleave with a `capture_boot` reset pulse.
     pub async fn set_dtr_rts(&self, dtr: bool, rts: bool) -> Result<()> {
+        let _control = self.control_lock().lock().await;
+        self.set_dtr_rts_unlocked(dtr, rts).await
+    }
+
+    /// Set DTR/RTS without taking the per-connection line-control lock.
+    /// Callers must already hold the lock (see [`Self::control_lock`]);
+    /// `capture_boot` uses this for its assert/hold/release sequence.
+    pub(crate) async fn set_dtr_rts_unlocked(&self, dtr: bool, rts: bool) -> Result<()> {
         self.ensure_open()?;
         let mut io = self.io.lock().await;
         io.as_mut()
@@ -2353,12 +2378,13 @@ mod schema {
     };
     use crate::serial::{ConnectionStatus, PortInfo};
     use crate::tools::types::{
-        ClearLogResult, CloseResult, ComputeChecksumResult, ConfigureResult, DeleteProfileResult,
-        ExportLogResult, FlushResult, GetLogResult, GetStatusResult, ListConnectionsResult,
-        ListPortsResult, ListProfilesResult, OpenResult, PortProfileMatch, ProfileMatchCandidate,
-        ReadResult, ReconfigureResult, ReconnectResult, RollbackProfileArgs, RollbackProfileResult,
-        SaveProfileResult, SendBreakResult, SetDtrRtsResult, SetFlowControlResult,
-        SubscribeChunkNotification, SubscribeEncodingErrorNotification, SubscribeFrameNotification,
+        CaptureBootArgs, CaptureBootReset, CaptureBootResult, ClearLogResult, CloseResult,
+        ComputeChecksumResult, ConfigureResult, DeleteProfileResult, ExportLogResult, FlushResult,
+        GetLogResult, GetStatusResult, ListConnectionsResult, ListPortsResult, ListProfilesResult,
+        OpenResult, PortProfileMatch, ProfileMatchCandidate, ReadResult, ReconfigureResult,
+        ReconnectResult, RollbackProfileArgs, RollbackProfileResult, SaveProfileResult,
+        SendBreakResult, SetDtrRtsResult, SetFlowControlResult, SubscribeChunkNotification,
+        SubscribeEncodingErrorNotification, SubscribeFrameNotification,
         SubscribePartialFrameNotification, SubscribeResult, SubscribeStopNotification,
         TransactResult, UnsubscribeResult, WriteResult,
     };
@@ -2505,6 +2531,11 @@ mod schema {
         ComputeChecksumResult
     );
     check_schema!(transact_result_has_no_uint_formats, TransactResult);
+    // Phase 5 atomic boot capture (guards mark_offset, pre_mark_bytes,
+    // and the nested ReadResult's uint fields).
+    check_schema!(capture_boot_args_has_no_uint_formats, CaptureBootArgs);
+    check_schema!(capture_boot_reset_has_no_uint_formats, CaptureBootReset);
+    check_schema!(capture_boot_result_has_no_uint_formats, CaptureBootResult);
     check_schema!(
         rollback_profile_args_has_no_uint_formats,
         RollbackProfileArgs

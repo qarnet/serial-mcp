@@ -4150,3 +4150,79 @@ async fn list_ports_preview_output_validates_against_generated_schema() {
 
     harness._client.cancel().await.ok();
 }
+
+// ── Phase 5: capture_boot arm-only over a real PTY ─────────────────────────
+//
+// PTYs expose no modem-line callbacks, so DTR/RTS assertion cannot be
+// observed here (the atomic reset proof lives in the controlled backend in
+// http_integration.rs). Arm-only capture (reset=null) needs no line control
+// at all and exercises the real byte pipeline end-to-end.
+
+#[tokio::test]
+async fn pty_capture_boot_arm_only_captures_only_post_mark_bytes() {
+    let (_server, client, _rx, mut pty, connection_id) = setup().await;
+
+    // Stale bytes the device emitted before the capture is armed.
+    pty.write_device(b"stale-banner\r\n").await.unwrap();
+    // Consume them so the shared cursor sits past them.
+    let r = client
+        .peer()
+        .call_tool(tool_request(
+            "read",
+            json!({ "connection_id": connection_id, "timeout_ms": 1000 }),
+        ))
+        .await
+        .unwrap();
+    assert_ne!(r.is_error, Some(true), "{r:?}");
+    assert!(
+        r.structured_content.unwrap()["data"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("stale-banner"),
+        "stale bytes must be readable before capture"
+    );
+
+    // Arm-only capture with a match so the read half waits for the boot
+    // prompt instead of returning immediately.
+    let call = client.peer().call_tool(tool_request(
+        "capture_boot",
+        json!({
+            "connection_id": connection_id,
+            "reset": null,
+            "match": {
+                "pattern": "boot>",
+                "config": { "mode": "literal_substring", "pattern_encoding": "utf8" }
+            },
+            "timeout_ms": 3000,
+        }),
+    ));
+    let mut call = Box::pin(call);
+
+    // Emit the boot bytes while the capture is armed (external reset).
+    tokio::select! {
+        res = call.as_mut() => {
+            panic!("arm-only capture completed before external bytes: {res:?}");
+        }
+        _ = tokio::time::sleep(std::time::Duration::from_millis(300)) => {}
+    }
+    pty.write_device(b"early-boot-output\r\nboot> ")
+        .await
+        .unwrap();
+
+    let r = call.await.unwrap();
+    assert_ne!(r.is_error, Some(true), "{r:?}");
+    let s = r.structured_content.expect("structured capture result");
+    assert!(s["reset"].is_null(), "arm-only capture reports reset=null");
+    assert_eq!(s["read"]["stop_reason"], json!("match_found"));
+    let data = s["read"]["data"].as_str().unwrap_or_default();
+    assert!(
+        data.contains("boot>"),
+        "post-mark boot bytes must be captured: {data:?}"
+    );
+    assert!(
+        !data.contains("stale-banner"),
+        "pre-mark stale bytes must never appear in the capture: {data:?}"
+    );
+
+    client.cancel().await.ok();
+}

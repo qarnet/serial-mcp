@@ -9,12 +9,13 @@
 //! can stand in for a device.
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use rmcp::model::{
-    CallToolRequestParams, GetPromptRequestParams, PaginatedRequestParams,
-    ReadResourceRequestParams,
+    CallToolRequest, CallToolRequestParams, CancelledNotificationParam, ClientRequest,
+    GetPromptRequestParams, PaginatedRequestParams, ReadResourceRequestParams,
 };
+use rmcp::service::{PeerRequestOptions, RoleClient, RunningService};
 use serde_json::json;
 use tempfile::TempDir;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -23,7 +24,10 @@ use serial_mcp::limits::{MAX_TIMEOUT_MS, MAX_WRITE_BYTES};
 use serial_mcp::serial::{test_support::loopback_connection, ConnectionManager};
 
 mod common;
-use common::{args_object, connect_client, next_notification, tool_request, TestServer};
+use common::controlled::ControlledState;
+use common::{
+    args_object, connect_client, next_notification, tool_request, NotificationCollector, TestServer,
+};
 
 const EXPECTED_TOOLS: &[&str] = &[
     "list_ports",
@@ -33,6 +37,7 @@ const EXPECTED_TOOLS: &[&str] = &[
     "write",
     "transact",
     "read",
+    "capture_boot",
     "flush",
     "set_dtr_rts",
     "set_flow_control",
@@ -64,7 +69,7 @@ async fn initialize_handshake_succeeds() {
 }
 
 #[tokio::test]
-async fn list_tools_returns_all_twenty_six_tools() {
+async fn list_tools_returns_all_twenty_seven_tools() {
     let server = common::spawned::SpawnedServer::start().await;
     let (client, _rx) = common::spawned::spawn_client(&server).await.unwrap();
 
@@ -2472,4 +2477,1012 @@ async fn relative_profiles_path_resolves_against_server_cwd() {
         "relative-path store must survive restart: {names:?}"
     );
     client2.cancel().await.ok();
+}
+
+// =============================================================================
+// Phase 5 — capture_boot (controlled `SerialIo` through public HTTP MCP)
+//
+// These tests drive the REAL MCP surface (HTTP transport, tool router,
+// RxSession pump, stop controller) against a controlled in-memory backend
+// that records line transitions and can inject RX bytes synchronously at
+// assertion/release time. No tool/store logic is mocked.
+//
+// NOTE on request delivery: the rmcp client only transmits a `tools/call`
+// request once its future is polled. Tests that need the capture to run
+// while the test drives the backend must poll the future (tokio::select!)
+// instead of holding it un-polled.
+// =============================================================================
+
+/// Default reset pulse shape used by most capture tests: assert both lines
+/// low (Arduino-style reset), release back high.
+fn capture_reset() -> serde_json::Value {
+    json!({
+        "assert_dtr": false,
+        "assert_rts": false,
+        "release_dtr": true,
+        "release_rts": true,
+        "hold_ms": 150,
+    })
+}
+
+/// A literal-substring match request that never matches the test payloads.
+fn never_match() -> serde_json::Value {
+    json!({
+        "pattern": "zzz-no-match",
+        "config": { "mode": "literal_substring", "pattern_encoding": "utf8" }
+    })
+}
+
+/// Start a server with one injected controlled connection.
+async fn controlled_server(
+    port: &str,
+    rx_buffer_size: usize,
+) -> (
+    TestServer,
+    RunningService<RoleClient, NotificationCollector>,
+    String,
+    Arc<ControlledState>,
+) {
+    let manager = Arc::new(ConnectionManager::new());
+    let (conn, state) = common::controlled::controlled_connection(port, rx_buffer_size);
+    let cid = manager.insert(conn).await.unwrap();
+    let server = TestServer::start_with(manager).await;
+    let (client, _rx) = connect_client(&server).await.unwrap();
+    (server, client, cid, state)
+}
+
+/// Wait until the line log records the first line transition, polling the
+/// in-flight capture call so its request is actually transmitted (the rmcp
+/// client only sends a request once its future is polled).
+async fn wait_for_line(
+    call: &mut std::pin::Pin<
+        Box<
+            impl std::future::Future<
+                    Output = Result<rmcp::model::CallToolResult, rmcp::service::ServiceError>,
+                > + Send,
+        >,
+    >,
+    state: &ControlledState,
+    deadline: Instant,
+    what: &str,
+) {
+    while state.line_log().is_empty() {
+        assert!(
+            Instant::now() < deadline,
+            "{what} never recorded in line log"
+        );
+        tokio::select! {
+            res = call.as_mut() => {
+                panic!("capture completed before {what}: {res:?}");
+            }
+            _ = tokio::time::sleep(Duration::from_millis(10)) => {}
+        }
+    }
+}
+
+// ── 1. Stale bytes excluded; immediate release-hook bytes captured; shared
+//       cursor and ring history remain readable afterwards ────────────────
+
+#[tokio::test]
+async fn capture_boot_stale_bytes_excluded_boot_bytes_captured_cursor_preserved() {
+    let (_server, client, cid, state) = controlled_server("loop-capture-1", 65536).await;
+
+    // Stale pre-mark bytes, consumed by an ordinary read (cursor now at 5).
+    state.inject_rx(b"STALE");
+    let r = client
+        .peer()
+        .call_tool(tool_request(
+            "read",
+            json!({ "connection_id": cid, "timeout_ms": 1000 }),
+        ))
+        .await
+        .unwrap();
+    assert_ne!(r.is_error, Some(true), "{r:?}");
+    assert_eq!(r.structured_content.unwrap()["data"], json!("STALE"));
+
+    // Boot bytes appear only when the reset line is ASSERTED: the hook fires
+    // synchronously inside `set_dtr_rts` for the (false,false) state.
+    state.set_on_line_change(Some(Arc::new({
+        let state = Arc::clone(&state);
+        move |dtr, rts| {
+            if !dtr && !rts {
+                state.inject_rx(b"BOOT!");
+            }
+        }
+    })));
+
+    let r = client
+        .peer()
+        .call_tool(tool_request(
+            "capture_boot",
+            json!({
+                "connection_id": cid,
+                "reset": capture_reset(),
+                "timeout_ms": 2000,
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_ne!(r.is_error, Some(true), "{r:?}");
+    let s = r.structured_content.expect("structured capture result");
+    assert_eq!(s["mark_offset"], json!(5), "mark after the stale bytes");
+    assert_eq!(s["pre_mark_bytes"], json!(5));
+    assert_eq!(s["os_input_flushed"], json!(true));
+    assert_eq!(
+        s["read"]["data"],
+        json!("BOOT!"),
+        "stale bytes must never appear"
+    );
+    assert_eq!(s["read"]["from_offset"], json!(5));
+
+    // The shared cursor never moved: a plain read still starts at 5 and
+    // re-reads the captured bytes.
+    let r = client
+        .peer()
+        .call_tool(tool_request(
+            "read",
+            json!({ "connection_id": cid, "timeout_ms": 1000 }),
+        ))
+        .await
+        .unwrap();
+    let s = r.structured_content.expect("structured read result");
+    assert_eq!(s["data"], json!("BOOT!"));
+    assert_eq!(s["from_offset"], json!(5));
+
+    // Ring history is still readable: replay from the oldest retained byte.
+    let r = client
+        .peer()
+        .call_tool(tool_request(
+            "read",
+            json!({
+                "connection_id": cid,
+                "from": { "type": "buffer_start" },
+                "timeout_ms": 1000,
+            }),
+        ))
+        .await
+        .unwrap();
+    let s = r.structured_content.expect("structured read result");
+    assert_eq!(s["data"], json!("STALEBOOT!"));
+
+    client.cancel().await.ok();
+}
+
+// ── 2. Bytes emitted inside the line-change call are captured and a match
+//       stops at the pattern ──────────────────────────────────────────────
+
+#[tokio::test]
+async fn capture_boot_immediate_bytes_captured_and_match_stops_at_pattern() {
+    let (_server, client, cid, state) = controlled_server("loop-capture-match", 65536).await;
+
+    // The device starts streaming the moment the reset line is asserted.
+    state.set_on_line_change(Some(Arc::new({
+        let state = Arc::clone(&state);
+        move |dtr, rts| {
+            if !dtr && !rts {
+                state.inject_rx(b"garbage\r\nboot> prompt\r\n");
+            }
+        }
+    })));
+
+    let r = client
+        .peer()
+        .call_tool(tool_request(
+            "capture_boot",
+            json!({
+                "connection_id": cid,
+                "reset": capture_reset(),
+                "match": {
+                    "pattern": "boot>",
+                    "config": { "mode": "literal_substring", "pattern_encoding": "utf8" }
+                },
+                "timeout_ms": 2000,
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_ne!(r.is_error, Some(true), "{r:?}");
+    let s = r.structured_content.expect("structured capture result");
+    assert_eq!(s["read"]["stop_reason"], json!("match_found"));
+    assert_eq!(s["read"]["matched"], json!(true));
+    assert_eq!(s["read"]["data"], json!("garbage\r\nboot>"));
+    assert_eq!(s["read"]["match_index"], json!(9));
+    assert_eq!(s["mark_offset"], json!(0), "nothing predates the mark");
+
+    client.cancel().await.ok();
+}
+
+// ── 3. Pump barrier: capture cannot acquire the gate until an in-flight
+//       pre-reset pump read has appended ──────────────────────────────────
+
+#[tokio::test]
+async fn capture_boot_pump_barrier_appends_inflight_read_before_mark() {
+    let (_server, client, cid, state) = controlled_server("loop-capture-barrier", 65536).await;
+
+    // Establish the session + pump, then consume the first bytes.
+    state.inject_rx(b"STALE-A");
+    let r = client
+        .peer()
+        .call_tool(tool_request(
+            "read",
+            json!({ "connection_id": cid, "timeout_ms": 1000 }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r.structured_content.unwrap()["data"], json!("STALE-A"));
+
+    // Wait for the pump to be parked (no data — it holds the pump gate for
+    // the whole read), then wait for a FRESH poll event: right after a poll,
+    // the pump's read is guaranteed to hold the gate for >=45ms (its read
+    // budget is 100ms, polls are ~55ms apart).
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while !state.is_parked() && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert!(state.is_parked(), "pump must be parked inside a read");
+    let base_polls = state.poll_count();
+    while state.poll_count() <= base_polls && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+    // The pump now holds the gate with >=45ms of read budget left.
+
+    // Boot bytes appear at assertion time.
+    state.set_on_line_change(Some(Arc::new({
+        let state = Arc::clone(&state);
+        move |dtr, rts| {
+            if !dtr && !rts {
+                state.inject_rx(b"boot!");
+            }
+        }
+    })));
+
+    // Start the capture and keep polling it so the request is transmitted.
+    // While the pump holds the gate (it has >=45ms of budget left), the
+    // capture must NOT proceed: no line assertion, no completion.
+    let call = client.peer().call_tool(tool_request(
+        "capture_boot",
+        json!({
+            "connection_id": cid,
+            "reset": capture_reset(),
+            "timeout_ms": 2000,
+        }),
+    ));
+    let mut call = Box::pin(call);
+    let polled = tokio::select! {
+        _ = tokio::time::sleep(Duration::from_millis(30)) => "pending",
+        _res = &mut call => "done",
+    };
+    assert_eq!(
+        polled, "pending",
+        "capture must wait for the in-flight pump read+append"
+    );
+    assert!(
+        state.line_log().is_empty(),
+        "no line assertion may happen before the in-flight bytes are appended: {:?}",
+        state.line_log()
+    );
+
+    // Now the pre-reset bytes arrive while the pump is mid-read: the pump
+    // reads INFLIGHT, appends it, and only then releases the gate. The
+    // capture's mark must therefore include those bytes.
+    state.inject_rx(b"INFLIGHT");
+    let r = call.await.unwrap();
+    assert_ne!(r.is_error, Some(true), "{r:?}");
+    let s = r.structured_content.expect("structured capture result");
+    assert_eq!(
+        s["mark_offset"],
+        json!(15),
+        "in-flight pre-reset bytes (7 stale + 8 inflight) must be appended BEFORE the mark"
+    );
+    assert_eq!(s["pre_mark_bytes"], json!(15));
+    assert_eq!(
+        s["read"]["data"],
+        json!("boot!"),
+        "only post-mark bytes captured"
+    );
+    assert_eq!(s["read"]["from_offset"], json!(15));
+    // Assert then release, in order.
+    assert_eq!(state.line_log(), vec![(false, false), (true, true)]);
+
+    client.cancel().await.ok();
+}
+
+// ── 4. Request-scoped cancellation during hold releases lines ────────────
+
+#[tokio::test]
+async fn capture_boot_cancellation_releases_lines_request_scoped() {
+    let (_server, client, cid, state) = controlled_server("loop-capture-cancel", 65536).await;
+
+    let handle = client
+        .peer()
+        .send_cancellable_request(
+            ClientRequest::CallToolRequest(CallToolRequest::new(
+                CallToolRequestParams::new("capture_boot").with_arguments(args_object(json!({
+                    "connection_id": cid,
+                    "reset": {
+                        "assert_dtr": false,
+                        "assert_rts": false,
+                        "release_dtr": true,
+                        "release_rts": true,
+                        "hold_ms": 30000,
+                    },
+                }))),
+            )),
+            PeerRequestOptions::no_options(),
+        )
+        .await
+        .unwrap();
+
+    // Wait until the pulse is asserted (hold phase).
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while state.line_log().is_empty() && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(
+        state.line_log(),
+        vec![(false, false)],
+        "assertion must precede cancellation"
+    );
+
+    // Request-scoped cancellation (notifications/cancelled for THIS request),
+    // not whole-client teardown. Note: rmcp's client resolves its own
+    // cancelled request handle with `Err(Cancelled)` and discards the server
+    // response, so the structured `cancelled` outcome is proven at the unit
+    // level (helpers.rs) and the wire-level release is proven below.
+    handle
+        .peer
+        .notify_cancelled(CancelledNotificationParam {
+            request_id: handle.id.clone(),
+            reason: Some("test cancel".into()),
+        })
+        .await
+        .unwrap();
+
+    // The capture must release the lines promptly instead of holding for the
+    // full 30s hold.
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while !state.line_log().iter().any(|&(d, r)| d && r) && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(
+        state.line_log().iter().any(|&(d, r)| d && r),
+        "lines must be released after cancellation: {:?}",
+        state.line_log()
+    );
+    assert_eq!(
+        state.line_log(),
+        vec![(false, false), (true, true)],
+        "assert then release, in order"
+    );
+
+    // The capture finished server-side: the control lock is free, so a
+    // subsequent line-control call completes promptly.
+    let r = tokio::time::timeout(
+        Duration::from_secs(2),
+        client.peer().call_tool(tool_request(
+            "set_dtr_rts",
+            json!({ "connection_id": cid, "dtr": true, "rts": true }),
+        )),
+    )
+    .await
+    .expect("set_dtr_rts must not block after cancellation")
+    .unwrap();
+    assert_ne!(r.is_error, Some(true), "{r:?}");
+
+    // The client is still fully functional (request-scoped, not teardown).
+    let r = client
+        .peer()
+        .call_tool(tool_request("get_status", json!({ "connection_id": cid })))
+        .await
+        .unwrap();
+    assert_ne!(r.is_error, Some(true), "{r:?}");
+
+    client.cancel().await.ok();
+}
+
+// ── 5. Assertion failure and release failure attempt configured cleanup ──
+
+#[tokio::test]
+async fn capture_boot_assertion_failure_errors_and_attempts_cleanup() {
+    let (_server, client, cid, state) = controlled_server("loop-capture-assert-fail", 65536).await;
+
+    // The assert call fails (intent recorded, then I/O error — the RTS
+    // failure after DTR applied case).
+    state.set_fail_next_set(1);
+
+    let r = client
+        .peer()
+        .call_tool(tool_request(
+            "capture_boot",
+            json!({
+                "connection_id": cid,
+                "reset": capture_reset(),
+                "timeout_ms": 500,
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        r.is_error,
+        Some(true),
+        "assertion failure must be a tool error: {r:?}"
+    );
+
+    // The drop-time guard must still attempt the configured release state.
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < deadline {
+        if state.line_log().iter().any(|&(d, r)| d && r) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(
+        state.line_log().iter().any(|&(d, r)| d && r),
+        "cleanup release with the configured release state must be attempted: {:?}",
+        state.line_log()
+    );
+    assert_eq!(state.line_log().first(), Some(&(false, false)));
+
+    client.cancel().await.ok();
+}
+
+#[tokio::test]
+async fn capture_boot_release_failure_errors_and_retries_cleanup() {
+    let (_server, client, cid, state) = controlled_server("loop-capture-rel-fail", 65536).await;
+
+    let call = client.peer().call_tool(tool_request(
+        "capture_boot",
+        json!({
+            "connection_id": cid,
+            "reset": {
+                "assert_dtr": false,
+                "assert_rts": false,
+                "release_dtr": true,
+                "release_rts": true,
+                "hold_ms": 800,
+            },
+            "timeout_ms": 500,
+        }),
+    ));
+    let mut call = Box::pin(call);
+
+    // Wait for the assert (polling the call so the request is transmitted),
+    // then arm a failure for the release call.
+    let deadline = Instant::now() + Duration::from_secs(2);
+    wait_for_line(&mut call, &state, deadline, "assertion").await;
+    assert_eq!(state.line_log(), vec![(false, false)]);
+    state.set_fail_next_set(1);
+
+    let r = call.await.unwrap();
+    assert_eq!(
+        r.is_error,
+        Some(true),
+        "release failure must be a tool error: {r:?}"
+    );
+
+    // The guard's drop retries the release (failure flag now consumed);
+    // the release must eventually land in the log.
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < deadline {
+        if state.line_log().iter().any(|&(d, r)| d && r) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(
+        state.line_log().iter().any(|&(d, r)| d && r),
+        "cleanup release retry must be attempted: {:?}",
+        state.line_log()
+    );
+
+    client.cancel().await.ok();
+}
+
+// ── 6. Invalid framing construction fails before any line transition ─────
+
+#[tokio::test]
+async fn capture_boot_invalid_framing_fails_before_line_transition() {
+    let (_server, client, cid, state) = controlled_server("loop-capture-bad-framing", 65536).await;
+
+    let r = client
+        .peer()
+        .call_tool(tool_request(
+            "capture_boot",
+            json!({
+                "connection_id": cid,
+                "reset": capture_reset(),
+                "rx_framing": { "type": "length_prefixed", "prefix_size": 3 },
+                "timeout_ms": 500,
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r.is_error, Some(true), "{r:?}");
+    assert!(
+        r.structured_content.is_none(),
+        "invalid framing must surface as a tool error: {r:?}"
+    );
+    assert!(
+        state.line_log().is_empty(),
+        "no line transition may occur for an invalid framing config: {:?}",
+        state.line_log()
+    );
+
+    client.cancel().await.ok();
+}
+
+// ── 7. Runtime SLIP framing error: partial structured result, lines
+//       released ──────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn capture_boot_runtime_framing_error_returns_partial_result_and_releases_lines() {
+    let (_server, client, cid, state) = controlled_server("loop-capture-slip-err", 65536).await;
+
+    // One valid SLIP frame then a malformed escape (0xDB 0xFF).
+    let slip_bytes: [u8; 6] = [0xC0, b'O', b'K', 0xC0, 0xDB, 0xFF];
+    state.set_on_line_change(Some(Arc::new({
+        let state = Arc::clone(&state);
+        move |dtr, rts| {
+            if !dtr && !rts {
+                state.inject_rx(&slip_bytes);
+            }
+        }
+    })));
+
+    let r = client
+        .peer()
+        .call_tool(tool_request(
+            "capture_boot",
+            json!({
+                "connection_id": cid,
+                "reset": capture_reset(),
+                "rx_framing": { "type": "slip" },
+                "timeout_ms": 2000,
+            }),
+        ))
+        .await
+        .unwrap();
+    // Framing errors are structured results, not tool errors.
+    assert_ne!(r.is_error, Some(true), "{r:?}");
+    let s = r.structured_content.expect("structured capture result");
+    assert_eq!(s["read"]["stop_reason"], json!("framing_error"));
+    assert!(
+        s["read"]["error"]
+            .as_str()
+            .is_some_and(|e| e.contains("SLIP")),
+        "framing error text must be present: {s:?}"
+    );
+    // The valid frame decoded before the error survives. On the framing
+    // error the effective encoding falls back to hex, so the frame is
+    // reported in hex too (4f 4b = "OK").
+    let frames = s["read"]["frames"].as_array().expect("partial frames");
+    assert_eq!(frames.len(), 1);
+    assert_eq!(frames[0]["data"], json!("4f 4b"));
+    // Lines were released despite the decode error.
+    assert_eq!(state.line_log(), vec![(false, false), (true, true)]);
+
+    client.cancel().await.ok();
+}
+
+// ── 8. NDJSON framing/parser and binary hex/base64 output reuse current
+//       read behavior ─────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn capture_boot_ndjson_preset_decodes_frames() {
+    let (_server, client, cid, state) = controlled_server("loop-capture-ndjson", 65536).await;
+
+    state.set_on_line_change(Some(Arc::new({
+        let state = Arc::clone(&state);
+        move |dtr, rts| {
+            if !dtr && !rts {
+                state.inject_rx(b"{\"a\":1}\n{\"b\":2}\n");
+            }
+        }
+    })));
+
+    let r = client
+        .peer()
+        .call_tool(tool_request(
+            "capture_boot",
+            json!({
+                "connection_id": cid,
+                "reset": capture_reset(),
+                "protocol": { "type": "ndjson" },
+                "timeout_ms": 1000,
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_ne!(r.is_error, Some(true), "{r:?}");
+    let s = r.structured_content.expect("structured capture result");
+    let frames = s["read"]["frames"].as_array().expect("ndjson frames");
+    assert_eq!(frames.len(), 2, "two JSON lines decoded: {frames:?}");
+    assert!(
+        frames[0]["parsed"].is_object(),
+        "parsed JSON payload: {frames:?}"
+    );
+
+    client.cancel().await.ok();
+}
+
+#[tokio::test]
+async fn capture_boot_binary_output_hex_and_base64() {
+    let (_server, client, cid, state) = controlled_server("loop-capture-binary", 65536).await;
+
+    let binary: [u8; 4] = [0x00, 0x01, 0x02, 0xFF];
+    state.set_on_line_change(Some(Arc::new({
+        let state = Arc::clone(&state);
+        move |dtr, rts| {
+            if !dtr && !rts {
+                state.inject_rx(&binary);
+            }
+        }
+    })));
+
+    // Hex output.
+    let r = client
+        .peer()
+        .call_tool(tool_request(
+            "capture_boot",
+            json!({
+                "connection_id": cid,
+                "reset": capture_reset(),
+                "encoding": "hex",
+                "timeout_ms": 1000,
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_ne!(r.is_error, Some(true), "{r:?}");
+    let s = r.structured_content.expect("structured capture result");
+    assert_eq!(s["read"]["encoding"], json!("hex"));
+    assert_eq!(s["read"]["data"], json!("00 01 02 ff"));
+
+    // Base64 output for the next capture.
+    let r = client
+        .peer()
+        .call_tool(tool_request(
+            "capture_boot",
+            json!({
+                "connection_id": cid,
+                "reset": capture_reset(),
+                "encoding": "base64",
+                "timeout_ms": 1000,
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_ne!(r.is_error, Some(true), "{r:?}");
+    let s = r.structured_content.expect("structured capture result");
+    assert_eq!(s["read"]["encoding"], json!("base64"));
+    assert_eq!(s["read"]["data"], json!("AAEC/w=="));
+
+    client.cancel().await.ok();
+}
+
+// ── 9. Silence timeout after a banner; wall timeout during continuous
+//       output ────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn capture_boot_silence_timeout_stops_after_banner() {
+    let (_server, client, cid, state) = controlled_server("loop-capture-silence", 65536).await;
+
+    state.set_on_line_change(Some(Arc::new({
+        let state = Arc::clone(&state);
+        move |dtr, rts| {
+            if !dtr && !rts {
+                state.inject_rx(b"banner-line\n");
+            }
+        }
+    })));
+
+    let r = client
+        .peer()
+        .call_tool(tool_request(
+            "capture_boot",
+            json!({
+                "connection_id": cid,
+                "reset": capture_reset(),
+                "match": never_match(),
+                "no_new_rx_timeout_ms": 150,
+                "timeout_ms": 3000,
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_ne!(r.is_error, Some(true), "{r:?}");
+    let s = r.structured_content.expect("structured capture result");
+    assert_eq!(s["read"]["stop_reason"], json!("no_new_rx_timeout"));
+    assert!(
+        s["read"]["data"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("banner-line"),
+        "banner must be captured before the silence stop: {s:?}"
+    );
+
+    client.cancel().await.ok();
+}
+
+#[tokio::test]
+async fn capture_boot_wall_timeout_stops_during_continuous_output() {
+    let (_server, client, cid, state) = controlled_server("loop-capture-wall", 65536).await;
+
+    // A device that never goes silent: keep feeding bytes.
+    let stop = tokio_util::sync::CancellationToken::new();
+    let injector = {
+        let state = Arc::clone(&state);
+        let stop = stop.clone();
+        tokio::spawn(async move {
+            while !stop.is_cancelled() {
+                state.inject_rx(b"AAAA");
+                tokio::time::sleep(Duration::from_millis(15)).await;
+            }
+        })
+    };
+
+    let r = client
+        .peer()
+        .call_tool(tool_request(
+            "capture_boot",
+            json!({
+                "connection_id": cid,
+                "reset": capture_reset(),
+                "match": never_match(),
+                "timeout_ms": 250,
+            }),
+        ))
+        .await
+        .unwrap();
+    stop.cancel();
+    injector.await.unwrap();
+
+    assert_ne!(r.is_error, Some(true), "{r:?}");
+    let s = r.structured_content.expect("structured capture result");
+    assert_eq!(s["read"]["stop_reason"], json!("timeout"));
+    assert!(
+        s["read"]["bytes_observed"].as_u64().unwrap_or(0) > 0,
+        "wall timeout must fire during continuous output: {s:?}"
+    );
+
+    client.cancel().await.ok();
+}
+
+// ── 10. Disconnect returns a partial capture with `connection_closed` ────
+
+#[tokio::test]
+async fn capture_boot_disconnect_returns_partial_capture_connection_closed() {
+    let (_server, client, cid, state) = controlled_server("loop-capture-disc", 65536).await;
+
+    state.set_on_line_change(Some(Arc::new({
+        let state = Arc::clone(&state);
+        move |dtr, rts| {
+            if !dtr && !rts {
+                state.inject_rx(b"PARTIAL");
+            }
+        }
+    })));
+
+    let call = client.peer().call_tool(tool_request(
+        "capture_boot",
+        json!({
+            "connection_id": cid,
+            "reset": capture_reset(),
+            "match": never_match(),
+            "timeout_ms": 5000,
+        }),
+    ));
+    let mut call = Box::pin(call);
+
+    // Wait for the assertion, then close the connection mid-capture.
+    let deadline = Instant::now() + Duration::from_secs(2);
+    wait_for_line(&mut call, &state, deadline, "assertion").await;
+    assert_eq!(state.line_log(), vec![(false, false)]);
+    let r = client
+        .peer()
+        .call_tool(tool_request("close", json!({ "connection_id": cid })))
+        .await
+        .unwrap();
+    assert_ne!(r.is_error, Some(true), "close: {r:?}");
+
+    let r = call.await.unwrap();
+    assert_ne!(r.is_error, Some(true), "{r:?}");
+    let s = r.structured_content.expect("structured capture result");
+    assert_eq!(s["read"]["stop_reason"], json!("connection_closed"));
+    assert!(
+        s["read"]["data"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("PARTIAL"),
+        "bytes captured before the disconnect must survive: {s:?}"
+    );
+
+    client.cancel().await.ok();
+}
+
+// ── 11. Ring wrap reports `bytes_lost`; the atomic mark is preserved ─────
+
+#[tokio::test]
+async fn capture_boot_ring_wrap_reports_bytes_lost_and_preserves_mark() {
+    // Tiny ring forces a wrap while the capture is in flight.
+    let (_server, client, cid, state) = controlled_server("loop-capture-wrap", 16).await;
+
+    // 32 bytes injected at assertion into a 16-byte ring: the ring wraps, so
+    // the read must report bytes_lost and start at the clamped offset while
+    // mark_offset keeps the original atomic boundary.
+    let burst: [u8; 32] = *b"0123456789abcdefGHIJKLMNOPQRSTUV";
+    state.set_on_line_change(Some(Arc::new({
+        let state = Arc::clone(&state);
+        move |dtr, rts| {
+            if !dtr && !rts {
+                state.inject_rx(&burst);
+            }
+        }
+    })));
+
+    let r = client
+        .peer()
+        .call_tool(tool_request(
+            "capture_boot",
+            json!({
+                "connection_id": cid,
+                "reset": capture_reset(),
+                "timeout_ms": 2000,
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_ne!(r.is_error, Some(true), "{r:?}");
+    let s = r.structured_content.expect("structured capture result");
+    assert_eq!(s["mark_offset"], json!(0), "atomic boundary recorded");
+    assert_eq!(
+        s["read"]["from_offset"],
+        json!(16),
+        "read clamped to retained start"
+    );
+    assert_eq!(s["read"]["bytes_lost"], json!(16), "wrap loss reported");
+    assert_eq!(
+        s["read"]["data"],
+        json!("GHIJKLMNOPQRSTUV"),
+        "tail of the burst retained"
+    );
+
+    client.cancel().await.ok();
+}
+
+// ── 12. Concurrent `set_dtr_rts` cannot interleave inside the pulse ──────
+
+#[tokio::test]
+async fn capture_boot_concurrent_set_dtr_rts_cannot_interleave_inside_pulse() {
+    let (server, client, cid, state) = controlled_server("loop-capture-lock", 65536).await;
+    // A second client session on the SAME server for the concurrent
+    // line-control call.
+    let (client_b, _rx_b) = connect_client(&server).await.unwrap();
+
+    let call = client.peer().call_tool(tool_request(
+        "capture_boot",
+        json!({
+            "connection_id": cid,
+            "reset": {
+                "assert_dtr": false,
+                "assert_rts": false,
+                "release_dtr": true,
+                "release_rts": true,
+                "hold_ms": 600,
+            },
+            "timeout_ms": 2000,
+        }),
+    ));
+    let mut call = Box::pin(call);
+
+    // Wait for the assertion (capture now holds the control lock).
+    let deadline = Instant::now() + Duration::from_secs(2);
+    wait_for_line(&mut call, &state, deadline, "assertion").await;
+    assert_eq!(state.line_log(), vec![(false, false)]);
+
+    // A concurrent set_dtr_rts on the same connection must wait for the
+    // whole pulse (assert + hold + release) to finish.
+    let set_call = client_b.peer().call_tool(tool_request(
+        "set_dtr_rts",
+        json!({ "connection_id": cid, "dtr": true, "rts": true }),
+    ));
+    let mut set_call = Box::pin(set_call);
+    let polled = tokio::select! {
+        _ = tokio::time::sleep(Duration::from_millis(300)) => "pending",
+        _res = &mut set_call => "done",
+    };
+    assert_eq!(
+        polled, "pending",
+        "set_dtr_rts must not interleave inside the reset pulse"
+    );
+
+    let capture_result = call.await.unwrap();
+    assert_ne!(capture_result.is_error, Some(true), "{capture_result:?}");
+    let set_result = set_call.await.unwrap();
+    assert_ne!(set_result.is_error, Some(true), "{set_result:?}");
+
+    // Exactly three transitions, in order: assert, release, user's set.
+    assert_eq!(
+        state.line_log(),
+        vec![(false, false), (true, true), (true, true)],
+        "no line-control call may interleave between assert and release"
+    );
+
+    client.cancel().await.ok();
+    client_b.cancel().await.ok();
+}
+
+// ── 13. Arm-only capture (no reset config) never touches lines ───────────
+
+#[tokio::test]
+async fn capture_boot_arm_only_does_not_touch_lines() {
+    let (_server, client, cid, state) = controlled_server("loop-capture-arm", 65536).await;
+
+    // Stale bytes that predate the capture (purged or pre-mark — either way
+    // they must never appear in the result).
+    state.inject_rx(b"STALE");
+    let call = client.peer().call_tool(tool_request(
+        "capture_boot",
+        json!({
+            "connection_id": cid,
+            "reset": null,
+            "match": never_match(),
+            "timeout_ms": 1500,
+        }),
+    ));
+    let mut call = Box::pin(call);
+
+    // Poll the call so the request is transmitted, then wait for the
+    // server-side capture to reach its read phase (gate acquisition + mark:
+    // at most one pump cycle, ~100ms) before emitting the external bytes.
+    tokio::select! {
+        res = call.as_mut() => {
+            panic!("arm-only capture completed before external bytes: {res:?}");
+        }
+        _ = tokio::time::sleep(Duration::from_millis(300)) => {}
+    }
+
+    // Device bytes arrive after the capture is armed (external reset).
+    state.inject_rx(b"EXT-BOOT");
+
+    let r = call.await.unwrap();
+    assert_ne!(r.is_error, Some(true), "{r:?}");
+    let s = r.structured_content.expect("structured capture result");
+    assert!(s["reset"].is_null(), "arm-only capture reports reset=null");
+    assert_eq!(s["os_input_flushed"], json!(true));
+    let data = s["read"]["data"].as_str().unwrap_or_default();
+    assert!(
+        data.contains("EXT-BOOT"),
+        "post-arm bytes must be captured: {data:?}"
+    );
+    assert!(
+        !data.contains("STALE"),
+        "pre-capture bytes must never appear in the result: {data:?}"
+    );
+    assert!(
+        state.line_log().is_empty(),
+        "arm-only capture must never touch DTR/RTS: {:?}",
+        state.line_log()
+    );
+
+    client.cancel().await.ok();
+}
+
+// ── Schema guard: capture_boot schemas carry no non-standard uint formats ─
+
+#[test]
+fn capture_boot_schemas_have_no_nonstandard_uint_formats() {
+    for schema in [
+        schemars::schema_for!(serial_mcp::tools::types::CaptureBootArgs),
+        schemars::schema_for!(serial_mcp::tools::types::CaptureBootReset),
+        schemars::schema_for!(serial_mcp::tools::types::CaptureBootResult),
+    ] {
+        let text = serde_json::to_string(&schema).unwrap();
+        for bad in ["uint", "uint8", "uint16", "uint32", "uint64"] {
+            assert!(
+                !text.contains(&format!("\"format\":\"{bad}\"")),
+                "capture_boot schema must not contain {bad}"
+            );
+        }
+    }
 }
