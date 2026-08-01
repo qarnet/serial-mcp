@@ -78,7 +78,7 @@ impl SpawnedServer {
     /// the caller explicitly wants the OS user-config default). The caller
     /// owns the path's lifetime.
     pub async fn start_with_profiles_path(profiles_path: Option<&std::path::Path>) -> Self {
-        Self::start_inner(profiles_path, None).await
+        Self::start_inner(profiles_path, None, None).await
     }
 
     /// Like [`SpawnedServer::start_with_profiles_path`], but runs the
@@ -88,17 +88,25 @@ impl SpawnedServer {
         cwd: &std::path::Path,
         profiles_path: Option<&std::path::Path>,
     ) -> Self {
-        Self::start_inner(profiles_path, Some(cwd)).await
+        Self::start_inner(profiles_path, Some(cwd), None).await
+    }
+
+    /// Like [`SpawnedServer::start`], but passes `--capture-dir <path>` so
+    /// the child enables persistent capture into the caller's directory.
+    /// The caller owns the directory's lifetime.
+    pub async fn start_with_capture_dir(capture_dir: &std::path::Path) -> Self {
+        Self::start_inner(None, None, Some(capture_dir)).await
     }
 
     async fn start_inner(
         profiles_path: Option<&std::path::Path>,
         cwd: Option<&std::path::Path>,
+        capture_dir: Option<&std::path::Path>,
     ) -> Self {
         ensure_serial_mcp_built().expect("serial-mcp binary available for spawned server");
         let _guard = SPAWN_LOCK.lock().await;
         let port = pick_free_port().expect("find a free local TCP port for the spawned server");
-        let child = spawn_serial_mcp_http(port, profiles_path, cwd)
+        let child = spawn_serial_mcp_http(port, profiles_path, cwd, capture_dir)
             .await
             .expect("spawn serial-mcp --transport=http");
         // Wait until the listener is actually accepting. axum binds and
@@ -161,6 +169,7 @@ async fn spawn_serial_mcp_http(
     port: u16,
     profiles_path: Option<&std::path::Path>,
     cwd: Option<&std::path::Path>,
+    capture_dir: Option<&std::path::Path>,
 ) -> Result<Child> {
     let bin = serial_mcp_bin();
     let mut command = Command::new(&bin);
@@ -173,6 +182,9 @@ async fn spawn_serial_mcp_http(
         .kill_on_drop(true);
     if let Some(path) = profiles_path {
         command.arg("--profiles-path").arg(path);
+    }
+    if let Some(dir) = capture_dir {
+        command.arg("--capture-dir").arg(dir);
     }
     if let Some(cwd) = cwd {
         command.current_dir(cwd);

@@ -1178,25 +1178,38 @@ pub async fn clear_log(
 
 pub async fn export_log(
     connections: &Arc<ConnectionManager>,
+    capture_store: &Arc<crate::capture_store::CaptureStore>,
     args: ExportLogArgs,
 ) -> Result<Json<ExportLogResult>, String> {
+    // Order matters: store enabled check and path validity run BEFORE any
+    // connection or file work — a disabled store or bad filename must fail
+    // without touching the connection or the capture root.
+    if !capture_store.is_enabled() {
+        return Err(crate::capture_store::CAPTURE_DISABLED_ERROR.to_string());
+    }
+    crate::capture_store::validate_capture_filename(&args.path)?;
     let conn = lookup_connection(connections, &args.connection_id).await?;
 
-    let events = conn.log().snapshot();
-    let count = events.len();
-    let mut out = String::new();
-    for event in &events {
-        let line = serde_json::to_string(event)
-            .map_err(|e| format!("Failed to serialize log entry: {e}"))?;
-        out.push_str(&line);
-        out.push('\n');
-    }
-    std::fs::write(&args.path, out).map_err(|e| format!("Failed to write log export: {e}"))?;
+    // Serialize the bounded snapshot in a blocking context so a large log
+    // never stalls a Tokio worker thread. The store then commits in its own
+    // spawn_blocking under the process-local + advisory locks.
+    let max_file_bytes = capture_store.max_file_bytes();
+    let log = Arc::clone(conn.log());
+    let snapshot = tokio::task::spawn_blocking(move || log.jsonl_snapshot(max_file_bytes))
+        .await
+        .map_err(|e| format!("capture snapshot task failed: {e}"))??;
+
+    let write = capture_store
+        .write_new(args.path.clone(), snapshot.bytes)
+        .await?;
 
     Ok(Json(ExportLogResult {
         connection_id: args.connection_id,
-        path: args.path,
-        events_written: count,
+        path: write.path.display().to_string(),
+        events_written: snapshot.events,
+        bytes_written: write.bytes_written,
+        files_used: write.files_used,
+        total_bytes_used: write.total_bytes_used,
     }))
 }
 

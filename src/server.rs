@@ -17,6 +17,7 @@ use rmcp::{
 use tracing::{debug, info};
 
 use crate::buffer_budget::BufferBudget;
+use crate::capture_store::CaptureStore;
 use crate::rx_session::RxSessionManager;
 use crate::security::SecurityManager;
 use crate::serial::{ConnectionManager, PortProvider};
@@ -72,6 +73,10 @@ pub struct SerialHandler {
     tx_sessions: Arc<TxSessionManager>,
     budget: Arc<dyn BufferBudget>,
     profile_store: Arc<crate::profile_store::ProfileStore>,
+    /// Process-wide capture store (Phase 6). Disabled unless production
+    /// `main.rs` configured `--capture-dir`; shared by every stdio/HTTP
+    /// session handler.
+    capture_store: Arc<CaptureStore>,
     /// Process-wide injectable port enumeration used consistently by tools,
     /// resources, and automatic profile-session identity capture.
     port_provider: Arc<dyn PortProvider>,
@@ -91,6 +96,10 @@ pub struct SerialHandlerOptions {
     /// library/test construction; production `main.rs` injects a store
     /// opened at the resolved `--profiles-path`.
     pub profile_store: Arc<crate::profile_store::ProfileStore>,
+    /// Process-wide capture store. Defaults to disabled for
+    /// library/test construction; production `main.rs` injects a store
+    /// opened at the resolved `--capture-dir`.
+    pub capture_store: Arc<CaptureStore>,
     /// Process-wide port enumeration. Defaults to the system provider;
     /// tests inject a static provider.
     pub port_provider: Arc<dyn PortProvider>,
@@ -108,6 +117,7 @@ impl Default for SerialHandlerOptions {
                 DEFAULT_MAX_TOOL_BUFFERED_BYTES,
             )),
             profile_store: Arc::new(crate::profile_store::ProfileStore::ephemeral()),
+            capture_store: Arc::new(CaptureStore::disabled()),
             port_provider: Arc::new(crate::serial::SystemPortProvider),
         }
     }
@@ -140,6 +150,10 @@ impl SerialHandlerBuilder {
         self.options.profile_store = profile_store;
         self
     }
+    pub fn capture_store(mut self, capture_store: Arc<CaptureStore>) -> Self {
+        self.options.capture_store = capture_store;
+        self
+    }
     pub fn port_provider(mut self, port_provider: Arc<dyn PortProvider>) -> Self {
         self.options.port_provider = port_provider;
         self
@@ -155,6 +169,7 @@ impl SerialHandlerBuilder {
             security,
             budget,
             profile_store,
+            capture_store,
             port_provider,
         } = self.options;
         let handler = SerialHandler {
@@ -166,6 +181,7 @@ impl SerialHandlerBuilder {
             tx_sessions: Arc::new(TxSessionManager::new()),
             budget,
             profile_store,
+            capture_store,
             port_provider,
         };
         handler.spawn_reconnect_supervisor();
@@ -612,15 +628,15 @@ impl SerialHandler {
     }
 
     #[tool(
-        description = "Export the event log for a connection to a JSONL file on disk. Each line is a JSON object representing one log entry.",
+        description = "Export the event log for a connection to a JSONL file inside the configured capture directory. Persistent capture is DISABLED unless the server started with --capture-dir <absolute-directory>. `path` is a portable .jsonl FILENAME relative to that root — never an arbitrary path: no separators, no subdirectories, no traversal, filename only (1-120 chars, ends .jsonl). The server never overwrites an existing file (no-clobber), rejects symlink targets, enforces per-file/total-byte/file-count quotas from a fresh scan under an advisory cross-process lock, and commits the complete bounded snapshot atomically. Success returns exact event/byte counts, the canonical absolute final path, and post-commit quota usage; failure creates no file and changes no existing capture.",
         title = "Export Log",
-        annotations(destructive_hint = true, open_world_hint = false)
+        annotations(destructive_hint = false, open_world_hint = false)
     )]
     async fn export_log(
         &self,
         Parameters(args): Parameters<ExportLogArgs>,
     ) -> Result<Json<ExportLogResult>, String> {
-        port_ops::export_log(&self.connections, args).await
+        port_ops::export_log(&self.connections, &self.capture_store, args).await
     }
 
     #[tool(
@@ -851,7 +867,10 @@ impl ServerHandler for SerialHandler {
              `rollback_profile` restores a retained configuration after a bad learned \
              change.\n\
              7. Escalate to framing/parser, cursor replay, reconnect, line control, and \
-             log tools only when the common path needs them.\n\
+             log tools only when the common path needs them. `export_log` persists the \
+             event log as JSONL only when the server started with `--capture-dir`; it \
+             takes a portable filename (never a path), never overwrites, and is \
+             quota-bounded.\n\
              Resources: serial://ports (same preview as list_ports), serial://connections, \
              serial://connections/{id}. Prompts: diagnose_port, interactive_terminal."
                 .to_string(),

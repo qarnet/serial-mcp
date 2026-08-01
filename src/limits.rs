@@ -13,3 +13,8 @@ pub const DEFAULT_MAX_TOOL_BUFFERED_BYTES: usize = 1024 * 1024; // 1 MiB
 // RX ring buffer defaults (per-connection capture ring)
 pub const DEFAULT_RX_BUFFER_SIZE: usize = 256 * 1024; // 256 KiB
 pub const MAX_RX_BUFFER_SIZE: usize = 16 * 1024 * 1024; // 16 MiB per-connection ceiling
+
+// Persistent capture store defaults (Phase 6, --capture-dir)
+pub const DEFAULT_CAPTURE_MAX_FILE_BYTES: u64 = 16 * 1024 * 1024; // 16 MiB
+pub const DEFAULT_CAPTURE_MAX_TOTAL_BYTES: u64 = 256 * 1024 * 1024; // 256 MiB
+pub const DEFAULT_CAPTURE_MAX_FILES: usize = 256;

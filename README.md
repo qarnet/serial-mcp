@@ -100,6 +100,15 @@ serial-mcp [OPTIONS]
   --max-tool-buffered-bytes <N>     Per-tool ceiling for max_buffered_bytes
   --profiles-path <path>            Profile store file path (default: OS user
                                     config dir + serial-mcp/profiles.toml)
+  --capture-dir <absolute-dir>      Enable persistent export_log capture into an
+                                    existing absolute directory (disabled by
+                                    default; no fallback to cwd/config/temp)
+  --capture-max-file-bytes <N>      Per-file quota for a capture JSONL snapshot
+                                    (default: 16777216 / 16 MiB)
+  --capture-max-total-bytes <N>     Total-byte quota across committed capture
+                                    files (default: 268435456 / 256 MiB)
+  --capture-max-files <N>           File-count quota across committed capture
+                                    files (default: 256)
   -V, --version                     Print version and exit (also: `serial-mcp version`)
   -h, --help                        Print help
 
@@ -112,6 +121,38 @@ server process. The default location follows your OS user config directory
 across repositories. Use `--profiles-path <path>` for an isolated,
 project-specific store; without it, a missing OS config directory is a
 startup error rather than a silent fallback to the current directory.
+
+### Persistent capture (`--capture-dir`)
+
+`export_log` persists a connection's event log as JSONL, but only when the
+server starts with an explicit absolute `--capture-dir`. Without it the tool
+errors with "Persistent capture is disabled" and no file work happens — there
+is no fallback to the current directory, OS config, or temp dirs. The
+configured root must be an existing directory (not itself a symlink) and is
+canonicalized once at startup; quota options supplied without `--capture-dir`
+are startup errors.
+
+`export_log`'s `path` field is a **portable `.jsonl` filename relative to the
+capture root** — never an arbitrary path. It must be ASCII, 1–120 characters,
+start alphanumeric, contain only alphanumeric/`.`/`_`/`-`, end `.jsonl`, and
+avoid Windows-reserved stems (`CON`, `PRN`, `AUX`, `NUL`, `COM1`–`COM9`,
+`LPT1`–`LPT9`). No separators, no subdirectories, no traversal, no absolute
+paths.
+
+Every export is a complete point-in-time snapshot committed atomically with
+`persist_noclobber`: an existing file (regular, symlink, directory, or
+special) is rejected — `export_log` **never overwrites** and never follows
+symlinks. Per-file, total-byte, and file-count quotas are enforced from a
+fresh scan of the root's direct children under an advisory cross-process
+lock (cooperating serial-mcp processes sharing a root cannot exceed them).
+Success returns the canonical absolute path plus exact event/byte counts and
+post-commit quota usage; failure creates no file and changes no existing
+capture. Internal entries (`.serial-mcp-captures.lock`, `.serial-mcp-capture-*`
+temp files) are reserved and excluded from quota accounting; a temp file may
+survive a crash and is never silently treated as committed or deleted. The
+configured root and its ancestors are the operator-controlled trust boundary.
+(Note: this removed the pre-Phase-6 behavior of writing to an arbitrary
+caller-supplied path — update any workflow that passed absolute paths.)
 
 ### Automatic profile sessions
 

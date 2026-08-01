@@ -380,6 +380,65 @@ fn features_md_marks_reconnect_policy_shipped() {
     );
 }
 
+#[test]
+fn readme_teaches_capture_export_contract() {
+    // Phase 6: README must teach the disabled-by-default capture store,
+    // the filename-only export_log contract, and the no-overwrite rule.
+    let readme = repo_file("README.md");
+    assert!(
+        readme.contains("--capture-dir"),
+        "README must document --capture-dir"
+    );
+    assert!(
+        readme.contains("--capture-max-file-bytes")
+            && readme.contains("--capture-max-total-bytes")
+            && readme.contains("--capture-max-files"),
+        "README must document all three capture quotas"
+    );
+    let export_section = readme
+        .find("`export_log`")
+        .map(|i| &readme[i..i + 3000])
+        .unwrap_or_default();
+    assert!(
+        export_section.contains("filename"),
+        "README export_log teaching must say path is a filename: {export_section}"
+    );
+    assert!(
+        export_section.contains("never overwrites") || export_section.contains("no overwrite"),
+        "README export_log teaching must state the no-overwrite rule"
+    );
+}
+
+#[test]
+fn capture_cli_options_synced_between_value_list_and_help() {
+    // The VALUE_TAKING_OPTIONS const and the --help block must both list
+    // every capture option, or `--capture-dir --version` style detection
+    // silently drifts (see the CROSS-REFERENCE comment in main.rs).
+    let main = repo_file("src/main.rs");
+    let value_list = main
+        .split("const VALUE_TAKING_OPTIONS: &[&str] = &[")
+        .nth(1)
+        .and_then(|s| s.split("];").next())
+        .unwrap_or_default();
+    let help_block = main
+        .split("Usage: serial-mcp [OPTIONS]")
+        .nth(1)
+        .and_then(|s| s.split("Commands:").next())
+        .unwrap_or_default();
+    for opt in [
+        "--capture-dir",
+        "--capture-max-file-bytes",
+        "--capture-max-total-bytes",
+        "--capture-max-files",
+    ] {
+        assert!(
+            value_list.contains(opt),
+            "VALUE_TAKING_OPTIONS must contain {opt}"
+        );
+        assert!(help_block.contains(opt), "--help block must document {opt}");
+    }
+}
+
 fn collect_versions(v: &serde_json::Value, out: &mut Vec<String>) {
     if let serde_json::Value::Object(map) = v {
         for (k, val) in map {

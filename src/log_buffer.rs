@@ -14,7 +14,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 // ---- Event types -----------------------------------------------------------
 
 /// A single log event with timestamp, direction, and event data.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct LogEntry {
     /// Milliseconds since Unix epoch.
     #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
@@ -30,7 +30,7 @@ pub struct LogEntry {
 ///
 /// The `#[serde(tag = "event")]` attribute ensures each entry carries a
 /// `"event"` field naming the variant, producing clean JSONL output.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum LogEvent {
     /// RX data chunk received from the device.
@@ -154,11 +154,57 @@ impl LogBuffer {
         events.iter().cloned().collect()
     }
 
+    /// Serialize the buffer to a bounded JSONL snapshot (Phase 6).
+    ///
+    /// Locks the log exactly once for a consistent point-in-time snapshot,
+    /// serializes one entry per line with a trailing newline, and checks the
+    /// projected size before extending the output (checked arithmetic).
+    /// Fails — leaving no output — when the exact snapshot exceeds
+    /// `max_bytes` (the capture per-file quota). The event deque itself is
+    /// never cloned and no second full output String is built.
+    pub fn jsonl_snapshot(&self, max_bytes: u64) -> Result<JsonlSnapshot, String> {
+        let events = self.events.lock().expect("log mutex poisoned");
+        let mut out: Vec<u8> = Vec::new();
+        let mut count: usize = 0;
+        for entry in events.iter() {
+            let line = serde_json::to_string(entry)
+                .map_err(|e| format!("Failed to serialize log entry: {e}"))?;
+            let needed = line.len() + 1; // line + trailing newline
+            let projected = (out.len() as u64)
+                .checked_add(needed as u64)
+                .ok_or_else(|| "log snapshot size overflow".to_string())?;
+            if projected > max_bytes {
+                return Err(format!(
+                    "log snapshot exceeds capture per-file quota ({max_bytes} bytes); \
+                     reduce log_capacity or raise --capture-max-file-bytes"
+                ));
+            }
+            out.extend_from_slice(line.as_bytes());
+            out.push(b'\n');
+            count = count
+                .checked_add(1)
+                .ok_or_else(|| "log snapshot event count overflow".to_string())?;
+        }
+        Ok(JsonlSnapshot {
+            bytes: out,
+            events: count,
+        })
+    }
+
     /// Clear all entries from the buffer.
     pub fn clear(&self) {
         let mut events = self.events.lock().expect("log mutex poisoned");
         events.clear();
     }
+}
+
+/// A bounded point-in-time JSONL serialization of a [`LogBuffer`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JsonlSnapshot {
+    /// Serialized bytes: one JSON object per line with trailing newline.
+    pub bytes: Vec<u8>,
+    /// Number of events serialized.
+    pub events: usize,
 }
 
 impl Default for LogBuffer {
@@ -270,5 +316,76 @@ mod tests {
         assert!(json.contains("\"event\":\"rx_data\""));
         assert!(json.contains("\"bytes\":42"));
         assert!(json.contains("\"direction\":\"rx\""));
+    }
+
+    #[test]
+    fn jsonl_snapshot_matches_get_log_snapshot() {
+        let log = LogBuffer::new(10, true);
+        log.opened();
+        log.rx_data(5);
+        log.tx_data(3);
+        log.match_found("OK", "literal_substring");
+        let snap = log.jsonl_snapshot(u64::MAX).unwrap();
+        assert_eq!(snap.events, 4);
+        let text = String::from_utf8(snap.bytes.clone()).unwrap();
+        assert_eq!(text.lines().count(), 4);
+        assert!(text.ends_with('\n'));
+        // Every line parses and equals the get_log snapshot entry.
+        let expected: Vec<LogEntry> = log.snapshot();
+        for (i, line) in text.lines().enumerate() {
+            let parsed: LogEntry = serde_json::from_str(line).unwrap();
+            assert_eq!(parsed, expected[i]);
+        }
+    }
+
+    #[test]
+    fn jsonl_snapshot_exact_limit_and_one_byte_over() {
+        let log = LogBuffer::new(10, true);
+        log.rx_data(1);
+        log.rx_data(2);
+        let unlimited = log.jsonl_snapshot(u64::MAX).unwrap();
+        assert!(!unlimited.bytes.is_empty());
+        // Exact limit succeeds with identical bytes.
+        let exact = log.jsonl_snapshot(unlimited.bytes.len() as u64).unwrap();
+        assert_eq!(exact.bytes, unlimited.bytes);
+        assert_eq!(exact.events, unlimited.events);
+        // One byte under the exact size fails and leaves no output.
+        let err = log
+            .jsonl_snapshot(unlimited.bytes.len() as u64 - 1)
+            .unwrap_err();
+        assert!(err.contains("quota"), "got: {err}");
+        // A zero limit fails for any non-empty log; succeeds for empty.
+        assert!(log.jsonl_snapshot(0).is_err());
+        let empty = LogBuffer::new(10, true);
+        let snap = empty.jsonl_snapshot(0).unwrap();
+        assert!(snap.bytes.is_empty());
+        assert_eq!(snap.events, 0);
+    }
+
+    #[test]
+    fn jsonl_snapshot_disabled_log_is_zero_bytes() {
+        let log = LogBuffer::new(10, false);
+        log.rx_data(5);
+        let snap = log.jsonl_snapshot(u64::MAX).unwrap();
+        assert!(snap.bytes.is_empty());
+        assert_eq!(snap.events, 0);
+    }
+
+    #[test]
+    fn jsonl_snapshot_is_point_in_time_under_concurrent_records() {
+        // The lock is held across the whole serialization: events recorded
+        // during the snapshot either appear fully or not at all — never
+        // partially interleaved.
+        let log = LogBuffer::new(1000, true);
+        log.rx_data(1);
+        let snap = log.jsonl_snapshot(u64::MAX).unwrap();
+        assert_eq!(snap.events, 1);
+        // Events recorded AFTER the snapshot are not in its bytes.
+        log.rx_data(2);
+        log.rx_data(3);
+        let lines = String::from_utf8(snap.bytes).unwrap();
+        assert_eq!(lines.lines().count(), 1);
+        assert!(!lines.contains("\"bytes\":2"));
+        assert!(!lines.contains("\"bytes\":3"));
     }
 }

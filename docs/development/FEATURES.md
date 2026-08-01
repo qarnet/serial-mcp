@@ -195,6 +195,12 @@
 ### Recording + replay
 - useful but niche: reproducible bugs, test fixtures from real hardware,
   decoder/parser regression tests
+- **Phase 6 shipped the safe persistent capture foundation** (disabled-by-default
+  `--capture-dir` store, portable filename-only `export_log`, quotas,
+  no-overwrite atomic commits, advisory locks) — a prerequisite, not the
+  feature. Continuous raw capture lifecycle is specified (NOT implemented)
+  in [safe-continuous-capture-design.md](safe-continuous-capture-design.md);
+  recommendation: do not implement until concrete task evidence.
 
 ### RS-485 options
 - half-duplex bus semantics, direction control timing, RTS-based send control

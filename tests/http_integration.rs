@@ -3570,3 +3570,662 @@ fn capture_boot_schemas_have_no_nonstandard_uint_formats() {
         }
     }
 }
+
+// ── Phase 6: safe persistent capture (export_log) ────────────────────────────
+
+use serial_mcp::capture_store::{CaptureLimits, CaptureStore};
+use serial_mcp::log_buffer::LogEntry;
+use serial_mcp::serial::{test_support::loopback_connection_with_config, ConnectionConfig};
+
+fn capture_store_in(
+    root: &std::path::Path,
+    max_file_bytes: u64,
+    max_total_bytes: u64,
+    max_files: usize,
+) -> Arc<CaptureStore> {
+    Arc::new(
+        CaptureStore::open(
+            root.to_path_buf(),
+            CaptureLimits {
+                max_file_bytes,
+                max_total_bytes,
+                max_files,
+            },
+        )
+        .expect("open capture store for test"),
+    )
+}
+
+/// Loopback connection seeded with `events` rx_data entries (plus the
+/// automatic `open` event, which is always present).
+fn seeded_log_conn(
+    name: &str,
+    events: usize,
+) -> (
+    serial_mcp::serial::SerialConnection,
+    tokio::io::DuplexStream,
+) {
+    let (conn, peer) = loopback_connection(name);
+    for i in 0..events {
+        conn.log().rx_data(i + 1);
+    }
+    (conn, peer)
+}
+
+fn export_call(connection_id: &str, path: &str) -> serde_json::Value {
+    json!({ "connection_id": connection_id, "path": path })
+}
+
+/// Run one `export_log` call through the real MCP boundary.
+async fn export_via<H: rmcp::handler::client::ClientHandler>(
+    client: &rmcp::service::RunningService<rmcp::service::RoleClient, H>,
+    connection_id: &str,
+    path: &str,
+) -> rmcp::model::CallToolResult {
+    client
+        .peer()
+        .call_tool(tool_request("export_log", export_call(connection_id, path)))
+        .await
+        .unwrap()
+}
+
+/// Concatenated text of a tool-call result's content blocks (error text
+/// lives in `content`, alongside `structured_content`).
+fn tool_error_text(result: &rmcp::model::CallToolResult) -> String {
+    result
+        .content
+        .iter()
+        .filter_map(|c| c.as_text())
+        .map(|t| t.text.clone())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// ConnectionConfig for a connection whose log is enabled but has capacity
+/// 0 — every recorded event is immediately evicted, so exports are empty.
+fn empty_log_config(port: &str) -> ConnectionConfig {
+    use serial_mcp::serial::{DataBits, FlowControl, Parity, StopBits};
+    ConnectionConfig {
+        port: port.into(),
+        name: None,
+        baud_rate: 115200,
+        data_bits: DataBits::Eight,
+        stop_bits: StopBits::One,
+        parity: Parity::None,
+        flow_control: FlowControl::None,
+        port_info: None,
+        log_capacity: 0,
+        log_enabled: true,
+        tx_framing: None,
+        rx_framing: None,
+        rx_parser: None,
+        protocol: None,
+        rx_buffer_size: serial_mcp::limits::DEFAULT_RX_BUFFER_SIZE,
+        max_buffered_bytes: 32768,
+        poll_interval_ms: 200,
+    }
+}
+
+/// The only entries allowed in a capture root after failed exports: the
+/// advisory lock file. Temp files may exist only transiently and are
+/// removed on failure (NamedTempFile drop), so this is also a no-temp check.
+fn assert_root_has_only_lock(root: &std::path::Path) {
+    let entries: Vec<String> = std::fs::read_dir(root)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|n| n != serial_mcp::capture_store::CAPTURE_LOCK_FILE)
+        .collect();
+    assert!(
+        entries.is_empty(),
+        "capture root must contain only the lock file, got: {entries:?}"
+    );
+}
+
+#[tokio::test]
+async fn export_log_disabled_errors_before_path_write_and_creates_nothing() {
+    let manager = Arc::new(ConnectionManager::new());
+    let (conn, _peer) = seeded_log_conn("loop-export-disabled", 2);
+    let cid = manager.insert(conn).await.unwrap();
+    let server = TestServer::start_with(manager).await; // default: disabled store
+    let (client, _rx) = connect_client(&server).await.unwrap();
+
+    let result = client
+        .peer()
+        .call_tool(tool_request("export_log", export_call(&cid, "boot.jsonl")))
+        .await
+        .unwrap();
+    assert_eq!(result.is_error, Some(true), "{result:?}");
+    let text = tool_error_text(&result);
+    assert!(
+        text.contains("Persistent capture is disabled"),
+        "got: {text}"
+    );
+    assert!(
+        text.contains("--capture-dir"),
+        "disabled error must teach --capture-dir: {text}"
+    );
+
+    // The disabled check runs BEFORE connection lookup: a bogus connection
+    // id yields the disabled error, not connection_not_found.
+    let result = client
+        .peer()
+        .call_tool(tool_request(
+            "export_log",
+            export_call("no-such-connection", "boot.jsonl"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(result.is_error, Some(true));
+    let text = tool_error_text(&result);
+    assert!(
+        text.contains("Persistent capture is disabled"),
+        "disabled check must precede connection lookup: {text}"
+    );
+
+    client.cancel().await.ok();
+}
+
+#[tokio::test]
+async fn export_log_enabled_writes_valid_jsonl_matching_get_log() {
+    let root = TempDir::new().unwrap();
+    let store = capture_store_in(root.path(), 4096, 8192, 8);
+    let manager = Arc::new(ConnectionManager::new());
+    let (conn, _peer) = seeded_log_conn("loop-export-ok", 3);
+    let cid = manager.insert(conn).await.unwrap();
+    let server = TestServer::start_with_capture_store(manager, store).await;
+    let (client, _rx) = connect_client(&server).await.unwrap();
+
+    // Reference snapshot via get_log.
+    let get = client
+        .peer()
+        .call_tool(tool_request("get_log", json!({ "connection_id": cid })))
+        .await
+        .unwrap();
+    let structured = get.structured_content.expect("structured");
+    let events: Vec<LogEntry> = serde_json::from_value(structured["events"].clone()).unwrap();
+
+    let result = client
+        .peer()
+        .call_tool(tool_request("export_log", export_call(&cid, "boot.jsonl")))
+        .await
+        .unwrap();
+    assert_ne!(result.is_error, Some(true), "{result:?}");
+    let structured = result.structured_content.expect("structured content");
+    assert_eq!(structured["events_written"], json!(events.len()));
+    assert_eq!(structured["files_used"], json!(1));
+    assert_eq!(structured["total_bytes_used"], structured["bytes_written"]);
+    let canonical = root.path().canonicalize().unwrap().join("boot.jsonl");
+    assert_eq!(structured["path"], json!(canonical.display().to_string()));
+
+    let raw = std::fs::read(&canonical).unwrap();
+    assert_eq!(
+        raw.len(),
+        structured["bytes_written"].as_u64().unwrap() as usize
+    );
+    assert_eq!(structured["bytes_written"], json!(raw.len()));
+    let text = String::from_utf8(raw).unwrap();
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.len(), events.len());
+    for (i, line) in lines.iter().enumerate() {
+        let parsed: LogEntry = serde_json::from_str(line).unwrap();
+        assert_eq!(parsed, events[i], "line {i} must equal get_log entry");
+    }
+    assert!(text.ends_with('\n'));
+
+    client.cancel().await.ok();
+}
+
+#[tokio::test]
+async fn export_log_empty_log_commits_zero_byte_file_and_consumes_slot() {
+    let root = TempDir::new().unwrap();
+    let store = capture_store_in(root.path(), 1024, 1024, 4);
+    let manager = Arc::new(ConnectionManager::new());
+    // log_capacity 0 with logging enabled: every record is immediately
+    // evicted, so the buffer is empty.
+    let (conn, _peer) = loopback_connection_with_config(empty_log_config("loop-export-empty"));
+    let cid = manager.insert(conn).await.unwrap();
+    let server = TestServer::start_with_capture_store(manager, store).await;
+    let (client, _rx) = connect_client(&server).await.unwrap();
+
+    let result = client
+        .peer()
+        .call_tool(tool_request("export_log", export_call(&cid, "empty.jsonl")))
+        .await
+        .unwrap();
+    assert_ne!(result.is_error, Some(true), "{result:?}");
+    let structured = result.structured_content.expect("structured content");
+    assert_eq!(structured["events_written"], json!(0));
+    assert_eq!(structured["bytes_written"], json!(0));
+    assert_eq!(structured["files_used"], json!(1));
+    let committed = root.path().join("empty.jsonl");
+    assert!(committed.is_file());
+    assert_eq!(std::fs::metadata(&committed).unwrap().len(), 0);
+
+    // A second zero-byte export consumes a second file slot.
+    let result = client
+        .peer()
+        .call_tool(tool_request(
+            "export_log",
+            export_call(&cid, "empty2.jsonl"),
+        ))
+        .await
+        .unwrap();
+    assert_ne!(result.is_error, Some(true), "{result:?}");
+    let structured = result.structured_content.expect("structured content");
+    assert_eq!(structured["files_used"], json!(2));
+
+    client.cancel().await.ok();
+}
+
+#[tokio::test]
+async fn export_log_rejects_traversal_absolute_and_bad_names_without_files() {
+    let root = TempDir::new().unwrap();
+    let store = capture_store_in(root.path(), 4096, 8192, 8);
+    let manager = Arc::new(ConnectionManager::new());
+    let (conn, _peer) = seeded_log_conn("loop-export-bad", 2);
+    let cid = manager.insert(conn).await.unwrap();
+    let server = TestServer::start_with_capture_store(manager, store).await;
+    let (client, _rx) = connect_client(&server).await.unwrap();
+
+    for bad in [
+        "../escape.jsonl",
+        "sub/dir.jsonl",
+        "sub\\dir.jsonl",
+        "/abs.jsonl",
+        "name.txt",
+        "name.json",
+        "name.JSONL",
+        "CON.jsonl",
+        "lpt1.jsonl",
+        ".jsonl",
+        ".serial-mcp-capture-x.jsonl",
+        &format!("{}.jsonl", "a".repeat(120)),
+        "",
+        "..",
+    ] {
+        let result = client
+            .peer()
+            .call_tool(tool_request("export_log", export_call(&cid, bad)))
+            .await
+            .unwrap();
+        assert_eq!(
+            result.is_error,
+            Some(true),
+            "name {bad:?} must fail: {result:?}"
+        );
+        // The validation error is a tool error with a useful message.
+        let text = tool_error_text(&result);
+        assert!(!text.is_empty(), "name {bad:?} must produce a message");
+    }
+
+    assert_root_has_only_lock(root.path());
+    client.cancel().await.ok();
+}
+
+#[tokio::test]
+async fn export_log_existing_target_remains_byte_identical() {
+    let root = TempDir::new().unwrap();
+    let store = capture_store_in(root.path(), 4096, 8192, 8);
+    std::fs::write(root.path().join("boot.jsonl"), b"original-content").unwrap();
+    let manager = Arc::new(ConnectionManager::new());
+    let (conn, _peer) = seeded_log_conn("loop-export-clobber", 2);
+    let cid = manager.insert(conn).await.unwrap();
+    let server = TestServer::start_with_capture_store(manager, store).await;
+    let (client, _rx) = connect_client(&server).await.unwrap();
+
+    let result = client
+        .peer()
+        .call_tool(tool_request("export_log", export_call(&cid, "boot.jsonl")))
+        .await
+        .unwrap();
+    assert_eq!(result.is_error, Some(true), "{result:?}");
+    assert_eq!(
+        std::fs::read(root.path().join("boot.jsonl")).unwrap(),
+        b"original-content"
+    );
+    assert_eq!(
+        std::fs::metadata(root.path().join("boot.jsonl"))
+            .unwrap()
+            .len(),
+        16
+    );
+
+    client.cancel().await.ok();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn export_log_rejects_symlink_target_and_leaves_outside_untouched() {
+    let root = TempDir::new().unwrap();
+    let store = capture_store_in(root.path(), 4096, 8192, 8);
+    let outside = TempDir::new().unwrap();
+    let victim = outside.path().join("victim.jsonl");
+    std::fs::write(&victim, b"outside-data").unwrap();
+    std::os::unix::fs::symlink(&victim, root.path().join("boot.jsonl")).unwrap();
+
+    let manager = Arc::new(ConnectionManager::new());
+    let (conn, _peer) = seeded_log_conn("loop-export-symlink", 2);
+    let cid = manager.insert(conn).await.unwrap();
+    let server = TestServer::start_with_capture_store(manager, store).await;
+    let (client, _rx) = connect_client(&server).await.unwrap();
+
+    let result = client
+        .peer()
+        .call_tool(tool_request("export_log", export_call(&cid, "boot.jsonl")))
+        .await
+        .unwrap();
+    assert_eq!(result.is_error, Some(true), "{result:?}");
+    // The symlink still points at the outside target; the target is untouched.
+    assert!(root
+        .path()
+        .join("boot.jsonl")
+        .symlink_metadata()
+        .unwrap()
+        .file_type()
+        .is_symlink());
+    assert_eq!(std::fs::read(&victim).unwrap(), b"outside-data");
+
+    client.cancel().await.ok();
+}
+
+#[tokio::test]
+async fn export_log_concurrent_same_name_yields_exactly_one_success() {
+    let root = TempDir::new().unwrap();
+    let store = capture_store_in(root.path(), 4096, 8192, 8);
+    let manager = Arc::new(ConnectionManager::new());
+    let (conn, _peer) = seeded_log_conn("loop-export-race", 2);
+    let cid = manager.insert(conn).await.unwrap();
+    let server = TestServer::start_with_capture_store(manager, store).await;
+    let (client_a, _rx_a) = connect_client(&server).await.unwrap();
+    let (client_b, _rx_b) = connect_client(&server).await.unwrap();
+
+    let (r1, r2) = tokio::join!(
+        export_via(&client_a, &cid, "race.jsonl"),
+        export_via(&client_b, &cid, "race.jsonl")
+    );
+    let results = [r1, r2];
+    let successes: Vec<_> = results
+        .iter()
+        .filter(|r| r.is_error != Some(true))
+        .collect();
+    assert_eq!(
+        successes.len(),
+        1,
+        "exactly one concurrent same-name export may succeed: {results:?}"
+    );
+    // The committed file is a complete snapshot (the loser changed nothing).
+    let raw = std::fs::read(root.path().join("race.jsonl")).unwrap();
+    assert!(raw.ends_with(b"\n"));
+    assert!(!raw.is_empty());
+
+    client_a.cancel().await.ok();
+    client_b.cancel().await.ok();
+}
+
+#[tokio::test]
+async fn export_log_per_file_quota_failure_creates_no_file() {
+    let root = TempDir::new().unwrap();
+    // Tiny per-file quota: any real snapshot exceeds it.
+    let store = capture_store_in(root.path(), 16, 1024, 8);
+    let manager = Arc::new(ConnectionManager::new());
+    let (conn, _peer) = seeded_log_conn("loop-export-file-quota", 5);
+    let cid = manager.insert(conn).await.unwrap();
+    let server = TestServer::start_with_capture_store(manager, store).await;
+    let (client, _rx) = connect_client(&server).await.unwrap();
+
+    let result = client
+        .peer()
+        .call_tool(tool_request("export_log", export_call(&cid, "big.jsonl")))
+        .await
+        .unwrap();
+    assert_eq!(result.is_error, Some(true), "{result:?}");
+    let text = tool_error_text(&result);
+    assert!(
+        text.contains("quota"),
+        "per-file quota failure must mention quota: {text}"
+    );
+    assert_root_has_only_lock(root.path());
+
+    client.cancel().await.ok();
+}
+
+#[tokio::test]
+async fn export_log_total_byte_quota_persists_across_exports_and_fresh_stores() {
+    let root = TempDir::new().unwrap();
+    let manager = Arc::new(ConnectionManager::new());
+    let (conn, _peer) = seeded_log_conn("loop-export-total", 1);
+    let cid = manager.insert(conn).await.unwrap();
+
+    // Server A commits one file against a generous quota; its result
+    // reports the EXACT committed byte count.
+    let store_a = capture_store_in(root.path(), 4096, 100_000, 8);
+    let server_a = TestServer::start_with_capture_store(Arc::clone(&manager), store_a).await;
+    let (client_a, _rx) = connect_client(&server_a).await.unwrap();
+    let result = export_via(&client_a, &cid, "a.jsonl").await;
+    assert_ne!(result.is_error, Some(true), "{result:?}");
+    let used_bytes = result.structured_content.expect("structured")["total_bytes_used"]
+        .as_u64()
+        .unwrap();
+    assert!(used_bytes > 0);
+    client_a.cancel().await.ok();
+    drop(server_a);
+
+    // Server B is a FRESH CaptureStore instance scanning the same root with
+    // a total quota equal to A's committed size: B's identical snapshot
+    // passes the per-file check but blows the total (A's file + B's file).
+    let store_b = capture_store_in(root.path(), used_bytes, used_bytes, 8);
+    let server_b = TestServer::start_with_capture_store(Arc::clone(&manager), store_b).await;
+    let (client_b, _rx) = connect_client(&server_b).await.unwrap();
+    let result = export_via(&client_b, &cid, "b.jsonl").await;
+    assert_eq!(result.is_error, Some(true), "{result:?}");
+    let text = tool_error_text(&result);
+    assert!(
+        text.contains("total-byte quota"),
+        "fresh store must observe A's usage: {text}"
+    );
+    // No file was committed by the failed attempt.
+    assert!(!root.path().join("b.jsonl").exists());
+    assert_eq!(
+        std::fs::metadata(root.path().join("a.jsonl"))
+            .unwrap()
+            .len(),
+        used_bytes
+    );
+
+    client_b.cancel().await.ok();
+}
+
+#[tokio::test]
+async fn export_log_file_count_quota_includes_prior_committed_files() {
+    let root = TempDir::new().unwrap();
+    let store = capture_store_in(root.path(), 4096, 8192, 1);
+    let manager = Arc::new(ConnectionManager::new());
+    let (conn, _peer) = seeded_log_conn("loop-export-count", 1);
+    let cid = manager.insert(conn).await.unwrap();
+    let server = TestServer::start_with_capture_store(manager, store).await;
+    let (client, _rx) = connect_client(&server).await.unwrap();
+
+    let result = client
+        .peer()
+        .call_tool(tool_request("export_log", export_call(&cid, "one.jsonl")))
+        .await
+        .unwrap();
+    assert_ne!(result.is_error, Some(true), "{result:?}");
+    assert_eq!(
+        result.structured_content.expect("structured")["files_used"],
+        json!(1)
+    );
+
+    let result = client
+        .peer()
+        .call_tool(tool_request("export_log", export_call(&cid, "two.jsonl")))
+        .await
+        .unwrap();
+    assert_eq!(result.is_error, Some(true), "{result:?}");
+    let text = tool_error_text(&result);
+    assert!(
+        text.contains("file-count quota"),
+        "count quota must include prior committed files: {text}"
+    );
+    assert!(!root.path().join("two.jsonl").exists());
+
+    client.cancel().await.ok();
+}
+
+#[tokio::test]
+async fn export_log_independent_servers_sharing_root_cannot_exceed_quota() {
+    // Two servers, each with an independent CaptureStore (independent
+    // process-local mutexes). Only the advisory lock on the shared root
+    // serializes scan+commit, so the FILE-COUNT quota holds across them:
+    // at most one of the two concurrent exports may commit.
+    let root = TempDir::new().unwrap();
+    let manager_a = Arc::new(ConnectionManager::new());
+    let (conn_a, _peer_a) = loopback_connection("loop-export-xstore-a");
+    conn_a.log().rx_data(7);
+    conn_a.log().rx_data(8);
+    let cid_a = manager_a.insert(conn_a).await.unwrap();
+
+    let manager_b = Arc::new(ConnectionManager::new());
+    let (conn_b, _peer_b) = loopback_connection("loop-export-xstore-b");
+    conn_b.log().rx_data(9);
+    let cid_b = manager_b.insert(conn_b).await.unwrap();
+
+    let store_a = capture_store_in(root.path(), 4096, 8192, 1);
+    let store_b = capture_store_in(root.path(), 4096, 8192, 1);
+    let server_a = TestServer::start_with_capture_store(manager_a, store_a).await;
+    let server_b = TestServer::start_with_capture_store(manager_b, store_b).await;
+    let (client_a, _rx_a) = connect_client(&server_a).await.unwrap();
+    let (client_b, _rx_b) = connect_client(&server_b).await.unwrap();
+
+    let (ra, rb) = tokio::join!(
+        export_via(&client_a, &cid_a, "a.jsonl"),
+        export_via(&client_b, &cid_b, "b.jsonl")
+    );
+    let results = [ra, rb];
+    let successes: Vec<_> = results
+        .iter()
+        .filter(|r| r.is_error != Some(true))
+        .collect();
+    assert_eq!(
+        successes.len(),
+        1,
+        "independent stores sharing a root may commit at most one file: {results:?}"
+    );
+    let files: Vec<String> = std::fs::read_dir(root.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|n| n.ends_with(".jsonl"))
+        .collect();
+    assert_eq!(
+        files.len(),
+        1,
+        "only the winning commit may persist: {files:?}"
+    );
+    // The loser's error names the count quota (cross-store scan saw the
+    // winner's committed file).
+    let loser = results
+        .iter()
+        .find(|r| r.is_error == Some(true))
+        .expect("one loser");
+    let text = tool_error_text(loser);
+    assert!(
+        text.contains("file-count quota") || text.contains("already exists"),
+        "loser must observe the winner's commit: {text}"
+    );
+
+    client_a.cancel().await.ok();
+    client_b.cancel().await.ok();
+}
+
+#[tokio::test]
+async fn export_log_failure_leaves_connection_usable() {
+    let root = TempDir::new().unwrap();
+    let store = capture_store_in(root.path(), 4096, 8192, 8);
+    let manager = Arc::new(ConnectionManager::new());
+    let (conn, _peer) = seeded_log_conn("loop-export-usable", 2);
+    let cid = manager.insert(conn).await.unwrap();
+    let server = TestServer::start_with_capture_store(manager, store).await;
+    let (client, _rx) = connect_client(&server).await.unwrap();
+
+    // Failed export (bad filename).
+    let result = client
+        .peer()
+        .call_tool(tool_request(
+            "export_log",
+            export_call(&cid, "bad/name.jsonl"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(result.is_error, Some(true));
+
+    // The connection still answers get_log and a good export succeeds.
+    let result = client
+        .peer()
+        .call_tool(tool_request("get_log", json!({ "connection_id": cid })))
+        .await
+        .unwrap();
+    assert_ne!(result.is_error, Some(true), "{result:?}");
+    let result = client
+        .peer()
+        .call_tool(tool_request("export_log", export_call(&cid, "after.jsonl")))
+        .await
+        .unwrap();
+    assert_ne!(result.is_error, Some(true), "{result:?}");
+
+    client.cancel().await.ok();
+}
+
+#[tokio::test]
+async fn export_log_snapshot_is_point_in_time() {
+    let root = TempDir::new().unwrap();
+    let store = capture_store_in(root.path(), 4096, 8192, 8);
+    let manager = Arc::new(ConnectionManager::new());
+    let (conn, _peer) = seeded_log_conn("loop-export-pit", 2);
+    let log = Arc::clone(conn.log());
+    let cid = manager.insert(conn).await.unwrap();
+    let server = TestServer::start_with_capture_store(manager, store).await;
+    let (client, _rx) = connect_client(&server).await.unwrap();
+
+    let result = client
+        .peer()
+        .call_tool(tool_request("export_log", export_call(&cid, "pit.jsonl")))
+        .await
+        .unwrap();
+    assert_ne!(result.is_error, Some(true), "{result:?}");
+    let events_written = result.structured_content.expect("structured")["events_written"]
+        .as_u64()
+        .unwrap();
+
+    // Events recorded AFTER the export must not appear in the committed
+    // file (the snapshot locked the buffer exactly once).
+    log.rx_data(999);
+    log.rx_data(998);
+    let text = std::fs::read_to_string(root.path().join("pit.jsonl")).unwrap();
+    assert_eq!(text.lines().count(), events_written as usize);
+    assert!(
+        !text.contains("\"bytes\":999") && !text.contains("\"bytes\":998"),
+        "post-export events must not leak into the committed file: {text}"
+    );
+
+    client.cancel().await.ok();
+}
+
+#[tokio::test]
+async fn spawned_server_starts_with_capture_dir() {
+    // Real binary + real HTTP transport: a valid --capture-dir must not
+    // break startup, and the initialized server still serves the catalog.
+    let root = TempDir::new().unwrap();
+    let server = common::spawned::SpawnedServer::start_with_capture_dir(root.path()).await;
+    let (client, _rx) = common::spawned::spawn_client(&server).await.unwrap();
+
+    let info = client.peer_info().expect("peer info");
+    assert_eq!(info.server_info.name, "serial-mcp");
+    let tools = client
+        .peer()
+        .list_tools(Some(PaginatedRequestParams::default()))
+        .await
+        .unwrap();
+    assert_eq!(tools.tools.len(), 27);
+
+    client.cancel().await.ok();
+}

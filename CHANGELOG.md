@@ -93,6 +93,31 @@
 - `advance_cursor` helper extracts the 16× cursor-clamp duplication.
 - Tool count drops from 23 → 22 (`seek` removed, folded into `read`).
 
+## [Unreleased]
+
+### Added
+- **Safe persistent capture foundation** — `export_log` now persists the
+  event log as a bounded, atomic JSONL snapshot through a disabled-by-default
+  `CaptureStore` (`src/capture_store.rs`), enabled only with an explicit
+  absolute `--capture-dir`. Per-file (`--capture-max-file-bytes`, default
+  16 MiB), total-byte (`--capture-max-total-bytes`, default 256 MiB), and
+  file-count (`--capture-max-files`, default 256) quotas are enforced from a
+  fresh scan of the root's direct children under a process-local mutex and an
+  advisory cross-process lock (`.serial-mcp-captures.lock`). Startup validates
+  the root (absolute, existing directory, not a symlink, working lock) and the
+  quota relation; quota options without `--capture-dir` are startup errors.
+  Tool count unchanged (27).
+
+### Changed
+- **Breaking:** `export_log` no longer writes to an arbitrary caller-supplied
+  path. `path` is now a portable `.jsonl` filename (ASCII, 1–120 chars,
+  alphanumeric/`.`/`_`/`-`, `.jsonl` suffix, no separators/traversal,
+  Windows-reserved stems rejected) relative to the configured capture
+  directory. Existing destinations are never overwritten (`persist_noclobber`,
+  symlinks rejected). Result is additive: `bytes_written`, `files_used`, and
+  `total_bytes_used` join `events_written`, and `path` reports the canonical
+  absolute final file.
+
 ## [0.8.1]
 
 ### Added

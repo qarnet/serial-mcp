@@ -1,4 +1,5 @@
 pub mod buffer_budget;
+pub mod capture_store;
 pub(crate) mod checksums;
 pub mod codec;
 pub mod error;

@@ -983,16 +983,30 @@ pub struct ClearLogResult {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ExportLogArgs {
     pub connection_id: String,
-    /// File path to write the JSONL log to.
+    /// Portable `.jsonl` filename for the export, relative to the configured
+    /// capture directory (`--capture-dir`). Not an arbitrary path: no
+    /// separators, no subdirectories, no absolute/relative traversal, ASCII
+    /// 1-120 chars ending `.jsonl`. The server rejects existing files (no
+    /// overwrite) and enforces per-file, total-byte, and file-count quotas.
     pub path: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct ExportLogResult {
     pub connection_id: String,
+    /// Canonical absolute path of the committed file inside the capture root.
     pub path: String,
     #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
     pub events_written: usize,
+    /// Exact bytes committed (the full snapshot).
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub bytes_written: u64,
+    /// Committed managed files in the root after this export.
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub files_used: usize,
+    /// Total managed bytes in the root after this export.
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
+    pub total_bytes_used: u64,
 }
 
 // ---- Reconnect tool --------------------------------------------------------

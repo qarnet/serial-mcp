@@ -34,6 +34,7 @@ use serde_json::Map;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+use serial_mcp::capture_store::CaptureStore;
 use serial_mcp::security::SecurityManager;
 use serial_mcp::serial::ConnectionManager;
 use serial_mcp::serial::PortProvider;
@@ -134,7 +135,18 @@ impl TestServer {
         manager: Arc<ConnectionManager>,
         security: SecurityManager,
     ) -> Self {
-        Self::start_inner(manager, security, None, None).await
+        Self::start_inner(manager, security, None, None, None).await
+    }
+
+    /// Start a server with a custom [`ConnectionManager`] and an injected
+    /// capture store (Phase 6 export_log tests). The default profile store
+    /// is ephemeral.
+    pub async fn start_with_capture_store(
+        manager: Arc<ConnectionManager>,
+        capture_store: Arc<CaptureStore>,
+    ) -> Self {
+        let security = SecurityManager::from_patterns::<[&str; 0]>([]);
+        Self::start_inner(manager, security, None, None, Some(capture_store)).await
     }
 
     /// Start a server with a custom [`ConnectionManager`] and an injected
@@ -145,7 +157,7 @@ impl TestServer {
         provider: Arc<dyn PortProvider>,
     ) -> Self {
         let security = SecurityManager::from_patterns::<[&str; 0]>([]);
-        Self::start_inner(manager, security, None, Some(provider)).await
+        Self::start_inner(manager, security, None, Some(provider), None).await
     }
 
     /// Start a server with a custom profiles path (for tests that exercise
@@ -173,7 +185,7 @@ impl TestServer {
             serial_mcp::profile_store::ProfileStore::open(profiles_path)
                 .expect("open profiles store for test server"),
         );
-        Self::start_inner(manager, security, Some(store), None).await
+        Self::start_inner(manager, security, Some(store), None, None).await
     }
 
     /// Start a server with a custom profiles path AND an injected static
@@ -188,7 +200,7 @@ impl TestServer {
             serial_mcp::profile_store::ProfileStore::open(profiles_path)
                 .expect("open profiles store for test server"),
         );
-        Self::start_inner(manager, security, Some(store), Some(provider)).await
+        Self::start_inner(manager, security, Some(store), Some(provider), None).await
     }
 
     /// Shared construction: one `Arc<ProfileStore>` per server, cloned into
@@ -201,6 +213,7 @@ impl TestServer {
         security: SecurityManager,
         profile_store: Option<Arc<serial_mcp::profile_store::ProfileStore>>,
         provider: Option<Arc<dyn PortProvider>>,
+        capture_store: Option<Arc<CaptureStore>>,
     ) -> Self {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -213,10 +226,12 @@ impl TestServer {
         let provider = provider.unwrap_or_else(|| {
             Arc::new(serial_mcp::serial::SystemPortProvider) as Arc<dyn PortProvider>
         });
+        let capture_store = capture_store.unwrap_or_else(|| Arc::new(CaptureStore::disabled()));
         let manager_for_service = Arc::clone(&manager);
         let streams_for_service = Arc::clone(&streams);
         let profile_store_for_service = Arc::clone(&profile_store);
         let provider_for_service = Arc::clone(&provider);
+        let capture_store_for_service = Arc::clone(&capture_store);
         let shutdown_for_service = shutdown.child_token();
         let service = StreamableHttpService::new(
             move || {
@@ -225,6 +240,7 @@ impl TestServer {
                     .streams(Arc::clone(&streams_for_service))
                     .security(security.clone())
                     .profile_store(Arc::clone(&profile_store_for_service))
+                    .capture_store(Arc::clone(&capture_store_for_service))
                     .port_provider(Arc::clone(&provider_for_service))
                     .build())
             },

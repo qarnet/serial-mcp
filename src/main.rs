@@ -3,7 +3,11 @@ use rmcp::transport::streamable_http_server::{
 };
 use rmcp::{transport::stdio, ServiceExt};
 use serial_mcp::buffer_budget::AtomicBudget;
-use serial_mcp::limits::{DEFAULT_MAX_PROGRAM_BUFFERED_BYTES, DEFAULT_MAX_TOOL_BUFFERED_BYTES};
+use serial_mcp::capture_store::{CaptureLimits, CaptureStore};
+use serial_mcp::limits::{
+    DEFAULT_CAPTURE_MAX_FILES, DEFAULT_CAPTURE_MAX_FILE_BYTES, DEFAULT_CAPTURE_MAX_TOTAL_BYTES,
+    DEFAULT_MAX_PROGRAM_BUFFERED_BYTES, DEFAULT_MAX_TOOL_BUFFERED_BYTES,
+};
 use serial_mcp::security::SecurityManager;
 use serial_mcp::serial::ConnectionManager;
 use serial_mcp::server::StreamRegistry;
@@ -24,6 +28,8 @@ struct Args {
     max_program_buffered_bytes: usize,
     max_tool_buffered_bytes: usize,
     profiles_path: Option<PathBuf>,
+    capture_dir: Option<PathBuf>,
+    capture_limits: CaptureLimits,
 }
 
 enum Transport {
@@ -60,6 +66,10 @@ const VALUE_TAKING_OPTIONS: &[&str] = &[
     "--max-program-buffered-bytes",
     "--max-tool-buffered-bytes",
     "--profiles-path",
+    "--capture-dir",
+    "--capture-max-file-bytes",
+    "--capture-max-total-bytes",
+    "--capture-max-files",
 ];
 
 /// Scan argv for a version flag (`-V` / `--version`) that is NOT in the
@@ -128,6 +138,14 @@ Options:
   --max-tool-buffered-bytes <N>     Per-tool ceiling for max_buffered_bytes (default: {tool_default})
   --profiles-path <path>            Profile store file path
                                      (default: OS user config dir + serial-mcp/profiles.toml)
+  --capture-dir <absolute-dir>      Enable persistent export_log capture into an existing
+                                     absolute directory (disabled by default; no fallback)
+  --capture-max-file-bytes <N>      Per-file quota for a capture JSONL snapshot
+                                     (default: {cap_file})
+  --capture-max-total-bytes <N>     Total-byte quota across committed capture files
+                                     (default: {cap_total})
+  --capture-max-files <N>           File-count quota across committed capture files
+                                     (default: {cap_files})
   -V, --version                     Print version and exit
   -h, --help                        Print this help
 
@@ -146,6 +164,9 @@ Examples:
             bind = DEFAULT_HTTP_BIND,
             prog_default = DEFAULT_MAX_PROGRAM_BUFFERED_BYTES,
             tool_default = DEFAULT_MAX_TOOL_BUFFERED_BYTES,
+            cap_file = DEFAULT_CAPTURE_MAX_FILE_BYTES,
+            cap_total = DEFAULT_CAPTURE_MAX_TOTAL_BYTES,
+            cap_files = DEFAULT_CAPTURE_MAX_FILES,
         );
         std::process::exit(0);
     }
@@ -186,6 +207,13 @@ Examples:
 
     let profiles_path: Option<std::path::PathBuf> = pargs.opt_value_from_str("--profiles-path")?;
 
+    let capture_dir: Option<std::path::PathBuf> = pargs.opt_value_from_str("--capture-dir")?;
+    let capture_max_file_bytes: Option<u64> =
+        pargs.opt_value_from_str("--capture-max-file-bytes")?;
+    let capture_max_total_bytes: Option<u64> =
+        pargs.opt_value_from_str("--capture-max-total-bytes")?;
+    let capture_max_files: Option<usize> = pargs.opt_value_from_str("--capture-max-files")?;
+
     let remaining = pargs.finish();
     if !remaining.is_empty() {
         eprintln!(
@@ -215,6 +243,41 @@ Examples:
         std::process::exit(1);
     }
 
+    // Capture quota options are meaningless without a capture root; an
+    // explicitly supplied quota without `--capture-dir` is a startup error
+    // (never a silent disable).
+    let quotas_supplied = capture_max_file_bytes.is_some()
+        || capture_max_total_bytes.is_some()
+        || capture_max_files.is_some();
+    if quotas_supplied && capture_dir.is_none() {
+        eprintln!(
+            "error: --capture-max-file-bytes/--capture-max-total-bytes/--capture-max-files \
+             require --capture-dir"
+        );
+        std::process::exit(1);
+    }
+    let capture_limits = CaptureLimits {
+        max_file_bytes: capture_max_file_bytes.unwrap_or(DEFAULT_CAPTURE_MAX_FILE_BYTES),
+        max_total_bytes: capture_max_total_bytes.unwrap_or(DEFAULT_CAPTURE_MAX_TOTAL_BYTES),
+        max_files: capture_max_files.unwrap_or(DEFAULT_CAPTURE_MAX_FILES),
+    };
+    // `CaptureStore::open` revalidates the same rules; checking here keeps
+    // the CLI errors local to argument parsing.
+    if capture_limits.max_file_bytes == 0
+        || capture_limits.max_total_bytes == 0
+        || capture_limits.max_files == 0
+    {
+        eprintln!("error: capture quota limits must all be > 0");
+        std::process::exit(1);
+    }
+    if capture_limits.max_file_bytes > capture_limits.max_total_bytes {
+        eprintln!(
+            "error: --capture-max-file-bytes ({}) must be <= --capture-max-total-bytes ({})",
+            capture_limits.max_file_bytes, capture_limits.max_total_bytes
+        );
+        std::process::exit(1);
+    }
+
     Ok(Args {
         transport,
         allowlist,
@@ -222,6 +285,8 @@ Examples:
         max_program_buffered_bytes,
         max_tool_buffered_bytes,
         profiles_path,
+        capture_dir,
+        capture_limits,
     })
 }
 
@@ -239,6 +304,7 @@ async fn run_stdio(
     security: SecurityManager,
     budget: Arc<dyn serial_mcp::buffer_budget::BufferBudget>,
     profile_store: Arc<serial_mcp::profile_store::ProfileStore>,
+    capture_store: Arc<CaptureStore>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     info!("Starting Serial MCP Server v{}", env!("CARGO_PKG_VERSION"));
     let connections = Arc::new(ConnectionManager::new());
@@ -249,6 +315,7 @@ async fn run_stdio(
         .security(security)
         .budget(budget)
         .profile_store(profile_store)
+        .capture_store(capture_store)
         .build();
     let service = handler.serve(stdio()).await.map_err(|e| {
         error!("Failed to start server: {:?}", e);
@@ -265,6 +332,7 @@ async fn run_http(
     bind: String,
     budget: Arc<dyn serial_mcp::buffer_budget::BufferBudget>,
     profile_store: Arc<serial_mcp::profile_store::ProfileStore>,
+    capture_store: Arc<CaptureStore>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     info!(
         "Starting Serial MCP Server (HTTP) v{} on http://{}{}",
@@ -280,6 +348,7 @@ async fn run_http(
     let streams_for_service = Arc::clone(&streams);
     let budget_for_service = Arc::clone(&budget);
     let profile_store_for_service = Arc::clone(&profile_store);
+    let capture_store_for_service = Arc::clone(&capture_store);
 
     let service = StreamableHttpService::new(
         move || {
@@ -289,6 +358,7 @@ async fn run_http(
                 .security(security.clone())
                 .budget(Arc::clone(&budget_for_service))
                 .profile_store(Arc::clone(&profile_store_for_service))
+                .capture_store(Arc::clone(&capture_store_for_service))
                 .build())
         },
         LocalSessionManager::default().into(),
@@ -361,8 +431,36 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     info!("Profiles store: {}", profiles_path.display());
 
+    // Persistent capture is disabled unless an explicit absolute capture
+    // directory was configured. `CaptureStore::open` validates the root
+    // (absolute, existing directory, not a symlink, working advisory lock)
+    // and the quota relation at startup.
+    let capture_store = match &args.capture_dir {
+        Some(dir) => Arc::new(
+            CaptureStore::open(dir.clone(), args.capture_limits).unwrap_or_else(|e| {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            }),
+        ),
+        None => {
+            info!("Persistent capture disabled (no --capture-dir)");
+            Arc::new(CaptureStore::disabled())
+        }
+    };
+    if let Some(root) = capture_store.root() {
+        info!(
+            "Capture store: {} (file={} total={} files={})",
+            root.display(),
+            args.capture_limits.max_file_bytes,
+            args.capture_limits.max_total_bytes,
+            args.capture_limits.max_files,
+        );
+    }
+
     match args.transport {
-        Transport::Http => run_http(security, args.bind, budget, profile_store).await,
-        Transport::Stdio => run_stdio(security, budget, profile_store).await,
+        Transport::Http => {
+            run_http(security, args.bind, budget, profile_store, capture_store).await
+        }
+        Transport::Stdio => run_stdio(security, budget, profile_store, capture_store).await,
     }
 }

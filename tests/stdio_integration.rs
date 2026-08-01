@@ -282,3 +282,212 @@ fn stdio_profiles_path_consumes_version_as_value() {
         "must not print version when --version is the value of --profiles-path, got: {stdout:?}"
     );
 }
+
+// ── Phase 6: capture CLI surface ─────────────────────────────────────────────
+
+#[test]
+fn stdio_help_documents_capture_options() {
+    let (out, stdout) = run_bin(&["--help"]);
+    assert!(
+        out.status.success(),
+        "expected exit 0, got {:?}",
+        out.status
+    );
+    for opt in [
+        "--capture-dir",
+        "--capture-max-file-bytes",
+        "--capture-max-total-bytes",
+        "--capture-max-files",
+    ] {
+        assert!(
+            stdout.contains(opt),
+            "help must document {opt}, got: {stdout:?}"
+        );
+    }
+}
+
+#[test]
+fn stdio_capture_dir_consumes_version_as_value() {
+    // `--capture-dir --version`: `--version` is the VALUE of --capture-dir
+    // (not a version request). The value is not an absolute path, so the
+    // process must exit with a startup error — never print the version.
+    let out = std::process::Command::new(common::binaries::serial_mcp_bin())
+        .args(["--capture-dir", "--version"])
+        .env("RUST_LOG", "off")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("spawn serial-mcp");
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(
+        !stdout.starts_with("serial-mcp "),
+        "must not print version when --version is the value of --capture-dir, got: {stdout:?}"
+    );
+    assert!(
+        !out.status.success(),
+        "expected startup error for non-absolute capture dir, got {:?}",
+        out.status
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(
+        stderr.contains("capture") || stderr.contains("absolute"),
+        "stderr must explain the capture dir error: {stderr:?}"
+    );
+}
+
+#[test]
+fn stdio_capture_quota_without_root_rejects_startup() {
+    let (out, _stdout) = run_bin(&["--capture-max-files=5"]);
+    assert!(
+        !out.status.success(),
+        "quota option without --capture-dir must reject startup, got {:?}",
+        out.status
+    );
+    let (out, _stdout) = run_bin(&["--capture-max-file-bytes=1024"]);
+    assert!(
+        !out.status.success(),
+        "per-file quota without root must reject"
+    );
+    let (out, _stdout) = run_bin(&["--capture-max-total-bytes=1024"]);
+    assert!(
+        !out.status.success(),
+        "total quota without root must reject"
+    );
+}
+
+#[test]
+fn stdio_capture_relative_root_rejects_startup() {
+    // A relative --capture-dir must fail startup (absolute required), even
+    // when the directory exists relative to the child's cwd.
+    let cwd = std::env::current_dir().expect("cwd");
+    let rel = cwd.join("target/capture-cli-rel-test");
+    std::fs::create_dir_all(&rel).unwrap();
+    let out = std::process::Command::new(common::binaries::serial_mcp_bin())
+        .args(["--capture-dir", "target/capture-cli-rel-test"])
+        .env("RUST_LOG", "off")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("spawn serial-mcp");
+    std::fs::remove_dir_all(&rel).ok();
+    assert!(
+        !out.status.success(),
+        "relative capture dir must reject startup, got {:?}",
+        out.status
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(
+        stderr.contains("absolute"),
+        "stderr must demand an absolute dir: {stderr:?}"
+    );
+}
+
+#[test]
+fn stdio_capture_missing_root_rejects_startup() {
+    let out = std::process::Command::new(common::binaries::serial_mcp_bin())
+        .args(["--capture-dir", "/definitely/not/a/real/dir"])
+        .env("RUST_LOG", "off")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("spawn serial-mcp");
+    assert!(
+        !out.status.success(),
+        "missing capture dir must reject startup, got {:?}",
+        out.status
+    );
+}
+
+#[test]
+fn stdio_capture_invalid_quota_relation_rejects_startup() {
+    let dir = TempDir::new().expect("temp dir for capture root");
+    // per-file > total is invalid.
+    let out = std::process::Command::new(common::binaries::serial_mcp_bin())
+        .args([
+            "--capture-dir",
+            dir.path().to_str().unwrap(),
+            "--capture-max-file-bytes=2048",
+            "--capture-max-total-bytes=1024",
+        ])
+        .env("RUST_LOG", "off")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("spawn serial-mcp");
+    assert!(
+        !out.status.success(),
+        "per-file > total must reject startup, got {:?}",
+        out.status
+    );
+    // Zero limits are invalid too.
+    let out = std::process::Command::new(common::binaries::serial_mcp_bin())
+        .args([
+            "--capture-dir",
+            dir.path().to_str().unwrap(),
+            "--capture-max-files=0",
+        ])
+        .env("RUST_LOG", "off")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("spawn serial-mcp");
+    assert!(
+        !out.status.success(),
+        "zero limits must reject startup, got {:?}",
+        out.status
+    );
+}
+
+#[test]
+fn stdio_capture_file_root_rejects_startup() {
+    let dir = TempDir::new().expect("temp dir");
+    let file = dir.path().join("not-a-dir");
+    std::fs::write(&file, b"x").unwrap();
+    let out = std::process::Command::new(common::binaries::serial_mcp_bin())
+        .args(["--capture-dir", file.to_str().unwrap()])
+        .env("RUST_LOG", "off")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("spawn serial-mcp");
+    assert!(
+        !out.status.success(),
+        "non-directory capture root must reject startup, got {:?}",
+        out.status
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn stdio_capture_symlink_root_rejects_startup() {
+    let dir = TempDir::new().expect("temp dir");
+    let real = dir.path().join("real");
+    std::fs::create_dir(&real).unwrap();
+    let link = dir.path().join("link");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let out = std::process::Command::new(common::binaries::serial_mcp_bin())
+        .args(["--capture-dir", link.to_str().unwrap()])
+        .env("RUST_LOG", "off")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("spawn serial-mcp");
+    assert!(
+        !out.status.success(),
+        "symlink capture root must reject startup, got {:?}",
+        out.status
+    );
+}
+
+#[tokio::test]
+async fn stdio_server_starts_with_capture_dir() {
+    // A valid absolute --capture-dir must start the stdio server and the
+    // handshake must succeed.
+    build_stdio_server();
+    let capture_dir = TempDir::new().expect("temp capture dir");
+    let profiles_dir = TempDir::new().expect("temp profiles dir");
+    let profiles_path = profiles_dir.path().join("profiles.toml");
+    let cmd = Command::new(common::binaries::serial_mcp_bin()).configure(|cmd| {
+        cmd.env("RUST_LOG", "off");
+        cmd.arg("--profiles-path").arg(&profiles_path);
+        cmd.arg("--capture-dir").arg(capture_dir.path());
+    });
+    let transport = TokioChildProcess::new(cmd).expect("spawn stdio server");
+    let client = ().serve(transport).await.expect("initialize client");
+    let info = client.peer_info().expect("peer info");
+    assert_eq!(info.server_info.name, "serial-mcp");
+    client.cancel().await.ok();
+}
