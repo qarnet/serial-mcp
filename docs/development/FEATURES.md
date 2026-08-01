@@ -306,19 +306,6 @@ Non-feature work, roughly in suggested order. From the 2026-07-05 repo review.
   following the `config_schema_validation` precedent in `ci.yml`, so doc
   drift is its own visible, required check
 
-### Vendor the `models.dev` model schema for hermetic schema tests
-- `schemas/opencode.schema.json` refs
-  `https://models.dev/model-schema.json#/$defs/Model` externally; the
-  `jsonschema` crate resolves external refs eagerly in `validator_for`, so
-  the network-less Nix build sandbox cannot compile it
-- until vendored, `flake.nix`'s source filter excludes
-  `schemas/opencode.schema.json` from the Nix source — that fixture still
-  silently skips in `nix flake check` (network-enabled CI covers it), while
-  the self-contained Claude Code / Codex fixtures now validate for real
-- follow-up: vendor `model-schema.json` under `schemas/`, rewrite the four
-  `$ref`s to a local resource, and register it in the validator so the test
-  is hermetic on every runner (see the filter comment in `flake.nix`)
-
 ### Windows e2e test path — investigate
 - CI builds and unit-tests Windows, but the native_sim e2e suite is
   Unix-only (PTY-based; 57 tests ignored on the Windows runner)
