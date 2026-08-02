@@ -91,6 +91,38 @@
 
 ## Later
 
+### MCP Tasks extension for long-running operations
+- SEP-2663 / `io.modelcontextprotocol/tasks`: let a tool return a task handle
+  immediately, then expose `tasks/get`, `tasks/update`, and `tasks/cancel` with
+  cooperative cancellation and bounded result retention/TTL
+- candidates: long `read`, `transact`, `capture_boot`, `send_break`, and any
+  future firmware/file-transfer operation; keep normal synchronous execution
+  for clients that do not declare Tasks support
+- not a replacement for open-ended RX availability notifications: rmcp 3.0.1
+  clients must poll task state and task-status delivery through
+  `subscriptions/listen` is not available yet
+- needs ownership/lifecycle design for connection close, client disconnect,
+  server restart, task expiry, profile learning, and partial serial results
+
+### Positive MCP cache hints
+- MCP 2026-07-28 list/read results carry `ttlMs` + `cacheScope`; migration uses
+  non-cacheable `ttlMs=0`, `private` values for valid modern wire shapes
+- possible later policy: long/public for static tool, prompt, and resource-
+  template catalogs; short/private for live port lists; zero/private for open
+  connections, logs, status, and RX data
+- only enable positive TTL after resource/list notification invalidation,
+  authorization partitioning, pagination keys, and rmcp's stale-on-error client
+  behavior have public-boundary tests
+
+### Standard HTTP parameter headers
+- MCP 2026-07-28 + rmcp 3 automatically provide `Mcp-Method` and `Mcp-Name`;
+  selected primitive tool inputs can later opt into `Mcp-Param-*` through
+  top-level `x-mcp-header` schema annotations
+- possible low-risk first field: `connection_id`; assess `port` and `profile`
+  separately because proxies commonly log headers
+- never promote commands, serial payloads, match data, selectors, credentials,
+  or capture filenames into infrastructure-visible headers
+
 ### Flow-control-aware ring backpressure (pause-on-full)
 - follow-up to the 0.8.0 RX ring redesign: the always-on pump
   drains the kernel buffer continuously, so with RTS/CTS enabled the kernel
@@ -220,6 +252,12 @@
 
 ## Explicit skip for now
 
+- **MRTR product flows** — rmcp 3 supports SEP-2322 multi-round tool/resource/
+  prompt requests (`InputRequiredResult`) for client elicitation and retries,
+  but current schemas, defaults, destructive hints, and cancellation cover the
+  serial workflows we have. Revisit only for a concrete need such as physical
+  power-cycle guidance or destructive reset confirmation; any echoed
+  `requestState` must be integrity-protected.
 - **Remote monitor** — skip, keep off active roadmap
 - **SECURITY.md / vulnerability disclosure policy** — not important at the
   current project size; revisit if outside contributors arrive
