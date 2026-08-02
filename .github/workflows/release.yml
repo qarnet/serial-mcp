@@ -34,7 +34,7 @@ jobs:
       mode: ${{ steps.mode.outputs.mode }}
     steps:
       - name: Checkout target ref
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || github.event.workflow_run.head_sha }}
           fetch-depth: 0
@@ -151,7 +151,7 @@ jobs:
             pkg_config_path: ""
     steps:
       - name: Checkout target ref
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: ${{ needs.prepare.outputs.sha }}
 
@@ -234,7 +234,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout target ref
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: ${{ needs.prepare.outputs.sha }}
 

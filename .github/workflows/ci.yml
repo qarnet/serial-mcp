@@ -17,7 +17,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@v22
@@ -60,7 +60,7 @@ jobs:
             install: ""
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install system dependencies
         if: matrix.install != ''
@@ -106,7 +106,7 @@ jobs:
       NCS_INSTALL_DIR: /home/runner/ncs
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       # GitHub-hosted ubuntu-latest runners ship ~14 GB free disk. The NCS
       # SDK + toolchain cache alone is ~4.6 GB, cargo cache ~1-2 GB, and the
