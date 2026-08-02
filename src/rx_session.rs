@@ -841,6 +841,9 @@ mod tests {
         /// Waker for the pump's parked read, woken on `release`.
         waker: StdMutex<Option<std::task::Waker>>,
         /// Fired on every `poll_read`; the test waits for the first fire.
+        /// `notify_one` retains a permit when no waiter is registered yet,
+        /// so the signal cannot be lost to a pump that polls before the
+        /// test registers its wait.
         read_started: Notify,
         /// Fired when the payload is delivered to the pump's read.
         consumed: Notify,
@@ -877,7 +880,10 @@ mod tests {
             buf: &mut ReadBuf<'_>,
         ) -> Poll<std::io::Result<()>> {
             *self.state.waker.lock().expect("waker poisoned") = Some(cx.waker().clone());
-            self.state.read_started.notify_waiters();
+            // `notify_one` (not `notify_waiters`): the retained permit makes
+            // the read-start signal order-independent — it survives even if
+            // the pump polls before the test registers `read_started.notified()`.
+            self.state.read_started.notify_one();
             if !self.state.released.load(Ordering::SeqCst) {
                 return Poll::Pending;
             }
@@ -953,12 +959,18 @@ mod tests {
             }),
         ));
         let session = test_session(Arc::clone(&conn));
+
+        // Register the read-start wait BEFORE the pump can possibly run
+        // (registration happens at `notified()` creation). Combined with the
+        // backend's `notify_one`, the signal is order-independent: a pump
+        // that polls before this line still leaves a retained permit.
+        let read_started = state.read_started.notified();
         session.ensure_pump_running();
 
         // Wait for the pump's first read to be in flight. The pump acquires
         // the gate before it ever reaches `poll_read`, so when this fires
         // the gate is held by the pump.
-        tokio::time::timeout(Duration::from_secs(5), state.read_started.notified())
+        tokio::time::timeout(Duration::from_secs(5), read_started)
             .await
             .expect("pump read must start within the hang guard");
 
@@ -994,6 +1006,13 @@ mod tests {
         // the gate released. `consumed` fires inside the read, so queuing
         // the acquisition afterwards still registers while the append is
         // the pump's next step under the gate.
+        //
+        // Ordering safety: the wait is registered (notified()) BEFORE
+        // `release()`, and delivery can only happen after release (the
+        // backend holds the payload until then). `notify_waiters` is
+        // received when it happens after future creation, so the signal
+        // cannot be lost here — unlike `read_started` above, no retained
+        // permit is needed.
         let consumed = state.consumed.notified();
         state.release();
         tokio::time::timeout(Duration::from_secs(5), consumed)
