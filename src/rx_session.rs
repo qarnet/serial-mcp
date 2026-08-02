@@ -403,8 +403,13 @@ mod tests {
     use super::*;
     use crate::buffer_budget::AtomicBudget;
     use crate::serial::test_support::loopback_connection;
+    use crate::serial::{FlowControl, FlushTarget, SerialIo};
+    use std::pin::Pin;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::task::{Context, Poll};
     use std::time::Duration;
-    use tokio::io::AsyncWriteExt;
+    use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf};
+    use tokio::sync::Notify;
 
     /// Convenience: an unlimited budget for tests where budget isn't under test.
     fn test_budget() -> Arc<dyn BufferBudget> {
@@ -807,6 +812,211 @@ mod tests {
         session.ensure_pump_running();
         assert!(session.pump_task.lock().expect("pump_task").is_some());
 
+        session.shutdown_and_join().await;
+    }
+
+    // ── Pump gate barrier (deterministic) ──────────────────────────────────
+
+    /// Controlled [`SerialIo`] backend for the pump-gate barrier test.
+    ///
+    /// The payload is pre-loaded but held back: `poll_read` parks the pump's
+    /// read (`Pending`) until [`PumpGateState::release`] delivers the exact
+    /// bytes. Two explicit event-driven synchronization points expose the
+    /// pump's progress without any wall-clock assumption:
+    ///
+    /// - `read_started`: fired on the first `poll_read` — the pump's read is
+    ///   in flight and the pump holds `pump_gate` (it acquires the gate
+    ///   before calling `read`).
+    /// - `consumed`: fired when `poll_read` delivers the payload — the read
+    ///   has returned with the bytes; the pump's ring append is the next
+    ///   step, still under the gate.
+    ///
+    /// The pump's read has a 100ms budget and may time out and cycle while
+    /// parked, but the payload is only ever delivered by `release`, so the
+    /// ring cannot change before release no matter how the pump cycles.
+    struct PumpGateState {
+        /// Payload delivered to the pump's read once `released` is set.
+        payload: StdMutex<Option<Vec<u8>>>,
+        released: AtomicBool,
+        /// Waker for the pump's parked read, woken on `release`.
+        waker: StdMutex<Option<std::task::Waker>>,
+        /// Fired on every `poll_read`; the test waits for the first fire.
+        read_started: Notify,
+        /// Fired when the payload is delivered to the pump's read.
+        consumed: Notify,
+    }
+
+    impl PumpGateState {
+        fn new(payload: &[u8]) -> Self {
+            Self {
+                payload: StdMutex::new(Some(payload.to_vec())),
+                released: AtomicBool::new(false),
+                waker: StdMutex::new(None),
+                read_started: Notify::new(),
+                consumed: Notify::new(),
+            }
+        }
+
+        /// Deliver the exact payload to the pump's parked read and wake it.
+        fn release(&self) {
+            self.released.store(true, Ordering::SeqCst);
+            if let Some(w) = self.waker.lock().expect("waker poisoned").take() {
+                w.wake();
+            }
+        }
+    }
+
+    struct PumpGateIo {
+        state: Arc<PumpGateState>,
+    }
+
+    impl AsyncRead for PumpGateIo {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            *self.state.waker.lock().expect("waker poisoned") = Some(cx.waker().clone());
+            self.state.read_started.notify_waiters();
+            if !self.state.released.load(Ordering::SeqCst) {
+                return Poll::Pending;
+            }
+            let mut payload = self.state.payload.lock().expect("payload poisoned");
+            if let Some(bytes) = payload.take() {
+                let n = buf.initialize_unfilled().len().min(bytes.len());
+                let unfilled = buf.initialize_unfilled();
+                unfilled[..n].copy_from_slice(&bytes[..n]);
+                buf.advance(n);
+                self.state.consumed.notify_waiters();
+                Poll::Ready(Ok(()))
+            } else {
+                Poll::Pending
+            }
+        }
+    }
+
+    impl AsyncWrite for PumpGateIo {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            Poll::Ready(Ok(buf.len()))
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    impl SerialIo for PumpGateIo {
+        fn clear_os_buffers(&self, _target: FlushTarget) -> std::io::Result<()> {
+            Ok(())
+        }
+        fn set_dtr_rts(&mut self, _dtr: bool, _rts: bool) -> std::io::Result<()> {
+            Ok(())
+        }
+        fn set_flow_control(&mut self, _flow_control: FlowControl) -> std::io::Result<()> {
+            Ok(())
+        }
+        fn set_break_state(&self, _asserted: bool) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// The pump holds `pump_gate` across one complete read + ring append.
+    ///
+    /// While the pump's read is in flight the gate cannot be acquired and
+    /// the ring stays empty; after the exact payload is released, a gate
+    /// acquisition succeeds only once the ring contains the payload at the
+    /// expected offsets. This is the atomic unit `capture_boot` waits on for
+    /// its live-edge mark: a byte physically read before the mark can never
+    /// append after it.
+    ///
+    /// All synchronization is event-driven (wakers + `Notify`), never
+    /// wall-clock: the pump's 100ms read budget may elapse and the pump may
+    /// cycle any number of times, but every assertion is on a state that
+    /// holds regardless of timing. Bounded timeouts only guard against hangs.
+    #[tokio::test]
+    async fn pump_holds_gate_across_inflight_read_and_ring_append() {
+        const PAYLOAD: &[u8] = b"INFLIGHT";
+
+        let state = Arc::new(PumpGateState::new(PAYLOAD));
+        let conn = Arc::new(SerialConnection::from_io(
+            "test-pump-gate".to_string(),
+            Box::new(PumpGateIo {
+                state: Arc::clone(&state),
+            }),
+        ));
+        let session = test_session(Arc::clone(&conn));
+        session.ensure_pump_running();
+
+        // Wait for the pump's first read to be in flight. The pump acquires
+        // the gate before it ever reaches `poll_read`, so when this fires
+        // the gate is held by the pump.
+        tokio::time::timeout(Duration::from_secs(5), state.read_started.notified())
+            .await
+            .expect("pump read must start within the hang guard");
+
+        // Nothing can be appended before release: the payload is held back,
+        // so every pump cycle reads nothing, regardless of timing.
+        assert_eq!(
+            session.ring().end_offset(),
+            0,
+            "ring must be empty while the pump's read is in flight"
+        );
+
+        // The gate cannot be acquired while the read is in flight. The
+        // pump's read budget is 100ms: on timeout the gate is dropped and
+        // immediately re-acquired between cycles, so a `try_lock` at that
+        // exact instant can (benignly) succeed once. Yield so a runnable
+        // pump re-locks, then require the gate held — a pump that reads
+        // outside the gate (regression) fails every attempt.
+        let mut gate_held = false;
+        for _ in 0..3 {
+            if session.pump_gate.try_lock().is_err() {
+                gate_held = true;
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            gate_held,
+            "pump must hold pump_gate while its read is in flight"
+        );
+
+        // Release the exact payload. The in-flight read completes with it,
+        // the append lands while the gate is still held, and only then is
+        // the gate released. `consumed` fires inside the read, so queuing
+        // the acquisition afterwards still registers while the append is
+        // the pump's next step under the gate.
+        let consumed = state.consumed.notified();
+        state.release();
+        tokio::time::timeout(Duration::from_secs(5), consumed)
+            .await
+            .expect("pump must consume the released payload within the hang guard");
+
+        // A gate acquisition now succeeds only after the append: the pump
+        // releases the gate after `ring.append`, so at acquisition time the
+        // ring already contains the exact payload at the expected offsets.
+        let guard = session.pump_gate_guard().await;
+        assert_eq!(
+            session.ring().end_offset(),
+            PAYLOAD.len() as u64,
+            "payload must be appended before the gate is released"
+        );
+        let slice = session.ring().read_from(0, PAYLOAD.len());
+        assert_eq!(slice.bytes, PAYLOAD);
+        assert_eq!(slice.bytes_lost, 0);
+        assert_eq!(slice.from_offset, 0);
+        assert_eq!(slice.next_offset, PAYLOAD.len() as u64);
+        drop(guard);
+
+        // Cleanup: cancel and join the pump task.
         session.shutdown_and_join().await;
     }
 }

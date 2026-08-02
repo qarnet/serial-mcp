@@ -78,10 +78,10 @@ Accepted:
   stale-data race Phase 4 measured is eliminated by the pump gate
   (`src/rx_session.rs`): the pump holds `pump_gate` across one complete read
   + ring append, and `capture_boot` acquires the same gate for its
-  purge → mark → assert sequence. Public-behavior proof:
-  `tests/http_integration.rs::capture_boot_pump_barrier_appends_inflight_read_before_mark`
-  (an in-flight pre-reset pump read's bytes land in `pre_mark_bytes`, never
-  in the capture result) and
+  purge → mark → assert sequence. Deterministic proof:
+  `src/rx_session.rs::pump_holds_gate_across_inflight_read_and_ring_append`
+  (an in-flight pump read holds the gate and appends before any gate
+  acquisition succeeds) plus the public-behavior
   `capture_boot_stale_bytes_excluded_boot_bytes_captured_cursor_preserved`.
 
 Rejected (with reasons):

@@ -10,15 +10,6 @@
 //! - `on_line_change` fires SYNCHRONOUSLY inside the line-change call, so a
 //!   test can inject RX bytes at the exact instant the reset line is
 //!   asserted/released (the "immediate boot bytes" case).
-//! - `block_reads` makes `poll_read` always return `Pending`, parking the RX
-//!   pump inside a read while it holds the pump gate. CAVEAT: the pump's read
-//!   has a 100ms budget, so a blocked read still ends with `ReadTimeout`; the
-//!   gate is then released and immediately re-acquired (no yield between),
-//!   and the pump keeps cycling. `is_parked` therefore proves the pump is
-//!   inside a read, NOT that the gate will stay held. To get a deterministic
-//!   hold window, reset the pump phase: let it consume an injected byte (its
-//!   read returns with data before the budget), which starts a fresh read
-//!   cycle with a full 100ms budget.
 //! - `fail_next_set` makes the next `set_dtr_rts` fail (assert or release
 //!   failure injection).
 //! - `os_input_flush_count` counts `clear_os_buffers(Input)` calls so tests
@@ -28,7 +19,7 @@
 
 use std::collections::VecDeque;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::task::{Context, Poll, Waker};
 
@@ -43,18 +34,6 @@ use serial_mcp::serial::{
 pub struct ControlledState {
     rx_queue: StdMutex<VecDeque<u8>>,
     rx_waker: StdMutex<Option<Waker>>,
-    /// When true, `poll_read` always returns `Pending` (pump parks inside a
-    /// read while holding the pump gate). The pump's 100ms read budget still
-    /// elapses while blocked: the read times out, the gate is released and
-    /// immediately re-acquired, and the pump keeps cycling. Blocking parks
-    /// the pump but does NOT pin the gate indefinitely.
-    block_reads: AtomicBool,
-    /// 1 while the most recent `poll_read` returned `Pending`, else 0.
-    /// Lets a test wait until the pump is provably parked inside a read
-    /// before starting `capture_boot`. Note the `block_reads` caveat: parked
-    /// alone does not bound how long the gate stays held — reset the pump
-    /// phase (let it consume an injected byte) for a deterministic window.
-    parked: AtomicUsize,
     /// Every `set_dtr_rts` call, in order: `(dtr, rts)`.
     line_log: StdMutex<Vec<(bool, bool)>>,
     /// Number of `set_dtr_rts` calls to fail (assert/release injection).
@@ -73,8 +52,6 @@ impl ControlledState {
         Self {
             rx_queue: StdMutex::new(VecDeque::new()),
             rx_waker: StdMutex::new(None),
-            block_reads: AtomicBool::new(false),
-            parked: AtomicUsize::new(0),
             line_log: StdMutex::new(Vec::new()),
             fail_next_set: AtomicUsize::new(0),
             on_line_change: StdMutex::new(None),
@@ -91,27 +68,11 @@ impl ControlledState {
         self.wake_reader();
     }
 
-    /// Wake a parked reader (after clearing `block_reads` or injecting).
+    /// Wake a reader parked in `poll_read` (after injecting bytes).
     pub fn wake_reader(&self) {
         if let Some(w) = self.rx_waker.lock().expect("waker poisoned").take() {
             w.wake();
         }
-    }
-
-    /// Park/unpark the pump inside `poll_read`. While parked, the pump stays
-    /// inside its read (holding the pump gate) until the read's 100ms budget
-    /// elapses. For a deterministic gate-hold window, reset the pump phase
-    /// afterwards by letting it consume an injected byte.
-    pub fn set_block_reads(&self, block: bool) {
-        self.block_reads.store(block, Ordering::SeqCst);
-        self.wake_reader();
-    }
-
-    /// 1 while the pump is parked in `poll_read` (inside a read, holding the
-    /// pump gate at that instant). The pump's 100ms read budget still expires
-    /// while parked, so this does NOT bound how long the gate stays held.
-    pub fn is_parked(&self) -> bool {
-        self.parked.load(Ordering::SeqCst) == 1
     }
 
     /// All `set_dtr_rts` calls so far, in order.
@@ -190,12 +151,11 @@ impl AsyncRead for ControlledIo {
         buf: &mut ReadBuf<'_>,
     ) -> Poll<std::io::Result<()>> {
         let mut queue = self.state.rx_queue.lock().expect("rx queue poisoned");
-        if self.state.block_reads.load(Ordering::SeqCst) || queue.is_empty() {
+        if queue.is_empty() {
+            // Park with the waker registered so a later `inject_rx` wakes us.
             *self.state.rx_waker.lock().expect("waker poisoned") = Some(cx.waker().clone());
-            self.state.parked.store(1, Ordering::SeqCst);
             return Poll::Pending;
         }
-        self.state.parked.store(0, Ordering::SeqCst);
         let n = buf.initialize_unfilled().len().min(queue.len());
         let filled = buf.initialize_unfilled();
         for slot in filled.iter_mut().take(n) {
