@@ -71,7 +71,17 @@
             || pkgs.lib.hasSuffix "README.md" relPath
             || pkgs.lib.hasSuffix "CHANGELOG.md" relPath
             || pkgs.lib.hasSuffix "server.json" relPath
-            || pkgs.lib.hasPrefix "/docs" relPath;
+            || pkgs.lib.hasSuffix "flake.nix" relPath
+            || pkgs.lib.hasPrefix "/docs" relPath
+            # Workflow fixtures and registry-manifest tooling: doc_drift reads
+            # .github/workflows at runtime, and the builder unittest suite
+            # lives in scripts/. Both must survive the source filter — a
+            # pruned fixture fails the checks below and the CI doc_drift job.
+            # The prefix is the containing directory itself (/.github), not
+            # just the workflows subdir: cleanSource prunes any subtree whose
+            # directory does not match the filter.
+            || pkgs.lib.hasPrefix "/.github" relPath
+            || pkgs.lib.hasPrefix "/scripts" relPath;
         };
 
         # Common args shared by both the deps-only and final derivations.
@@ -192,6 +202,9 @@
           serial-mcp = serial-mcp;
           serial-mcp-aarch64 = serial-mcp-aarch64;
           inherit mcp-publisher;
+          # Independent schema validator for the registry manifest. Must never
+          # build or depend on the serial-mcp package.
+          jsonschema-cli = pkgs.jsonschema-cli;
         };
 
         # `nix run .#<name>` — entry points for each binary.
@@ -256,6 +269,35 @@
         # valid and the nixpkgs derivation builds. Keep it to that.
         checks = {
           inherit serial-mcp;
+
+          # Executable proof the filtered source ships every workflow fixture
+          # doc_drift reads at runtime. If the source filter ever prunes
+          # .github/workflows again, `nix flake check` fails here.
+          workflow-fixtures-present = pkgs.runCommand "workflow-fixtures-present" { } ''
+            test -f ${src}/.github/workflows/ci.yml
+            test -f ${src}/.github/workflows/hardening.yml
+            test -f ${src}/.github/workflows/publish-mcp-registry.yml
+            test -f ${src}/.github/workflows/publish-mcp-registry-backfill.yml
+            test -f ${src}/.github/workflows/release.yml
+            test -f ${src}/.github/workflows/release-dry-run.yml
+            test -f ${src}/.github/workflows/schema-drift.yml
+            touch $out
+          '';
+
+          # Offline, deterministic unittest suite for the registry manifest
+          # builder, run from the filtered source so it also proves scripts/
+          # survives the filter.
+          registry-manifest-builder-tests =
+            pkgs.runCommand "registry-manifest-builder-tests"
+              {
+                nativeBuildInputs = [ pkgs.python3 ];
+              }
+              ''
+                export PYTHONDONTWRITEBYTECODE=1
+                cd ${src}/scripts/tests
+                python3 -m unittest discover -v
+                touch $out
+              '';
         };
       }
     );

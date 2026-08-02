@@ -101,6 +101,10 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: cargo test --locked --test doc_drift
 
+      - name: Run registry manifest builder tests
+        if: matrix.os == 'ubuntu-latest'
+        run: python3 -m unittest discover -s scripts/tests -v
+
   native-sim:
     name: native_sim firmware + test
     runs-on: ubuntu-latest
@@ -229,3 +233,37 @@ jobs:
     uses: ./.github/workflows/publish-mcp-registry.yml
     with:
       ref: ${{ github.sha }}
+      version: ${{ needs.release.outputs.version }}
+
+  notify-release-failure:
+    name: Notify release pipeline failure
+    needs: [release, publish-mcp-registry]
+    # Runs on trusted main push only, after the release chain, whenever either
+    # privileged call failed. always() keeps it alive when a dependency fails.
+    if: always() && github.event_name == 'push' && github.ref == 'refs/heads/main' && (needs.release.result == 'failure' || needs.publish-mcp-registry.result == 'failure')
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: Create or comment on release-failure issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          SHA: ${{ github.sha }}
+          RELEASE_RESULT: ${{ needs.release.result }}
+          REGISTRY_RESULT: ${{ needs.publish-mcp-registry.result }}
+        run: |
+          set -euo pipefail
+          # One stable issue per failure lineage: comment on the open
+          # "[automation] Release pipeline failed" issue or create it. There is
+          # no checkout, so GH_REPO pins the repository for gh. All dynamic
+          # values arrive via env, never interpolated into the source.
+          BODY="Release pipeline failed in run ${RUN_URL} at commit ${SHA}. release=${RELEASE_RESULT}, registry=${REGISTRY_RESULT}."
+          OPEN=$(gh api "repos/${GH_REPO}/issues?state=open&per_page=100" \
+            --jq 'map(select(.title == "[automation] Release pipeline failed"))[0].number // empty')
+          if [ -n "$OPEN" ]; then
+            gh issue comment "$OPEN" --body "$BODY"
+          else
+            gh issue create --title "[automation] Release pipeline failed" --body "$BODY"
+          fi

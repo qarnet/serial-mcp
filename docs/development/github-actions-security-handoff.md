@@ -73,7 +73,18 @@ unsafe shape of checking out and executing event-derived code from privileged
   - same exact trusted push/ref condition.
   - `permissions: contents: read` and `id-token: write`.
   - `uses: ./.github/workflows/publish-mcp-registry.yml`.
-  - pass immutable `ref: ${{ github.sha }}`. No secrets.
+  - pass immutable `ref: ${{ github.sha }}` and `version: ${{ needs.release.outputs.version }}`
+    (the release `workflow_call` exposes the prepared version, so an
+    already-published release skip still reaches the registry — this is how
+    v0.9.1 recovers without a version bump). No secrets.
+- Add final job `notify-release-failure`:
+  - `needs: [release, publish-mcp-registry]`.
+  - `if: always() && github.event_name == 'push' && github.ref == 'refs/heads/main' &&
+    (needs.release.result == 'failure' || needs.publish-mcp-registry.result == 'failure')`.
+  - `permissions: issues: write` only; no checkout, no project execution.
+  - Creates or comments on one `[automation] Release pipeline failed` issue with
+    run URL/SHA and per-job results; all dynamic values passed via env, never
+    interpolated into shell source.
 
 ### `.github/workflows/release.yml`
 
@@ -122,18 +133,64 @@ unsafe shape of checking out and executing event-derived code from privileged
 ### `.github/workflows/publish-mcp-registry.yml`
 
 - Convert trigger to `on: workflow_call` only with required `ref` input.
-- Remove `workflow_run` condition and event-derived SHA.
+- Convert trigger to `on: workflow_call` only with required `ref` and
+  `version` inputs.
+- Remove `workflow_run` condition and event-derived SHA; the caller (trusted CI
+  or backfill) supplies the immutable ref and the strict SemVer version.
+- Strictly validate `version` before it is used in any tag/path argument.
 - Keep explicit least privilege: `contents: read`, `id-token: write`.
-- Checkout `inputs.ref`.
-- Preserve existing tag-exists and registry-version idempotency gates, package
-  generation, schema validation, OIDC login, and publication.
-- Update comments: dry-run now means registry workflow is never called, rather
-  than being called and finding no tag. Keep tag gate as retry/idempotency and
-  defense-in-depth behavior.
+- Checkout the current trusted `inputs.ref` with `fetch-depth: 0`; read the
+  historical template ONLY as data via `git show v<version>:server.json` —
+  never execute historical code.
+- Verify the published GitHub release/tag exists (`gh release view`); keep the
+  exact registry-version idempotency gate.
+- Download each exact asset fail-closed with `gh release download` into clean
+  staging (no curl-to-hash pipelines); fetch GitHub release asset metadata
+  (size + sha256 digest); build the manifest with
+  `scripts/build_registry_manifest.py`, which fails before output commit on
+  invalid version, template version mismatch, pre-existing packages, tag
+  mismatch, missing/duplicate/unexpected metadata, missing/non-regular/empty
+  local assets, size mismatch, or digest missing/mismatched.
+- Validate the generated manifest schema with the independent
+  `nix shell .#jsonschema-cli` package — never `nix develop`, never building
+  serial-mcp. Publish the staged manifest with mcp-publisher OIDC.
+- Add `publish-mcp-registry-backfill.yml` (`workflow_dispatch`, strict version
+  input, `contents: read` + `id-token: write`, no secrets): calls the current
+  local publisher with `ref: ${{ github.sha }}` so already-released versions
+  (e.g. 0.9.0/0.9.1) can be published without checking out historical code.
 
 ### `.github/workflows/schema-drift.yml`
 
 - Add explicit `permissions: contents: read`.
+
+### `scripts/build_registry_manifest.py` + `scripts/tests/`
+
+- Standard-library, offline, fail-closed manifest builder. Inputs: historical
+  template server.json, strict SemVer version, release metadata JSON (tag +
+  assets with size + sha256 digest), asset directory, output path. Fixed
+  expected assets: serial-mcp-x86_64-linux, serial-mcp-aarch64-linux,
+  serial-mcp-aarch64-macos, serial-mcp-x86_64-windows.exe. Fails before output
+  commit on: invalid version; template version mismatch; template already has
+  packages; release/tag mismatch; missing/duplicate/unexpected metadata;
+  missing/not-regular/empty local file; local size differs from GitHub
+  metadata; digest missing/not-sha256/mismatched. Builds package URLs for
+  v<version>, hashes local files, preserves template fields, writes atomically
+  (temp + rename).
+- `scripts/tests/test_build_registry_manifest.py` (stdlib unittest) covers the
+  happy path and every failure class, deterministic and offline. Run by Ubuntu
+  CI and by the `registry-manifest-builder-tests` flake check — never left
+  unused.
+
+### `flake.nix`
+
+- Extend the source filter to include the complete `.github/workflows/` and
+  `scripts/` trees (doc_drift and the builder tests read them at runtime).
+- Export `jsonschema-cli` as an independent flake package (no dependency on
+  serial-mcp) so the publisher can validate the manifest schema without
+  building the project.
+- Add `workflow-fixtures-present` and `registry-manifest-builder-tests` checks:
+  `nix flake check` proves the filtered source ships every workflow fixture
+  and that the offline unittest suite passes.
 
 ### Regression tests in `tests/doc_drift.rs`
 
@@ -155,6 +212,17 @@ must fail if future edits recreate vulnerable orchestration. At minimum prove:
   with no `contents: write`; the write jobs (`create-draft`/`publish-release`)
   contain no checkout/cargo/nix and never execute project code; later
   checkouts use the resolved immutable SHA rather than mutable `inputs.ref`.
+- Workflow parsers normalize CRLF (Windows checkouts) and are proven against a
+  CRLF fixture.
+- The flake source filter ships `.github/workflows/` and `scripts/`.
+- The publisher workflow never uses `nix develop`, uses the offline manifest
+  builder + `gh release download` + `git show` data extraction, and declares
+  required `ref` + `version` inputs.
+- The backfill workflow is dispatch-only, read-only, passes `version` +
+  `github.sha`, and carries no secrets/checkout.
+- The failure notifier is push-main gated with `always()`, depends on both the
+  release and registry jobs, carries `issues: write` only, and has no
+  checkout/project execution.
 
 Keep helpers understandable. Avoid brittle exact-whole-file snapshots. Tests
 should inspect relevant bounded job sections or normalized text and include
