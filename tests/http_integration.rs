@@ -26,38 +26,9 @@ use serial_mcp::serial::{test_support::loopback_connection, ConnectionManager};
 mod common;
 use common::controlled::ControlledState;
 use common::{
-    args_object, connect_client, next_notification, tool_request, NotificationCollector, TestServer,
+    args_object, connect_client, next_notification, tool_request, NotificationCollector,
+    TestServer, EXPECTED_TOOLS,
 };
-
-const EXPECTED_TOOLS: &[&str] = &[
-    "list_ports",
-    "list_connections",
-    "open",
-    "close",
-    "write",
-    "transact",
-    "read",
-    "capture_boot",
-    "flush",
-    "set_dtr_rts",
-    "set_flow_control",
-    "send_break",
-    "subscribe",
-    "unsubscribe",
-    "get_status",
-    "reconfigure",
-    "list_profiles",
-    "open_profile",
-    "save_profile",
-    "delete_profile",
-    "configure",
-    "rollback_profile",
-    "get_log",
-    "clear_log",
-    "export_log",
-    "reconnect",
-    "compute_checksum",
-];
 
 #[tokio::test]
 async fn initialize_handshake_succeeds() {
@@ -299,7 +270,10 @@ async fn configure_profile_creates_new_profile() {
     let profiles_dir = TempDir::new().unwrap();
     let profiles_path = profiles_dir.path().join("profiles.toml");
     let manager = Arc::new(ConnectionManager::new());
-    let server = TestServer::start_with_profiles_path(manager, profiles_path.clone()).await;
+    let server = TestServer::builder(manager)
+        .profiles_path(profiles_path.clone())
+        .start()
+        .await;
     let (client, _rx) = connect_client(&server).await.unwrap();
     let name = "test-configure-create";
     let result = client
@@ -336,14 +310,17 @@ async fn configure_profile_creates_new_profile() {
     // TempDir cleanup: profiles_dir dropped here, deletes profiles.toml.
 }
 
-/// Phase 3A: `list_profiles` exposes metadata and bounded revision history
+/// `list_profiles` exposes metadata and bounded revision history
 /// so agents can understand selection and future rollback revisions.
 #[tokio::test]
 async fn list_profiles_exposes_metadata_and_revisions() {
     let profiles_dir = TempDir::new().unwrap();
     let profiles_path = profiles_dir.path().join("profiles.toml");
     let manager = Arc::new(ConnectionManager::new());
-    let server = TestServer::start_with_profiles_path(manager, profiles_path).await;
+    let server = TestServer::builder(manager)
+        .profiles_path(profiles_path)
+        .start()
+        .await;
     let (client, _rx) = connect_client(&server).await.unwrap();
     let name = "meta-probe";
 
@@ -403,7 +380,10 @@ async fn configure_profile_overwrites_existing() {
     let profiles_dir = TempDir::new().unwrap();
     let profiles_path = profiles_dir.path().join("profiles.toml");
     let manager = Arc::new(ConnectionManager::new());
-    let server = TestServer::start_with_profiles_path(manager, profiles_path.clone()).await;
+    let server = TestServer::builder(manager)
+        .profiles_path(profiles_path.clone())
+        .start()
+        .await;
     let (client, _rx) = connect_client(&server).await.unwrap();
     let name = "test-configure-ow";
     // Create initial profile.
@@ -445,7 +425,10 @@ async fn configure_profile_rejects_existing_without_overwrite() {
     let profiles_dir = TempDir::new().unwrap();
     let profiles_path = profiles_dir.path().join("profiles.toml");
     let manager = Arc::new(ConnectionManager::new());
-    let server = TestServer::start_with_profiles_path(manager, profiles_path.clone()).await;
+    let server = TestServer::builder(manager)
+        .profiles_path(profiles_path.clone())
+        .start()
+        .await;
     let (client, _rx) = connect_client(&server).await.unwrap();
     let name = "test-configure-rej";
     // Create initial profile.
@@ -678,7 +661,7 @@ async fn call_tool_list_ports_returns_structured_result() {
         .expect("list_ports must produce structuredContent");
     assert!(structured.get("count").is_some());
     assert!(structured.get("ports").is_some());
-    // Phase 4: the parallel profile-match preview is always present.
+    // The parallel profile-match preview is always present.
     let ports = structured["ports"].as_array().unwrap();
     let matches = structured["profile_matches"]
         .as_array()
@@ -692,7 +675,7 @@ async fn call_tool_list_ports_returns_structured_result() {
     client.cancel().await.ok();
 }
 
-/// Phase 4: the `serial://ports` resource serves the same profile-match map
+/// The `serial://ports` resource serves the same profile-match map
 /// as the `list_ports` tool (same fresh store read, same pure computation).
 #[tokio::test]
 async fn ports_resource_includes_profile_match_map() {
@@ -996,7 +979,7 @@ async fn subscribe_with_timeout_auto_stops_in_background() {
         .unwrap();
 
     assert_ne!(result.is_error, Some(true), "{result:?}");
-    // Subscribe ack is always immediate after PLAN 1b.
+    // Subscribe ack is always immediate.
 
     // Data arrives as a background notification.
     let event = next_notification(&mut rx, Duration::from_secs(2))
@@ -1032,7 +1015,7 @@ async fn subscribe_without_timeout_is_fire_and_forget() {
         .unwrap();
     assert_ne!(result.is_error, Some(true), "{result:?}");
 
-    // Subscribe ack is always immediate after PLAN 1b.
+    // Subscribe ack is always immediate.
 
     // Background stream still runs: write something and it arrives as notification
     peer.write_all(b"post-subscribe").await.unwrap();
@@ -1099,7 +1082,7 @@ async fn subscribe_closed_from_other_session_stops_streaming_task() {
     client_b.cancel().await.ok();
 }
 
-// ── Phase 4: lossless RX encoding fallback ────────────────────────────────
+// ── Lossless RX encoding fallback ─────────────────────────────────────────
 
 #[tokio::test]
 async fn read_invalid_utf8_falls_back_to_exact_hex() {
@@ -2503,7 +2486,7 @@ async fn reconfigure_invalid_stop_bits_returns_error() {
     client.cancel().await.ok();
 }
 
-// ── Phase 2: shared persistent profile store ────────────────────────────────
+// ── Shared persistent profile store ─────────────────────────────────────────
 //
 // These tests prove user-observable persistence behavior through public MCP
 // calls: real process restart, shared HTTP sessions, concurrent writers
@@ -2613,8 +2596,10 @@ async fn profiles_survive_real_process_restart() {
 async fn profiles_shared_across_http_sessions() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("profiles.toml");
-    let server =
-        TestServer::start_with_profiles_path(Arc::new(ConnectionManager::new()), path).await;
+    let server = TestServer::builder(Arc::new(ConnectionManager::new()))
+        .profiles_path(path)
+        .start()
+        .await;
     let (client_a, _rx_a) = connect_client(&server).await.unwrap();
     let (client_b, _rx_b) = connect_client(&server).await.unwrap();
 
@@ -2654,9 +2639,10 @@ async fn profiles_shared_across_http_sessions() {
 async fn concurrent_same_process_profile_writes_keep_both() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("profiles.toml");
-    let server =
-        TestServer::start_with_profiles_path(Arc::new(ConnectionManager::new()), path.clone())
-            .await;
+    let server = TestServer::builder(Arc::new(ConnectionManager::new()))
+        .profiles_path(path.clone())
+        .start()
+        .await;
     let (client_a, _rx_a) = connect_client(&server).await.unwrap();
     let (client_b, _rx_b) = connect_client(&server).await.unwrap();
 
@@ -2679,8 +2665,10 @@ async fn concurrent_same_process_profile_writes_keep_both() {
     drop(server);
 
     // A fresh store over the same file proves both persisted.
-    let server2 =
-        TestServer::start_with_profiles_path(Arc::new(ConnectionManager::new()), path).await;
+    let server2 = TestServer::builder(Arc::new(ConnectionManager::new()))
+        .profiles_path(path)
+        .start()
+        .await;
     let (client2, _rx2) = connect_client(&server2).await.unwrap();
     let names2 = list_profile_names_via(&client2).await;
     assert!(
@@ -2928,7 +2916,7 @@ async fn relative_profiles_path_resolves_against_server_cwd() {
 }
 
 // =============================================================================
-// Phase 5 — capture_boot (controlled `SerialIo` through public HTTP MCP)
+// capture_boot — controlled `SerialIo` through public HTTP MCP
 //
 // These tests drive the REAL MCP surface (HTTP transport, tool router,
 // RxSession pump, stop controller) against a controlled in-memory backend
@@ -3928,7 +3916,7 @@ fn capture_boot_schemas_have_no_nonstandard_uint_formats() {
     }
 }
 
-// ── Phase 6: safe persistent capture (export_log) ────────────────────────────
+// ── Safe persistent capture (export_log) ─────────────────────────────────────
 
 use serial_mcp::capture_store::{CaptureLimits, CaptureStore};
 use serial_mcp::log_buffer::LogEntry;
@@ -4089,7 +4077,10 @@ async fn export_log_enabled_writes_valid_jsonl_matching_get_log() {
     let manager = Arc::new(ConnectionManager::new());
     let (conn, _peer) = seeded_log_conn("loop-export-ok", 3);
     let cid = manager.insert(conn).await.unwrap();
-    let server = TestServer::start_with_capture_store(manager, store).await;
+    let server = TestServer::builder(manager)
+        .capture_store(store)
+        .start()
+        .await;
     let (client, _rx) = connect_client(&server).await.unwrap();
 
     // Reference snapshot via get_log.
@@ -4146,7 +4137,10 @@ async fn export_log_empty_log_commits_zero_byte_file_and_consumes_slot() {
     // evicted, so the buffer is empty.
     let (conn, _peer) = loopback_connection_with_config(empty_log_config("loop-export-empty"));
     let cid = manager.insert(conn).await.unwrap();
-    let server = TestServer::start_with_capture_store(manager, store).await;
+    let server = TestServer::builder(manager)
+        .capture_store(store)
+        .start()
+        .await;
     let (client, _rx) = connect_client(&server).await.unwrap();
 
     let result = client
@@ -4186,7 +4180,10 @@ async fn export_log_rejects_traversal_absolute_and_bad_names_without_files() {
     let manager = Arc::new(ConnectionManager::new());
     let (conn, _peer) = seeded_log_conn("loop-export-bad", 2);
     let cid = manager.insert(conn).await.unwrap();
-    let server = TestServer::start_with_capture_store(manager, store).await;
+    let server = TestServer::builder(manager)
+        .capture_store(store)
+        .start()
+        .await;
     let (client, _rx) = connect_client(&server).await.unwrap();
 
     for bad in [
@@ -4232,7 +4229,10 @@ async fn export_log_existing_target_remains_byte_identical() {
     let manager = Arc::new(ConnectionManager::new());
     let (conn, _peer) = seeded_log_conn("loop-export-clobber", 2);
     let cid = manager.insert(conn).await.unwrap();
-    let server = TestServer::start_with_capture_store(manager, store).await;
+    let server = TestServer::builder(manager)
+        .capture_store(store)
+        .start()
+        .await;
     let (client, _rx) = connect_client(&server).await.unwrap();
 
     let result = client
@@ -4268,7 +4268,10 @@ async fn export_log_rejects_symlink_target_and_leaves_outside_untouched() {
     let manager = Arc::new(ConnectionManager::new());
     let (conn, _peer) = seeded_log_conn("loop-export-symlink", 2);
     let cid = manager.insert(conn).await.unwrap();
-    let server = TestServer::start_with_capture_store(manager, store).await;
+    let server = TestServer::builder(manager)
+        .capture_store(store)
+        .start()
+        .await;
     let (client, _rx) = connect_client(&server).await.unwrap();
 
     let result = client
@@ -4297,7 +4300,10 @@ async fn export_log_concurrent_same_name_yields_exactly_one_success() {
     let manager = Arc::new(ConnectionManager::new());
     let (conn, _peer) = seeded_log_conn("loop-export-race", 2);
     let cid = manager.insert(conn).await.unwrap();
-    let server = TestServer::start_with_capture_store(manager, store).await;
+    let server = TestServer::builder(manager)
+        .capture_store(store)
+        .start()
+        .await;
     let (client_a, _rx_a) = connect_client(&server).await.unwrap();
     let (client_b, _rx_b) = connect_client(&server).await.unwrap();
 
@@ -4332,7 +4338,10 @@ async fn export_log_per_file_quota_failure_creates_no_file() {
     let manager = Arc::new(ConnectionManager::new());
     let (conn, _peer) = seeded_log_conn("loop-export-file-quota", 5);
     let cid = manager.insert(conn).await.unwrap();
-    let server = TestServer::start_with_capture_store(manager, store).await;
+    let server = TestServer::builder(manager)
+        .capture_store(store)
+        .start()
+        .await;
     let (client, _rx) = connect_client(&server).await.unwrap();
 
     let result = client
@@ -4361,7 +4370,10 @@ async fn export_log_total_byte_quota_persists_across_exports_and_fresh_stores() 
     // Server A commits one file against a generous quota; its result
     // reports the EXACT committed byte count.
     let store_a = capture_store_in(root.path(), 4096, 100_000, 8);
-    let server_a = TestServer::start_with_capture_store(Arc::clone(&manager), store_a).await;
+    let server_a = TestServer::builder(Arc::clone(&manager))
+        .capture_store(store_a)
+        .start()
+        .await;
     let (client_a, _rx) = connect_client(&server_a).await.unwrap();
     let result = export_via(&client_a, &cid, "a.jsonl").await;
     assert_ne!(result.is_error, Some(true), "{result:?}");
@@ -4376,7 +4388,10 @@ async fn export_log_total_byte_quota_persists_across_exports_and_fresh_stores() 
     // a total quota equal to A's committed size: B's identical snapshot
     // passes the per-file check but blows the total (A's file + B's file).
     let store_b = capture_store_in(root.path(), used_bytes, used_bytes, 8);
-    let server_b = TestServer::start_with_capture_store(Arc::clone(&manager), store_b).await;
+    let server_b = TestServer::builder(Arc::clone(&manager))
+        .capture_store(store_b)
+        .start()
+        .await;
     let (client_b, _rx) = connect_client(&server_b).await.unwrap();
     let result = export_via(&client_b, &cid, "b.jsonl").await;
     assert_eq!(result.is_error, Some(true), "{result:?}");
@@ -4404,7 +4419,10 @@ async fn export_log_file_count_quota_includes_prior_committed_files() {
     let manager = Arc::new(ConnectionManager::new());
     let (conn, _peer) = seeded_log_conn("loop-export-count", 1);
     let cid = manager.insert(conn).await.unwrap();
-    let server = TestServer::start_with_capture_store(manager, store).await;
+    let server = TestServer::builder(manager)
+        .capture_store(store)
+        .start()
+        .await;
     let (client, _rx) = connect_client(&server).await.unwrap();
 
     let result = client
@@ -4454,8 +4472,14 @@ async fn export_log_independent_servers_sharing_root_cannot_exceed_quota() {
 
     let store_a = capture_store_in(root.path(), 4096, 8192, 1);
     let store_b = capture_store_in(root.path(), 4096, 8192, 1);
-    let server_a = TestServer::start_with_capture_store(manager_a, store_a).await;
-    let server_b = TestServer::start_with_capture_store(manager_b, store_b).await;
+    let server_a = TestServer::builder(manager_a)
+        .capture_store(store_a)
+        .start()
+        .await;
+    let server_b = TestServer::builder(manager_b)
+        .capture_store(store_b)
+        .start()
+        .await;
     let (client_a, _rx_a) = connect_client(&server_a).await.unwrap();
     let (client_b, _rx_b) = connect_client(&server_b).await.unwrap();
 
@@ -4506,7 +4530,10 @@ async fn export_log_failure_leaves_connection_usable() {
     let manager = Arc::new(ConnectionManager::new());
     let (conn, _peer) = seeded_log_conn("loop-export-usable", 2);
     let cid = manager.insert(conn).await.unwrap();
-    let server = TestServer::start_with_capture_store(manager, store).await;
+    let server = TestServer::builder(manager)
+        .capture_store(store)
+        .start()
+        .await;
     let (client, _rx) = connect_client(&server).await.unwrap();
 
     // Failed export (bad filename).
@@ -4545,7 +4572,10 @@ async fn export_log_snapshot_is_point_in_time() {
     let (conn, _peer) = seeded_log_conn("loop-export-pit", 2);
     let log = Arc::clone(conn.log());
     let cid = manager.insert(conn).await.unwrap();
-    let server = TestServer::start_with_capture_store(manager, store).await;
+    let server = TestServer::builder(manager)
+        .capture_store(store)
+        .start()
+        .await;
     let (client, _rx) = connect_client(&server).await.unwrap();
 
     let result = client

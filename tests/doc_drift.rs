@@ -326,7 +326,7 @@ fn server_json_omits_packages() {
 
 #[test]
 fn readme_teaches_capture_boot_boot_path_and_semantics() {
-    // Phase 5: the README must teach capture_boot as the boot/reset path,
+    // The README must teach capture_boot as the boot/reset path,
     // and the tool description must state the private cursor, OS-input
     // purge, optional line pulse, bounded in-memory result, and no file
     // output.
@@ -366,7 +366,7 @@ fn readme_teaches_capture_boot_boot_path_and_semantics() {
 
 #[test]
 fn readme_teaches_profile_discovery_and_common_flow() {
-    // Phase 4: the normal workflow is discover → bare open → transact →
+    // The normal workflow is discover → bare open → transact →
     // inspect the learned profile → escalate. Positive guidance assertions.
     let readme = repo_file("README.md");
     assert!(
@@ -433,7 +433,7 @@ fn prompts_teach_current_decision_tree_without_stale_references() {
 #[test]
 fn server_instructions_teach_decision_tree() {
     // The server `instructions` string (served on initialize) must carry the
-    // Phase 4 decision tree, not a flat tool list.
+    // decision tree, not a flat tool list.
     let server = repo_file("src/server.rs");
     let instructions = server
         .split("with_instructions(")
@@ -488,7 +488,7 @@ fn features_md_does_not_relist_shipped_items() {
 
 #[test]
 fn readme_teaches_capture_export_contract() {
-    // Phase 6: README must teach the disabled-by-default capture store,
+    // README must teach the disabled-by-default capture store,
     // the filename-only export_log contract, and the no-overwrite rule.
     let readme = repo_file("README.md");
     assert!(

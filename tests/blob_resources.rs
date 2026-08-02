@@ -6,11 +6,6 @@ use tempfile::TempDir;
 use tokio::process::Command;
 
 mod common;
-use common::binaries::ensure_serial_mcp_built;
-
-fn build_stdio_server() {
-    ensure_serial_mcp_built().expect("serial-mcp binary available for blob resource tests");
-}
 
 /// A stdio server command isolated from the user's actual default profile
 /// config via a temporary `--profiles-path`.
@@ -26,7 +21,8 @@ fn isolated_stdio_command() -> (tokio::process::Command, TempDir) {
 
 #[tokio::test]
 async fn blob_resource_template_is_advertised() {
-    build_stdio_server();
+    common::binaries::ensure_serial_mcp_built()
+        .expect("serial-mcp binary available for blob resource tests");
 
     let (cmd, _profiles_dir) = isolated_stdio_command();
 
@@ -54,7 +50,8 @@ async fn blob_resource_template_is_advertised() {
 
 #[tokio::test]
 async fn resource_uri_parsing_includes_raw_suffix() {
-    build_stdio_server();
+    common::binaries::ensure_serial_mcp_built()
+        .expect("serial-mcp binary available for blob resource tests");
 
     let (cmd, _profiles_dir) = isolated_stdio_command();
 

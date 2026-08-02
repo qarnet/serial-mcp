@@ -258,6 +258,28 @@ pub async fn unsubscribe(
     }))
 }
 
+/// Serialize a notification into a logging-message parameter, substituting
+/// `{}` on serialization failure with a warning carrying the given
+/// serialization context (e.g. `SubscribeChunkNotification`). Performs no
+/// peer send and no accounting.
+fn logging_notification<T: serde::Serialize>(
+    notification: &T,
+    level: LoggingLevel,
+    logger: &str,
+    serialization_context: &str,
+    connection_id: &str,
+) -> LoggingMessageNotificationParam {
+    let payload = serde_json::to_value(notification).unwrap_or_else(|e| {
+        warn!("{serialization_context} serialization error on {connection_id}: {e}");
+        serde_json::json!({})
+    });
+    LoggingMessageNotificationParam {
+        level,
+        logger: Some(logger.to_string()),
+        data: payload,
+    }
+}
+
 /// `subscribe`'s frame sink: emits one notification per decoded frame, tracking
 /// cumulative returned bytes. Stops at the matching frame (preserving the legacy
 /// quirk that a failed emit of the *matching* frame still reports the match).
@@ -312,28 +334,19 @@ impl RxFrameSink for SubscribeFrameSink<'_> {
             parsed: frame.parsed,
             matched: if matched { Some(true) } else { None },
         };
-        let payload = serde_json::to_value(&notification).unwrap_or_else(|e| {
-            warn!(
-                "RX frame notification serialization error on {}: {e}",
-                self.conn_id
-            );
-            serde_json::json!({})
-        });
-
-        let param = LoggingMessageNotificationParam {
-            level: LoggingLevel::Info,
-            logger: Some(self.logger.to_string()),
-            data: payload,
-        };
+        let param = logging_notification(
+            &notification,
+            LoggingLevel::Info,
+            self.logger,
+            "RX frame notification",
+            self.conn_id,
+        );
         let emit = self.peer.notify_logging_message(param).await;
 
         if matched {
-            // Quirk: a failed emit of the matching frame still reports the match
-            // (logs + record_notification_drop only), distinct from the non-matching
-            // path below which returns PeerDisconnected. Intentional — see the
-            // read/subscribe framing invariants in AGENTS.md.
-            // KNOWN GAP: not characterization-tested (requires a peer disconnect
-            // mid-emit on the matching frame); preserved by faithful translation.
+            // Matching-frame notification failure records a drop but match
+            // remains the stop reason; nonmatching failure stops as peer
+            // disconnected.
             if let Err(e) = emit {
                 error!("RX frame stream peer disconnected: {e}");
                 self.conn.record_notification_drop();
@@ -354,6 +367,203 @@ impl RxFrameSink for SubscribeFrameSink<'_> {
         }
         *self.total_returned += frame.data.len();
         SinkFlow::Continue
+    }
+}
+
+enum RawChunkDelivery {
+    /// Chunk delivered to the client; the caller adds its raw byte length to
+    /// `total_returned`, then processes the existing stop outcome.
+    Sent,
+    /// True encode+hex failure: the error notification was delivered and the
+    /// chunk was dropped. The caller continues without advancing the private
+    /// cursor.
+    EncodingDropped,
+    /// Peer went away while emitting either the normal chunk or the
+    /// encoding-error notification. The caller stops with
+    /// `peer_disconnected`.
+    PeerDisconnected,
+}
+
+/// Encode and deliver one raw RX chunk, owning the path-specific encoding
+/// fallback/drop accounting, error notification, chunk notification, and peer
+/// send. Advances nothing — the caller owns `total_returned` and the private
+/// cursor.
+async fn deliver_raw_chunk(
+    peer: &Peer<RoleServer>,
+    conn: &crate::serial::SerialConnection,
+    logger: &str,
+    conn_id: &str,
+    encoding: crate::codec::Encoding,
+    chunk: &[u8],
+    bytes_lost: u64,
+) -> RawChunkDelivery {
+    let n = chunk.len();
+    let encoded = match codec::encode_or_hex(encoding, chunk) {
+        Ok(payload) => {
+            if let Some(reason) = &payload.fallback_reason {
+                // Lossless fallback: the chunk still emits as exact
+                // spaced hex and the private cursor advances. Never
+                // counted as a dropped notification.
+                warn!(
+                    "RX chunk on {conn_id}: {encoding} cannot encode {n} bytes \
+                     ({reason}); using hex"
+                );
+            }
+            payload
+        }
+        Err(e) => {
+            // True encode+hex failure: preserve the legacy error
+            // notification + drop accounting.
+            warn!("RX encoding error on {conn_id}: {encoding} cannot encode {n} bytes — dropped");
+            conn.record_notification_drop();
+            conn.log().notification_dropped(&format!(
+                "encoding error: {encoding} cannot encode {n} bytes"
+            ));
+            let notification = SubscribeEncodingErrorNotification {
+                connection_id: conn_id.to_string(),
+                encoding_error: true,
+                encoding: encoding.to_string(),
+                bytes_dropped: n,
+                reason: e.to_string(),
+                bytes_lost: if bytes_lost > 0 {
+                    Some(bytes_lost)
+                } else {
+                    None
+                },
+            };
+            let param = logging_notification(
+                &notification,
+                LoggingLevel::Warning,
+                logger,
+                "SubscribeEncodingErrorNotification",
+                conn_id,
+            );
+            if let Err(e) = peer.notify_logging_message(param).await {
+                error!("RX stream peer disconnected: {e}");
+                return RawChunkDelivery::PeerDisconnected;
+            }
+            return RawChunkDelivery::EncodingDropped;
+        }
+    };
+
+    let notification = SubscribeChunkNotification {
+        connection_id: conn_id.to_string(),
+        bytes_read: n,
+        encoding: encoded.encoding.to_string(),
+        data: encoded.data,
+        bytes_lost: if bytes_lost > 0 {
+            Some(bytes_lost)
+        } else {
+            None
+        },
+    };
+    let param = logging_notification(
+        &notification,
+        LoggingLevel::Info,
+        logger,
+        "SubscribeChunkNotification",
+        conn_id,
+    );
+    if let Err(e) = peer.notify_logging_message(param).await {
+        error!("RX stream peer disconnected: {e}");
+        conn.record_notification_drop();
+        conn.log()
+            .notification_dropped(&format!("peer disconnected: {e}"));
+        return RawChunkDelivery::PeerDisconnected;
+    }
+    RawChunkDelivery::Sent
+}
+
+/// Encode and deliver the flushed partial frame. Returns the number of raw
+/// partial-frame bytes emitted to the client (zero on encode or send
+/// failure). A successful hex fallback warns but is not a drop.
+async fn deliver_partial_frame(
+    peer: &Peer<RoleServer>,
+    conn: &crate::serial::SerialConnection,
+    logger: &str,
+    conn_id: &str,
+    encoding: crate::codec::Encoding,
+    partial: crate::framing::Frame,
+) -> usize {
+    let encoded = match codec::encode_or_hex(encoding, &partial.data) {
+        Ok(payload) => {
+            if let Some(reason) = &payload.fallback_reason {
+                warn!(
+                    "RX partial frame on {conn_id} not encodable as {encoding} \
+                     ({reason}); using hex"
+                );
+            }
+            Some(payload)
+        }
+        Err(e) => {
+            warn!("RX partial frame encoding error on {conn_id}: {e}");
+            conn.record_notification_drop();
+            conn.log()
+                .notification_dropped(&format!("partial frame encoding error: {e}"));
+            None
+        }
+    };
+    let Some(encoded) = encoded else {
+        return 0;
+    };
+
+    let notification = SubscribePartialFrameNotification {
+        connection_id: conn_id.to_string(),
+        partial: true,
+        frame_index: partial.index,
+        frame_type: partial.frame_type.to_string(),
+        encoding: encoded.encoding.to_string(),
+        data: encoded.data,
+        parsed: partial.parsed,
+    };
+    let param = logging_notification(
+        &notification,
+        LoggingLevel::Info,
+        logger,
+        "SubscribePartialFrameNotification",
+        conn_id,
+    );
+    if let Err(e) = peer.notify_logging_message(param).await {
+        warn!("RX partial frame notify failed on {conn_id}: {e}");
+        conn.record_notification_drop();
+        conn.log()
+            .notification_dropped(&format!("partial frame notify: {e}"));
+        return 0;
+    }
+    partial.data.len()
+}
+
+/// Encode shaped match-context bytes for the final stop notification.
+/// `data` + its effective `encoding` are set together so hex fallback
+/// remains decodable. A successful fallback is warned but not counted; only
+/// a true encode+hex failure drops and returns `(None, None)`. No shaped
+/// data also returns `(None, None)` without accounting.
+fn encode_match_context(
+    conn: &crate::serial::SerialConnection,
+    conn_id: &str,
+    encoding: crate::codec::Encoding,
+    shaped_data: Option<&[u8]>,
+) -> (Option<String>, Option<String>) {
+    match shaped_data {
+        Some(data) => match codec::encode_or_hex(encoding, data) {
+            Ok(payload) => {
+                if let Some(reason) = &payload.fallback_reason {
+                    warn!(
+                        "RX stream match context on {conn_id} not encodable as {encoding} \
+                         ({reason}); using hex"
+                    );
+                }
+                (Some(payload.data), Some(payload.encoding.to_string()))
+            }
+            Err(e) => {
+                warn!("RX stream match context encoding error on {conn_id}: {e}");
+                conn.record_notification_drop();
+                conn.log()
+                    .notification_dropped(&format!("match context encoding error: {e}"));
+                (None, None)
+            }
+        },
+        None => (None, None),
     }
 }
 
@@ -549,95 +759,28 @@ async fn stream_rx_from_ring(
             }
 
             // Emit data notification (including gap info).
-            let encoded = match codec::encode_or_hex(encoding, &chunk) {
-                Ok(payload) => {
-                    if let Some(reason) = &payload.fallback_reason {
-                        // Lossless fallback: the chunk still emits as exact
-                        // spaced hex and the private cursor advances. Never
-                        // counted as a dropped notification.
-                        warn!(
-                            "RX chunk on {conn_id}: {encoding} cannot encode {n} bytes \
-                             ({reason}); using hex"
-                        );
-                    }
-                    payload
-                }
-                Err(e) => {
-                    // True encode+hex failure: preserve the legacy error
-                    // notification + drop accounting.
-                    warn!(
-                        "RX encoding error on {conn_id}: {encoding} cannot encode {n} bytes — dropped"
-                    );
-                    conn.record_notification_drop();
-                    conn.log().notification_dropped(&format!(
-                        "encoding error: {encoding} cannot encode {n} bytes"
-                    ));
-                    let notification = SubscribeEncodingErrorNotification {
-                        connection_id: conn_id.to_string(),
-                        encoding_error: true,
-                        encoding: encoding.to_string(),
-                        bytes_dropped: n,
-                        reason: e.to_string(),
-                        bytes_lost: if slice.bytes_lost > 0 {
-                            Some(slice.bytes_lost)
-                        } else {
-                            None
-                        },
-                    };
-                    let payload = serde_json::to_value(&notification).unwrap_or_else(|e| {
-                        warn!(
-                            "SubscribeEncodingErrorNotification serialization error on {conn_id}: {e}"
-                        );
-                        serde_json::json!({})
-                    });
-                    let param = LoggingMessageNotificationParam {
-                        level: LoggingLevel::Warning,
-                        logger: Some(logger.clone()),
-                        data: payload,
-                    };
-                    if let Err(e) = peer.notify_logging_message(param).await {
-                        error!("RX stream peer disconnected: {e}");
-                        stop_outcome = Some(ctrl.peer_disconnected());
-                    }
+            match deliver_raw_chunk(
+                &peer,
+                &conn,
+                &logger,
+                &conn_id,
+                encoding,
+                &chunk,
+                slice.bytes_lost,
+            )
+            .await
+            {
+                RawChunkDelivery::Sent => {
+                    total_returned += n;
                     if stop_outcome.is_some() {
                         break;
                     }
-                    continue;
                 }
-            };
-
-            let notification = SubscribeChunkNotification {
-                connection_id: conn_id.to_string(),
-                bytes_read: n,
-                encoding: encoded.encoding.to_string(),
-                data: encoded.data,
-                bytes_lost: if slice.bytes_lost > 0 {
-                    Some(slice.bytes_lost)
-                } else {
-                    None
-                },
-            };
-            let payload = serde_json::to_value(&notification).unwrap_or_else(|e| {
-                warn!("SubscribeChunkNotification serialization error on {conn_id}: {e}");
-                serde_json::json!({})
-            });
-            let param = LoggingMessageNotificationParam {
-                level: LoggingLevel::Info,
-                logger: Some(logger.clone()),
-                data: payload,
-            };
-            if let Err(e) = peer.notify_logging_message(param).await {
-                error!("RX stream peer disconnected: {e}");
-                conn.record_notification_drop();
-                conn.log()
-                    .notification_dropped(&format!("peer disconnected: {e}"));
-                stop_outcome = Some(ctrl.peer_disconnected());
-                break;
-            }
-            total_returned += n;
-
-            if stop_outcome.is_some() {
-                break;
+                RawChunkDelivery::EncodingDropped => continue,
+                RawChunkDelivery::PeerDisconnected => {
+                    stop_outcome = Some(ctrl.peer_disconnected());
+                    break;
+                }
             }
         } // end if !suppress_chunk_notification
 
@@ -653,57 +796,8 @@ async fn stream_rx_from_ring(
     if let Some(ref mut dec) = decoder {
         if let Some(partial) = dec.flush_partial() {
             frames_emitted += 1;
-            let encoded = match codec::encode_or_hex(encoding, &partial.data) {
-                Ok(payload) => {
-                    if let Some(reason) = &payload.fallback_reason {
-                        warn!(
-                            "RX partial frame on {conn_id} not encodable as {encoding} \
-                             ({reason}); using hex"
-                        );
-                    }
-                    Some(payload)
-                }
-                Err(e) => {
-                    warn!("RX partial frame encoding error on {conn_id}: {e}");
-                    conn.record_notification_drop();
-                    conn.log()
-                        .notification_dropped(&format!("partial frame encoding error: {e}"));
-                    None
-                }
-            };
-            if let Some(encoded) = encoded {
-                let notification = SubscribePartialFrameNotification {
-                    connection_id: conn_id.to_string(),
-                    partial: true,
-                    frame_index: partial.index,
-                    frame_type: partial.frame_type.to_string(),
-                    encoding: encoded.encoding.to_string(),
-                    data: encoded.data,
-                    parsed: partial.parsed,
-                };
-                let payload = serde_json::to_value(&notification).unwrap_or_else(|e| {
-                    warn!(
-                        "SubscribePartialFrameNotification serialization error on {conn_id}: {e}"
-                    );
-                    serde_json::json!({})
-                });
-                let param = LoggingMessageNotificationParam {
-                    level: LoggingLevel::Info,
-                    logger: Some(logger.clone()),
-                    data: payload,
-                };
-                if let Err(e) = peer.notify_logging_message(param).await {
-                    warn!("RX partial frame notify failed on {conn_id}: {e}");
-                    conn.record_notification_drop();
-                    conn.log()
-                        .notification_dropped(&format!("partial frame notify: {e}"));
-                } else {
-                    // Count only bytes actually emitted to the client; an
-                    // encode failure or a failed send leaves total_returned
-                    // unchanged (same contract as the raw chunk path).
-                    total_returned += partial.data.len();
-                }
-            }
+            total_returned +=
+                deliver_partial_frame(&peer, &conn, &logger, &conn_id, encoding, partial).await;
         }
     }
 
@@ -742,27 +836,8 @@ async fn stream_rx_from_ring(
     // Shaped match context: `data` + its effective `encoding` are set
     // together so hex fallback remains decodable. A successful fallback is
     // warned but not counted; only a true encode+hex failure drops.
-    let (match_data_encoded, match_data_encoding) = match shaped_data.as_ref() {
-        Some(data) => match codec::encode_or_hex(encoding, data) {
-            Ok(payload) => {
-                if let Some(reason) = &payload.fallback_reason {
-                    warn!(
-                        "RX stream match context on {conn_id} not encodable as {encoding} \
-                         ({reason}); using hex"
-                    );
-                }
-                (Some(payload.data), Some(payload.encoding.to_string()))
-            }
-            Err(e) => {
-                warn!("RX stream match context encoding error on {conn_id}: {e}");
-                conn.record_notification_drop();
-                conn.log()
-                    .notification_dropped(&format!("match context encoding error: {e}"));
-                (None, None)
-            }
-        },
-        None => (None, None),
-    };
+    let (match_data_encoded, match_data_encoding) =
+        encode_match_context(&conn, &conn_id, encoding, shaped_data.as_deref());
 
     let stop_notification = SubscribeStopNotification {
         connection_id: conn_id.to_string(),
@@ -803,15 +878,13 @@ async fn stream_rx_from_ring(
         start_offset: ring.start_offset(),
         end_offset: ring.end_offset(),
     };
-    let stop_payload = serde_json::to_value(&stop_notification).unwrap_or_else(|e| {
-        warn!("SubscribeStopNotification serialization error on {conn_id}: {e}");
-        serde_json::json!({})
-    });
-    let stop_param = LoggingMessageNotificationParam {
-        level: LoggingLevel::Info,
-        logger: Some(logger.clone()),
-        data: stop_payload,
-    };
+    let stop_param = logging_notification(
+        &stop_notification,
+        LoggingLevel::Info,
+        &logger,
+        "SubscribeStopNotification",
+        &conn_id,
+    );
     if let Err(e) = peer.notify_logging_message(stop_param).await {
         debug!("Failed to send stop notification: {e}");
     }

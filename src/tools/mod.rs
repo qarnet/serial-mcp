@@ -19,9 +19,9 @@ mod tests {
     use crate::server::tool_catalog;
     use crate::tools::types::OpenArgs;
 
-    /// The exhaustive 27-tool catalog served by MCP (Phase 5: `capture_boot`
-    /// added; shared with the xtask `agent-eval` catalog metrics via
-    /// `crate::server::tool_catalog`). A missing tool would skip its
+    /// The exhaustive 27-tool catalog served by MCP (shared with the xtask
+    /// `agent-eval` catalog metrics via `crate::server::tool_catalog`). A
+    /// missing tool would skip its
     /// `outputSchema`/`title` check and any uint-format scan, so the count
     /// is guarded explicitly.
     #[test]
@@ -102,7 +102,7 @@ mod tests {
         let json = serde_json::to_value(&schema).unwrap();
         let props = json.get("properties").unwrap();
         let baud = props.get("baud_rate").unwrap();
-        // baud_rate is optional (Phase 3A): anyOf [null, integer min 0].
+        // baud_rate is optional: anyOf [null, integer min 0].
         let inner = &baud["anyOf"][1];
         assert_eq!(inner.get("minimum"), Some(&serde_json::json!(0)));
         let required = json
@@ -119,7 +119,7 @@ mod tests {
 
     #[test]
     fn open_args_schema_no_longer_requires_default_bearing_fields() {
-        // Phase 3A: omitted baud/default-bearing fields must be valid calls
+        // Omitted baud/default-bearing fields must be valid calls
         // (they resolve to profile defaults / built-ins).
         let schema = schema_for!(OpenArgs);
         let json = serde_json::to_value(&schema).unwrap();
@@ -170,7 +170,7 @@ mod tests {
         );
     }
 
-    /// Phase 3A review gate: the optional override fields must genuinely
+    /// Review gate: the optional override fields must genuinely
     /// accept null (and omission) against the GENERATED schema — not merely
     /// be absent from the `required` list. Validates public schema behavior
     /// via the jsonschema validator, like the tool schema guards do.
@@ -249,7 +249,7 @@ mod tests {
         assert!(!json.contains("\"format\":\"uint\""));
     }
 
-    /// Phase 1 regression guard: after renaming `framing` → `rx_framing` and
+    /// Regression guard: after renaming `framing` → `rx_framing` and
     /// adding `tx_framing`, the write/read/subscribe input schemas must expose
     /// `rx_framing` / `tx_framing` and NOT expose the old `framing` field.
     #[test]
@@ -288,7 +288,7 @@ mod tests {
         );
     }
 
-    /// Phase 4a: after relocating `parser` from `rx_framing` to sibling
+    /// After relocating `parser` from `rx_framing` to sibling
     /// `rx_parser`, verify `rx_parser` appears in ReadArgs and SubscribeArgs
     /// schemas.
     #[test]
@@ -318,7 +318,7 @@ mod tests {
         );
     }
 
-    /// Phase 4b: after adding the `protocol` field, verify it appears in
+    /// After adding the `protocol` field, verify it appears in
     /// WriteArgs, ReadArgs, and SubscribeArgs schemas.
     #[test]
     fn protocol_field_present_in_schemas() {

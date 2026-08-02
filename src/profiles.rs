@@ -393,7 +393,7 @@ pub struct ProfileSelector {
 impl ProfileSelector {
     /// Whether every selector field is `None` — an empty selector matches
     /// ANY port and must never appear as a weak candidate in `list_ports`
-    /// profile previews (Phase 4). Empty selectors remain valid for
+    /// profile previews. Empty selectors remain valid for
     /// `Profile::matches` (used by tests and the `configure` profile mode
     /// creation path), but they carry no discoverable device knowledge.
     pub fn is_empty(&self) -> bool {
@@ -944,7 +944,7 @@ mod tests {
         assert!(!obj.contains_key("safety_policy"));
     }
 
-    // ── Phase 3A: identity confidence / canonical selector ────────────────
+    // ── Identity confidence / canonical selector ─────────────────────────
 
     fn usb_port(name: &str, vid: Option<u16>, pid: Option<u16>, serial: Option<&str>) -> PortInfo {
         let mut port = make_port(name, vid, pid, serial);
@@ -1089,7 +1089,7 @@ mod tests {
         assert!(selector_matches_high_identity(&no_interface, &no_iface_id));
     }
 
-    // ── Phase 3A: candidate ranking ───────────────────────────────────────
+    // ── Candidate ranking ─────────────────────────────────────────────────
 
     fn ranked_profile(name: &str, last_used: Option<u64>) -> Profile {
         Profile {
@@ -1128,7 +1128,7 @@ mod tests {
         assert_eq!(top_ts, next_ts, "equal top timestamps must tie");
     }
 
-    // ── Phase 3A: generated name normalization / allocation ───────────────
+    // ── Generated name normalization / allocation ────────────────────────
 
     #[test]
     fn generated_label_normalization() {
