@@ -168,7 +168,7 @@ pub struct SerialConnection {
     max_buffered_bytes_default: AtomicUsize,
     /// Default poll interval for `subscribe` in ms (from profile/open, mutable live).
     poll_interval_ms_default: AtomicU64,
-    /// Active profile-session binding (Phase 3A). `None` for connections
+    /// Active profile-session binding. `None` for connections
     /// inserted directly by low-level tests.
     active_profile: StdMutex<Option<ActiveProfileBinding>>,
     /// Serializes durable write-through-learning sequences on this
@@ -177,7 +177,7 @@ pub struct SerialConnection {
     /// connection-mode `configure`/clean close so concurrent requests
     /// cannot snapshot each other's half-applied state.
     learning_lock: tokio::sync::Mutex<()>,
-    /// Serializes line-control operations (Phase 5): `set_dtr_rts` and the
+    /// Serializes line-control operations: `set_dtr_rts` and the
     /// `capture_boot` reset pulse both hold this so a concurrent line-control
     /// request cannot interleave inside an assert/hold/release sequence.
     control_lock: tokio::sync::Mutex<()>,
@@ -366,8 +366,8 @@ impl SerialConnection {
         *self.active_profile.lock().expect("poisoned") = binding;
     }
 
-    /// Mutate the active profile-session binding in place (Phase 3B:
-    /// dirty/stale/error/revision updates from write-through learning).
+    /// Mutate the active profile-session binding in place
+    /// (dirty/stale/error/revision updates from write-through learning).
     pub(crate) fn update_active_profile_binding(
         &self,
         update: impl FnOnce(&mut ActiveProfileBinding),

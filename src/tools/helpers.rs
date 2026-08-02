@@ -83,10 +83,6 @@ pub async fn lookup_connection(
         .map_err(|_| format!("Connection ID {id} not found"))
 }
 
-/// Re-export of the shared [`crate::util::find_subsequence`] under the
-/// legacy `find_subslice` name to keep existing import paths stable.
-pub(crate) use crate::util::find_subsequence as find_subslice;
-
 // ------------------------------------------------------------------
 // Parsers
 // ------------------------------------------------------------------
@@ -97,7 +93,7 @@ pub fn parse_encoding(raw: &str) -> Result<Encoding, String> {
 }
 
 // ------------------------------------------------------------------
-// Open-settings resolution (Phase 3A)
+// Open-settings resolution
 // ------------------------------------------------------------------
 
 /// Optional open-field overlay shared by `open` and `open_profile`.
@@ -431,7 +427,7 @@ mod tests {
         assert!(err.contains("data_bits"));
     }
 
-    // ── Phase 3A: open-settings resolution precedence ─────────────────────
+    // ── Open-settings resolution precedence ───────────────────────────────
 
     #[test]
     fn omitted_open_fields_fall_back_to_builtin_defaults() {

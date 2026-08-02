@@ -164,7 +164,7 @@ mod schema {
     check_schema!(profile_selector_has_no_uint_formats, ProfileSelector);
     check_schema!(profile_metadata_has_no_uint_formats, ProfileMetadata);
     check_schema!(profile_revision_has_no_uint_formats, ProfileRevision);
-    // Phase 3A session-result shape exposed on open/status/connection
+    // Session-result shape exposed on open/status/connection
     // summaries (guards the Option<u64> revision field).
     check_schema!(
         profile_session_result_has_no_uint_formats,
@@ -175,7 +175,7 @@ mod schema {
     // Keep this list in sync with the `#[tool]` methods in `src/server.rs`
     // and with `tool_catalog()` in `src/server.rs`.
     check_schema!(list_ports_result_has_no_uint_formats, ListPortsResult);
-    // Phase 4 list_ports profile-match preview types (guards the u64
+    // `list_ports` profile-match preview types (guards the u64
     // revision / Option<u64> last_used_at_ms fields).
     check_schema!(
         profile_match_candidate_has_no_uint_formats,
@@ -237,7 +237,7 @@ mod schema {
         ComputeChecksumResult
     );
     check_schema!(transact_result_has_no_uint_formats, TransactResult);
-    // Phase 5 atomic boot capture (guards mark_offset, pre_mark_bytes,
+    // Atomic boot capture (guards mark_offset, pre_mark_bytes,
     // and the nested ReadResult's uint fields).
     check_schema!(capture_boot_args_has_no_uint_formats, CaptureBootArgs);
     check_schema!(capture_boot_reset_has_no_uint_formats, CaptureBootReset);
@@ -269,7 +269,7 @@ mod schema {
     // Decoded frame (guards the Vec<u8> data field + the usize index field).
     check_schema!(frame_has_no_uint_formats, Frame);
 
-    // Profile defaults (Phase 5 framing fields — no unsigned fields, but guard).
+    // Profile defaults (framing fields — no unsigned fields, but guard).
     check_schema!(
         profile_defaults_has_no_uint_formats,
         crate::profiles::ProfileDefaults

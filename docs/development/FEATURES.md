@@ -229,12 +229,12 @@
 Non-feature work, roughly in suggested order. From the 2026-07-05 repo review.
 
 ### Decompose the longest read/stream functions
-- `read_from_private_cursor` (`src/tools/read_loop.rs`) and
-  `stream_rx_from_ring` (`src/tools/stream_ops.rs`) are the longest functions
-  in the codebase; further decompose into `read_initial_slice` /
-  `read_wait_loop` / `handle_frame_outcome` now that the tool-helper split
-  (`tools/rx_validate.rs`, `tools/read_loop.rs`, `tools/result_builders.rs`)
-  unblocked finer module boundaries
+- Read now runs through `ReadAccumulator` + centralized result finalization
+  (`src/tools/read_loop.rs`); subscription delivery runs through named
+  raw/partial/context helpers (`src/tools/stream_ops.rs`).
+- Remaining debt, only if a concrete maintenance need justifies extra
+  control-flow boundaries: further async wait-loop decomposition inside the
+  read loop.
 
 ### `UInt` newtype to kill schemars `uint_schema` boilerplate
 - per-field `#[schemars(schema_with = "crate::schema_helpers::uint_schema")]`

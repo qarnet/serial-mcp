@@ -154,7 +154,7 @@ impl LogBuffer {
         events.iter().cloned().collect()
     }
 
-    /// Serialize the buffer to a bounded JSONL snapshot (Phase 6).
+    /// Serialize the buffer to a bounded JSONL snapshot.
     ///
     /// Locks the log exactly once for a consistent point-in-time snapshot,
     /// serializes one entry per line with a trailing newline, and checks the

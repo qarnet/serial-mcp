@@ -24,80 +24,14 @@
 
 use std::time::Duration;
 
-use anyhow::Context;
 use serde_json::json;
-use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::process::Command;
 
 mod common;
+use common::firmware::NativeSimFirmware;
 use common::{args_object, connect_client, tool_request, TestServer};
-
-// ── Firmware process management (mirrors native_sim_validation.rs) ──────────
 
 const BAUD_RATE: u32 = 115200;
 const CONNECTION_NAME: &str = "lifecycle-uart";
-
-fn zephyr_bin() -> std::path::PathBuf {
-    common::firmware::ensure_plain_firmware_built()
-        .expect("plain native_sim firmware available for lifecycle tests")
-}
-
-struct NativeSimFirmware {
-    child: tokio::process::Child,
-    pty_path: String,
-    _stdout_drain: tokio::task::JoinHandle<()>,
-}
-
-impl NativeSimFirmware {
-    async fn spawn() -> anyhow::Result<Self> {
-        let bin = zephyr_bin();
-        let mut child = Command::new(&bin)
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
-            .kill_on_drop(true)
-            .spawn()
-            .with_context(|| format!("Failed to spawn {}", bin.display()))?;
-
-        let stdout = child.stdout.take().context("stdout not piped")?;
-        let mut reader = BufReader::new(stdout).lines();
-
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-        let mut pty_path: Option<String> = None;
-        while tokio::time::Instant::now() < deadline {
-            match tokio::time::timeout(Duration::from_millis(500), reader.next_line()).await {
-                Ok(Ok(Some(line))) => {
-                    if let Some(pos) = line.find("uart connected to pseudotty:") {
-                        if let Some(path_start) = line[pos..].find("/dev/pts/") {
-                            pty_path = Some(line[pos + path_start..].to_string());
-                            break;
-                        }
-                    }
-                }
-                Ok(Ok(None)) => break,
-                Ok(Err(e)) => anyhow::bail!("Error reading zephyr stdout: {e}"),
-                Err(_) => continue,
-            }
-        }
-
-        let pty_path = pty_path
-            .ok_or_else(|| anyhow::anyhow!("zephyr.exe did not print PTY path within 5s"))?;
-
-        let drain =
-            tokio::spawn(async move { while let Ok(Some(_line)) = reader.next_line().await {} });
-
-        Ok(Self {
-            child,
-            pty_path,
-            _stdout_drain: drain,
-        })
-    }
-}
-
-impl Drop for NativeSimFirmware {
-    fn drop(&mut self) {
-        self.child.start_kill().ok();
-    }
-}
 
 // ── MCP helpers ──────────────────────────────────────────────────────────────
 
@@ -254,7 +188,7 @@ async fn sync_boot(
 #[ignore = "requires native_sim firmware binary"]
 async fn native_named_connection_appears_in_list_connections() {
     let fw = NativeSimFirmware::spawn().await.expect("spawn zephyr.exe");
-    let pty_path = fw.pty_path.to_string();
+    let pty_path = fw.pty_path().to_string();
 
     let server = TestServer::start().await;
     let (client, _rx) = connect_client(&server).await.unwrap();
@@ -293,7 +227,7 @@ async fn native_named_connection_appears_in_list_connections() {
 #[ignore = "requires native_sim firmware binary"]
 async fn native_set_flow_control_updates_summary_and_result() {
     let fw = NativeSimFirmware::spawn().await.expect("spawn zephyr.exe");
-    let pty_path = fw.pty_path.to_string();
+    let pty_path = fw.pty_path().to_string();
 
     let server = TestServer::start().await;
     let (client, _rx) = connect_client(&server).await.unwrap();
@@ -339,7 +273,7 @@ async fn native_set_flow_control_updates_summary_and_result() {
 #[ignore = "requires native_sim firmware binary"]
 async fn native_close_while_read_active_returns_close_error() {
     let fw = NativeSimFirmware::spawn().await.expect("spawn zephyr.exe");
-    let pty_path = fw.pty_path.to_string();
+    let pty_path = fw.pty_path().to_string();
 
     let server = TestServer::start().await;
     let (client, _rx) = connect_client(&server).await.unwrap();
@@ -404,7 +338,7 @@ async fn native_close_while_read_active_returns_close_error() {
 #[ignore = "requires native_sim firmware binary"]
 async fn native_reopen_same_port_after_close_works() {
     let fw = NativeSimFirmware::spawn().await.expect("spawn zephyr.exe");
-    let pty_path = fw.pty_path.to_string();
+    let pty_path = fw.pty_path().to_string();
 
     let server = TestServer::start().await;
     let (client, _rx) = connect_client(&server).await.unwrap();
@@ -459,7 +393,7 @@ async fn native_reopen_same_port_after_close_works() {
 #[ignore = "requires native_sim firmware binary"]
 async fn native_reopen_then_match_finds_fresh_output() {
     let fw = NativeSimFirmware::spawn().await.expect("spawn zephyr.exe");
-    let pty_path = fw.pty_path.to_string();
+    let pty_path = fw.pty_path().to_string();
 
     let server = TestServer::start().await;
     let (client, _rx) = connect_client(&server).await.unwrap();
@@ -536,7 +470,7 @@ async fn native_reopen_then_match_finds_fresh_output() {
 #[ignore = "requires native_sim firmware binary"]
 async fn native_open_with_flow_control_persists_in_summary() {
     let fw = NativeSimFirmware::spawn().await.expect("spawn zephyr.exe");
-    let pty_path = fw.pty_path.to_string();
+    let pty_path = fw.pty_path().to_string();
 
     let server = TestServer::start().await;
     let (client, _rx) = connect_client(&server).await.unwrap();

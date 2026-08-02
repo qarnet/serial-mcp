@@ -1,9 +1,9 @@
 //! Shared match configuration and byte-substring matching for RX tools.
 //!
-//! PLAN 4 introduces a `match` option on `read` and `subscribe` that specifies
-//! a byte pattern to detect in the incoming RX stream. Matching always happens
-//! on raw bytes; `pattern_encoding` controls how the `pattern` string is decoded
-//! into the byte needle.
+//! The `match` option on `read` and `subscribe` specifies a byte pattern to
+//! detect in the incoming RX stream. Matching always happens on raw bytes;
+//! `pattern_encoding` controls how the `pattern` string is decoded into the
+//! byte needle.
 //!
 //! This module provides:
 //! - `MatchRequest` — the JSON-serialisable request shape
@@ -46,7 +46,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::codec;
-use crate::tools::helpers::find_subslice;
+use crate::util::find_subsequence;
 
 // ---- Request shape --------------------------------------------------------
 
@@ -160,8 +160,8 @@ impl From<PatternEncoding> for codec::Encoding {
 /// Conservative overlap allowance (bytes) retained beyond
 /// `max_buffered_bytes` for regex and glob windows. Regex patterns have no
 /// fixed match length and glob lines are arbitrarily long, so a fixed 256
-/// byte allowance preserves the pre-Phase-5 subscribe heuristic: a match
-/// candidate that spans the boundary of the previous chunk is still seen.
+/// byte allowance keeps a match straddling the previous chunk boundary
+/// visible, mirroring the subscribe heuristic.
 pub(crate) const REGEX_GLOB_OVERLAP_ALLOWANCE: usize = 256;
 
 /// Saved matcher-owned literal context for the most recent push.
@@ -335,7 +335,7 @@ impl Matcher {
                 window,
                 base,
                 ..
-            } => find_subslice(window, needle)
+            } => find_subsequence(window, needle)
                 .map_or(MatchResult::NoMatch, |i| MatchResult::Found(base + i)),
             Self::Regex {
                 re, window, base, ..
@@ -1016,7 +1016,7 @@ mod tests {
         assert!(validate_match_request(&req).is_err());
     }
 
-    // ── Bounded-window policy (Phase 5) ────────────────────────────────
+    // ── Bounded-window policy ───────────────────────────────────────────
 
     #[test]
     fn retained_window_limit_uses_mode_overlap_allowance() {

@@ -1,9 +1,9 @@
 # Development Notes
 
-Index of the active development documentation. The post-0.9 refinement
-plan and its phase handoffs (Phases 1–8) were consumed and removed when the
-branch landed — commits preserve implementation history, and the
-consolidated evaluation below is the single current record.
+Index of active development documentation. Consumed implementation plans and
+phase handoffs are removed after their work completes; commits preserve that
+history, while durable behavior lives in `AGENTS.md`, the changelog, and the
+focused documents below.
 
 | Doc | What it is |
 |---|---|

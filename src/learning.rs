@@ -1,4 +1,4 @@
-//! Write-through profile learning composition (Phase 3B).
+//! Write-through profile learning composition.
 //!
 //! One shared helper converts a successful live mutation on a
 //! profile-bound connection into a revision-CAS persistence attempt and an
