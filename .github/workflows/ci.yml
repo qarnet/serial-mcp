@@ -6,6 +6,9 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: "-D warnings"
@@ -198,3 +201,31 @@ jobs:
 
       - name: Run HTTP integration tests (spawned binary)
         run: cargo test --test http_integration --locked -- --test-threads=1
+
+  release:
+    name: Release
+    needs: [nix-flake, build-test, native-sim]
+    # Only a trusted push to main may reach the privileged release call. Pull
+    # requests and other refs skip it, so PR-contributed content can never
+    # trigger a publish.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    permissions:
+      contents: write
+    uses: ./.github/workflows/release.yml
+    with:
+      mode: release
+      ref: ${{ github.sha }}
+    secrets:
+      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+  publish-mcp-registry:
+    name: Publish to MCP Registry
+    needs: release
+    # Same trusted gate as the release job; runs only after release succeeds.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/publish-mcp-registry.yml
+    with:
+      ref: ${{ github.sha }}

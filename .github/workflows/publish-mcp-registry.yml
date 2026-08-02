@@ -1,9 +1,12 @@
 name: Publish to MCP Registry
 
 on:
-  workflow_run:
-    workflows: ["Release"]
-    types: [completed]
+  workflow_call:
+    inputs:
+      ref:
+        description: Git ref (branch, tag, or SHA) whose release to publish
+        required: true
+        type: string
 
 # OIDC token required for mcp-publisher login github-oidc (no extra secrets needed)
 permissions:
@@ -14,15 +17,11 @@ jobs:
   publish:
     name: Publish to MCP Registry
     runs-on: ubuntu-latest
-    if: >-
-      github.repository == 'qarnet/serial-mcp' &&
-      github.event.workflow_run.conclusion == 'success' &&
-      github.event.workflow_run.head_branch == 'main'
     steps:
       - name: Checkout
         uses: actions/checkout@v7
         with:
-          ref: ${{ github.event.workflow_run.head_sha }}
+          ref: ${{ inputs.ref }}
 
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@v22
@@ -40,11 +39,13 @@ jobs:
           TAG="v${VERSION}"
           NAME=$(jq -r '.name' server.json)
 
-          # 1. The release tag must exist. Without it this was a dry-run build
-          #    (workflow_dispatch on Release) and the referenced release binaries
-          #    do not exist yet.
+          # 1. The release tag must exist. This workflow is only ever invoked
+          #    from the trusted CI release caller after a successful release,
+          #    so the tag is normally always present; the check is retained as
+          #    retry/idempotency and defense-in-depth (e.g. a tag deleted after
+          #    a partial release, or an out-of-band caller).
           if ! git ls-remote --tags origin "refs/tags/$TAG" | grep -q .; then
-            echo "Tag $TAG not found — dry-run release, nothing to publish."
+            echo "Tag $TAG not found — nothing to publish."
             echo "publish=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
