@@ -1,0 +1,22 @@
+name: Publish to MCP Registry (backfill)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Strict SemVer version to backfill (must already have a published GitHub release v<version>)
+        required: true
+        type: string
+
+# Read-only + OIDC only. No repository write credential, no secrets.
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  backfill:
+    name: Backfill registry publication
+    uses: ./.github/workflows/publish-mcp-registry.yml
+    with:
+      ref: ${{ github.sha }}
+      version: ${{ inputs.version }}
