@@ -202,7 +202,7 @@ bounded; a hung or slow run must fail the job, not idle.
   upload `fuzz/artifacts/<target>/` + `fuzz/corpus/<target>/` via
   `actions/upload-artifact@v4` (`if-no-files-found: warn`, `retention-days: 7`)
   — missing paths warn but never mask the original failure.
-- **Mutation** — project Rust `dtolnay/rust-toolchain@1.88.0` (NOT nightly;
+- **Mutation** — project Rust `dtolnay/rust-toolchain@1.97.1` (NOT nightly;
   cargo-fuzz/nightly are isolated fuzz tooling, not an MSRV bump) + pinned
   `cargo install cargo-mutants --locked --version 27.1.0`. Focused scope only:
   `--file src/checksums.rs` and `--file 'src/framing/parsers/**'` (quote the
@@ -219,7 +219,7 @@ bounded; a hung or slow run must fail the job, not idle.
 
 ## Repo workflow
 
-- Rust toolchain policy: CI, release, and schema-drift workflows install Rust 1.88.0 (`dtolnay/rust-toolchain@1.88.0`, each followed by a `rustc --version --verbose` report step); Nix derives the same version from `rust-toolchain.toml`. Bump both together.
+- Rust toolchain policy: CI, release, and schema-drift workflows install Rust 1.97.1 (`dtolnay/rust-toolchain@1.97.1`, each followed by a `rustc --version --verbose` report step); Nix derives the same version from `rust-toolchain.toml`. Bump both together.
 - Conventional commits used here: `feat:`, `fix:`, `docs:`, `test:`, `refactor:`.
 - Never add attribution footers or co-author lines.
 
