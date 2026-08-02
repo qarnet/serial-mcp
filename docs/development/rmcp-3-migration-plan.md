@@ -8,6 +8,7 @@
 - Primary protocol: MCP `2026-07-28`
 - Compatibility protocol: MCP `2025-11-25`, reduced feature set
 - Public tool target: 25 tools (`subscribe` and `unsubscribe` removed)
+- Conformance runner: `@modelcontextprotocol/conformance@0.2.0-alpha.10`
 
 This is a major protocol migration, not a dependency-only update. Modern
 clients get discovery, stateless HTTP, and standard resource subscriptions.
@@ -61,6 +62,11 @@ Authoritative sources inspected:
   `examples/servers/src/mrtr.rs`
 - MCP logging deprecation:
   `/home/thomas-workstation/Nextcloud/Development-Resources/mcp_model_context_protocol/modelcontextprotocol-main/seps/2577-deprecate-roots-sampling-and-logging.md`
+- official MCP conformance framework:
+  <https://github.com/modelcontextprotocol/conformance>, package version
+  `0.2.0-alpha.10`;
+- rmcp's pinned dual-version conformance workflow:
+  `.github/workflows/conformance.yml` at tag `rmcp-v3.0.1`.
 
 Indexed codebase-memory projects:
 
@@ -97,6 +103,132 @@ for new data, match patterns, decode frames, and report offsets/loss without
 any subscription. Modern resource notifications are an optional wake-up layer
 and must not participate in read cursor movement, framing, matching, or byte
 retention.
+
+## Compatibility verification strategy
+
+Version-dependent behavior is release-critical. Typed rmcp tests alone are not
+enough because client deserialization can hide missing, extra, or version-wrong
+wire fields. Every protocol branch needs a public-boundary proof, and wire-shape
+branches need raw JSON assertions.
+
+### Test layers and files
+
+1. **Pure behavior tests**
+   - `src/server.rs`: supported-version ordering, modern and legacy capability
+     views, and subscription-filter reduction;
+   - `src/resource_events.rs`: event filtering, lag recovery, deduplication, and
+     hotplug snapshot comparison;
+   - `src/rx_session.rs`: publication occurs after ring append and outside the
+     pump gate.
+2. **Typed rmcp integration tests**
+   - add `TestProtocol::{Modern, Legacy}` and explicit lifecycle helpers in
+     `tests/common/mod.rs` and `tests/common/spawned.rs`;
+   - add `tests/protocol_compatibility.rs` for the same core calls through
+     distinct modern and legacy HTTP clients;
+   - extend `tests/stdio_integration.rs` with explicit discover and initialize
+     clients rather than relying on rmcp's default lifecycle;
+   - rewrite `tests/resource_subscriptions.rs` around modern
+     `subscriptions/listen`; do not retain legacy resource-subscribe tests.
+3. **Raw HTTP wire tests**
+   - keep these in `tests/protocol_compatibility.rs` beside the typed tests;
+   - send exact headers, `_meta`, initialize/discover payloads, and parse both
+     JSON and SSE responses;
+   - assert HTTP status, JSON-RPC code, response ID, session headers,
+     capabilities, `resultType`, and cache fields without round-tripping through
+     rmcp response models.
+4. **Official conformance**
+   - add an Ubuntu `mcp-conformance` CI job in `.github/workflows/ci.yml`;
+   - run the built HTTP server with an isolated profile path;
+   - pin `@modelcontextprotocol/conformance@0.2.0-alpha.10` and run only generic
+     scenarios that do not require the framework's named fixture
+     tools/resources;
+   - upload conformance output on success and failure;
+   - store narrowly justified per-check exceptions in
+     `conformance/expected-failures.yaml`.
+
+### Required protocol matrix
+
+| Behavior | Modern `2026-07-28` proof | Legacy `2025-11-25` proof |
+|---|---|---|
+| Lifecycle | discovery succeeds without initialize or session ID | initialize + initialized succeeds; session ID lifecycle remains valid |
+| Version list/selection | discovery lists `2026-07-28` first and selects it | initialize selects exactly `2025-11-25` for explicit legacy client |
+| Common capability/catalog | 25 tools plus resources/prompts/completions | same 25 tools plus resources/prompts/completions |
+| Capability exclusions | no logging/list-change; resources subscription enabled | no logging/list-change/subscription capability |
+| Core call | `compute_checksum` succeeds without hardware | same call and result succeed |
+| Modern listen | accepted filter acknowledged; resource updates tagged with subscription ID | `subscriptions/listen` rejected as method not found |
+| Removed legacy methods | initialize, ping, logging, resource subscribe/unsubscribe return modern HTTP 404 + JSON-RPC `-32601` | legacy resource subscribe/unsubscribe return JSON-RPC `-32601`; ping remains available |
+| Result discriminator | ordinary list/read/prompt/tool/completion results contain `resultType: "complete"` | same responses omit `resultType` |
+| Cache shape | cacheable list/read responses contain `ttlMs: 0`, `cacheScope: "private"` | cache fields omitted |
+| Missing resource | `-32602` and requested URI in error data | legacy `-32002` behavior preserved |
+| Request envelope | required `_meta`; header/meta mismatch and unsupported version are HTTP 400 typed errors | session header and negotiated protocol header work after initialize |
+| Cancellation/progress | `send_break(duration_ms=2000)` on an injected loopback emits matching progress, accepts request-scoped cancellation, and releases BREAK | same public behavior through legacy lifecycle |
+| Logging removal | no `notifications/message` during representative tool execution | no logging capability and no logging messages |
+
+Use representative responses from every response family for discriminator/cache
+checks: `tools/list`, `compute_checksum`, `resources/list`,
+`resources/read(serial://ports)`, `prompts/list`, one existing prompt, and
+`completion/complete`. This catches handler-specific constructors that a single
+tool call would miss.
+
+For cancellation/progress, parameterize one test body over both lifecycle
+modes. Attach a known progress token, wait for its first progress notification,
+cancel that request rather than the client service, and prove a later tool call
+still succeeds. This verifies version-independent request lifecycle behavior
+without asserting private token maps or handler internals.
+
+### Official conformance scenario set
+
+Run these against MCP `2025-11-25`:
+
+```text
+server-initialize
+server-session-lifecycle
+ping
+completion-complete
+tools-list
+resources-list
+prompts-list
+```
+
+Run these against MCP `2026-07-28`:
+
+```text
+server-stateless
+completion-complete
+tools-list
+resources-list
+prompts-list
+caching
+sep-2164-resource-not-found
+```
+
+`server-stateless` supplies broad raw-wire coverage: discovery, mandatory
+request metadata, version/header errors, removed method routing, response ID
+echo, listen acknowledgment, subscription IDs, and filter isolation. Its
+diagnostic probes assume named conformance-only tools that serial-mcp must not
+add to its public catalog. Baseline only these four check IDs:
+
+```yaml
+server:
+  - server-stateless:sep-2575-server-rejects-undeclared-capability
+  - server-stateless:sep-2575-missing-capability-http-400
+  - server-stateless:sep-2575-http-server-no-independent-requests-on-stream
+  - server-stateless:sep-2575-server-no-log-without-loglevel
+```
+
+Each is untestable without `test_missing_capability`,
+`test_streaming_elicitation`, or `test_logging_tool`; local public-boundary
+tests cover applicable serial-mcp behavior instead. Do not baseline the whole
+scenario. Never baseline `wire-schema-valid`, discovery, version/header,
+method-routing, subscription, cache, or serial-mcp-owned behavior. The
+conformance runner fails stale per-check baselines, so an upstream scenario
+improvement forces review.
+
+Do not run `--suite all` against the product server. Most full-suite scenarios
+require fixture names such as `test://static-text` and
+`test_simple_text_tool`; adding hidden product endpoints would weaken catalog
+and tool-count guarantees. Targeted generic scenarios provide a strict gate
+without test-only production behavior.
 
 ## Resource notification semantics
 
@@ -457,12 +589,15 @@ Scope:
 - modern discovery capabilities;
 - legacy initialize capability view;
 - modern and legacy client helpers;
-- explicit negotiation tests over stdio and HTTP.
+- explicit negotiation and raw-wire tests over stdio and HTTP;
+- keep resource subscription advertisement disabled until Phase 3 installs
+  `accepted_subscription_filter` and `listen` in the same change.
 
 Files:
 
 - `src/server.rs`, `src/main.rs` as needed;
 - `tests/common/mod.rs`, `tests/common/spawned.rs`;
+- add `tests/protocol_compatibility.rs`;
 - `tests/http_integration.rs`, `tests/stdio_integration.rs`.
 
 Acceptance behavior:
@@ -471,8 +606,17 @@ Acceptance behavior:
 - legacy client initializes and negotiates `2025-11-25`;
 - both can list/call core tools and read resources;
 - legacy capabilities omit subscription/logging;
-- modern capabilities advertise resource subscriptions but no list-change or
-  logging capabilities.
+- modern capabilities omit logging and all list-change flags;
+- raw HTTP tests prove session/header, `_meta`, method-gate, `resultType`, and
+  version-specific resource-error behavior.
+
+Verification:
+
+```bash
+cargo test --test protocol_compatibility --locked
+cargo test --test http_integration --locked
+cargo test --test stdio_integration --locked
+```
 
 ### Phase 3 — resource event hub and modern subscriptions
 
@@ -480,6 +624,8 @@ Scope:
 
 - process-wide event hub;
 - `accepted_subscription_filter` and `listen`;
+- enable modern resource-subscription capability atomically with those
+  handlers;
 - open/close/state/RX/log resource updates;
 - port hotplug watcher;
 - modern subscription client tests;
@@ -508,6 +654,15 @@ Public-boundary tests must cover:
 - unchanged/reordered/erroring enumeration emits no false update;
 - HTTP stateless handler instances share same hub;
 - stdio listener cancellation completes cleanly.
+
+Verification:
+
+```bash
+cargo test --test resource_subscriptions --locked
+cargo test --test protocol_compatibility --locked
+cargo test --test http_integration --locked
+cargo test --test stdio_integration --locked
+```
 
 ### Phase 4 — remove legacy streaming tools and logging
 
@@ -540,14 +695,35 @@ Acceptance:
 - historical evaluator baseline remains unchanged;
 - current evaluator report explains measured catalog delta.
 
+Verification:
+
+```bash
+cargo test --test http_integration --locked
+cargo test --test stdio_integration --locked
+cargo test --test doc_drift --locked
+cargo run --manifest-path xtask/Cargo.toml -- agent-eval \
+  --baseline docs/development/agent-interface-baseline.json
+```
+
 ### Phase 5 — modern cache-shape compliance and complete gates
 
 Scope:
 
 - zero/private cache fields required by modern responses;
 - no positive caching policy;
+- pinned official conformance job and narrow expected-failure file;
 - schema snapshots/evaluator review;
 - full software-only gates and documentation consistency.
+
+Files:
+
+- `src/server.rs` for explicit cacheable list responses;
+- resource read handlers in `src/server.rs`;
+- `tests/protocol_compatibility.rs` for modern-present/legacy-absent wire
+  assertions;
+- `.github/workflows/ci.yml` for the Ubuntu `mcp-conformance` gate;
+- add `conformance/expected-failures.yaml` with only the four documented
+  fixture-gap checks.
 
 Verification:
 
@@ -558,12 +734,21 @@ cargo test --locked
 cargo clippy --all-targets --locked -- -D warnings
 cargo test --test config_schema_validation
 cargo test --test doc_drift
+cargo test --test protocol_compatibility --locked
+cargo test --test resource_subscriptions --locked
 cargo run --manifest-path xtask/Cargo.toml -- agent-eval \
   --baseline docs/development/agent-interface-baseline.json
 cargo run --manifest-path xtask/Cargo.toml -- build-test-assets
 cargo run --manifest-path xtask/Cargo.toml -- test-all
 nix flake check
 ```
+
+Also run the pinned official conformance scenario sets from “Official
+conformance scenario set” against the built HTTP binary. This command downloads
+and executes the pinned npm package, so obtain explicit approval before running
+it on a developer machine; CI may run it as a declared networked gate. Every
+scenario must pass apart from the four exact per-check fixture gaps. Archive
+the generated JSON/Markdown reports for failure diagnosis.
 
 No hardware test is required. Native_sim and PTY suites provide serial-path
 coverage.
