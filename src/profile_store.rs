@@ -13,7 +13,7 @@
 //!   in memory and rejects corrupt or unsupported-future files instead of
 //!   silently treating them as empty,
 //! - maintains per-profile metadata and a bounded prior-revision history
-//!   for the Phase 3 automatic-selection/rollback work.
+//!   for automatic selection and rollback.
 //!
 //! Ephemeral stores (`ProfileStore::ephemeral`) keep the same in-memory
 //! semantics for tests/library construction but never touch disk.
@@ -127,8 +127,8 @@ impl ProfileStore {
         self.cache.read().await.clone()
     }
 
-    /// Fresh cross-process read of all profiles (Phase 4 `list_ports`
-    /// preview).
+    /// Fresh cross-process read of all profiles for the `list_ports`
+    /// preview.
     ///
     /// Persistent stores: acquires the advisory file lock, reloads the file
     /// from disk (never cache-only — another process may have changed
@@ -313,7 +313,7 @@ impl ProfileStore {
         .await
     }
 
-    /// Revision-CAS learned update (Phase 3B write-through learning).
+    /// Revision-CAS learned update from a live connection.
     ///
     /// Inside the locked reload-under-lock transaction:
     ///
@@ -380,7 +380,7 @@ impl ProfileStore {
         .await
     }
 
-    /// Roll a profile back to a prior retained revision (Phase 3B).
+    /// Roll a profile back to a prior retained revision.
     ///
     /// Requires the current revision to equal `expected_revision`, then:
     ///
@@ -702,7 +702,7 @@ fn create_metadata(now: u64) -> ProfileMetadata {
 
 /// Next metadata for an overwrite: preserve the original creation
 /// timestamp, generated flag, last-used metadata, and use count unless the
-/// incoming operation explicitly owns them (Phase 3). Bumps the revision
+/// incoming operation explicitly owns them. Bumps the revision
 /// (a legacy/default revision 0 becomes 1 on the first update) and stamps
 /// `updated_at_ms`.
 fn bump_metadata(old: &Profile, now: u64) -> ProfileMetadata {
@@ -1139,7 +1139,7 @@ baud_rate = 115200
 
     #[tokio::test]
     async fn generated_metadata_round_trips_through_file() {
-        // Phase 3 profiles carry `generated: true`; serialization must not
+        // Generated profiles carry `generated: true`; serialization must not
         // depend on the profile name and must survive a reopen. A prewritten
         // v2 file's metadata (including an overwrite preserving it) must
         // come back intact.
@@ -1169,8 +1169,8 @@ use_count = 3
         assert_eq!(p.metadata.use_count, 3);
         assert_eq!(p.metadata.revision, 7);
 
-        // Overwrite preserves the Phase 3-owned fields (generated flag,
-        // last-used metadata, use count) per the handoff.
+        // Overwrite preserves the generated-profile fields (generated flag,
+        // last-used metadata, use count).
         let mut updated = test_profile("gen-device");
         updated.defaults.baud_rate = 9600;
         store.upsert(updated, true).await.unwrap();
@@ -1207,7 +1207,7 @@ use_count = 3
         // http_integration `relative_profiles_path` test.
     }
 
-    // ── Phase 3A: automatic resolution, generated create, mark_used ──────
+    // ── Automatic resolution, generated create, mark_used ────────────────
 
     fn high_usb_port(name: &str, serial: &str, interface: Option<u8>) -> PortInfo {
         PortInfo {
@@ -1564,7 +1564,7 @@ vid = 0x1234
         assert!(err.contains("not found"), "got: {err}");
     }
 
-    // ── Phase 3B: learned CAS updates, no-op detection, rollback ──────────
+    // ── Learned CAS updates, no-op detection, rollback ────────────────────
 
     #[tokio::test]
     async fn update_learned_defaults_bumps_revision_and_preserves_selector_and_generated_metadata()

@@ -99,14 +99,99 @@ impl RxFrameSink for ReadFrameSink<'_> {
 }
 
 // ------------------------------------------------------------------
-// Ring-based read (Phase 1.3)
+// Ring-based read (private and shared cursor paths)
 // ------------------------------------------------------------------
 
-/// Advance a cursor by `consumed` bytes from `base`, clamped to the ring's
-/// live edge. Mirrors the previous shared-cursor `advance_cursor` helper,
-/// but writes to a caller-owned cursor value instead of the session.
+/// Advance a caller-owned cursor by `consumed` bytes from `base`, clamped to
+/// the ring's live edge. Saturating by design; other branches keep their own
+/// wrapping-plus-clamp formulas.
 fn advance_private_cursor(base: u64, consumed: u64, ring: &crate::rx_ring::RxRing) -> u64 {
     base.saturating_add(consumed).min(ring.end_offset())
+}
+
+/// Owns all mutable state accumulated across a private read: raw bytes
+/// consumed from the ring, returned payload bytes, decoded frames, and frame
+/// accounting. Consumed only on return paths.
+struct ReadAccumulator {
+    /// Raw bytes consumed from the ring (drives cursor advancement and
+    /// offsets). Returned bytes may differ after match-context shaping.
+    consumed_offset: u64,
+    returned_bytes: Vec<u8>,
+    frames: Vec<crate::framing::Frame>,
+    frames_seen: usize,
+    frames_dropped: usize,
+    frame_error: Option<String>,
+}
+
+impl ReadAccumulator {
+    fn new(max_bytes: usize) -> Self {
+        Self {
+            consumed_offset: 0,
+            returned_bytes: Vec::with_capacity(max_bytes),
+            frames: Vec::new(),
+            frames_seen: 0,
+            frames_dropped: 0,
+            frame_error: None,
+        }
+    }
+
+    /// Consume the accumulator into a generic `ReadOutcome` plus the final
+    /// private cursor. Offsets derive from the ring's current start/end, the
+    /// ORIGINAL private cursor, and raw `consumed_offset`.
+    /// `payload_override` changes only the returned bytes (framed match data,
+    /// shaped live-match context) — never the offsets.
+    #[allow(clippy::too_many_arguments)]
+    fn into_outcome(
+        self,
+        ring: &crate::rx_ring::RxRing,
+        original_cursor: u64,
+        max_bytes: usize,
+        elapsed_ms: u64,
+        meta: RxStopMetadata,
+        matched: bool,
+        match_index: Option<usize>,
+        match_frame_index: Option<usize>,
+        payload_override: Option<Vec<u8>>,
+        final_cursor: u64,
+    ) -> (ReadOutcome, u64) {
+        let start_off = ring.start_offset();
+        let end_off = ring.end_offset();
+        let clamped_from = original_cursor.max(start_off).min(end_off);
+        let bytes_lost = start_off.saturating_sub(original_cursor);
+        let used = self.consumed_offset.min(max_bytes as u64);
+        let next_off = clamped_from + used;
+        let from_off = if self.returned_bytes.is_empty() && self.consumed_offset == 0 {
+            None
+        } else {
+            Some(clamped_from)
+        };
+        let next_off_out = if self.returned_bytes.is_empty() && self.consumed_offset == 0 {
+            None
+        } else {
+            Some(next_off)
+        };
+        let buffered_remaining = end_off.saturating_sub(next_off);
+        (
+            ReadOutcome {
+                bytes: payload_override.unwrap_or(self.returned_bytes),
+                elapsed_ms,
+                meta,
+                matched,
+                match_index,
+                match_frame_index,
+                frames: self.frames,
+                frames_dropped: self.frames_dropped,
+                error: self.frame_error,
+                from_offset: from_off,
+                next_offset: next_off_out,
+                bytes_lost,
+                buffered_remaining,
+                start_offset: ring.start_offset(),
+                end_offset: ring.end_offset(),
+            },
+            final_cursor,
+        )
+    }
 }
 
 /// Drive a `read` from the ring buffer using a PRIVATE cursor, with cat
@@ -150,74 +235,10 @@ pub(crate) async fn read_from_private_cursor(
         Some(cfg) => Some(crate::framing::FrameDecoder::new(cfg, parser.as_ref())?),
         None => None,
     };
-    let mut collected_frames: Vec<crate::framing::Frame> = Vec::new();
-    let mut frames_seen: usize = 0;
-    let mut frames_dropped: usize = 0;
-    let mut frame_error_msg: Option<String> = None;
     let conn_id = session.connection_id().to_string();
 
-    // We track how many raw bytes we consumed from the ring (for cursor advancement)
-    // and how many we return in the result.
-    let mut consumed_offset: u64 = 0; // raw bytes consumed from ring cursor
-    let mut returned_bytes: Vec<u8> = Vec::with_capacity(max_bytes);
-    // Private cursor state: every write the shared-cursor version made to
-    // `session.set_read_cursor` lands here instead. Every return path below
-    // overwrites it before returning (the shared version also always
-    // overwrites before reading back), so the initial value is never read.
-    #[allow(unused_assignments)]
-    let mut cursor_state: u64 = cursor;
-
-    // Helper: build the ReadOutcome from current state.
-    // Does not touch the shared cursor.
-    let make_read_outcome = |returned_bytes: Vec<u8>,
-                             consumed_offset: u64,
-                             _ctrl: &RxStopController,
-                             elapsed_ms: u64,
-                             meta: RxStopMetadata,
-                             matched: bool,
-                             match_index: Option<usize>,
-                             match_frame_index: Option<usize>,
-                             frames: Vec<crate::framing::Frame>,
-                             frames_dropped: usize,
-                             error: Option<String>,
-                             ring: &crate::rx_ring::RxRing,
-                             cursor: u64|
-     -> ReadOutcome {
-        let start_off = ring.start_offset();
-        let end_off = ring.end_offset();
-        let clamped_from = cursor.max(start_off).min(end_off);
-        let bytes_lost = start_off.saturating_sub(cursor);
-        let used = consumed_offset.min(max_bytes as u64);
-        let next_off = clamped_from + used;
-        let from_off = if returned_bytes.is_empty() && consumed_offset == 0 {
-            None
-        } else {
-            Some(clamped_from)
-        };
-        let next_off_out = if returned_bytes.is_empty() && consumed_offset == 0 {
-            None
-        } else {
-            Some(next_off)
-        };
-        let buffered_remaining = end_off.saturating_sub(next_off);
-        ReadOutcome {
-            bytes: returned_bytes,
-            elapsed_ms,
-            meta,
-            matched,
-            match_index,
-            match_frame_index,
-            frames,
-            frames_dropped,
-            error,
-            from_offset: from_off,
-            next_offset: next_off_out,
-            bytes_lost,
-            buffered_remaining,
-            start_offset: ring.start_offset(),
-            end_offset: ring.end_offset(),
-        }
-    };
+    // Owns all mutable read state; consumed only on return paths.
+    let mut acc = ReadAccumulator::new(max_bytes);
 
     // Check if we have immediate cat-path data (no match, bytes available).
     let has_immediate_data = !initial_slice.bytes.is_empty() && matcher.is_none();
@@ -225,27 +246,22 @@ pub(crate) async fn read_from_private_cursor(
     if has_immediate_data && decoder.is_none() {
         // Cat path: return buffered bytes immediately.
         let take = initial_slice.bytes.len().min(max_bytes);
-        let data: Vec<u8> = initial_slice.bytes[..take].to_vec();
-        let consumed = data.len() as u64;
+        acc.returned_bytes = initial_slice.bytes[..take].to_vec();
+        let consumed = acc.returned_bytes.len() as u64;
+        acc.consumed_offset = consumed;
         let meta = RxStopMetadata::drained(cursor + consumed, consumed as usize, consumed as usize);
-        cursor_state = advance_private_cursor(initial_slice.from_offset, consumed, ring);
-        return Ok((
-            make_read_outcome(
-                data,
-                consumed,
-                &ctrl,
-                read_start.elapsed().as_millis() as u64,
-                meta,
-                false,
-                None,
-                None,
-                Vec::new(),
-                0,
-                None,
-                ring,
-                cursor,
-            ),
-            cursor_state,
+        let final_cursor = advance_private_cursor(initial_slice.from_offset, consumed, ring);
+        return Ok(acc.into_outcome(
+            ring,
+            cursor,
+            max_bytes,
+            read_start.elapsed().as_millis() as u64,
+            meta,
+            false,
+            None,
+            None,
+            None,
+            final_cursor,
         ));
     }
 
@@ -260,13 +276,15 @@ pub(crate) async fn read_from_private_cursor(
         if let Some(MatchResult::Found(idx)) = match_result {
             let match_end = idx + needle_len.unwrap_or(0);
             let consumed = match_end as u64;
-            let data = hist[..match_end].to_vec();
+            acc.returned_bytes = hist[..match_end].to_vec();
             let meta = RxStopMetadata::match_found(consumed as usize, consumed as usize);
-            cursor_state = advance_private_cursor(initial_slice.from_offset, consumed, ring);
-            // Handle context shaping
+            // Historical literal-context match: offsets stay on the initial
+            // slice snapshot (from_offset/bytes_lost), not the live ring.
             if let Some(context) = context_amount {
                 let shaped = shape_match_context(hist, idx, needle_len.unwrap_or(0), Some(context));
                 let shaped_consumed = shaped.data.len() as u64;
+                let final_cursor =
+                    advance_private_cursor(initial_slice.from_offset, consumed, ring);
                 return Ok((
                     ReadOutcome {
                         bytes: shaped.data,
@@ -290,31 +308,26 @@ pub(crate) async fn read_from_private_cursor(
                         start_offset: ring.start_offset(),
                         end_offset: ring.end_offset(),
                     },
-                    cursor_state,
+                    final_cursor,
                 ));
             }
-            return Ok((
-                make_read_outcome(
-                    data,
-                    consumed,
-                    &ctrl,
-                    read_start.elapsed().as_millis() as u64,
-                    meta,
-                    true,
-                    Some(idx),
-                    None,
-                    Vec::new(),
-                    0,
-                    None,
-                    ring,
-                    cursor,
-                ),
-                cursor_state,
+            let final_cursor = advance_private_cursor(initial_slice.from_offset, consumed, ring);
+            return Ok(acc.into_outcome(
+                ring,
+                cursor,
+                max_bytes,
+                read_start.elapsed().as_millis() as u64,
+                meta,
+                true,
+                Some(idx),
+                None,
+                None,
+                final_cursor,
             ));
         }
         // Not found in history — consume what we read from the ring for the result so far.
-        consumed_offset = take as u64;
-        returned_bytes = hist.to_vec();
+        acc.consumed_offset = take as u64;
+        acc.returned_bytes = hist.to_vec();
         ctrl.notify_data_received();
         ctrl.push_data(take, take, Some(MatchResult::NoMatch));
     }
@@ -323,19 +336,19 @@ pub(crate) async fn read_from_private_cursor(
     if decoder.is_some() && !initial_slice.bytes.is_empty() {
         let take = initial_slice.bytes.len().min(max_bytes);
         let chunk = &initial_slice.bytes[..take];
-        consumed_offset += take as u64;
-        returned_bytes.extend_from_slice(chunk);
+        acc.consumed_offset += take as u64;
+        acc.returned_bytes.extend_from_slice(chunk);
 
         if let Some(ref mut dec) = decoder {
-            let mut sink = ReadFrameSink::new(&mut collected_frames);
+            let mut sink = ReadFrameSink::new(&mut acc.frames);
             let outcome = consume_frames(
                 chunk,
                 dec,
                 &mut matcher,
                 max_frames,
-                &mut frames_seen,
+                &mut acc.frames_seen,
                 &mut sink,
-                &mut frames_dropped,
+                &mut acc.frames_dropped,
             )
             .await;
             let ReadFrameSink {
@@ -345,59 +358,48 @@ pub(crate) async fn read_from_private_cursor(
                 ..
             } = sink;
             if let Some(data) = match_data {
-                let meta = RxStopMetadata::match_found(ctrl.bytes_observed(), returned_bytes.len());
-                cursor_state = initial_slice
+                let meta =
+                    RxStopMetadata::match_found(ctrl.bytes_observed(), acc.returned_bytes.len());
+                let final_cursor = initial_slice
                     .from_offset
-                    .wrapping_add(consumed_offset)
+                    .wrapping_add(acc.consumed_offset)
                     .min(ring.end_offset());
-                return Ok((
-                    make_read_outcome(
-                        data,
-                        consumed_offset,
-                        &ctrl,
-                        read_start.elapsed().as_millis() as u64,
-                        meta,
-                        true,
-                        match_index,
-                        match_frame_index,
-                        std::mem::take(&mut collected_frames),
-                        frames_dropped,
-                        None,
-                        ring,
-                        cursor,
-                    ),
-                    cursor_state,
+                return Ok(acc.into_outcome(
+                    ring,
+                    cursor,
+                    max_bytes,
+                    read_start.elapsed().as_millis() as u64,
+                    meta,
+                    true,
+                    match_index,
+                    match_frame_index,
+                    Some(data),
+                    final_cursor,
                 ));
             }
             if let Some(stop) = frame_outcome_to_stop(
                 outcome,
                 &ctrl,
-                returned_bytes.len(),
+                acc.returned_bytes.len(),
                 match_index,
-                &mut frame_error_msg,
+                &mut acc.frame_error,
                 &conn_id,
             ) {
-                cursor_state = initial_slice
+                let final_cursor = initial_slice
                     .from_offset
-                    .wrapping_add(consumed_offset)
+                    .wrapping_add(acc.consumed_offset)
                     .min(ring.end_offset());
-                return Ok((
-                    make_read_outcome(
-                        returned_bytes,
-                        consumed_offset,
-                        &ctrl,
-                        read_start.elapsed().as_millis() as u64,
-                        stop.meta,
-                        stop.matched,
-                        stop.match_index,
-                        match_frame_index,
-                        std::mem::take(&mut collected_frames),
-                        frames_dropped,
-                        frame_error_msg,
-                        ring,
-                        cursor,
-                    ),
-                    cursor_state,
+                return Ok(acc.into_outcome(
+                    ring,
+                    cursor,
+                    max_bytes,
+                    read_start.elapsed().as_millis() as u64,
+                    stop.meta,
+                    stop.matched,
+                    stop.match_index,
+                    match_frame_index,
+                    None,
+                    final_cursor,
                 ));
             }
         }
@@ -411,24 +413,20 @@ pub(crate) async fn read_from_private_cursor(
             match disconnect_state(conn, &mut ctrl) {
                 DisconnectState::Closed => {
                     let outcome = ctrl.connection_closed();
-                    cursor_state = cursor.wrapping_add(consumed_offset).min(ring.end_offset());
-                    return Ok((
-                        make_read_outcome(
-                            returned_bytes,
-                            consumed_offset,
-                            &ctrl,
-                            read_start.elapsed().as_millis() as u64,
-                            outcome.meta,
-                            outcome.matched,
-                            outcome.match_index,
-                            None,
-                            std::mem::take(&mut collected_frames),
-                            frames_dropped,
-                            None,
-                            ring,
-                            cursor,
-                        ),
-                        cursor_state,
+                    let final_cursor = cursor
+                        .wrapping_add(acc.consumed_offset)
+                        .min(ring.end_offset());
+                    return Ok(acc.into_outcome(
+                        ring,
+                        cursor,
+                        max_bytes,
+                        read_start.elapsed().as_millis() as u64,
+                        outcome.meta,
+                        outcome.matched,
+                        outcome.match_index,
+                        None,
+                        None,
+                        final_cursor,
                     ));
                 }
                 DisconnectState::Reconnecting => {
@@ -440,45 +438,33 @@ pub(crate) async fn read_from_private_cursor(
         }
 
         if let RxStopDecision::Stop(outcome) = ctrl.check_timeout() {
-            cursor_state = advance_private_cursor(cursor, consumed_offset, ring);
-            return Ok((
-                make_read_outcome(
-                    returned_bytes,
-                    consumed_offset,
-                    &ctrl,
-                    read_start.elapsed().as_millis() as u64,
-                    outcome.meta,
-                    outcome.matched,
-                    outcome.match_index,
-                    None,
-                    std::mem::take(&mut collected_frames),
-                    frames_dropped,
-                    None,
-                    ring,
-                    cursor,
-                ),
-                cursor_state,
+            let final_cursor = advance_private_cursor(cursor, acc.consumed_offset, ring);
+            return Ok(acc.into_outcome(
+                ring,
+                cursor,
+                max_bytes,
+                read_start.elapsed().as_millis() as u64,
+                outcome.meta,
+                outcome.matched,
+                outcome.match_index,
+                None,
+                None,
+                final_cursor,
             ));
         }
         if let RxStopDecision::Stop(outcome) = ctrl.check_silence_timeout() {
-            cursor_state = advance_private_cursor(cursor, consumed_offset, ring);
-            return Ok((
-                make_read_outcome(
-                    returned_bytes,
-                    consumed_offset,
-                    &ctrl,
-                    read_start.elapsed().as_millis() as u64,
-                    outcome.meta,
-                    outcome.matched,
-                    outcome.match_index,
-                    None,
-                    std::mem::take(&mut collected_frames),
-                    frames_dropped,
-                    None,
-                    ring,
-                    cursor,
-                ),
-                cursor_state,
+            let final_cursor = advance_private_cursor(cursor, acc.consumed_offset, ring);
+            return Ok(acc.into_outcome(
+                ring,
+                cursor,
+                max_bytes,
+                read_start.elapsed().as_millis() as u64,
+                outcome.meta,
+                outcome.matched,
+                outcome.match_index,
+                None,
+                None,
+                final_cursor,
             ));
         }
 
@@ -493,18 +479,20 @@ pub(crate) async fn read_from_private_cursor(
         tokio::select! {
             _ = ct.cancelled() => {
                 let outcome = ctrl.cancelled();
-                    cursor_state = cursor
-                        .wrapping_add(consumed_offset)
-                        .min(ring.end_offset());
-                return Ok((
-                    make_read_outcome(
-                        returned_bytes, consumed_offset, &ctrl,
-                        read_start.elapsed().as_millis() as u64,
-                        outcome.meta, outcome.matched, outcome.match_index, None,
-                        std::mem::take(&mut collected_frames),
-                        frames_dropped, None, ring, cursor,
-                    ),
-                    cursor_state,
+                let final_cursor = cursor
+                    .wrapping_add(acc.consumed_offset)
+                    .min(ring.end_offset());
+                return Ok(acc.into_outcome(
+                    ring,
+                    cursor,
+                    max_bytes,
+                    read_start.elapsed().as_millis() as u64,
+                    outcome.meta,
+                    outcome.matched,
+                    outcome.match_index,
+                    None,
+                    None,
+                    final_cursor,
                 ));
             }
             _ = ring.wait_for_data(clocked_cursor) => {}
@@ -517,7 +505,7 @@ pub(crate) async fn read_from_private_cursor(
         // New data arrived — read from ring at the clocked cursor.
         let slice = ring.read_from(
             clocked_cursor,
-            max_bytes.saturating_sub(returned_bytes.len()),
+            max_bytes.saturating_sub(acc.returned_bytes.len()),
         );
         if slice.bytes.is_empty() {
             continue; // spurious wakeup
@@ -527,24 +515,25 @@ pub(crate) async fn read_from_private_cursor(
         let take = slice
             .bytes
             .len()
-            .min(max_bytes.saturating_sub(returned_bytes.len()));
+            .min(max_bytes.saturating_sub(acc.returned_bytes.len()));
         let chunk = &slice.bytes[..take];
-        returned_bytes.extend_from_slice(chunk);
-        consumed_offset = consumed_offset
+        acc.returned_bytes.extend_from_slice(chunk);
+        acc.consumed_offset = acc
+            .consumed_offset
             .wrapping_add(take as u64)
             .min(max_bytes as u64);
 
         // Feed to frame decoder if active.
         if let Some(ref mut dec) = decoder {
-            let mut sink = ReadFrameSink::new(&mut collected_frames);
+            let mut sink = ReadFrameSink::new(&mut acc.frames);
             let outcome = consume_frames(
                 chunk,
                 dec,
                 &mut matcher,
                 max_frames,
-                &mut frames_seen,
+                &mut acc.frames_seen,
                 &mut sink,
-                &mut frames_dropped,
+                &mut acc.frames_dropped,
             )
             .await;
             let ReadFrameSink {
@@ -554,59 +543,48 @@ pub(crate) async fn read_from_private_cursor(
                 ..
             } = sink;
             if let Some(data) = match_data {
-                let meta = RxStopMetadata::match_found(ctrl.bytes_observed(), returned_bytes.len());
-                cursor_state = slice
+                let meta =
+                    RxStopMetadata::match_found(ctrl.bytes_observed(), acc.returned_bytes.len());
+                let final_cursor = slice
                     .from_offset
                     .wrapping_add(take as u64)
                     .min(ring.end_offset());
-                return Ok((
-                    make_read_outcome(
-                        data,
-                        consumed_offset,
-                        &ctrl,
-                        read_start.elapsed().as_millis() as u64,
-                        meta,
-                        true,
-                        match_index,
-                        match_frame_index,
-                        std::mem::take(&mut collected_frames),
-                        frames_dropped,
-                        None,
-                        ring,
-                        cursor,
-                    ),
-                    cursor_state,
+                return Ok(acc.into_outcome(
+                    ring,
+                    cursor,
+                    max_bytes,
+                    read_start.elapsed().as_millis() as u64,
+                    meta,
+                    true,
+                    match_index,
+                    match_frame_index,
+                    Some(data),
+                    final_cursor,
                 ));
             }
             if let Some(stop) = frame_outcome_to_stop(
                 outcome,
                 &ctrl,
-                returned_bytes.len(),
+                acc.returned_bytes.len(),
                 match_index,
-                &mut frame_error_msg,
+                &mut acc.frame_error,
                 &conn_id,
             ) {
-                cursor_state = slice
+                let final_cursor = slice
                     .from_offset
                     .wrapping_add(take as u64)
                     .min(ring.end_offset());
-                return Ok((
-                    make_read_outcome(
-                        returned_bytes,
-                        consumed_offset,
-                        &ctrl,
-                        read_start.elapsed().as_millis() as u64,
-                        stop.meta,
-                        stop.matched,
-                        stop.match_index,
-                        match_frame_index,
-                        std::mem::take(&mut collected_frames),
-                        frames_dropped,
-                        frame_error_msg,
-                        ring,
-                        cursor,
-                    ),
-                    cursor_state,
+                return Ok(acc.into_outcome(
+                    ring,
+                    cursor,
+                    max_bytes,
+                    read_start.elapsed().as_millis() as u64,
+                    stop.meta,
+                    stop.matched,
+                    stop.match_index,
+                    match_frame_index,
+                    None,
+                    final_cursor,
                 ));
             }
         }
@@ -616,7 +594,7 @@ pub(crate) async fn read_from_private_cursor(
             // Bounded push: same matcher-owned window policy as the
             // initial-history path and subscribe.
             let match_result = matcher.as_mut().map(|m| m.push_bounded(chunk, max_bytes));
-            let buffered_len = returned_bytes.len();
+            let buffered_len = acc.returned_bytes.len();
             let data_count = chunk.len();
             if let RxStopDecision::Stop(outcome) =
                 ctrl.push_data(data_count, buffered_len, match_result)
@@ -631,31 +609,25 @@ pub(crate) async fn read_from_private_cursor(
                         .and_then(|m| m.shape_literal_match_context(idx))
                     {
                         Some(shaped) => (shaped.data, Some(shaped.match_index)),
-                        None => (returned_bytes.clone(), Some(idx)),
+                        None => (acc.returned_bytes.clone(), Some(idx)),
                     },
-                    None => (returned_bytes.clone(), None),
+                    None => (acc.returned_bytes.clone(), None),
                 };
-                cursor_state = slice
+                let final_cursor = slice
                     .from_offset
                     .wrapping_add(take as u64)
                     .min(ring.end_offset());
-                return Ok((
-                    make_read_outcome(
-                        match_bytes,
-                        consumed_offset,
-                        &ctrl,
-                        read_start.elapsed().as_millis() as u64,
-                        outcome.meta,
-                        outcome.matched,
-                        match_index,
-                        None,
-                        std::mem::take(&mut collected_frames),
-                        frames_dropped,
-                        None,
-                        ring,
-                        cursor,
-                    ),
-                    cursor_state,
+                return Ok(acc.into_outcome(
+                    ring,
+                    cursor,
+                    max_bytes,
+                    read_start.elapsed().as_millis() as u64,
+                    outcome.meta,
+                    outcome.matched,
+                    match_index,
+                    None,
+                    Some(match_bytes),
+                    final_cursor,
                 ));
             }
         }
@@ -664,30 +636,24 @@ pub(crate) async fn read_from_private_cursor(
         clocked_cursor = slice.next_offset;
 
         // max_bytes reached -> drained
-        if returned_bytes.len() >= max_bytes {
+        if acc.returned_bytes.len() >= max_bytes {
             let meta = RxStopMetadata::drained(
-                cursor.wrapping_add(consumed_offset),
-                returned_bytes.len(),
-                returned_bytes.len(),
+                cursor.wrapping_add(acc.consumed_offset),
+                acc.returned_bytes.len(),
+                acc.returned_bytes.len(),
             );
-            cursor_state = advance_private_cursor(cursor, consumed_offset, ring);
-            return Ok((
-                make_read_outcome(
-                    returned_bytes,
-                    consumed_offset,
-                    &ctrl,
-                    read_start.elapsed().as_millis() as u64,
-                    meta,
-                    false,
-                    None,
-                    None,
-                    std::mem::take(&mut collected_frames),
-                    frames_dropped,
-                    None,
-                    ring,
-                    cursor,
-                ),
-                cursor_state,
+            let final_cursor = advance_private_cursor(cursor, acc.consumed_offset, ring);
+            return Ok(acc.into_outcome(
+                ring,
+                cursor,
+                max_bytes,
+                read_start.elapsed().as_millis() as u64,
+                meta,
+                false,
+                None,
+                None,
+                None,
+                final_cursor,
             ));
         }
     }
@@ -695,8 +661,7 @@ pub(crate) async fn read_from_private_cursor(
 
 /// Drive a `read` from the ring buffer with the SHARED read cursor: reads
 /// the current cursor, delegates to [`read_from_private_cursor`], and
-/// applies the returned final cursor. Preserves the pre-Phase-5 behavior
-/// exactly — `read`/`transact` call this wrapper.
+/// applies the returned final cursor. `read`/`transact` call this wrapper.
 #[allow(clippy::too_many_arguments)]
 pub async fn read_bytes_from_ring(
     session: Arc<RxSession>,
@@ -737,7 +702,7 @@ mod tests {
 
     use crate::serial::ConnectionManager;
 
-    // ── Phase 5: private-cursor extraction ────────────────────────────────
+    // ── Private/shared cursor behavior ────────────────────────────────────
 
     /// An already-cancelled request token routed through the private read
     /// path yields a STRUCTURED `cancelled` outcome (with offsets), not an
@@ -904,5 +869,43 @@ mod tests {
         assert_eq!(outcome.meta.stop_reason.to_string(), "timeout");
 
         session.shutdown_and_join().await;
+    }
+
+    /// `into_outcome` advances `next_offset` by raw `consumed_offset` even
+    /// when the returned payload is overridden with a different length
+    /// (framed match data, shaped live-match context). Offsets are
+    /// consumption-based, not payload-length-based.
+    #[test]
+    fn into_outcome_offsets_follow_consumed_bytes_not_payload_length() {
+        let ring = crate::rx_ring::RxRing::new(64);
+        ring.append(&[0u8; 60]); // end_offset 60, start_offset 0
+
+        let mut acc = ReadAccumulator::new(4096);
+        acc.consumed_offset = 10;
+        acc.returned_bytes = vec![0u8; 40];
+
+        let (outcome, final_cursor) = acc.into_outcome(
+            &ring,
+            0,
+            4096,
+            1,
+            RxStopMetadata::match_found(40, 5),
+            true,
+            Some(0),
+            None,
+            Some(vec![0u8; 5]),
+            10,
+        );
+
+        assert_eq!(outcome.bytes.len(), 5, "override replaces the payload");
+        assert_eq!(
+            outcome.next_offset,
+            Some(10),
+            "offset advances by consumed bytes, not payload length"
+        );
+        assert_eq!(outcome.from_offset, Some(0));
+        assert_eq!(outcome.bytes_lost, 0);
+        assert_eq!(outcome.buffered_remaining, 50);
+        assert_eq!(final_cursor, 10);
     }
 }

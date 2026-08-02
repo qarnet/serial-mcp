@@ -201,7 +201,7 @@ pub(crate) trait FrameParser: Send + Sync {
 }
 
 /// Emit one decoded frame: apply skip_empty, run the parser with
-/// Phase-1 checksum drop-and-count semantics, increment frame_count on
+/// checksum drop-and-count semantics, increment frame_count on
 /// success, and return either `Some(Frame)` to emit or `None` to skip.
 /// On a `ChecksumMismatch` with `validate=true`: returns `Ok(None)`,
 /// increments `frames_dropped`, logs a `warn`. On a stream-fatal parser

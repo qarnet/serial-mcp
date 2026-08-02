@@ -1,8 +1,8 @@
-//! Process-wide persistent capture store (Phase 6).
+//! Process-wide persistent capture store.
 //!
 //! Establishes the containment, symlink, quota, atomicity, and lifecycle
 //! policy required before any future continuous raw capture feature. No
-//! continuous capture tool exists yet — this phase only hardens
+//! continuous capture tool exists yet — the store only hardens
 //! `export_log`.
 //!
 //! Policy summary:
@@ -19,7 +19,7 @@
 //!   once at startup. The advisory lock path must be a regular non-symlink
 //!   file. Managed-name symlink entries inside the root are rejected and
 //!   never followed. The configured root and its ancestors remain the
-//!   operator-controlled trust boundary — this phase deliberately does not
+//!   operator-controlled trust boundary — the store deliberately does not
 //!   defend against an operator replacing trusted root ancestors while the
 //!   server runs (portable std/tempfile/fs2 APIs cannot provide
 //!   directory-handle-relative guarantees).
@@ -31,7 +31,7 @@
 //!   file (reserved internal prefix), `sync_all`-ed, then committed with
 //!   `persist_noclobber`. A PRE-commit failure leaves no final file and
 //!   changes no existing capture. A temp file may survive a process crash;
-//!   this phase never silently treats it as committed and never deletes
+//!   the store never silently treats it as committed and never deletes
 //!   arbitrary files. On Unix the root directory is synced after commit; a
 //!   POST-commit root-sync failure is reported as a `durability_warning` on
 //!   the successful result (the file is committed and counted; it is never
@@ -245,7 +245,8 @@ impl CaptureStore {
     }
 }
 
-/// Validate a portable capture filename per the Phase 6 contract:
+/// Validate a portable capture filename per the portable-filename
+/// contract:
 ///
 /// - ASCII, 1..=[`MAX_CAPTURE_FILENAME_LEN`] characters including `.jsonl`
 /// - starts alphanumeric; remaining chars only alphanumeric, `.`, `_`, `-`

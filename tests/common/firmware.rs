@@ -1,5 +1,6 @@
 //! Shared helpers that resolve the on-disk path of the
-//! `native_sim` test firmware binary used by integration tests.
+//! `native_sim` test firmware binary used by integration tests, plus the
+//! [`NativeSimFirmware`] process harness that spawns it.
 //!
 //! Three resolution rules, in order:
 //!
@@ -17,14 +18,19 @@
 //!
 //! These helpers are intentionally synchronous: they are called from
 //! preludes and from `Once`-guarded setup blocks, not from inside
-//! async test bodies. Spawning the firmware itself remains the
-//! responsibility of the caller.
+//! async test bodies. Spawning the firmware itself is owned by
+//! [`NativeSimFirmware::spawn`] (async, cross-platform Tokio process
+//! I/O), which builds the binary on demand, discovers the PTY path from
+//! stdout, drains the remaining output in a background task, and kills
+//! the child on drop.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::OnceLock;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
+use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::process::Command;
 
 /// `native_sim` build.
 pub const PLAIN_VARIANT: &str = "native_sim";
@@ -35,26 +41,9 @@ pub const PLAIN_BIN_ENV: &str = "SERIAL_MCP_NATIVE_SIM_BIN";
 /// Standard Zephyr executable name produced by `west build`.
 pub const ZEPHYR_EXE: &str = "zephyr.exe";
 
-/// Absolute path to the `serial-mcp` workspace root.
-///
-/// Resolved at first call from the `CARGO_MANIFEST_DIR` env var that
-/// cargo always exports while running tests.
-pub fn workspace_root() -> &'static PathBuf {
-    static WORKSPACE_ROOT: OnceLock<PathBuf> = OnceLock::new();
-    WORKSPACE_ROOT.get_or_init(|| {
-        let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        debug_assert!(
-            manifest.join("Cargo.toml").is_file(),
-            "CARGO_MANIFEST_DIR does not point at a Cargo workspace root: {}",
-            manifest.display()
-        );
-        manifest
-    })
-}
-
 /// Default build tree for a given variant (e.g. `build/native_sim`).
 pub fn default_build_dir(variant: &str) -> PathBuf {
-    workspace_root().join("build").join(variant)
+    super::workspace_root().join("build").join(variant)
 }
 
 /// Default firmware binary location.
@@ -105,7 +94,7 @@ fn ensure_firmware_built(variant: &str, env_var: &str, helper: &str) -> Result<P
 }
 
 fn run_helper(helper: &str, bin: &Path) -> Result<PathBuf> {
-    let root = workspace_root();
+    let root = super::workspace_root();
     eprintln!(
         "tests/common/firmware: building {variant} firmware via {helper} (binary missing at {bin})",
         variant = bin
@@ -116,7 +105,7 @@ fn run_helper(helper: &str, bin: &Path) -> Result<PathBuf> {
         helper = helper,
         bin = bin.display()
     );
-    let status = Command::new(helper)
+    let status = std::process::Command::new(helper)
         .current_dir(root)
         .status()
         .with_context(|| format!("failed to spawn {helper} from {}", root.display()))?;
@@ -130,4 +119,95 @@ fn run_helper(helper: &str, bin: &Path) -> Result<PathBuf> {
         );
     }
     Ok(bin.to_path_buf())
+}
+
+/// A running `native_sim` firmware instance with a known PTY path.
+///
+/// Spawns the firmware binary, parses the PTY path from stdout, and
+/// drains remaining output in a background task. Kills the process on
+/// drop. Spawning, discovery, and cleanup are all owned here — callers
+/// await [`NativeSimFirmware::spawn`] and use [`pty_path`](Self::pty_path).
+pub struct NativeSimFirmware {
+    child: tokio::process::Child,
+    pty_path: String,
+    _stdout_drain: tokio::task::JoinHandle<()>,
+}
+
+impl NativeSimFirmware {
+    /// Spawn the firmware, parse the PTY path from its stdout.
+    ///
+    /// Builds the firmware first via [`ensure_plain_firmware_built`] if
+    /// the binary is missing, then reads stdout until the PTY path line
+    /// (`uart connected to pseudotty: /dev/pts/N`) appears, with a
+    /// five-second discovery deadline. Uses only cross-platform Tokio
+    /// process/I/O APIs so the harness compiles on every platform.
+    pub async fn spawn() -> anyhow::Result<Self> {
+        let bin = ensure_plain_firmware_built()
+            .expect("plain native_sim firmware available for native_sim tests");
+        let mut child = Command::new(&bin)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .with_context(|| format!("Failed to spawn {}", bin.display()))?;
+
+        let stdout = child.stdout.take().context("stdout not piped")?;
+        let mut reader = BufReader::new(stdout).lines();
+
+        // Read until we find the PTY path line:
+        //   uart connected to pseudotty: /dev/pts/N
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        let mut pty_path: Option<String> = None;
+
+        while tokio::time::Instant::now() < deadline {
+            match tokio::time::timeout(Duration::from_millis(500), reader.next_line()).await {
+                Ok(Ok(Some(line))) => {
+                    if let Some(pos) = line.find("uart connected to pseudotty:") {
+                        if let Some(path_start) = line[pos..].find("/dev/pts/") {
+                            pty_path = Some(line[pos + path_start..].to_string());
+                            break;
+                        }
+                    }
+                }
+                Ok(Ok(None)) => break, // stdout closed
+                Ok(Err(e)) => {
+                    anyhow::bail!("Error reading zephyr stdout: {e}");
+                }
+                Err(_elapsed) => continue, // timeout, poll again
+            }
+        }
+
+        let pty_path = pty_path
+            .ok_or_else(|| anyhow::anyhow!("zephyr.exe did not print PTY path within 5s"))?;
+
+        // Drain remaining stdout in background so the pipe buffer doesn't fill.
+        let drain = tokio::spawn(async move {
+            while let Ok(Some(_line)) = reader.next_line().await {
+                // drain
+            }
+        });
+
+        Ok(Self {
+            child,
+            pty_path,
+            _stdout_drain: drain,
+        })
+    }
+
+    /// The PTY slave path the firmware's UART is connected to.
+    pub fn pty_path(&self) -> &str {
+        &self.pty_path
+    }
+
+    /// Check whether the firmware process has exited, and return its exit code.
+    pub fn try_exit_code(&mut self) -> Option<i32> {
+        self.child.try_wait().ok().flatten().and_then(|s| s.code())
+    }
+}
+
+impl Drop for NativeSimFirmware {
+    fn drop(&mut self) {
+        // start_kill sends SIGKILL, best-effort cleanup.
+        self.child.start_kill().ok();
+    }
 }

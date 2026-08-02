@@ -1132,7 +1132,7 @@ pub struct TransactResult {
     pub read: ReadResult,
 }
 
-// ---- Atomic boot capture (Phase 5) -----------------------------------------
+// ---- Atomic boot capture ---------------------------------------------------
 
 /// Optional DTR/RTS reset pulse for `capture_boot`.
 ///

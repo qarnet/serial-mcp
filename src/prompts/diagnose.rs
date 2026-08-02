@@ -4,11 +4,11 @@ use crate::prompts::types::DiagnosePortArgs;
 
 /// Build a diagnosis plan prompt for probing an unknown serial device.
 ///
-/// Teaches the Phase 4 common path: `list_ports` profile preview → bare
-/// `open` (automatic 115200 fallback + profile selection) → `transact`
-/// probes → inspect/roll back the learned profile when a probe misfired.
-/// Phase 5: `capture_boot` is the boot/reset capture path (atomic mark +
-/// optional DTR/RTS pulse + private-cursor capture).
+/// Teaches the common path: `list_ports` profile preview → bare `open`
+/// (automatic 115200 fallback + profile selection) → `transact` probes →
+/// inspect/roll back the learned profile when a probe misfired.
+/// `capture_boot` is the boot/reset capture path (atomic mark + optional
+/// DTR/RTS pulse + private-cursor capture).
 pub fn build_diagnose_prompt(args: DiagnosePortArgs) -> GetPromptResult {
     let starting = args
         .baud_rate

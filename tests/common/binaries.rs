@@ -30,31 +30,16 @@ const SERIAL_MCP_BIN_NAME: &str = "serial-mcp";
 /// Environment variable that overrides the binary location for tests.
 pub const SERIAL_MCP_BIN_ENV: &str = "SERIAL_MCP_BIN";
 
-/// Absolute path to the `serial-mcp` workspace root.
-///
-/// Resolved at first call by reading `CARGO_MANIFEST_DIR` (always
-/// populated by cargo when running tests) and walking up to the
-/// directory that contains `Cargo.toml`.
-pub fn workspace_root() -> &'static PathBuf {
-    static WORKSPACE_ROOT: OnceLock<PathBuf> = OnceLock::new();
-    WORKSPACE_ROOT.get_or_init(|| {
-        let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        debug_assert!(
-            manifest.join("Cargo.toml").is_file(),
-            "CARGO_MANIFEST_DIR does not point at a Cargo workspace root: {}",
-            manifest.display()
-        );
-        manifest
-    })
-}
-
 /// Default path to the debug `serial-mcp` binary inside the workspace.
 pub fn default_serial_mcp_bin() -> PathBuf {
-    workspace_root().join("target").join("debug").join(format!(
-        "{}{}",
-        SERIAL_MCP_BIN_NAME,
-        std::env::consts::EXE_SUFFIX
-    ))
+    super::workspace_root()
+        .join("target")
+        .join("debug")
+        .join(format!(
+            "{}{}",
+            SERIAL_MCP_BIN_NAME,
+            std::env::consts::EXE_SUFFIX
+        ))
 }
 
 /// Resolve the path to the `serial-mcp` binary the tests should spawn.
@@ -91,7 +76,7 @@ pub fn ensure_serial_mcp_built() -> Result<PathBuf> {
 }
 
 fn run_cargo_build(bin: &std::path::Path) -> Result<PathBuf> {
-    let root = workspace_root();
+    let root = super::workspace_root();
     eprintln!(
         "tests/common/binaries: building {bin_name} (binary missing at {bin})",
         bin_name = SERIAL_MCP_BIN_NAME,

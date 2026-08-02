@@ -13,41 +13,7 @@ use tempfile::TempDir;
 use tokio::process::Command;
 
 mod common;
-use common::binaries::ensure_serial_mcp_built;
-
-const EXPECTED_TOOLS: &[&str] = &[
-    "list_ports",
-    "list_connections",
-    "open",
-    "close",
-    "write",
-    "transact",
-    "read",
-    "capture_boot",
-    "flush",
-    "set_dtr_rts",
-    "set_flow_control",
-    "send_break",
-    "subscribe",
-    "unsubscribe",
-    "get_status",
-    "reconfigure",
-    "list_profiles",
-    "open_profile",
-    "save_profile",
-    "delete_profile",
-    "configure",
-    "rollback_profile",
-    "get_log",
-    "clear_log",
-    "export_log",
-    "reconnect",
-    "compute_checksum",
-];
-
-fn build_stdio_server() {
-    ensure_serial_mcp_built().expect("serial-mcp binary available for stdio tests");
-}
+use common::EXPECTED_TOOLS;
 
 /// Start a stdio server child with an isolated temporary `--profiles-path`
 /// so the test never touches the user's actual default profile config.
@@ -57,7 +23,8 @@ async fn start_stdio_client() -> (
     rmcp::service::RunningService<rmcp::service::RoleClient, ()>,
     TempDir,
 ) {
-    build_stdio_server();
+    common::binaries::ensure_serial_mcp_built()
+        .expect("serial-mcp binary available for stdio tests");
 
     let profiles_dir = TempDir::new().expect("temp dir for isolated stdio profile store");
     let profiles_path = profiles_dir.path().join("profiles.toml");
@@ -132,7 +99,7 @@ async fn stdio_list_resources_returns_statics_and_templates() {
 // std::process::Command directly, not the rmcp transport.
 
 fn run_bin(args: &[&str]) -> (std::process::Output, String) {
-    ensure_serial_mcp_built().expect("serial-mcp binary available");
+    common::binaries::ensure_serial_mcp_built().expect("serial-mcp binary available");
     let out = std::process::Command::new(common::binaries::serial_mcp_bin())
         .args(args)
         .output()
@@ -283,7 +250,7 @@ fn stdio_profiles_path_consumes_version_as_value() {
     );
 }
 
-// ── Phase 6: capture CLI surface ─────────────────────────────────────────────
+// ── Capture CLI surface ─────────────────────────────────────────────────────
 
 #[test]
 fn stdio_help_documents_capture_options() {
@@ -476,7 +443,8 @@ fn stdio_capture_symlink_root_rejects_startup() {
 async fn stdio_server_starts_with_capture_dir() {
     // A valid absolute --capture-dir must start the stdio server and the
     // handshake must succeed.
-    build_stdio_server();
+    common::binaries::ensure_serial_mcp_built()
+        .expect("serial-mcp binary available for stdio tests");
     let capture_dir = TempDir::new().expect("temp capture dir");
     let profiles_dir = TempDir::new().expect("temp profiles dir");
     let profiles_path = profiles_dir.path().join("profiles.toml");

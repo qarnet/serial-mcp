@@ -42,7 +42,7 @@ pub struct RxSession {
     connection: Arc<SerialConnection>,
     pump_task: StdMutex<Option<JoinHandle<()>>>,
     pump_token: StdMutex<CancellationToken>,
-    /// Async pump gate (Phase 5): the pump holds this across one complete
+    /// Async pump gate: the pump holds this across one complete
     /// read + ring append. `capture_boot` acquires the same gate so its mark
     /// cannot race an in-flight pump read/append — a byte physically read
     /// before the reset can never append after the mark.
@@ -119,7 +119,7 @@ impl RxSession {
         self.ring_capacity
     }
 
-    /// Acquire the pump gate (Phase 5): waits for any in-flight pump
+    /// Acquire the pump gate: waits for any in-flight pump
     /// read+append to finish, then blocks the pump from reading again until
     /// the returned guard is dropped. `capture_boot` holds this across the
     /// OS-input purge, the live-edge mark, and the reset-line assertion so
@@ -224,7 +224,7 @@ impl RxSession {
 ///
 /// The pump holds `pump_gate` across one complete read + ring append and
 /// releases it before the disconnect pause/sleep. `capture_boot` acquires
-/// the same gate to establish an atomic live-edge mark (Phase 5): a byte
+/// the same gate to establish an atomic live-edge mark: a byte
 /// physically read before the mark can never be appended after it.
 async fn pump_loop(
     connection: Arc<SerialConnection>,

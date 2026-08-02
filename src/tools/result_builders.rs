@@ -116,6 +116,30 @@ pub fn build_read_result(
     }))
 }
 
+/// Shared post-read accounting for `read`, `transact`, and `capture_boot`
+/// (NOT `subscribe`, whose lifecycle differs). Runs the exact four-step
+/// order every caller used: record the read operation, log RX bytes, then
+/// optionally record/log truncation, then optionally log the match.
+/// Builds no results, returns no errors, and owns no tool-specific logging.
+pub(crate) fn record_read_completion(
+    connection: &crate::serial::SerialConnection,
+    result: &crate::tools::types::ReadResult,
+    match_request: Option<&crate::match_config::MatchRequest>,
+) {
+    connection.record_read_op();
+    let log = connection.log();
+    log.rx_data(result.bytes_read);
+    if result.truncated {
+        connection.record_truncation();
+        log.truncated(result.bytes_observed, result.bytes_returned);
+    }
+    if result.matched {
+        if let Some(m) = match_request {
+            log.match_found(&m.pattern, &m.config.mode.to_string());
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

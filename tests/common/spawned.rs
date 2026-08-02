@@ -22,11 +22,8 @@ use std::net::TcpListener;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use rmcp::handler::client::ClientHandler;
 use rmcp::model::LoggingMessageNotificationParam;
-use rmcp::service::{NotificationContext, RoleClient, RunningService};
-use rmcp::transport::streamable_http_client::StreamableHttpClientTransport;
-use rmcp::ServiceExt;
+use rmcp::service::{RoleClient, RunningService};
 use tokio::process::{Child, Command};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -208,38 +205,14 @@ async fn wait_for_port(port: u16, timeout: Duration) -> Result<()> {
     anyhow::bail!("timed out waiting for spawned serial-mcp to bind {target}")
 }
 
-/// Forward every received `notifications/message` onto an unbounded
-/// mpsc channel so tests can await log/progress events.
-#[derive(Clone)]
-pub struct NotificationCollector {
-    tx: mpsc::UnboundedSender<LoggingMessageNotificationParam>,
-}
-
-impl ClientHandler for NotificationCollector {
-    fn on_logging_message(
-        &self,
-        params: LoggingMessageNotificationParam,
-        _ctx: NotificationContext<RoleClient>,
-    ) -> impl std::future::Future<Output = ()> + Send + '_ {
-        let tx = self.tx.clone();
-        async move {
-            let _ = tx.send(params);
-        }
-    }
-}
-
 /// Connect an `rmcp` HTTP client to a `SpawnedServer`. Returns the
-/// running client service plus the receiving end of the notification
-/// collector.
+/// running client service plus the receiving end of the shared
+/// notification collector.
 pub async fn spawn_client(
     server: &SpawnedServer,
 ) -> Result<(
-    RunningService<RoleClient, NotificationCollector>,
+    RunningService<RoleClient, super::NotificationCollector>,
     mpsc::UnboundedReceiver<LoggingMessageNotificationParam>,
 )> {
-    let (tx, rx) = mpsc::unbounded_channel();
-    let handler = NotificationCollector { tx };
-    let transport = StreamableHttpClientTransport::from_uri(server.url.as_str());
-    let client = handler.serve(transport).await?;
-    Ok((client, rx))
+    super::connect_to_url(server.url.as_str()).await
 }

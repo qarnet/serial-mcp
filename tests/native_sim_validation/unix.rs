@@ -12,100 +12,10 @@
 
 use std::time::Duration;
 
-use anyhow::Context;
 use serde_json::json;
-use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::process::Command;
 
+use crate::common::firmware::NativeSimFirmware;
 use crate::common::{args_object, connect_client, next_notification, tool_request, TestServer};
-
-// ── Firmware process management ──────────────────────────────────────────────
-
-fn zephyr_bin() -> std::path::PathBuf {
-    crate::common::firmware::ensure_plain_firmware_built()
-        .expect("plain native_sim firmware available for validation tests")
-}
-
-/// A running native_sim firmware instance with a known PTY path.
-/// Spawns `zephyr.exe`, parses the PTY path from stdout, and
-/// drains remaining output in a background task. Kills the
-/// process on drop.
-struct NativeSimFirmware {
-    child: tokio::process::Child,
-    pty_path: String,
-    _stdout_drain: tokio::task::JoinHandle<()>,
-}
-
-impl NativeSimFirmware {
-    /// Spawn `zephyr.exe`, parse the PTY path from its stdout.
-    async fn spawn() -> anyhow::Result<Self> {
-        let bin = zephyr_bin();
-        let mut child = Command::new(&bin)
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
-            .kill_on_drop(true)
-            .spawn()
-            .with_context(|| format!("Failed to spawn {}", bin.display()))?;
-
-        let stdout = child.stdout.take().context("stdout not piped")?;
-        let mut reader = BufReader::new(stdout).lines();
-
-        // Read until we find the PTY path line:
-        //   uart connected to pseudotty: /dev/pts/N
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-        let mut pty_path: Option<String> = None;
-
-        while tokio::time::Instant::now() < deadline {
-            match tokio::time::timeout(Duration::from_millis(500), reader.next_line()).await {
-                Ok(Ok(Some(line))) => {
-                    if let Some(pos) = line.find("uart connected to pseudotty:") {
-                        if let Some(path_start) = line[pos..].find("/dev/pts/") {
-                            pty_path = Some(line[pos + path_start..].to_string());
-                            break;
-                        }
-                    }
-                }
-                Ok(Ok(None)) => break, // stdout closed
-                Ok(Err(e)) => {
-                    anyhow::bail!("Error reading zephyr stdout: {e}");
-                }
-                Err(_elapsed) => continue, // timeout, poll again
-            }
-        }
-
-        let pty_path = pty_path
-            .ok_or_else(|| anyhow::anyhow!("zephyr.exe did not print PTY path within 5s"))?;
-
-        // Drain remaining stdout in background so the pipe buffer doesn't fill.
-        let drain = tokio::spawn(async move {
-            while let Ok(Some(_line)) = reader.next_line().await {
-                // drain
-            }
-        });
-
-        Ok(Self {
-            child,
-            pty_path,
-            _stdout_drain: drain,
-        })
-    }
-
-    fn pty_path(&self) -> &str {
-        &self.pty_path
-    }
-
-    /// Check whether the firmware process has exited, and return its exit code.
-    fn try_exit_code(&mut self) -> Option<i32> {
-        self.child.try_wait().ok().flatten().and_then(|s| s.code())
-    }
-}
-
-impl Drop for NativeSimFirmware {
-    fn drop(&mut self) {
-        // start_kill sends SIGKILL, best-effort cleanup.
-        self.child.start_kill().ok();
-    }
-}
 
 // ── MCP helper functions ─────────────────────────────────────────────────────
 
@@ -1270,7 +1180,7 @@ async fn native_unsubscribe_then_resubscribe() {
     drop(fw);
 }
 
-// ── Phase 1 gap-fill: get_status on PTY ─────────────────────────────────────
+// ── get_status on PTY ───────────────────────────────────────────────────────
 
 #[tokio::test]
 #[ignore = "requires native_sim firmware binary"]
@@ -1337,7 +1247,7 @@ async fn native_get_status_after_write_increments_tx_counter() {
     drop(fw);
 }
 
-// ── Phase 1 gap-fill: reconfigure on PTY ─────────────────────────────────────
+// ── reconfigure on PTY ──────────────────────────────────────────────────────
 
 #[tokio::test]
 #[ignore = "requires native_sim firmware binary"]
@@ -3105,7 +3015,7 @@ async fn native_read_explicit_rx_framing_overrides_protocol() {
     drop(fw);
 }
 
-// ── Connection-default e2e tests (Phase 5 layer 3-4) ────────────────────────
+// ── Connection-default e2e tests ─────────────────────────────────────────────
 
 #[tokio::test]
 #[ignore = "requires native_sim firmware binary"]
@@ -4194,7 +4104,7 @@ async fn native_read_modbus_ascii_preset_decodes_parsed_frame() {
     drop(fw);
 }
 
-// ── Phase 5: capture_boot arm-only over the real firmware pipeline ──────────
+// ── capture_boot arm-only over the real firmware pipeline ───────────────────
 //
 // native_sim's PTY UART has no modem-line callbacks, so DTR/RTS assertion
 // cannot be observed here (the atomic reset proof lives in the controlled
