@@ -34,6 +34,11 @@ modern protocol.
 9. Defer Tasks, positive cache lifetimes, promoted HTTP parameter headers, and
    MRTR product behavior. Record them in `docs/development/FEATURES.md`.
 10. OAuth remains out of scope because serial-mcp is local-first.
+11. Remove `poll_interval_ms` from open/profile/configure/connection defaults.
+    It only controls the deleted RX-stream tool and has no role in event-driven
+    `subscriptions/listen`. Existing profile files may contain the old key;
+    serde ignores it on read and the next durable rewrite drops it. No profile
+    schema-version bump is needed.
 
 Interpretation note: “subscription is only available to modern clients” means
 the standard MCP `subscriptions/listen` method, not a retained serial-mcp
@@ -555,31 +560,61 @@ and hotplug updates will be shipped. FEATURES keeps only unshipped work.
 
 ## Phased implementation
 
-### Phase 1 — rmcp 3 compile surface
+### Phase 1 — rmcp 3 compile surface and obsolete-stream removal
 
 Scope:
 
 - metadata/model/constructor/response migrations;
 - remove obsolete task descriptor fields;
-- keep existing protocol behavior temporarily while code compiles;
-- adapt tests only as required by renamed rmcp APIs.
+- remove MCP logging and the `subscribe`/`unsubscribe` tools now, because their
+  deprecated rmcp models prevent a warning-clean all-target build;
+- remove legacy `resources/subscribe`/`resources/unsubscribe` handlers and
+  subscription/list-change/logging capability flags; modern resource
+  subscription stays disabled until Phase 3;
+- remove subscription-only `poll_interval_ms`, stream chunk limits/schema
+  helpers, and their profile/open/configure/connection plumbing rather than
+  leaving a public no-op setting;
+- remove `StreamRegistry`, `stream_ops`, subscription-only wire types, schema
+  tests, fuzz inputs, integration stages, and notification collectors;
+- keep `read`, RX ring, matcher, framing, parser, and capture behavior intact;
+- update current-surface tool counts and docs to 25 while preserving historical
+  release-note text about older versions.
 
 Files:
 
 - `Cargo.toml`, `Cargo.lock`;
 - `src/server.rs`;
 - `src/tools/control_ops.rs`, `src/tools/io_ops.rs`;
+- `src/main.rs`, `src/tools/mod.rs`, `src/tools/types.rs`,
+  `src/tools/rx_validate.rs`, `src/tools/helpers.rs`, `src/limits.rs`,
+  `src/schema_helpers.rs`;
+- `src/profiles.rs`, `src/serial/config.rs`, `src/serial/connection.rs`,
+  `src/serial/manager.rs`, and `src/tools/port_ops.rs` for obsolete
+  `poll_interval_ms` removal;
+- delete `src/tools/stream_ops.rs`;
 - prompt files;
-- direct-rmcp test files.
+- directly affected unit, property, fuzz, PTY, protocol-emulator, HTTP, stdio,
+  and resource-subscription tests;
+- current surface docs/evaluator files: `README.md`, `AGENTS.md`,
+  `docs/agent-config.md`, `docs/development/FEATURES.md`,
+  `docs/development/agent-interface-evaluation.md`, and `CHANGELOG.md`'s
+  Unreleased section. Do not rewrite historical changelog entries.
 
 Acceptance:
 
 ```bash
-cargo check --all-targets --locked
 cargo fmt --all -- --check
+cargo build --all-targets --locked
+cargo test --locked
+cargo clippy --all-targets --locked -- -D warnings
+cargo test --test doc_drift --locked
+cargo run --manifest-path xtask/Cargo.toml -- agent-eval \
+  --baseline docs/development/agent-interface-baseline.json
 ```
 
-No broad lint allowances. No new protocol feature yet.
+No `allow(deprecated)` bridge, broad lint allowance, hidden replacement tool,
+or modern subscription implementation yet. Tool operational behavior outside
+the two removed tools remains unchanged.
 
 ### Phase 2 — dual protocol and discovery
 
@@ -664,48 +699,7 @@ cargo test --test http_integration --locked
 cargo test --test stdio_integration --locked
 ```
 
-### Phase 4 — remove legacy streaming tools and logging
-
-Scope:
-
-- delete `subscribe`/`unsubscribe` tools and implementation;
-- remove MCP logging capability/models/collectors;
-- remove legacy resources subscribe/unsubscribe handlers;
-- reduce exact tool catalog count 27 -> 25;
-- update agent evaluator and docs from measured output.
-
-Files include:
-
-- `src/server.rs`, `src/tools/mod.rs`, `src/tools/types.rs`;
-- delete `src/tools/stream_ops.rs` if no remaining consumer;
-- `src/main.rs`, test helpers, subscription tests;
-- `README.md`, `AGENTS.md`, `CHANGELOG.md`, `server.json` only if executable
-  truth requires it;
-- `tests/doc_drift.rs`;
-- `docs/development/agent-interface-evaluation.md`;
-- `docs/development/FEATURES.md`.
-
-Acceptance:
-
-- no `rmcp` logging API usage remains;
-- no `#[allow(deprecated)]` needed for logging or legacy subscriptions;
-- no public tool named `subscribe` or `unsubscribe`;
-- agent guidance teaches modern resource listen + independent `read`;
-- exact tool count and every prose reference say 25;
-- historical evaluator baseline remains unchanged;
-- current evaluator report explains measured catalog delta.
-
-Verification:
-
-```bash
-cargo test --test http_integration --locked
-cargo test --test stdio_integration --locked
-cargo test --test doc_drift --locked
-cargo run --manifest-path xtask/Cargo.toml -- agent-eval \
-  --baseline docs/development/agent-interface-baseline.json
-```
-
-### Phase 5 — modern cache-shape compliance and complete gates
+### Phase 4 — modern cache compliance, conformance, and complete gates
 
 Scope:
 
