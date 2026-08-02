@@ -16,6 +16,12 @@ updates:
     schedule:
       interval: monthly
     open-pull-requests-limit: 5
+    ignore:
+      - dependency-name: dtolnay/rust-toolchain
+        update-types:
+          - version-update:semver-major
+          - version-update:semver-minor
+          - version-update:semver-patch
     groups:
       patch-and-minor:
         applies-to: version-updates
