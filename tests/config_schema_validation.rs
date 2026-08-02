@@ -50,7 +50,10 @@ fn load_json_file(path: &Path) -> Result<Value, String> {
 struct NoNetworkRetriever;
 
 impl Retrieve for NoNetworkRetriever {
-    fn retrieve(&self, uri: &Uri<&str>) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    fn retrieve(
+        &self,
+        uri: &Uri<String>,
+    ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
         Err(Box::new(UnresolvedResourceError(format!(
             "local validation cannot fetch external resource {uri}"
         ))))
@@ -77,10 +80,16 @@ impl std::error::Error for UnresolvedResourceError {}
 /// resource is harmless and keeps one local path).
 fn compile_local(schema: &Value) -> Result<jsonschema::Validator, String> {
     let models_dev = load_json_file(&fixture_path(MODELS_DEV_SCHEMA_PATH))?;
-    let resource = Resource::from_contents(models_dev)
-        .map_err(|err| format!("invalid vendored {MODELS_DEV_SCHEMA_PATH}: {err}"))?;
+    // 0.49's `Resource::from_contents` is infallible; draft detection happens
+    // during `Registry::prepare`.
+    let resource = Resource::from_contents(models_dev);
+    let registry = jsonschema::Registry::new()
+        .add(MODELS_DEV_URI, resource)
+        .map_err(|err| err.to_string())?
+        .prepare()
+        .map_err(|err| err.to_string())?;
     jsonschema::options()
-        .with_resource(MODELS_DEV_URI, resource)
+        .with_registry(&registry)
         .with_retriever(NoNetworkRetriever)
         .build(schema)
         .map_err(|err| err.to_string())
