@@ -32,7 +32,7 @@ axum = "0.8"
 glob = "0.3"
 regex = "1"
 pico-args = { version = "0.5.0", features = ["eq-separator"] }
-toml = "0.8"
+toml = "1.1"
 dirs = "6"
 tempfile = "3"
 fs2 = "0.4.3"
@@ -50,7 +50,7 @@ rmcp = { version = "1.7", features = ["client", "transport-streamable-http-clien
 tokio = { version = "1.41", features = ["process", "fs"] }
 anyhow = "1.0"
 proptest = "1.6"
-proptest-derive = "0.5"
+proptest-derive = "0.8"
 libfuzzer-sys = "0.4"
 arbitrary = { version = "1", features = ["derive"] }
 jsonschema = "0.26"
