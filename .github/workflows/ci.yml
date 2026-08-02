@@ -17,7 +17,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@v22
@@ -60,14 +60,14 @@ jobs:
             install: ""
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install system dependencies
         if: matrix.install != ''
         run: ${{ matrix.install }}
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@1.88.0
+        uses: dtolnay/rust-toolchain@1.97.1
         with:
           components: clippy, rustfmt
 
@@ -106,7 +106,7 @@ jobs:
       NCS_INSTALL_DIR: /home/runner/ncs
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       # GitHub-hosted ubuntu-latest runners ship ~14 GB free disk. The NCS
       # SDK + toolchain cache alone is ~4.6 GB, cargo cache ~1-2 GB, and the
@@ -131,7 +131,7 @@ jobs:
           sudo apt-get install -y libudev-dev pkg-config gcc-multilib libusb-1.0-0
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@1.88.0
+        uses: dtolnay/rust-toolchain@1.97.1
 
       - name: Report Rust toolchain
         run: rustc --version --verbose
@@ -141,7 +141,7 @@ jobs:
 
       - name: Cache NCS SDK and toolchain
         id: cache-ncs
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             /home/runner/ncs
@@ -189,7 +189,7 @@ jobs:
 
       # Remove the firmware build tree after tests so the post-step cache
       # upload (and any later steps) don't walk a stale build dir. The NCS
-      # cache at /home/runner/ncs is intentionally kept — actions/cache@v4
+      # cache at /home/runner/ncs is intentionally kept — actions/cache@v6
       # saves it post-job and a cache miss + skipped install would break the
       # next run. DO NOT rm -rf /home/runner/ncs.
       - name: Clean firmware build tree

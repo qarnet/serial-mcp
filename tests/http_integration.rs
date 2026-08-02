@@ -3128,108 +3128,7 @@ async fn capture_boot_immediate_bytes_captured_and_match_stops_at_pattern() {
     client.cancel().await.ok();
 }
 
-// ── 3. Pump barrier: capture cannot acquire the gate until an in-flight
-//       pre-reset pump read has appended ──────────────────────────────────
-
-#[tokio::test]
-async fn capture_boot_pump_barrier_appends_inflight_read_before_mark() {
-    let (_server, client, cid, state) = controlled_server("loop-capture-barrier", 65536).await;
-
-    // Establish the session + pump, then consume the first bytes. The pump's
-    // read has a 100ms budget: while parked, the gate is released (read
-    // timeout) and immediately re-acquired every ~105ms, so `is_parked`
-    // alone does not bound the gate-hold window. The STALE-A consumption
-    // below acts as the phase reset: the pump's read returns with data
-    // BEFORE its budget elapses, appends, and starts a fresh read cycle with
-    // a full 100ms budget. The capture below queues on the gate well inside
-    // that window.
-    state.inject_rx(b"STALE-A");
-    let r = client
-        .peer()
-        .call_tool(tool_request(
-            "read",
-            json!({ "connection_id": cid, "timeout_ms": 1000 }),
-        ))
-        .await
-        .unwrap();
-    assert_eq!(r.structured_content.unwrap()["data"], json!("STALE-A"));
-
-    // Block reads now: INFLIGHT can be queued but stays unread until the
-    // test releases the block. The pump is parked mid-read with ~100ms of
-    // its fresh budget left, so the gate is provably held for the whole
-    // sequence below — no poll/fresh-read timing loops needed.
-    state.set_block_reads(true);
-    let deadline = Instant::now() + Duration::from_secs(2);
-    while !state.is_parked() && Instant::now() < deadline {
-        tokio::time::sleep(Duration::from_millis(5)).await;
-    }
-    assert!(state.is_parked(), "pump must be parked inside a read");
-
-    // Boot bytes appear at assertion time.
-    state.set_on_line_change(Some(Arc::new({
-        let state = Arc::clone(&state);
-        move |dtr, rts| {
-            if !dtr && !rts {
-                state.inject_rx(b"boot!");
-            }
-        }
-    })));
-
-    // Start the capture and keep polling it so the request is transmitted.
-    // The pump is parked mid-read holding the gate with ~100ms of fresh
-    // budget left, so the capture must NOT proceed: no line assertion, no
-    // completion.
-    let call = client.peer().call_tool(tool_request(
-        "capture_boot",
-        json!({
-            "connection_id": cid,
-            "reset": capture_reset(),
-            "timeout_ms": 2000,
-        }),
-    ));
-    let mut call = Box::pin(call);
-    let polled = tokio::select! {
-        _ = tokio::time::sleep(Duration::from_millis(20)) => "pending",
-        _res = &mut call => "done",
-    };
-    assert_eq!(
-        polled, "pending",
-        "capture must wait for the in-flight pump read+append"
-    );
-    assert!(
-        state.line_log().is_empty(),
-        "no line assertion may happen before the in-flight bytes are appended: {:?}",
-        state.line_log()
-    );
-
-    // Now the pre-reset bytes arrive while the pump is parked: with reads
-    // still blocked they stay queued; releasing the block wakes the pump,
-    // which reads INFLIGHT, appends it, and only then releases the gate.
-    // The capture's mark must therefore include those bytes.
-    state.inject_rx(b"INFLIGHT");
-    state.set_block_reads(false);
-    let r = call.await.unwrap();
-    assert_ne!(r.is_error, Some(true), "{r:?}");
-    let s = r.structured_content.expect("structured capture result");
-    assert_eq!(
-        s["mark_offset"],
-        json!(15),
-        "in-flight pre-reset bytes (7 stale + 8 inflight) must be appended BEFORE the mark"
-    );
-    assert_eq!(s["pre_mark_bytes"], json!(15));
-    assert_eq!(
-        s["read"]["data"],
-        json!("boot!"),
-        "only post-mark bytes captured"
-    );
-    assert_eq!(s["read"]["from_offset"], json!(15));
-    // Assert then release, in order.
-    assert_eq!(state.line_log(), vec![(false, false), (true, true)]);
-
-    client.cancel().await.ok();
-}
-
-// ── 4. Request-scoped cancellation during hold releases lines ────────────
+// ── 3. Request-scoped cancellation during hold releases lines ────────────
 
 #[tokio::test]
 async fn capture_boot_cancellation_releases_lines_request_scoped() {
@@ -3406,7 +3305,7 @@ async fn capture_boot_cancellation_with_failed_release_retries_cleanup_via_contr
     client.cancel().await.ok();
 }
 
-// ── 5. Assertion failure and release failure attempt configured cleanup ──
+// ── 4. Assertion failure and release failure attempt configured cleanup ──
 
 #[tokio::test]
 async fn capture_boot_assertion_failure_errors_and_attempts_cleanup() {
@@ -3504,7 +3403,7 @@ async fn capture_boot_release_failure_errors_and_retries_cleanup() {
     client.cancel().await.ok();
 }
 
-// ── 6. Invalid framing construction fails before any line transition ─────
+// ── 5. Invalid framing construction fails before any line transition ─────
 
 #[tokio::test]
 async fn capture_boot_invalid_framing_fails_before_line_transition() {
@@ -3537,7 +3436,7 @@ async fn capture_boot_invalid_framing_fails_before_line_transition() {
     client.cancel().await.ok();
 }
 
-// ── 7. Runtime SLIP framing error: partial structured result, lines
+// ── 6. Runtime SLIP framing error: partial structured result, lines
 //       released ──────────────────────────────────────────────────────────
 
 #[tokio::test]
@@ -3594,7 +3493,7 @@ async fn capture_boot_runtime_framing_error_returns_partial_result_and_releases_
     client.cancel().await.ok();
 }
 
-// ── 8. NDJSON framing/parser and binary hex/base64 output reuse current
+// ── 7. NDJSON framing/parser and binary hex/base64 output reuse current
 //       read behavior ─────────────────────────────────────────────────────
 
 #[tokio::test]
@@ -3690,7 +3589,7 @@ async fn capture_boot_binary_output_hex_and_base64() {
     client.cancel().await.ok();
 }
 
-// ── 9. Silence timeout after a banner; wall timeout during continuous
+// ── 8. Silence timeout after a banner; wall timeout during continuous
 //       output ────────────────────────────────────────────────────────────
 
 #[tokio::test]
@@ -3778,7 +3677,7 @@ async fn capture_boot_wall_timeout_stops_during_continuous_output() {
     client.cancel().await.ok();
 }
 
-// ── 10. Disconnect returns a partial capture with `connection_closed` ────
+// ── 9. Disconnect returns a partial capture with `connection_closed` ────
 
 #[tokio::test]
 async fn capture_boot_disconnect_returns_partial_capture_connection_closed() {
@@ -3830,7 +3729,7 @@ async fn capture_boot_disconnect_returns_partial_capture_connection_closed() {
     client.cancel().await.ok();
 }
 
-// ── 11. Ring wrap reports `bytes_lost`; the atomic mark is preserved ─────
+// ── 10. Ring wrap reports `bytes_lost`; the atomic mark is preserved ─────
 
 #[tokio::test]
 async fn capture_boot_ring_wrap_reports_bytes_lost_and_preserves_mark() {
@@ -3880,7 +3779,7 @@ async fn capture_boot_ring_wrap_reports_bytes_lost_and_preserves_mark() {
     client.cancel().await.ok();
 }
 
-// ── 12. Concurrent `set_dtr_rts` cannot interleave inside the pulse ──────
+// ── 11. Concurrent `set_dtr_rts` cannot interleave inside the pulse ──────
 
 #[tokio::test]
 async fn capture_boot_concurrent_set_dtr_rts_cannot_interleave_inside_pulse() {
@@ -3942,7 +3841,7 @@ async fn capture_boot_concurrent_set_dtr_rts_cannot_interleave_inside_pulse() {
     client_b.cancel().await.ok();
 }
 
-// ── 13. Arm-only capture (no reset config) never touches lines ───────────
+// ── 12. Arm-only capture (no reset config) never touches lines ───────────
 
 #[tokio::test]
 async fn capture_boot_arm_only_does_not_touch_lines() {

@@ -1,5 +1,5 @@
 [toolchain]
-channel = "1.88.0"        # pick whatever stable you want; bump when you want
+channel = "1.97.1"       # pick whatever stable you want; bump when you want
 components = [ "rustfmt", "clippy", "rust-src", "rust-analyzer" ]
 targets = [ "aarch64-unknown-linux-gnu" ]
 profile = "minimal"
