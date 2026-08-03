@@ -1,0 +1,18 @@
+# Expected conformance failures (pinned @modelcontextprotocol/conformance@0.2.0-alpha.10)
+#
+# These four checks are fixture-dependent: the conformance suite drives them
+# through fixture endpoints / capabilities that serial-mcp deliberately does
+# not implement (no task/elicitation fixtures, no capability spoofing, no
+# independent-request streaming beyond the MCP contract, no MCP logging).
+# They are documented, NOT broadening: an entry that starts passing fails the
+# run as stale, and any OTHER check that fails is an unexpected regression.
+#
+# Format is the runner's `<scenario>:<check-id>` per-check baseline (check id
+# is the left-hand column printed by `conformance server`). Do not rename the
+# IDs or change the scope; only the representation may adapt to the pinned
+# runner's expectations.
+server:
+  - server-stateless:sep-2575-server-rejects-undeclared-capability
+  - server-stateless:sep-2575-missing-capability-http-400
+  - server-stateless:sep-2575-http-server-no-independent-requests-on-stream
+  - server-stateless:sep-2575-server-no-log-without-loglevel

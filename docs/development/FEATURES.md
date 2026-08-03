@@ -222,12 +222,17 @@
 - proxy observation, reverse engineering, test harnessing
 - very complex
 
-## Wish
+### MCP Bundle (MCPB) distribution
+- package existing native release binaries as an MCP Bundle for one-click local
+  stdio installation in supporting desktop clients
+- promising fit: `server.type = "binary"`, no language runtime, platform-specific
+  command overrides, and optional user configuration
+- separate release/distribution project, not protocol work; decide one
+  cross-platform bundle versus per-platform bundles, manifest version, signing,
+  update flow, and clean-machine Claude Desktop tests before implementation
+- validate/pack with a pinned `@anthropic-ai/mcpb` release when scheduled
 
-### Hotplug watch
-- subscribe-style notification when serial ports appear/disappear
-- pairs with profiles + auto-reconnect for flaky USB adapters
-- low priority: agents can poll `list_ports` today
+## Wish
 
 ### User-facing loopback / virtual port backend
 - expose a virtual echo/scripted device as an openable backend (the

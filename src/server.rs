@@ -9,9 +9,9 @@ use std::sync::Arc;
 
 use base64::Engine as _;
 use rmcp::{
-    handler::server::wrapper::Parameters, model::*, prompt, prompt_handler, prompt_router,
-    service::RequestContext, service::SubscriptionContext, tool, tool_handler, tool_router,
-    ErrorData as McpError, Json, RoleServer, ServerHandler,
+    handler::server::wrapper::Parameters, model::*, prompt, prompt_router, service::RequestContext,
+    service::SubscriptionContext, tool, tool_handler, tool_router, ErrorData as McpError, Json,
+    RoleServer, ServerHandler,
 };
 use tokio::sync::broadcast;
 
@@ -59,6 +59,34 @@ fn paginate<T: Clone>(
     };
 
     (items, next_cursor)
+}
+
+/// Whether the negotiated protocol version requires the SEP-2549 cache
+/// fields (`ttlMs` / `cacheScope`).
+///
+/// The fields exist only for protocol version `2026-07-28` and newer. rmcp
+/// strips `resultType` for legacy peers but deliberately does NOT strip
+/// cache fields, so the server must omit them itself — legacy peers must
+/// never see `ttlMs`/`cacheScope`. ISO `YYYY-MM-DD` versions compare
+/// lexically the same as chronologically.
+fn modern_cache_fields(protocol_version: Option<ProtocolVersion>) -> bool {
+    protocol_version.is_some_and(|v| v.as_str() >= ProtocolVersion::V_2026_07_28.as_str())
+}
+
+/// Apply the modern SEP-2549 cache fields to a read-resource result when the
+/// peer negotiated `2026-07-28` or newer; legacy peers keep the bare result.
+/// Non-cacheable complete results (`ttlMs: 0`, `cacheScope: "private"`) mark
+/// every `resources/read` response as immediately stale and client-private.
+fn modern_read_result(
+    result: ReadResourceResult,
+    protocol_version: Option<ProtocolVersion>,
+) -> ReadResourceResponse {
+    if modern_cache_fields(protocol_version) {
+        result.with_ttl_ms(0).with_cache_scope(CacheScope::Private)
+    } else {
+        result
+    }
+    .into()
 }
 
 // ---- Handler ---------------------------------------------------------------
@@ -928,8 +956,13 @@ impl SerialHandler {
     }
 }
 
+// NOTE: no `#[prompt_handler]` here — that macro *unconditionally replaces*
+// any `list_prompts`/`get_prompt` in the annotated block with generated
+// versions that leave the SEP-2549 cache fields unset (rmcp-macros 3.1.0,
+// unlike `#[tool_handler]`, does not honor existing methods). The two
+// methods are therefore written explicitly below using the SAME
+// `Self::prompt_router()` the macro would use.
 #[tool_handler]
-#[prompt_handler]
 impl ServerHandler for SerialHandler {
     fn get_info(&self) -> ServerInfo {
         // Modern view: rmcp intersects `subscriptions/listen` filters
@@ -1073,7 +1106,7 @@ impl ServerHandler for SerialHandler {
     async fn list_resources(
         &self,
         request: Option<PaginatedRequestParams>,
-        _ctx: RequestContext<RoleServer>,
+        ctx: RequestContext<RoleServer>,
     ) -> Result<ListResourcesResult, McpError> {
         const PAGE_SIZE: usize = 100;
 
@@ -1110,13 +1143,16 @@ impl ServerHandler for SerialHandler {
         let (resources, next_cursor) = paginate(&all, request.and_then(|r| r.cursor), PAGE_SIZE);
         let mut result = ListResourcesResult::with_all_items(resources);
         result.next_cursor = next_cursor;
+        if modern_cache_fields(ctx.protocol_version()) {
+            result = result.with_ttl_ms(0).with_cache_scope(CacheScope::Private);
+        }
         Ok(result)
     }
 
     async fn list_resource_templates(
         &self,
         request: Option<PaginatedRequestParams>,
-        _ctx: RequestContext<RoleServer>,
+        ctx: RequestContext<RoleServer>,
     ) -> Result<ListResourceTemplatesResult, McpError> {
         const PAGE_SIZE: usize = 100;
         let all = vec![
@@ -1167,13 +1203,16 @@ impl ServerHandler for SerialHandler {
             paginate(&all, request.and_then(|r| r.cursor), PAGE_SIZE);
         let mut result = ListResourceTemplatesResult::with_all_items(resource_templates);
         result.next_cursor = next_cursor;
+        if modern_cache_fields(ctx.protocol_version()) {
+            result = result.with_ttl_ms(0).with_cache_scope(CacheScope::Private);
+        }
         Ok(result)
     }
 
     async fn read_resource(
         &self,
         request: ReadResourceRequestParams,
-        _ctx: RequestContext<RoleServer>,
+        ctx: RequestContext<RoleServer>,
     ) -> Result<ReadResourceResponse, McpError> {
         let uri = request.uri;
         match parse_resource_uri(&uri) {
@@ -1194,10 +1233,12 @@ impl ServerHandler for SerialHandler {
                     profile_matches,
                 })
                 .map_err(|e| McpError::internal_error(format!("serialize: {e}"), None))?;
-                Ok(ReadResourceResult::new(vec![
-                    ResourceContents::text(body, uri).with_mime_type("application/json")
-                ])
-                .into())
+                Ok(modern_read_result(
+                    ReadResourceResult::new(vec![
+                        ResourceContents::text(body, uri).with_mime_type("application/json")
+                    ]),
+                    ctx.protocol_version(),
+                ))
             }
             ResourceUriKind::ConnectionsList => {
                 let summaries = self.connections.list_open().await;
@@ -1206,10 +1247,12 @@ impl ServerHandler for SerialHandler {
                     connections: summaries,
                 })
                 .map_err(|e| McpError::internal_error(format!("serialize: {e}"), None))?;
-                Ok(ReadResourceResult::new(vec![
-                    ResourceContents::text(body, uri).with_mime_type("application/json")
-                ])
-                .into())
+                Ok(modern_read_result(
+                    ReadResourceResult::new(vec![
+                        ResourceContents::text(body, uri).with_mime_type("application/json")
+                    ]),
+                    ctx.protocol_version(),
+                ))
             }
             ResourceUriKind::ConnectionDetail(id) => {
                 let conn = self.connections.get(&id).await.map_err(|_| {
@@ -1221,10 +1264,12 @@ impl ServerHandler for SerialHandler {
 
                 let body = serde_json::to_string_pretty(&conn.summary())
                     .map_err(|e| McpError::internal_error(format!("serialize: {e}"), None))?;
-                Ok(ReadResourceResult::new(vec![
-                    ResourceContents::text(body, uri).with_mime_type("application/json")
-                ])
-                .into())
+                Ok(modern_read_result(
+                    ReadResourceResult::new(vec![
+                        ResourceContents::text(body, uri).with_mime_type("application/json")
+                    ]),
+                    ctx.protocol_version(),
+                ))
             }
             ResourceUriKind::ConnectionDetailRaw(id) => {
                 let conn = self.connections.get(&id).await.map_err(|_| {
@@ -1238,10 +1283,12 @@ impl ServerHandler for SerialHandler {
                     .await
                     .map_err(|e| McpError::internal_error(format!("Failed to read: {e}"), None))?;
                 let b64 = base64::engine::general_purpose::STANDARD.encode(&raw_bytes);
-                Ok(ReadResourceResult::new(vec![
-                    ResourceContents::blob(b64, uri).with_mime_type("application/octet-stream")
-                ])
-                .into())
+                Ok(modern_read_result(
+                    ReadResourceResult::new(vec![
+                        ResourceContents::blob(b64, uri).with_mime_type("application/octet-stream")
+                    ]),
+                    ctx.protocol_version(),
+                ))
             }
             ResourceUriKind::ConnectionLog(id) => {
                 let conn = self.connections.get(&id).await.map_err(|_| {
@@ -1258,10 +1305,12 @@ impl ServerHandler for SerialHandler {
                     body.push_str(&line);
                     body.push('\n');
                 }
-                Ok(ReadResourceResult::new(vec![
-                    ResourceContents::text(body, uri).with_mime_type("application/x-ndjson")
-                ])
-                .into())
+                Ok(modern_read_result(
+                    ReadResourceResult::new(vec![
+                        ResourceContents::text(body, uri).with_mime_type("application/x-ndjson")
+                    ]),
+                    ctx.protocol_version(),
+                ))
             }
             ResourceUriKind::Unknown => Err(McpError::resource_not_found(
                 "resource_not_found",
@@ -1282,6 +1331,62 @@ impl ServerHandler for SerialHandler {
             .map_err(|e| McpError::internal_error(format!("Completion error: {e}"), None))?;
         Ok(CompleteResult::new(completion))
     }
+
+    // Explicit `tools/list` / `prompts/list` handlers. The
+    // `#[tool_handler]` macro generates `list_tools` when absent but leaves
+    // the SEP-2549 cache fields unset, and `#[prompt_handler]` replaces any
+    // `list_prompts` outright; the explicit versions serve the SAME routers
+    // (exact deterministic catalog, titles, schemas, prompt definitions)
+    // with cursor pagination and set `ttlMs: 0` / `cacheScope: "private"`
+    // only for `2026-07-28`+ peers.
+    async fn list_tools(
+        &self,
+        request: Option<PaginatedRequestParams>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<ListToolsResult, McpError> {
+        const PAGE_SIZE: usize = 100;
+        let all = Self::tool_router().list_all();
+        let (tools, next_cursor) = paginate(&all, request.and_then(|r| r.cursor), PAGE_SIZE);
+        let mut result = ListToolsResult::with_all_items(tools);
+        result.next_cursor = next_cursor;
+        if modern_cache_fields(ctx.protocol_version()) {
+            result = result.with_ttl_ms(0).with_cache_scope(CacheScope::Private);
+        }
+        Ok(result)
+    }
+
+    /// Route `prompts/get` through the same `prompt_router` the
+    /// `#[prompt_handler]` macro would use (hand-written because that macro
+    /// replaces the method unconditionally — see the impl attribute note).
+    async fn get_prompt(
+        &self,
+        request: GetPromptRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<GetPromptResponse, McpError> {
+        let prompt_context = rmcp::handler::server::prompt::PromptContext::new(
+            self,
+            request.name,
+            request.arguments,
+            context,
+        );
+        Self::prompt_router().get_prompt(prompt_context).await
+    }
+
+    async fn list_prompts(
+        &self,
+        request: Option<PaginatedRequestParams>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<ListPromptsResult, McpError> {
+        const PAGE_SIZE: usize = 100;
+        let all = Self::prompt_router().list_all();
+        let (prompts, next_cursor) = paginate(&all, request.and_then(|r| r.cursor), PAGE_SIZE);
+        let mut result = ListPromptsResult::with_all_items(prompts);
+        result.next_cursor = next_cursor;
+        if modern_cache_fields(ctx.protocol_version()) {
+            result = result.with_ttl_ms(0).with_cache_scope(CacheScope::Private);
+        }
+        Ok(result)
+    }
 }
 
 // ---- Resource URI handling --------------------------------------------------
@@ -1294,6 +1399,53 @@ use crate::resources::{
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn modern_cache_fields_boundary() {
+        // No negotiated version: no cache fields (defensive; never occurs
+        // on the wire because every request negotiates a version).
+        assert!(!modern_cache_fields(None));
+        // Every legacy version stays field-free.
+        assert!(!modern_cache_fields(Some(ProtocolVersion::V_2025_11_25)));
+        assert!(!modern_cache_fields(Some(ProtocolVersion::V_2025_06_18)));
+        assert!(!modern_cache_fields(Some(ProtocolVersion::V_2024_11_05)));
+        // Modern 2026-07-28 requires the fields.
+        assert!(modern_cache_fields(Some(ProtocolVersion::V_2026_07_28)));
+        // Any newer version (constructed via Deserialize — the only public
+        // constructor for unknown versions) requires them too.
+        let future: ProtocolVersion =
+            serde_json::from_value(serde_json::json!("2027-01-01")).unwrap();
+        assert!(modern_cache_fields(Some(future)));
+    }
+
+    #[test]
+    fn modern_read_result_sets_cache_fields_only_for_modern() {
+        use rmcp::model::ReadResourceResponse;
+
+        let modern = modern_read_result(
+            ReadResourceResult::new(vec![]),
+            Some(ProtocolVersion::V_2026_07_28),
+        );
+        let ReadResourceResponse::Complete(modern) = modern else {
+            panic!("expected complete read result");
+        };
+        assert_eq!(modern.ttl_ms, Some(0), "modern ttlMs must be 0");
+        assert_eq!(
+            modern.cache_scope,
+            Some(CacheScope::Private),
+            "modern cacheScope must be private"
+        );
+
+        let legacy = modern_read_result(
+            ReadResourceResult::new(vec![]),
+            Some(ProtocolVersion::V_2025_11_25),
+        );
+        let ReadResourceResponse::Complete(legacy) = legacy else {
+            panic!("expected complete read result");
+        };
+        assert_eq!(legacy.ttl_ms, None, "legacy must omit ttlMs");
+        assert_eq!(legacy.cache_scope, None, "legacy must omit cacheScope");
+    }
 
     #[test]
     fn prompt_router_advertises_both_prompts() {

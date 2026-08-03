@@ -2545,12 +2545,25 @@ async fn native_read_start_end_framing_decodes() {
     drop(fw);
 }
 
-/// Decode the firmware trace read payload (exact lowercase spaced hex from
-/// the lossless RX encoding fallback) back into raw bytes.
+/// Decode the firmware trace read payload back into raw bytes.
+///
+/// The firmware's `trace on` mode emits one `RX[n]=0xXX\r\n` line per
+/// received byte (valid UTF-8 text — no encoding fallback applies), so each
+/// line's `=0x` suffix is parsed as a single hex byte; lines without a valid
+/// `=0x` pair (e.g. the firmware's own command echoes) are skipped.
 fn extract_trace_bytes(data: &str) -> Vec<u8> {
-    data.split_whitespace()
-        .map(|b| u8::from_str_radix(b, 16).expect("trace byte is hex"))
-        .collect()
+    let mut bytes = Vec::new();
+    for cap in data.lines() {
+        if let Some(idx) = cap.find("=0x") {
+            let hex_part = &cap[idx + 3..].trim_end();
+            if hex_part.len() >= 2 {
+                if let Ok(b) = u8::from_str_radix(&hex_part[..2], 16) {
+                    bytes.push(b);
+                }
+            }
+        }
+    }
+    bytes
 }
 
 /// Prove TX framing via firmware's trace on (observes exact received bytes).

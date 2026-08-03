@@ -694,3 +694,180 @@ fn current_protocol_guide_omits_removed_streaming_tool() {
         );
     }
 }
+
+// =============================================================================
+// Phase 4: pinned official conformance + Inspector gates
+// =============================================================================
+
+/// The exact pinned official conformance package (no floating tags).
+const PINNED_CONFORMANCE_PACKAGE: &str = "@modelcontextprotocol/conformance@0.2.0-alpha.10";
+/// The exact pinned official Inspector package (no floating tags).
+const PINNED_INSPECTOR_PACKAGE: &str = "@modelcontextprotocol/inspector@2.0.0";
+/// The exact pinned Node version for the conformance job.
+const PINNED_NODE_VERSION: &str = "22.19.0";
+
+/// The four documented fixture-dependent expected failures (server scope).
+/// A baseline entry that starts passing must fail the run as stale; the
+/// runner's exit-code contract enforces that, so these IDs must stay exact.
+const EXPECTED_FAILURE_IDS: &[&str] = &[
+    "server-stateless:sep-2575-server-rejects-undeclared-capability",
+    "server-stateless:sep-2575-missing-capability-http-400",
+    "server-stateless:sep-2575-http-server-no-independent-requests-on-stream",
+    "server-stateless:sep-2575-server-no-log-without-loglevel",
+];
+
+#[test]
+fn conformance_expected_failures_are_exactly_the_four_documented_checks() {
+    let file = repo_file("conformance/expected-failures.yaml");
+    let server_section = file
+        .split("server:")
+        .nth(1)
+        .expect("expected-failures.yaml must have a server: list");
+    for id in EXPECTED_FAILURE_IDS {
+        assert!(
+            server_section.contains(&format!("  - {id}")),
+            "expected-failures.yaml must baseline exactly {id:?}"
+        );
+    }
+    // No other baselined checks: every list line under server: is one of the
+    // four documented IDs.
+    let baselined: Vec<&str> = server_section
+        .lines()
+        .filter(|l| l.trim_start().starts_with("- "))
+        .map(|l| l.trim())
+        .collect();
+    assert_eq!(
+        baselined.len(),
+        EXPECTED_FAILURE_IDS.len(),
+        "expected-failures.yaml must baseline exactly {} checks, got {baselined:?}",
+        EXPECTED_FAILURE_IDS.len()
+    );
+}
+
+#[test]
+fn ci_conformance_job_pins_packages_and_never_runs_suite_all() {
+    let ci = repo_file(".github/workflows/ci.yml");
+    let job = ci
+        .split("mcp-conformance:")
+        .nth(1)
+        .expect("ci.yml must define the mcp-conformance job");
+    assert!(
+        job.contains(PINNED_CONFORMANCE_PACKAGE),
+        "mcp-conformance job must invoke the pinned {PINNED_CONFORMANCE_PACKAGE}"
+    );
+    // The Inspector package pin lives in scripts/inspector-smoke.mjs (the
+    // script's npx fallback — guarded by
+    // `inspector_smoke_script_pins_inspector_and_covers_expected_surface`);
+    // the job must wire the smoke script itself.
+    assert!(
+        job.contains("node scripts/inspector-smoke.mjs"),
+        "mcp-conformance job must run the Inspector smoke script"
+    );
+    assert!(
+        job.contains(PINNED_NODE_VERSION),
+        "mcp-conformance job must pin Node {PINNED_NODE_VERSION}"
+    );
+    assert!(
+        job.contains("--expected-failures conformance/expected-failures.yaml"),
+        "mcp-conformance job must apply the expected-failures baseline"
+    );
+    // Comments may explain why `--suite all` is forbidden; only an actual
+    // (non-comment) usage counts.
+    let suite_all_usage: Vec<&str> = job
+        .lines()
+        .filter(|l| l.contains("--suite all") && !l.trim_start().starts_with('#'))
+        .collect();
+    assert!(
+        suite_all_usage.is_empty(),
+        "mcp-conformance job must never run `--suite all`: {suite_all_usage:?}"
+    );
+    assert!(
+        job.contains("actions/upload-artifact@v7"),
+        "mcp-conformance job must upload reports with actions/upload-artifact@v7"
+    );
+    assert!(
+        job.contains("timeout-minutes: 15"),
+        "mcp-conformance job must be bounded to 15 minutes"
+    );
+}
+
+#[test]
+fn ci_scenario_lists_match_pinned_runner_scenarios() {
+    // The pinned conformance package provides no `server-session-lifecycle`
+    // scenario; the legacy initialize/session lifecycle is covered by
+    // `server-initialize`. Guard the CI job against re-adding a scenario the
+    // pinned runner does not ship, and against dropping any planned one.
+    let ci = repo_file(".github/workflows/ci.yml");
+    assert!(
+        ci.contains("server-initialize"),
+        "ci.yml must run the server-initialize legacy session scenario"
+    );
+    // Scoped to actual scenario-loop lines: the ci.yml comment explains the
+    // missing scenario by name, which must not trip this guard.
+    let scenario_loop_references_it = ci
+        .lines()
+        .any(|l| l.contains("sc in ") && l.contains("server-session-lifecycle"));
+    assert!(
+        !scenario_loop_references_it,
+        "ci.yml must not run a server-session-lifecycle scenario (absent from \
+         the pinned runner; server-initialize covers the legacy session lifecycle)"
+    );
+    for sc in [
+        "server-stateless",
+        "ping",
+        "completion-complete",
+        "tools-list",
+        "resources-list",
+        "prompts-list",
+        "caching",
+        "sep-2164-resource-not-found",
+    ] {
+        assert!(ci.contains(sc), "ci.yml must run the {sc} scenario");
+    }
+    // Runner exit status must never be suppressed in the scenario loops.
+    assert!(
+        ci.contains("set -e"),
+        "ci.yml conformance steps must fail on any nonzero runner exit"
+    );
+}
+
+#[test]
+fn inspector_smoke_script_pins_inspector_and_covers_expected_surface() {
+    let script = repo_file("scripts/inspector-smoke.mjs");
+    assert!(
+        script.contains(PINNED_INSPECTOR_PACKAGE),
+        "inspector-smoke.mjs must pin {PINNED_INSPECTOR_PACKAGE} as its npx fallback"
+    );
+    for needle in [
+        "serverUrl",
+        "MCP_AUTO_OPEN_ENABLED",
+        "--format",
+        "protocolEra",
+        "compute_checksum",
+        "serial://ports",
+        "diagnose_port",
+        "interactive_terminal",
+    ] {
+        assert!(
+            script.contains(needle),
+            "inspector-smoke.mjs must contain {needle:?}"
+        );
+    }
+    // The smoke must be a hard gate: any assertion failure or nonzero CLI
+    // exit leaves the script failing.
+    assert!(
+        script.contains("process.exitCode = 1"),
+        "inspector-smoke.mjs must exit nonzero on assertion failure"
+    );
+}
+
+#[test]
+fn readme_states_dual_protocol_compliance() {
+    // The user-facing compliance claim must name both supported protocol
+    // versions (2025-11-25 legacy sessions + 2026-07-28 modern discovery).
+    let readme = repo_file("README.md");
+    assert!(
+        readme.contains("2025-11-25") && readme.contains("2026-07-28"),
+        "README must state compliance with both supported MCP protocol versions"
+    );
+}

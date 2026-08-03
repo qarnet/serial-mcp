@@ -23,6 +23,7 @@ use std::collections::BTreeSet;
 use std::future::Future;
 
 use anyhow::Result;
+use base64::Engine as _;
 use common::TestServer;
 use rmcp::model::{PaginatedRequestParams, ReadResourceRequestParams};
 use rmcp::service::RoleClient;
@@ -327,6 +328,169 @@ async fn typed_legacy_capabilities_keep_subscription_disabled() {
             serde_json::to_value(caps).unwrap(),
             common_capabilities_json(),
             "legacy capabilities keep resource subscriptions disabled"
+        );
+        Ok(())
+    })
+    .await
+    .unwrap();
+}
+
+// =============================================================================
+// SEP-2549 cache fields (Phase 4)
+//
+// Modern `2026-07-28` peers get `ttlMs: 0` + `cacheScope: "private"` on
+// every cacheable family (tools/list, resources/list,
+// resources/templates/list, resources/read for every URI kind,
+// prompts/list). Legacy `2025-11-25` peers must see NEITHER field — rmcp
+// strips `resultType` for legacy but deliberately does not strip cache
+// fields, so the server omits them itself. Tool calls, prompts/get, and
+// completion have no applicable cache fields.
+// =============================================================================
+
+/// Assert a typed modern list/read result carries the SEP-2549 cache fields.
+fn assert_modern_cache_fields(ttl_ms: Option<u64>, cache_scope: Option<rmcp::model::CacheScope>) {
+    assert_eq!(ttl_ms, Some(0), "modern result must carry ttlMs: 0");
+    assert_eq!(
+        cache_scope,
+        Some(rmcp::model::CacheScope::Private),
+        "modern result must carry cacheScope: private"
+    );
+}
+
+/// Assert a typed legacy list/read result carries neither cache field.
+fn assert_legacy_no_cache_fields(
+    ttl_ms: Option<u64>,
+    cache_scope: Option<rmcp::model::CacheScope>,
+) {
+    assert_eq!(ttl_ms, None, "legacy result must omit ttlMs");
+    assert_eq!(cache_scope, None, "legacy result must omit cacheScope");
+}
+
+#[tokio::test]
+async fn typed_modern_cache_fields_on_every_cacheable_family() {
+    typed_modern(|client| async move {
+        let tools = client
+            .peer()
+            .list_tools(Some(PaginatedRequestParams::default()))
+            .await
+            .unwrap();
+        assert_modern_cache_fields(tools.ttl_ms, tools.cache_scope);
+
+        let resources = client
+            .peer()
+            .list_resources(Some(PaginatedRequestParams::default()))
+            .await
+            .unwrap();
+        assert_modern_cache_fields(resources.ttl_ms, resources.cache_scope);
+
+        let templates = client
+            .peer()
+            .list_resource_templates(Some(PaginatedRequestParams::default()))
+            .await
+            .unwrap();
+        assert_modern_cache_fields(templates.ttl_ms, templates.cache_scope);
+
+        let prompts = client
+            .peer()
+            .list_prompts(Some(PaginatedRequestParams::default()))
+            .await
+            .unwrap();
+        assert_modern_cache_fields(prompts.ttl_ms, prompts.cache_scope);
+
+        // Every URI kind of resources/read carries the fields.
+        for uri in ["serial://ports", "serial://connections"] {
+            let read = client
+                .peer()
+                .read_resource(ReadResourceRequestParams::new(uri))
+                .await
+                .unwrap();
+            assert_modern_cache_fields(read.ttl_ms, read.cache_scope);
+        }
+        Ok(())
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn typed_legacy_cache_fields_absent_on_every_cacheable_family() {
+    typed_legacy(|client| async move {
+        let tools = client
+            .peer()
+            .list_tools(Some(PaginatedRequestParams::default()))
+            .await
+            .unwrap();
+        assert_legacy_no_cache_fields(tools.ttl_ms, tools.cache_scope);
+
+        let resources = client
+            .peer()
+            .list_resources(Some(PaginatedRequestParams::default()))
+            .await
+            .unwrap();
+        assert_legacy_no_cache_fields(resources.ttl_ms, resources.cache_scope);
+
+        let templates = client
+            .peer()
+            .list_resource_templates(Some(PaginatedRequestParams::default()))
+            .await
+            .unwrap();
+        assert_legacy_no_cache_fields(templates.ttl_ms, templates.cache_scope);
+
+        let prompts = client
+            .peer()
+            .list_prompts(Some(PaginatedRequestParams::default()))
+            .await
+            .unwrap();
+        assert_legacy_no_cache_fields(prompts.ttl_ms, prompts.cache_scope);
+
+        let read = client
+            .peer()
+            .read_resource(ReadResourceRequestParams::new("serial://ports"))
+            .await
+            .unwrap();
+        assert_legacy_no_cache_fields(read.ttl_ms, read.cache_scope);
+        Ok(())
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn typed_modern_list_cursor_pages_are_honored() {
+    // The explicit tools/list + prompts/list handlers paginate through the
+    // same `paginate` helper as resources: a cursor past the single-page
+    // catalog yields an empty page and no next cursor.
+    typed_modern(|client| async move {
+        let cursor = base64::engine::general_purpose::STANDARD.encode("999".as_bytes());
+        let tools = client
+            .peer()
+            .list_tools(Some(PaginatedRequestParams::with_cursor(
+                PaginatedRequestParams::default(),
+                Some(cursor.clone()),
+            )))
+            .await
+            .unwrap();
+        assert!(
+            tools.tools.is_empty(),
+            "cursor past end -> empty tools page"
+        );
+        assert!(tools.next_cursor.is_none(), "no next cursor after the end");
+
+        let prompts = client
+            .peer()
+            .list_prompts(Some(PaginatedRequestParams::with_cursor(
+                PaginatedRequestParams::default(),
+                Some(cursor),
+            )))
+            .await
+            .unwrap();
+        assert!(
+            prompts.prompts.is_empty(),
+            "cursor past end -> empty prompts page"
+        );
+        assert!(
+            prompts.next_cursor.is_none(),
+            "no next cursor after the end"
         );
         Ok(())
     })
@@ -688,6 +852,134 @@ async fn raw_legacy_responses_omit_result_type() {
     let json = call.json.unwrap();
     assert!(json["result"].get("resultType").is_none());
     assert_eq!(json["result"]["structuredContent"]["checksum"], 111);
+}
+
+#[tokio::test]
+async fn raw_modern_cache_fields_present_legacy_absent() {
+    let server = common::spawned::SpawnedServer::start().await;
+
+    // Modern: every cacheable list family carries ttlMs 0 + cacheScope
+    // private on the wire.
+    for (id, method, params, name) in [
+        (30, "tools/list", json!({}), None),
+        (31, "resources/list", json!({}), None),
+        (32, "resources/templates/list", json!({}), None),
+        (33, "prompts/list", json!({}), None),
+    ] {
+        let raw = raw_modern(&server.url, id, method, params, name).await;
+        assert_eq!(raw.status, 200, "{method} modern -> 200");
+        let json = raw.json.unwrap();
+        assert_eq!(json["result"]["ttlMs"], 0, "{method} modern ttlMs");
+        assert_eq!(
+            json["result"]["cacheScope"], "private",
+            "{method} modern cacheScope"
+        );
+    }
+
+    // Modern resources/read for both static URI kinds.
+    for (id, uri) in [(34u64, "serial://ports"), (35u64, "serial://connections")] {
+        let raw = raw_modern(
+            &server.url,
+            id,
+            "resources/read",
+            json!({"uri": uri}),
+            Some(uri),
+        )
+        .await;
+        assert_eq!(raw.status, 200, "modern read {uri} -> 200");
+        let json = raw.json.unwrap();
+        assert_eq!(json["result"]["ttlMs"], 0, "modern read {uri} ttlMs");
+        assert_eq!(
+            json["result"]["cacheScope"], "private",
+            "modern read {uri} cacheScope"
+        );
+    }
+
+    // Legacy: neither cache field may leak to legacy peers.
+    let (session, _init) = raw_legacy_session(&server.url).await;
+    for (id, method, params) in [
+        (36, "tools/list", json!({})),
+        (37, "resources/list", json!({})),
+        (38, "resources/templates/list", json!({})),
+        (39, "prompts/list", json!({})),
+    ] {
+        let raw = raw_legacy(&server.url, &session, id, method, params).await;
+        assert_eq!(raw.status, 200, "{method} legacy -> 200");
+        let json = raw.json.unwrap();
+        assert!(
+            json["result"].get("ttlMs").is_none(),
+            "{method} legacy must omit ttlMs: {json}"
+        );
+        assert!(
+            json["result"].get("cacheScope").is_none(),
+            "{method} legacy must omit cacheScope: {json}"
+        );
+    }
+
+    let raw = raw_legacy(
+        &server.url,
+        &session,
+        40,
+        "resources/read",
+        json!({"uri": "serial://ports"}),
+    )
+    .await;
+    assert_eq!(raw.status, 200, "legacy read -> 200");
+    let json = raw.json.unwrap();
+    assert!(
+        json["result"].get("ttlMs").is_none(),
+        "legacy read must omit ttlMs: {json}"
+    );
+    assert!(
+        json["result"].get("cacheScope").is_none(),
+        "legacy read must omit cacheScope: {json}"
+    );
+}
+
+#[tokio::test]
+async fn raw_modern_list_cursor_pages_are_honored() {
+    let server = common::spawned::SpawnedServer::start().await;
+    // The manual tools/list + prompts/list handlers paginate through the
+    // same `paginate` helper as resources. A cursor past the single-page
+    // catalog yields an empty page and no next cursor.
+    let cursor = base64::engine::general_purpose::STANDARD.encode("999".as_bytes());
+    let raw = raw_modern(
+        &server.url,
+        41,
+        "tools/list",
+        json!({"cursor": cursor.clone()}),
+        None,
+    )
+    .await;
+    assert_eq!(raw.status, 200);
+    let json = raw.json.unwrap();
+    assert!(
+        json["result"]["tools"].as_array().unwrap().is_empty(),
+        "cursor past end -> empty tools page"
+    );
+    assert!(
+        json["result"].get("nextCursor").is_none(),
+        "no next cursor after the end"
+    );
+
+    let raw = raw_modern(
+        &server.url,
+        42,
+        "prompts/list",
+        json!({"cursor": cursor}),
+        None,
+    )
+    .await;
+    assert_eq!(raw.status, 200);
+    let json = raw.json.unwrap();
+    assert!(
+        json["result"]["prompts"].as_array().unwrap().is_empty(),
+        "cursor past end -> empty prompts page"
+    );
+    assert!(
+        json["result"].get("nextCursor").is_none(),
+        "no next cursor after the end"
+    );
 }
 
 #[tokio::test]

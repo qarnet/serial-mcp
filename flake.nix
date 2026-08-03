@@ -54,8 +54,10 @@
             || pkgs.lib.hasPrefix "/example-configs" relPath
             # Test fixtures read via CARGO_MANIFEST_DIR must survive the
             # source filter: doc_drift reads README.md, server.json,
-            # CHANGELOG.md, and docs/ (agent-config.md,
-            # development/FEATURES.md, future evaluations);
+            # CHANGELOG.md, docs/ (agent-config.md,
+            # development/FEATURES.md, future evaluations), the CI workflow
+            # (.github/workflows/ci.yml), conformance/expected-failures.yaml,
+            # and scripts/inspector-smoke.mjs (Phase 4 gate guards);
             # config_schema_validation reads schemas/ and
             # example-configs/ and REQUIRES them — a pruned fixture fails
             # the build. relPath keeps a leading "/", hence the explicit
@@ -71,7 +73,10 @@
             || pkgs.lib.hasSuffix "README.md" relPath
             || pkgs.lib.hasSuffix "CHANGELOG.md" relPath
             || pkgs.lib.hasSuffix "server.json" relPath
-            || pkgs.lib.hasPrefix "/docs" relPath;
+            || pkgs.lib.hasPrefix "/docs" relPath
+            || pkgs.lib.hasPrefix "/.github" relPath
+            || pkgs.lib.hasPrefix "/conformance" relPath
+            || pkgs.lib.hasPrefix "/scripts" relPath;
         };
 
         # Common args shared by both the deps-only and final derivations.

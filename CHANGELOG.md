@@ -160,6 +160,42 @@
   discover/initialize matrix + raw-wire status/code/header assertions)
   and stdio modern/legacy lifecycle tests.
 
+### Version-correct cache compliance + pinned conformance gates (Phase 4)
+- modern `2026-07-28` peers now receive the SEP-2549 cache fields
+  `ttlMs: 0` / `cacheScope: "private"` on every cacheable family
+  (`tools/list`, `resources/list`, `resources/templates/list`,
+  `resources/read` complete results for every URI kind, `prompts/list`)
+  via a single pure `modern_cache_fields` gate on the negotiated protocol
+  version; legacy `2025-11-25` peers continue to see neither field (rmcp
+  strips `resultType` for legacy but not cache fields, so the server omits
+  them itself — no leak to legacy clients);
+- `tools/list` / `prompts/list` are now explicit handlers over the same
+  routers (exact deterministic catalog, titles, schemas, prompt
+  definitions) with cursor pagination; `#[prompt_handler]` was dropped
+  because rmcp-macros 3.1.0 replaces any `list_prompts`/`get_prompt`
+  outright (unlike `#[tool_handler]`) — the two methods are hand-written
+  against the same `prompt_router`;
+- pinned official `@modelcontextprotocol/conformance@0.2.0-alpha.10` gate
+  in CI (`mcp-conformance` Ubuntu job, Node 22.19.0, 15-minute bound):
+  planned scenario sets at exact protocol versions only — legacy
+  `server-initialize`, `ping`, `completion-complete`, `tools-list`,
+  `resources-list`, `prompts-list` (2025-11-25) and modern
+  `server-stateless`, `completion-complete`, `tools-list`,
+  `resources-list`, `prompts-list`, `caching`, `sep-2164-resource-not-found`
+  (2026-07-28); the four documented fixture-dependent expected failures
+  live in `conformance/expected-failures.yaml` (a baseline entry that
+  starts passing fails the run as stale; no `--suite all`, no fixture
+  endpoints added to the product); reports upload under stable
+  `target/conformance-results/` paths on success and failure;
+- pinned official `@modelcontextprotocol/inspector@2.0.0` CLI
+  interoperability smoke (`scripts/inspector-smoke.mjs`, Node stdlib only)
+  in the same job: asserts server identity `serial-mcp` with modern
+  `2026-07-28` negotiation, exactly 25 unique tools with
+  `compute_checksum`, `serial://ports` + `serial://connections` resources,
+  `diagnose_port` + `interactive_terminal` prompts, and a
+  `compute_checksum` call returning raw `111` / hex `6F`; non-interactive,
+  per-command timeouts, hard gate (inspector, not conformance).
+
 ## [0.9.1]
 
 ### Security / maintenance

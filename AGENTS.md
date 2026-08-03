@@ -34,9 +34,19 @@ cargo test --locked --test config_schema_validation -- --ignored
 # native_sim tests (needs firmware built first — see Firmware section)
 cargo test --test native_sim_validation -- --ignored
 cargo test --test native_sim_connection_lifecycle -- --ignored --test-threads=1
+
+# pinned official conformance + Inspector smoke (local, against a running
+# HTTP binary; exact packages, no floating tags)
+target/debug/serial-mcp --transport=http --bind=127.0.0.1:8931 \
+  --profiles-path /tmp/profiles.toml &
+npx -y @modelcontextprotocol/conformance@0.2.0-alpha.10 server \
+  --url http://127.0.0.1:8931/mcp --scenario server-stateless \
+  --spec-version 2026-07-28 --expected-failures conformance/expected-failures.yaml \
+  -o target/conformance-results/server-stateless
+node scripts/inspector-smoke.mjs http://127.0.0.1:8931/mcp
 ```
 
-- CI runs exactly: fmt -> build -> test -> clippy, plus named Ubuntu gates for config-schema validation (`cargo test --locked --test config_schema_validation`) and release/documentation consistency (`cargo test --locked --test doc_drift`).
+- CI runs exactly: fmt -> build -> test -> clippy, plus named Ubuntu gates for config-schema validation (`cargo test --locked --test config_schema_validation`), release/documentation consistency (`cargo test --locked --test doc_drift`), and the pinned `mcp-conformance` gate (official conformance scenarios + Inspector 2.0.0 smoke against the built HTTP binary — see the Phase 4 section).
 - CI and schema workflows set `RUSTFLAGS="-D warnings"`. Treat warnings as errors locally too.
 - `nix flake check` is part of CI. The source filter admits the complete `schemas/` tree (all four vendored schemas validate hermetically offline — missing fixtures fail). On Nix, prefer `nix develop` before changing firmware or release workflow bits.
 
@@ -147,7 +157,8 @@ cargo test --test native_sim_connection_lifecycle -- --ignored --test-threads=1
 - `tests/blob_resources.rs` — blob resources and resource templates.
 - `tests/tx_session.rs` — cross-module TxSession wiring.
 - `tests/proptest.rs` — property-based and boundary-value tests.
-- `tests/doc_drift.rs` — prose-vs-code drift guards: tool count across README/Cargo.toml/server.json, protocol-preset mentions, tagged `from` wire forms, capture CLI option sync, FEATURES.md shipped-items absence, `server.json` package/version rules, and a CHANGELOG release contract (release-table row + body heading for the Cargo package version, `## [Unreleased]` before the current release) with synthetic negative proofs for each rule.
+- `tests/doc_drift.rs` — prose-vs-code drift guards: tool count across README/Cargo.toml/server.json, protocol-preset mentions, tagged `from` wire forms, capture CLI option sync, FEATURES.md shipped-items absence, `server.json` package/version rules, a CHANGELOG release contract (release-table row + body heading for the Cargo package version, `## [Unreleased]` before the current release) with synthetic negative proofs for each rule, and the Phase 4 gate guards: exactly the four documented expected-failure IDs in `conformance/expected-failures.yaml`, the pinned conformance/Inspector/Node versions and scenario lists in the `mcp-conformance` job (no `--suite all`, no `server-session-lifecycle`), the Inspector smoke script wiring, and the README dual-protocol compliance claim.
+- `tests/protocol_compatibility.rs` — dual-lifecycle compatibility matrix plus the Phase 4 cache wire proofs: typed modern `ttlMs: Some(0)` / `cacheScope: Private` on every cacheable family and typed legacy absence; raw modern `ttlMs: 0` / `cacheScope: "private"` presence and raw legacy absence; `resultType` modern-present/legacy-absent; cursor-page behavior of the manual `tools/list`/`prompts/list` handlers.
 - `tests/config_schema_validation.rs` validates all three vendored example configs (Claude Code, Codex, opencode) hermetically and offline — the vendored `models.dev` document is registered in memory under its original URI, a no-network retriever fails on anything else, and missing/malformed schema or instance fixtures fail the run (no skip path). Only the ignored case fetches latest upstream schemas.
 - `tests/native_sim_validation.rs` — native_sim firmware over PTY. 57 tests, pure software, fast (no hardware). Env: `SERIAL_MCP_NATIVE_SIM_BIN` (default `build/native_sim/firmware/zephyr/zephyr.exe`). Thin wrapper; all tests + helpers live in `tests/native_sim_validation/unix.rs` (Unix-only via `#[cfg(unix)]` module gate), with an empty `windows.rs` stub for future Windows-specific tests.
 - `tests/native_sim_connection_lifecycle.rs` — software-only lifecycle (6 tests): named connection, `set_flow_control`, close-while-read, reopen, touch-command bootloader entry. Run with `--test-threads=1`.
@@ -286,7 +297,7 @@ cargo run --manifest-path xtask/Cargo.toml -- print-paths
   at `-32601` inside SSE 200 responses (modern `subscriptions/listen` is
   implemented — Phase 3). Modern unknown resources are
   remapped to `-32602` (SEP-2164); legacy keeps `-32002`. Cache policy
-  (`ttlMs`/`cacheScope`) is Phase 4 scope.
+  (`ttlMs`/`cacheScope`) is Phase 4 scope — see the Phase 4 section below.
 - **Resource subscriptions (Phase 3):** one process-wide
   `ResourceEventHub` (`src/resource_events.rs`, `ResourceEvent::Updated`,
   capacity 256, synchronous non-blocking `publish_updated`) is created in
@@ -337,6 +348,71 @@ cargo run --manifest-path xtask/Cargo.toml -- print-paths
   lifecycle helpers (`TestProtocol`, `LegacyClientHandler`,
   `connect_modern_client`/`connect_legacy_client` + spawned mirrors) in
   `tests/common/{mod,spawned}.rs`.
+
+## Cache compliance + pinned conformance gates (Phase 4)
+
+- **Version-correct SEP-2549 cache fields.** Modern `2026-07-28`+ peers get
+  `ttlMs: 0` / `cacheScope: "private"` on every cacheable family:
+  `tools/list`, `resources/list`, `resources/templates/list`,
+  `resources/read` complete results for every URI kind, and `prompts/list`.
+  Legacy `2025-11-25` peers see NEITHER field — rmcp strips `resultType` for
+  legacy but does NOT strip cache fields, so the server omits them itself.
+  The gate is one pure helper `modern_cache_fields(Option<ProtocolVersion>)`
+  (`src/server.rs`, boundary-tested); a second helper `modern_read_result`
+  applies the fields to read results. Tool calls, `prompts/get`, completion,
+  and discovery (rmcp's own required zero/private fields) have no added
+  cache fields. `tools/list`/`prompts/list` are explicit handlers over the
+  SAME routers (`Self::tool_router()`/`Self::prompt_router()`) with cursor
+  pagination (PAGE_SIZE 100, `paginate`). **Do not re-add
+  `#[prompt_handler]`**: rmcp-macros 3.1.0 unconditionally REPLACES any
+  `list_prompts`/`get_prompt` in the annotated block (unlike
+  `#[tool_handler]`'s has-method check), which would silently drop the
+  cache fields — the two methods stay hand-written against the router.
+  Wire proofs: `tests/protocol_compatibility.rs` (typed modern fields +
+  typed legacy absence + raw modern `ttlMs:0`/`cacheScope:"private"` + raw
+  legacy absence + cursor-page tests for the manual list handlers).
+- **Pinned official conformance gate.** CI `mcp-conformance` Ubuntu job
+  (15-min bound, `contents: read`): Node 22.19.0 (exact), Rust 1.97.1 +
+  version report, `libudev-dev pkg-config`, locked binary build, isolated
+  temp profiles path, loopback HTTP server with a bounded `server/discover`
+  readiness probe (the only session-less 200 request), and the exact pinned
+  runner `@modelcontextprotocol/conformance@0.2.0-alpha.10` (no floating
+  tags). Planned scenario sets at exact protocol versions ONLY:
+  legacy `2025-11-25` → `server-initialize`, `ping`, `completion-complete`,
+  `tools-list`, `resources-list`, `prompts-list`; modern `2026-07-28` →
+  `server-stateless`, `completion-complete`, `tools-list`,
+  `resources-list`, `prompts-list`, `caching`, `sep-2164-resource-not-found`.
+  The pinned package has NO `server-session-lifecycle` scenario —
+  `server-initialize` covers the legacy initialize/session lifecycle
+  (drift-guarded). `conformance/expected-failures.yaml` baselines exactly
+  the four documented fixture-dependent checks
+  (`server-stateless:sep-2575-{server-rejects-undeclared-capability,
+  missing-capability-http-400,http-server-no-independent-requests-on-stream,
+  server-no-log-without-loglevel}`) in per-check `<scenario>:<check-id>`
+  form — a baseline entry that starts passing FAILS the run as stale; any
+  other failure is an unexpected regression. Never `--suite all`; never add
+  fixture endpoints to serial-mcp. Reports land under stable
+  `target/conformance-results/` (each scenario dir holds timestamped
+  `checks.json`) and upload via `actions/upload-artifact@v7`
+  (`if-no-files-found: warn`, 7-day retention) on success AND failure.
+  Runner exit status is never suppressed (`set -e` in the scenario loops).
+- **Pinned Inspector 2.0.0 interoperability smoke** (same CI job, named
+  separately — interoperability, NOT conformance):
+  `node scripts/inspector-smoke.mjs <server-url>` — Node-stdlib-only,
+  invokes the exact installed binary (`INSPECTOR_CMD`/`--inspector-cmd`)
+  or the exact pinned `npx` package `@modelcontextprotocol/inspector@2.0.0`
+  fallback, per-command hard timeout, parses `--format json`, noninteractive
+  (`MCP_AUTO_OPEN_ENABLED=false`, bounded `--connect-timeout`,
+  `--stored-auth-only`). It writes a temp session config with
+  `protocolEra: "modern"` (the Inspector's ad-hoc `--server-url` default is
+  legacy) and asserts: `initialize` → server name `serial-mcp` + negotiated
+  `2026-07-28`; `tools/list` → exactly 25 unique tools with
+  `compute_checksum`; `resources/list` → `serial://ports` +
+  `serial://connections`; `prompts/list` → `diagnose_port` +
+  `interactive_terminal`; `tools/call compute_checksum`
+  `{"algorithm":"xor","data":"$GPGGA,1","encoding":"utf8"}` → raw `111` /
+  hex `6F` from the JSON envelope. Any assertion failure or nonzero CLI
+  exit fails the script (hard gate).
 
 ## Discovery & evaluation
 

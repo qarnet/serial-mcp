@@ -15,7 +15,10 @@ presets (`at_command`, `slip`, `json_lines`, `cobs`, `ndjson`, `nmea0183`,
 full line control (DTR/RTS, BREAK, flow control) let Claude, Codex, or any MCP
 client flash, reset, and talk to a board on their own.
 
-**MCP 2025-11-25 compliant**, with a port allowlist and stdio plus HTTP transports.
+**MCP `2025-11-25` (legacy session lifecycle) and `2026-07-28` (modern
+discovery/stateless, SEP-2549 cache fields) compliant**, with a port allowlist,
+stdio plus HTTP transports, and pinned official conformance + Inspector
+interoperability gates in CI.
 
 ## Capabilities
 

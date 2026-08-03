@@ -150,6 +150,16 @@ branches need raw JSON assertions.
    - upload conformance output on success and failure;
    - store narrowly justified per-check exceptions in
      `conformance/expected-failures.yaml`.
+5. **Official Inspector interoperability smoke**
+   - pin `@modelcontextprotocol/inspector@2.0.0` (the official v2 release for
+     MCP `2026-07-28`; Node `>=22.19.0`);
+   - use CLI mode only against the built HTTP server — no browser, TUI,
+     Playwright, or floating `latest` tag;
+   - exercise `initialize`, `tools/list`, `resources/list`, `prompts/list`, and
+     `tools/call` for hardware-free `compute_checksum`, with JSON output where
+     supported;
+   - treat this as real-client interoperability coverage, not a replacement
+     for `@modelcontextprotocol/conformance` or the Rust integration tests.
 
 ### Required protocol matrix
 
@@ -234,6 +244,31 @@ require fixture names such as `test://static-text` and
 `test_simple_text_tool`; adding hidden product endpoints would weaken catalog
 and tool-count guarantees. Targeted generic scenarios provide a strict gate
 without test-only production behavior.
+
+### Official Inspector smoke
+
+The official Inspector v2 package is a second independent MCP client and catches
+client-integration failures that schema-focused conformance checks may not. Pin:
+
+```text
+@modelcontextprotocol/inspector@2.0.0
+```
+
+Run CLI one-shots against the same isolated HTTP server used by conformance:
+
+```text
+initialize
+tools/list
+resources/list
+prompts/list
+tools/call compute_checksum
+```
+
+Use `--transport http`, `--format json` where available, bounded connection
+timeouts, and non-interactive auth behavior. Assert command success plus compact
+semantic output (server identity/version, 25 tools, expected resources/prompts,
+and checksum result); do not snapshot Inspector prose. Inspector is not the
+normative conformance runner and must remain a separate named CI step.
 
 ## Resource notification semantics
 
@@ -558,6 +593,13 @@ After this migration lands, remove or rewrite old wishlist entries for hotplug
 watch and multiple public subscriptions because standard resource subscriptions
 and hotplug updates will be shipped. FEATURES keeps only unshipped work.
 
+### MCP Bundle distribution — Future
+
+Record MCPB as a separate release/distribution opportunity, not migration
+scope: package platform release binaries plus a manifest for one-click local
+stdio installation. Resolve cross-platform bundle layout, manifest validation,
+signing, updates, and desktop-client testing in a dedicated future phase.
+
 ## Phased implementation
 
 ### Phase 1 — rmcp 3 compile surface and obsolete-stream removal
@@ -730,6 +772,7 @@ Scope:
 - zero/private cache fields required by modern responses;
 - no positive caching policy;
 - pinned official conformance job and narrow expected-failure file;
+- pinned official Inspector `2.0.0` CLI interoperability smoke;
 - schema snapshots/evaluator review;
 - full software-only gates and documentation consistency.
 
@@ -741,7 +784,9 @@ Files:
   assertions;
 - `.github/workflows/ci.yml` for the Ubuntu `mcp-conformance` gate;
 - add `conformance/expected-failures.yaml` with only the four documented
-  fixture-gap checks.
+  fixture-gap checks;
+- add a small checked-in script or xtask entry for deterministic Inspector CLI
+  assertions rather than embedding fragile shell parsing in workflow YAML.
 
 Verification:
 
@@ -759,6 +804,14 @@ cargo run --manifest-path xtask/Cargo.toml -- agent-eval \
 cargo run --manifest-path xtask/Cargo.toml -- build-test-assets
 cargo run --manifest-path xtask/Cargo.toml -- test-all
 nix flake check
+```
+
+CI additionally runs pinned Node tooling against the built HTTP server:
+
+```text
+@modelcontextprotocol/conformance@0.2.0-alpha.10
+@modelcontextprotocol/inspector@2.0.0
+Node 22.19.0
 ```
 
 Also run the pinned official conformance scenario sets from “Official
