@@ -429,36 +429,65 @@ pub struct TestClientHandler;
 
 impl ClientHandler for TestClientHandler {}
 
-/// Client handler that explicitly negotiates the legacy `2025-11-25`
-/// protocol version instead of relying on rmcp's default
-/// (`ProtocolVersion::LATEST`, also `2025-11-25`). Makes the legacy
-/// lifecycle contract self-documenting in tests.
-#[derive(Clone, Default)]
-pub struct LegacyClientHandler;
+/// One cloneable client handler that explicitly advertises one exact MCP
+/// protocol version (instead of relying on rmcp's default,
+/// `ProtocolVersion::LATEST`). One type serves both lifecycle modes so the
+/// common connect helpers share a single return type. `get_info()` returns
+/// default client info tagged with `self.protocol.version()` for every case.
+#[derive(Clone)]
+pub struct VersionedClientHandler {
+    protocol: TestProtocol,
+}
 
-impl ClientHandler for LegacyClientHandler {
-    fn get_info(&self) -> rmcp::model::ClientInfo {
-        rmcp::model::ClientInfo::default().with_protocol_version(ProtocolVersion::V_2025_11_25)
+impl VersionedClientHandler {
+    /// Build a handler advertising the given explicit protocol version.
+    pub fn new(protocol: TestProtocol) -> Self {
+        Self { protocol }
     }
 }
 
-/// Which MCP protocol lifecycle a typed test client negotiates.
+impl ClientHandler for VersionedClientHandler {
+    fn get_info(&self) -> rmcp::model::ClientInfo {
+        rmcp::model::ClientInfo::default().with_protocol_version(self.protocol.version())
+    }
+}
+
+/// Which exact MCP protocol version a typed test client negotiates.
+///
+/// Variant names carry the exact version date so a future protocol revision
+/// cannot silently reclassify a case as "modern"/"legacy".
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TestProtocol {
-    /// Modern `2026-07-28` discovery / stateless requests.
-    Modern,
-    /// Legacy `2025-11-25` initialize / session requests.
-    Legacy,
+    /// MCP `2026-07-28` discovery / stateless requests.
+    V2026_07_28,
+    /// MCP `2025-11-25` initialize / session requests.
+    V2025_11_25,
 }
 
 impl TestProtocol {
-    /// The rmcp client lifecycle mode for this protocol flavor.
+    /// Every advertised version, in product-preferred order. The coverage
+    /// lock in `tests/protocol_compatibility.rs` compares this list against
+    /// the raw `server/discover` `supportedVersions` so a future production
+    /// policy row requires an explicit test case.
+    pub const ALL: [Self; 2] = [Self::V2026_07_28, Self::V2025_11_25];
+
+    /// The exact rmcp protocol version constant for this case.
+    pub fn version(self) -> ProtocolVersion {
+        match self {
+            TestProtocol::V2026_07_28 => ProtocolVersion::V_2026_07_28,
+            TestProtocol::V2025_11_25 => ProtocolVersion::V_2025_11_25,
+        }
+    }
+
+    /// The rmcp client lifecycle mode for this exact version:
+    /// `2026-07-28` uses discovery with only that preferred version;
+    /// `2025-11-25` uses the legacy initialize handshake.
     pub fn lifecycle(self) -> ClientLifecycleMode {
         match self {
-            TestProtocol::Modern => ClientLifecycleMode::Discover {
+            TestProtocol::V2026_07_28 => ClientLifecycleMode::Discover {
                 preferred_versions: vec![ProtocolVersion::V_2026_07_28],
             },
-            TestProtocol::Legacy => ClientLifecycleMode::Initialize,
+            TestProtocol::V2025_11_25 => ClientLifecycleMode::Initialize,
         }
     }
 }
@@ -485,47 +514,62 @@ pub async fn connect_to_url(
 }
 
 /// Connect an `rmcp` HTTP client to the given test server using the
-/// modern `2026-07-28` discover lifecycle (`server/discover` +
-/// self-contained per-request `_meta`).
-pub async fn connect_modern_client(
+/// explicit lifecycle for one exact protocol version. Returns the running
+/// client service plus a unit receiver (kept for caller symmetry). One
+/// return type covers every case: [`VersionedClientHandler`] advertises
+/// `protocol.version()` for both lifecycle modes.
+pub async fn connect_protocol_client(
     server: &TestServer,
-) -> Result<(RunningService<RoleClient, TestClientHandler>, ())> {
-    connect_modern_to_url(server.url.as_str()).await
+    protocol: TestProtocol,
+) -> Result<(RunningService<RoleClient, VersionedClientHandler>, ())> {
+    connect_protocol_to_url(server.url.as_str(), protocol).await
 }
 
-/// Like [`connect_modern_client`], but for an arbitrary server URL
+/// Like [`connect_protocol_client`], but for an arbitrary server URL
 /// (in-process or spawned-binary).
-pub async fn connect_modern_to_url(
+pub async fn connect_protocol_to_url(
     url: &str,
-) -> Result<(RunningService<RoleClient, TestClientHandler>, ())> {
-    let handler = TestClientHandler;
+    protocol: TestProtocol,
+) -> Result<(RunningService<RoleClient, VersionedClientHandler>, ())> {
+    let handler = VersionedClientHandler::new(protocol);
     let transport = StreamableHttpClientTransport::from_uri(url);
     let client = handler
-        .serve_with_lifecycle(transport, TestProtocol::Modern.lifecycle())
+        .serve_with_lifecycle(transport, protocol.lifecycle())
         .await?;
     Ok((client, ()))
 }
 
-/// Connect an `rmcp` HTTP client to the given test server using the
-/// explicit legacy `2025-11-25` initialize lifecycle. The handler's
-/// `ClientInfo.protocol_version` is exactly `2025-11-25`.
-pub async fn connect_legacy_client(
+/// Connect an `rmcp` HTTP client using the exact `2026-07-28` discover
+/// lifecycle (`server/discover` + self-contained per-request `_meta`).
+pub async fn connect_2026_07_28_client(
     server: &TestServer,
-) -> Result<(RunningService<RoleClient, LegacyClientHandler>, ())> {
-    connect_legacy_to_url(server.url.as_str()).await
+) -> Result<(RunningService<RoleClient, VersionedClientHandler>, ())> {
+    connect_protocol_client(server, TestProtocol::V2026_07_28).await
 }
 
-/// Like [`connect_legacy_client`], but for an arbitrary server URL
+/// Like [`connect_2026_07_28_client`], but for an arbitrary server URL
 /// (in-process or spawned-binary).
-pub async fn connect_legacy_to_url(
+pub async fn connect_2026_07_28_to_url(
     url: &str,
-) -> Result<(RunningService<RoleClient, LegacyClientHandler>, ())> {
-    let handler = LegacyClientHandler;
-    let transport = StreamableHttpClientTransport::from_uri(url);
-    let client = handler
-        .serve_with_lifecycle(transport, TestProtocol::Legacy.lifecycle())
-        .await?;
-    Ok((client, ()))
+) -> Result<(RunningService<RoleClient, VersionedClientHandler>, ())> {
+    connect_protocol_to_url(url, TestProtocol::V2026_07_28).await
+}
+
+/// Connect an `rmcp` HTTP client using the exact `2025-11-25` initialize
+/// lifecycle. The handler's `ClientInfo.protocol_version` is exactly
+/// `2025-11-25`.
+pub async fn connect_2025_11_25_client(
+    server: &TestServer,
+) -> Result<(RunningService<RoleClient, VersionedClientHandler>, ())> {
+    connect_protocol_client(server, TestProtocol::V2025_11_25).await
+}
+
+/// Like [`connect_2025_11_25_client`], but for an arbitrary server URL
+/// (in-process or spawned-binary).
+pub async fn connect_2025_11_25_to_url(
+    url: &str,
+) -> Result<(RunningService<RoleClient, VersionedClientHandler>, ())> {
+    connect_protocol_to_url(url, TestProtocol::V2025_11_25).await
 }
 
 #[derive(Clone)]

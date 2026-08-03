@@ -1,5 +1,6 @@
-//! MCP protocol compatibility matrix: modern `2026-07-28` discovery /
-//! stateless lifecycle vs legacy `2025-11-25` initialize / session lifecycle.
+//! MCP protocol compatibility matrix, indexed by exact MCP protocol version:
+//! `2026-07-28` discovery / stateless lifecycle vs `2025-11-25` initialize /
+//! session lifecycle.
 //!
 //! Two proof layers:
 //!
@@ -16,6 +17,12 @@
 //! Wire facts are pinned to rmcp 3.0.1 behavior (see
 //! `crates/rmcp/src/transport/streamable_http_server/tower.rs` and
 //! `crates/rmcp/src/handler/server.rs` in the pinned SDK source).
+//!
+//! Raw expected values never derive from production `src/mcp_protocol.rs`:
+//! the two layers stay independent so implementation and expectation cannot
+//! fail together. The coverage lock test at the bottom compares the
+//! independent test-case list `TestProtocol::ALL` against the raw
+//! `server/discover` `supportedVersions` wire output.
 
 mod common;
 
@@ -24,14 +31,14 @@ use std::future::Future;
 
 use anyhow::Result;
 use base64::Engine as _;
-use common::TestServer;
+use common::{TestProtocol, TestServer};
 use rmcp::model::{PaginatedRequestParams, ReadResourceRequestParams};
 use rmcp::service::RoleClient;
 use serde_json::{json, Value};
 
-/// Modern `2026-07-28` per-request `_meta` carried by every raw modern
+/// Exact `2026-07-28` per-request `_meta` carried by every raw modern
 /// request (SEP-2575 client context; `clientInfo` optional but included).
-fn modern_meta() -> Value {
+fn meta_2026_07_28() -> Value {
     json!({
         "io.modelcontextprotocol/protocolVersion": "2026-07-28",
         "io.modelcontextprotocol/clientInfo": {"name": "serial-mcp-test", "version": "1"},
@@ -39,8 +46,8 @@ fn modern_meta() -> Value {
     })
 }
 
-/// Expected legacy capability wire shape (common set only).
-fn common_capabilities_json() -> Value {
+/// Expected `2025-11-25` capability wire shape (common set only).
+fn capabilities_2025_11_25_json() -> Value {
     json!({
         "completions": {},
         "prompts": {},
@@ -49,10 +56,10 @@ fn common_capabilities_json() -> Value {
     })
 }
 
-/// Expected modern capability wire shape: common set plus
+/// Expected `2026-07-28` capability wire shape: common set plus
 /// `resources.subscribe` (Phase 3 resource subscriptions; no list-change
 /// flags).
-fn modern_capabilities_json() -> Value {
+fn capabilities_2026_07_28_json() -> Value {
     json!({
         "completions": {},
         "prompts": {},
@@ -65,250 +72,166 @@ fn modern_capabilities_json() -> Value {
 // Typed matrix
 // =============================================================================
 
-/// Run an async assertion body against a typed modern (discover lifecycle)
-/// client on a fresh in-process server.
-async fn typed_modern<F, Fut>(run: F) -> Result<()>
+/// Run an async assertion body against a typed client for one exact protocol
+/// version on a fresh in-process server. The common
+/// [`common::VersionedClientHandler`] serves both lifecycle modes, so every
+/// case shares one return type.
+async fn typed_protocol<F, Fut>(protocol: TestProtocol, run: F) -> Result<()>
 where
-    F: FnOnce(rmcp::service::RunningService<RoleClient, common::TestClientHandler>) -> Fut,
+    F: FnOnce(rmcp::service::RunningService<RoleClient, common::VersionedClientHandler>) -> Fut,
     Fut: Future<Output = Result<()>>,
 {
     let server = TestServer::start().await;
-    let (client, _rx) = common::connect_modern_client(&server).await?;
-    run(client).await
-}
-
-/// Run an async assertion body against a typed legacy (initialize
-/// lifecycle) client on a fresh in-process server.
-async fn typed_legacy<F, Fut>(run: F) -> Result<()>
-where
-    F: FnOnce(rmcp::service::RunningService<RoleClient, common::LegacyClientHandler>) -> Fut,
-    Fut: Future<Output = Result<()>>,
-{
-    let server = TestServer::start().await;
-    let (client, _rx) = common::connect_legacy_client(&server).await?;
+    let (client, _rx) = common::connect_protocol_client(&server, protocol).await?;
     run(client).await
 }
 
 #[tokio::test]
-async fn typed_modern_lifecycle_selects_exact_version() {
-    typed_modern(|client| async move {
-        let info = client.peer_info().expect("modern peer info");
-        assert_eq!(
-            info.protocol_version,
-            rmcp::model::ProtocolVersion::V_2026_07_28
-        );
-        Ok(())
-    })
-    .await
-    .unwrap();
+async fn typed_protocol_lifecycle_selects_exact_version() {
+    for protocol in TestProtocol::ALL {
+        typed_protocol(protocol, |client| async move {
+            let info = client.peer_info().expect("peer info");
+            assert_eq!(
+                info.protocol_version,
+                protocol.version(),
+                "case {protocol:?} must negotiate exact version {}",
+                protocol.version()
+            );
+            Ok(())
+        })
+        .await
+        .unwrap();
+    }
 }
 
 #[tokio::test]
-async fn typed_legacy_lifecycle_selects_exact_version() {
-    typed_legacy(|client| async move {
-        let info = client.peer_info().expect("legacy peer info");
-        assert_eq!(
-            info.protocol_version,
-            rmcp::model::ProtocolVersion::V_2025_11_25
-        );
-        Ok(())
-    })
-    .await
-    .unwrap();
+async fn typed_protocol_tools_list_returns_exact_twenty_five_tools() {
+    for protocol in TestProtocol::ALL {
+        typed_protocol(protocol, |client| async move {
+            let result = client
+                .peer()
+                .list_tools(Some(PaginatedRequestParams::default()))
+                .await
+                .unwrap();
+            let names: BTreeSet<&str> = result.tools.iter().map(|t| t.name.as_ref()).collect();
+            let expected: BTreeSet<&str> = common::EXPECTED_TOOLS.iter().copied().collect();
+            assert_eq!(
+                names, expected,
+                "case {protocol:?} tools/list must match EXPECTED_TOOLS"
+            );
+            Ok(())
+        })
+        .await
+        .unwrap();
+    }
 }
 
 #[tokio::test]
-async fn typed_modern_tools_list_returns_exact_twenty_five_tools() {
-    typed_modern(|client| async move {
-        let result = client
-            .peer()
-            .list_tools(Some(PaginatedRequestParams::default()))
-            .await
-            .unwrap();
-        let names: BTreeSet<&str> = result.tools.iter().map(|t| t.name.as_ref()).collect();
-        let expected: BTreeSet<&str> = common::EXPECTED_TOOLS.iter().copied().collect();
-        assert_eq!(
-            names, expected,
-            "modern tools/list must match EXPECTED_TOOLS"
-        );
-        Ok(())
-    })
-    .await
-    .unwrap();
+async fn typed_protocol_resources_and_templates_and_prompts() {
+    for protocol in TestProtocol::ALL {
+        typed_protocol(protocol, |client| async move {
+            let resources = client
+                .peer()
+                .list_resources(Some(PaginatedRequestParams::default()))
+                .await
+                .unwrap();
+            assert_eq!(
+                resources.resources.len(),
+                2,
+                "case {protocol:?}: two static resources"
+            );
+            let templates = client
+                .peer()
+                .list_resource_templates(Some(PaginatedRequestParams::default()))
+                .await
+                .unwrap();
+            assert_eq!(
+                templates.resource_templates.len(),
+                3,
+                "case {protocol:?}: three templates"
+            );
+            let prompts = client
+                .peer()
+                .list_prompts(Some(PaginatedRequestParams::default()))
+                .await
+                .unwrap();
+            assert_eq!(prompts.prompts.len(), 2, "case {protocol:?}: two prompts");
+            Ok(())
+        })
+        .await
+        .unwrap();
+    }
 }
 
 #[tokio::test]
-async fn typed_legacy_tools_list_returns_exact_twenty_five_tools() {
-    typed_legacy(|client| async move {
-        let result = client
-            .peer()
-            .list_tools(Some(PaginatedRequestParams::default()))
-            .await
-            .unwrap();
-        let names: BTreeSet<&str> = result.tools.iter().map(|t| t.name.as_ref()).collect();
-        let expected: BTreeSet<&str> = common::EXPECTED_TOOLS.iter().copied().collect();
-        assert_eq!(
-            names, expected,
-            "legacy tools/list must match EXPECTED_TOOLS"
-        );
-        Ok(())
-    })
-    .await
-    .unwrap();
+async fn typed_protocol_compute_checksum_succeeds_without_hardware() {
+    for protocol in TestProtocol::ALL {
+        typed_protocol(protocol, |client| async move {
+            let result = client
+                .peer()
+                .call_tool(common::tool_request(
+                    "compute_checksum",
+                    json!({"data": "$GPGGA,1", "algorithm": "xor"}),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(
+                result.is_error,
+                Some(false),
+                "case {protocol:?}: {result:?}"
+            );
+            let structured = result.structured_content.expect("structured content");
+            assert_eq!(structured["checksum"], 111, "case {protocol:?}");
+            assert_eq!(structured["checksum_hex"], "6F", "case {protocol:?}");
+            Ok(())
+        })
+        .await
+        .unwrap();
+    }
 }
 
 #[tokio::test]
-async fn typed_modern_resources_and_templates_and_prompts() {
-    typed_modern(|client| async move {
-        let resources = client
-            .peer()
-            .list_resources(Some(PaginatedRequestParams::default()))
-            .await
-            .unwrap();
-        assert_eq!(resources.resources.len(), 2, "two static resources");
-        let templates = client
-            .peer()
-            .list_resource_templates(Some(PaginatedRequestParams::default()))
-            .await
-            .unwrap();
-        assert_eq!(templates.resource_templates.len(), 3, "three templates");
-        let prompts = client
-            .peer()
-            .list_prompts(Some(PaginatedRequestParams::default()))
-            .await
-            .unwrap();
-        assert_eq!(prompts.prompts.len(), 2, "two prompts");
-        Ok(())
-    })
-    .await
-    .unwrap();
-}
-
-#[tokio::test]
-async fn typed_legacy_resources_and_templates_and_prompts() {
-    typed_legacy(|client| async move {
-        let resources = client
-            .peer()
-            .list_resources(Some(PaginatedRequestParams::default()))
-            .await
-            .unwrap();
-        assert_eq!(resources.resources.len(), 2, "two static resources");
-        let templates = client
-            .peer()
-            .list_resource_templates(Some(PaginatedRequestParams::default()))
-            .await
-            .unwrap();
-        assert_eq!(templates.resource_templates.len(), 3, "three templates");
-        let prompts = client
-            .peer()
-            .list_prompts(Some(PaginatedRequestParams::default()))
-            .await
-            .unwrap();
-        assert_eq!(prompts.prompts.len(), 2, "two prompts");
-        Ok(())
-    })
-    .await
-    .unwrap();
-}
-
-#[tokio::test]
-async fn typed_modern_compute_checksum_succeeds_without_hardware() {
-    typed_modern(|client| async move {
-        let result = client
-            .peer()
-            .call_tool(common::tool_request(
-                "compute_checksum",
-                json!({"data": "$GPGGA,1", "algorithm": "xor"}),
-            ))
-            .await
-            .unwrap();
-        assert_eq!(result.is_error, Some(false), "{result:?}");
-        let structured = result.structured_content.expect("structured content");
-        assert_eq!(structured["checksum"], 111);
-        assert_eq!(structured["checksum_hex"], "6F");
-        Ok(())
-    })
-    .await
-    .unwrap();
-}
-
-#[tokio::test]
-async fn typed_legacy_compute_checksum_succeeds_without_hardware() {
-    typed_legacy(|client| async move {
-        let result = client
-            .peer()
-            .call_tool(common::tool_request(
-                "compute_checksum",
-                json!({"data": "$GPGGA,1", "algorithm": "xor"}),
-            ))
-            .await
-            .unwrap();
-        assert_eq!(result.is_error, Some(false), "{result:?}");
-        let structured = result.structured_content.expect("structured content");
-        assert_eq!(structured["checksum"], 111);
-        assert_eq!(structured["checksum_hex"], "6F");
-        Ok(())
-    })
-    .await
-    .unwrap();
-}
-
-#[tokio::test]
-async fn typed_modern_read_serial_ports_resource_succeeds() {
-    typed_modern(|client| async move {
-        let result = client
-            .peer()
-            .read_resource(ReadResourceRequestParams::new("serial://ports"))
-            .await
-            .unwrap();
-        assert!(!result.contents.is_empty());
-        match &result.contents[0] {
-            rmcp::model::ResourceContents::TextResourceContents { uri, mime_type, .. } => {
-                assert_eq!(uri.as_str(), "serial://ports");
-                assert_eq!(mime_type.as_deref(), Some("application/json"));
+async fn typed_protocol_read_serial_ports_resource_succeeds() {
+    for protocol in TestProtocol::ALL {
+        typed_protocol(protocol, |client| async move {
+            let result = client
+                .peer()
+                .read_resource(ReadResourceRequestParams::new("serial://ports"))
+                .await
+                .unwrap();
+            assert!(!result.contents.is_empty(), "case {protocol:?}");
+            match &result.contents[0] {
+                rmcp::model::ResourceContents::TextResourceContents { uri, mime_type, .. } => {
+                    assert_eq!(uri.as_str(), "serial://ports", "case {protocol:?}");
+                    assert_eq!(
+                        mime_type.as_deref(),
+                        Some("application/json"),
+                        "case {protocol:?}"
+                    );
+                }
+                other => {
+                    panic!("case {protocol:?}: expected text resource contents, got {other:?}")
+                }
             }
-            other => panic!("expected text resource contents, got {other:?}"),
-        }
-        Ok(())
-    })
-    .await
-    .unwrap();
+            Ok(())
+        })
+        .await
+        .unwrap();
+    }
 }
 
 #[tokio::test]
-async fn typed_legacy_read_serial_ports_resource_succeeds() {
-    typed_legacy(|client| async move {
-        let result = client
-            .peer()
-            .read_resource(ReadResourceRequestParams::new("serial://ports"))
-            .await
-            .unwrap();
-        assert!(!result.contents.is_empty());
-        match &result.contents[0] {
-            rmcp::model::ResourceContents::TextResourceContents { uri, mime_type, .. } => {
-                assert_eq!(uri.as_str(), "serial://ports");
-                assert_eq!(mime_type.as_deref(), Some("application/json"));
-            }
-            other => panic!("expected text resource contents, got {other:?}"),
-        }
-        Ok(())
-    })
-    .await
-    .unwrap();
-}
-
-#[tokio::test]
-async fn typed_modern_capabilities_advertise_resource_subscriptions() {
-    typed_modern(|client| async move {
+async fn typed_2026_07_28_capabilities_advertise_resource_subscriptions() {
+    typed_protocol(TestProtocol::V2026_07_28, |client| async move {
         let caps = client
             .peer_info()
-            .expect("modern peer info")
+            .expect("2026-07-28 peer info")
             .capabilities
             .clone();
         assert_eq!(
             serde_json::to_value(caps).unwrap(),
-            modern_capabilities_json(),
-            "modern capabilities advertise resources.subscribe"
+            capabilities_2026_07_28_json(),
+            "2026-07-28 capabilities advertise resources.subscribe"
         );
         Ok(())
     })
@@ -317,17 +240,17 @@ async fn typed_modern_capabilities_advertise_resource_subscriptions() {
 }
 
 #[tokio::test]
-async fn typed_legacy_capabilities_keep_subscription_disabled() {
-    typed_legacy(|client| async move {
+async fn typed_2025_11_25_capabilities_keep_subscription_disabled() {
+    typed_protocol(TestProtocol::V2025_11_25, |client| async move {
         let caps = client
             .peer_info()
-            .expect("legacy peer info")
+            .expect("2025-11-25 peer info")
             .capabilities
             .clone();
         assert_eq!(
             serde_json::to_value(caps).unwrap(),
-            common_capabilities_json(),
-            "legacy capabilities keep resource subscriptions disabled"
+            capabilities_2025_11_25_json(),
+            "2025-11-25 capabilities keep resource subscriptions disabled"
         );
         Ok(())
     })
@@ -347,55 +270,59 @@ async fn typed_legacy_capabilities_keep_subscription_disabled() {
 // completion have no applicable cache fields.
 // =============================================================================
 
-/// Assert a typed modern list/read result carries the SEP-2549 cache fields.
-fn assert_modern_cache_fields(ttl_ms: Option<u64>, cache_scope: Option<rmcp::model::CacheScope>) {
-    assert_eq!(ttl_ms, Some(0), "modern result must carry ttlMs: 0");
-    assert_eq!(
-        cache_scope,
-        Some(rmcp::model::CacheScope::Private),
-        "modern result must carry cacheScope: private"
-    );
-}
-
-/// Assert a typed legacy list/read result carries neither cache field.
-fn assert_legacy_no_cache_fields(
+/// Assert a typed `2026-07-28` list/read result carries the SEP-2549 cache
+/// fields.
+fn assert_2026_07_28_cache_fields(
     ttl_ms: Option<u64>,
     cache_scope: Option<rmcp::model::CacheScope>,
 ) {
-    assert_eq!(ttl_ms, None, "legacy result must omit ttlMs");
-    assert_eq!(cache_scope, None, "legacy result must omit cacheScope");
+    assert_eq!(ttl_ms, Some(0), "2026-07-28 result must carry ttlMs: 0");
+    assert_eq!(
+        cache_scope,
+        Some(rmcp::model::CacheScope::Private),
+        "2026-07-28 result must carry cacheScope: private"
+    );
+}
+
+/// Assert a typed `2025-11-25` list/read result carries neither cache field.
+fn assert_2025_11_25_no_cache_fields(
+    ttl_ms: Option<u64>,
+    cache_scope: Option<rmcp::model::CacheScope>,
+) {
+    assert_eq!(ttl_ms, None, "2025-11-25 result must omit ttlMs");
+    assert_eq!(cache_scope, None, "2025-11-25 result must omit cacheScope");
 }
 
 #[tokio::test]
-async fn typed_modern_cache_fields_on_every_cacheable_family() {
-    typed_modern(|client| async move {
+async fn typed_2026_07_28_cache_fields_on_every_cacheable_family() {
+    typed_protocol(TestProtocol::V2026_07_28, |client| async move {
         let tools = client
             .peer()
             .list_tools(Some(PaginatedRequestParams::default()))
             .await
             .unwrap();
-        assert_modern_cache_fields(tools.ttl_ms, tools.cache_scope);
+        assert_2026_07_28_cache_fields(tools.ttl_ms, tools.cache_scope);
 
         let resources = client
             .peer()
             .list_resources(Some(PaginatedRequestParams::default()))
             .await
             .unwrap();
-        assert_modern_cache_fields(resources.ttl_ms, resources.cache_scope);
+        assert_2026_07_28_cache_fields(resources.ttl_ms, resources.cache_scope);
 
         let templates = client
             .peer()
             .list_resource_templates(Some(PaginatedRequestParams::default()))
             .await
             .unwrap();
-        assert_modern_cache_fields(templates.ttl_ms, templates.cache_scope);
+        assert_2026_07_28_cache_fields(templates.ttl_ms, templates.cache_scope);
 
         let prompts = client
             .peer()
             .list_prompts(Some(PaginatedRequestParams::default()))
             .await
             .unwrap();
-        assert_modern_cache_fields(prompts.ttl_ms, prompts.cache_scope);
+        assert_2026_07_28_cache_fields(prompts.ttl_ms, prompts.cache_scope);
 
         // Every URI kind of resources/read carries the fields.
         for uri in ["serial://ports", "serial://connections"] {
@@ -404,7 +331,7 @@ async fn typed_modern_cache_fields_on_every_cacheable_family() {
                 .read_resource(ReadResourceRequestParams::new(uri))
                 .await
                 .unwrap();
-            assert_modern_cache_fields(read.ttl_ms, read.cache_scope);
+            assert_2026_07_28_cache_fields(read.ttl_ms, read.cache_scope);
         }
         Ok(())
     })
@@ -413,42 +340,42 @@ async fn typed_modern_cache_fields_on_every_cacheable_family() {
 }
 
 #[tokio::test]
-async fn typed_legacy_cache_fields_absent_on_every_cacheable_family() {
-    typed_legacy(|client| async move {
+async fn typed_2025_11_25_cache_fields_absent_on_every_cacheable_family() {
+    typed_protocol(TestProtocol::V2025_11_25, |client| async move {
         let tools = client
             .peer()
             .list_tools(Some(PaginatedRequestParams::default()))
             .await
             .unwrap();
-        assert_legacy_no_cache_fields(tools.ttl_ms, tools.cache_scope);
+        assert_2025_11_25_no_cache_fields(tools.ttl_ms, tools.cache_scope);
 
         let resources = client
             .peer()
             .list_resources(Some(PaginatedRequestParams::default()))
             .await
             .unwrap();
-        assert_legacy_no_cache_fields(resources.ttl_ms, resources.cache_scope);
+        assert_2025_11_25_no_cache_fields(resources.ttl_ms, resources.cache_scope);
 
         let templates = client
             .peer()
             .list_resource_templates(Some(PaginatedRequestParams::default()))
             .await
             .unwrap();
-        assert_legacy_no_cache_fields(templates.ttl_ms, templates.cache_scope);
+        assert_2025_11_25_no_cache_fields(templates.ttl_ms, templates.cache_scope);
 
         let prompts = client
             .peer()
             .list_prompts(Some(PaginatedRequestParams::default()))
             .await
             .unwrap();
-        assert_legacy_no_cache_fields(prompts.ttl_ms, prompts.cache_scope);
+        assert_2025_11_25_no_cache_fields(prompts.ttl_ms, prompts.cache_scope);
 
         let read = client
             .peer()
             .read_resource(ReadResourceRequestParams::new("serial://ports"))
             .await
             .unwrap();
-        assert_legacy_no_cache_fields(read.ttl_ms, read.cache_scope);
+        assert_2025_11_25_no_cache_fields(read.ttl_ms, read.cache_scope);
         Ok(())
     })
     .await
@@ -456,11 +383,11 @@ async fn typed_legacy_cache_fields_absent_on_every_cacheable_family() {
 }
 
 #[tokio::test]
-async fn typed_modern_list_cursor_pages_are_honored() {
+async fn typed_2026_07_28_list_cursor_pages_are_honored() {
     // The explicit tools/list + prompts/list handlers paginate through the
     // same `paginate` helper as resources: a cursor past the single-page
     // catalog yields an empty page and no next cursor.
-    typed_modern(|client| async move {
+    typed_protocol(TestProtocol::V2026_07_28, |client| async move {
         let cursor = base64::engine::general_purpose::STANDARD.encode("999".as_bytes());
         let tools = client
             .peer()
@@ -592,9 +519,10 @@ async fn raw_post(
     }
 }
 
-/// Modern request: `_meta` + matching `MCP-Protocol-Version` header plus the
-/// SEP-2243 `Mcp-Method` / `Mcp-Name` headers rmcp requires for 2026-07-28.
-async fn raw_modern(
+/// `2026-07-28` request: `_meta` + matching `MCP-Protocol-Version` header
+/// plus the SEP-2243 `Mcp-Method` / `Mcp-Name` headers rmcp requires for
+/// `2026-07-28`.
+async fn raw_2026_07_28(
     url: &str,
     id: u64,
     method: &str,
@@ -602,7 +530,7 @@ async fn raw_modern(
     name: Option<&str>,
 ) -> RawWire {
     let mut params = params;
-    params["_meta"] = modern_meta();
+    params["_meta"] = meta_2026_07_28();
     raw_post(
         url,
         Some(id),
@@ -616,10 +544,10 @@ async fn raw_modern(
     .await
 }
 
-/// Establish a legacy session: initialize with `2025-11-25`, capture
+/// Establish a `2025-11-25` session: initialize with `2025-11-25`, capture
 /// `Mcp-Session-Id`, send `notifications/initialized`. Returns the session
 /// id and the initialize raw wire.
-async fn raw_legacy_session(url: &str) -> (String, RawWire) {
+async fn raw_2025_11_25_session(url: &str) -> (String, RawWire) {
     let init = raw_post(
         url,
         Some(400),
@@ -661,8 +589,9 @@ async fn raw_legacy_session(url: &str) -> (String, RawWire) {
     (session, init)
 }
 
-/// Legacy request: session header + `MCP-Protocol-Version: 2025-11-25`.
-async fn raw_legacy(url: &str, session: &str, id: u64, method: &str, params: Value) -> RawWire {
+/// `2025-11-25` request: session header + `MCP-Protocol-Version:
+/// 2025-11-25`.
+async fn raw_2025_11_25(url: &str, session: &str, id: u64, method: &str, params: Value) -> RawWire {
     raw_post(
         url,
         Some(id),
@@ -681,9 +610,9 @@ async fn raw_legacy(url: &str, session: &str, id: u64, method: &str, params: Val
 // =============================================================================
 
 #[tokio::test]
-async fn raw_discover_succeeds_without_session_and_lists_versions_modern_first() {
+async fn raw_discover_succeeds_without_session_and_lists_2026_07_28_first() {
     let server = common::spawned::SpawnedServer::start().await;
-    let raw = raw_modern(&server.url, 1, "server/discover", json!({}), None).await;
+    let raw = raw_2026_07_28(&server.url, 1, "server/discover", json!({}), None).await;
     assert_eq!(raw.status, 200, "discover without session id succeeds");
     assert!(
         raw.content_type.starts_with("text/event-stream"),
@@ -698,19 +627,47 @@ async fn raw_discover_succeeds_without_session_and_lists_versions_modern_first()
     assert_eq!(
         result["supportedVersions"],
         json!(["2026-07-28", "2025-11-25"]),
-        "supportedVersions exactly modern then legacy"
+        "supportedVersions exactly 2026-07-28 then 2025-11-25"
     );
-    assert_eq!(result["capabilities"], modern_capabilities_json());
+    assert_eq!(result["capabilities"], capabilities_2026_07_28_json());
     // Cache policy (`ttlMs` / `cacheScope`) is Phase 4 scope; no cache
     // assertion belongs in the Phase 2 discovery acceptance.
 }
 
 #[tokio::test]
-async fn raw_modern_surface_includes_result_type_complete() {
+async fn coverage_matrix_matches_exact_supported_versions_on_the_wire() {
+    // Public-boundary coverage lock: the independent test-case list
+    // `TestProtocol::ALL` (in order) must equal the exact `supportedVersions`
+    // the raw `server/discover` returns. This fails on a missing, extra, or
+    // reordered version, so a future production policy row requires an
+    // explicit test case. Deliberately independent from production
+    // `src/mcp_protocol.rs` internals — raw wire facts only.
+    let server = common::spawned::SpawnedServer::start().await;
+    let raw = raw_2026_07_28(&server.url, 50, "server/discover", json!({}), None).await;
+    assert_eq!(raw.status, 200, "discover without session id succeeds");
+    let json = raw.json.expect("discover JSON");
+    let expected: Vec<String> = TestProtocol::ALL
+        .iter()
+        .map(|p| p.version().as_str().to_string())
+        .collect();
+    let wire: Vec<String> = json["result"]["supportedVersions"]
+        .as_array()
+        .expect("supportedVersions array")
+        .iter()
+        .map(|v| v.as_str().expect("version string").to_string())
+        .collect();
+    assert_eq!(
+        wire, expected,
+        "server/discover supportedVersions must equal TestProtocol::ALL exactly, in order"
+    );
+}
+
+#[tokio::test]
+async fn raw_2026_07_28_surface_includes_result_type_complete() {
     let server = common::spawned::SpawnedServer::start().await;
 
     // tools/list
-    let raw = raw_modern(&server.url, 2, "tools/list", json!({}), None).await;
+    let raw = raw_2026_07_28(&server.url, 2, "tools/list", json!({}), None).await;
     assert_eq!(raw.status, 200);
     let json = raw.json.unwrap();
     assert_eq!(json["id"], 2);
@@ -725,14 +682,14 @@ async fn raw_modern_surface_includes_result_type_complete() {
     assert_eq!(names, expected);
 
     // resources/list
-    let raw = raw_modern(&server.url, 3, "resources/list", json!({}), None).await;
+    let raw = raw_2026_07_28(&server.url, 3, "resources/list", json!({}), None).await;
     assert_eq!(raw.status, 200);
     let json = raw.json.unwrap();
     assert_eq!(json["result"]["resultType"], "complete");
     assert_eq!(json["result"]["resources"].as_array().unwrap().len(), 2);
 
     // resources/read(serial://ports)
-    let raw = raw_modern(
+    let raw = raw_2026_07_28(
         &server.url,
         4,
         "resources/read",
@@ -750,14 +707,14 @@ async fn raw_modern_surface_includes_result_type_complete() {
     );
 
     // prompts/list
-    let raw = raw_modern(&server.url, 5, "prompts/list", json!({}), None).await;
+    let raw = raw_2026_07_28(&server.url, 5, "prompts/list", json!({}), None).await;
     assert_eq!(raw.status, 200);
     let json = raw.json.unwrap();
     assert_eq!(json["result"]["resultType"], "complete");
     assert_eq!(json["result"]["prompts"].as_array().unwrap().len(), 2);
 
     // prompts/get
-    let raw = raw_modern(
+    let raw = raw_2026_07_28(
         &server.url,
         6,
         "prompts/get",
@@ -774,7 +731,7 @@ async fn raw_modern_surface_includes_result_type_complete() {
     );
 
     // completion/complete
-    let raw = raw_modern(
+    let raw = raw_2026_07_28(
         &server.url,
         7,
         "completion/complete",
@@ -794,7 +751,7 @@ async fn raw_modern_surface_includes_result_type_complete() {
     );
 
     // tools/call(compute_checksum)
-    let raw = raw_modern(
+    let raw = raw_2026_07_28(
         &server.url,
         8,
         "tools/call",
@@ -810,37 +767,37 @@ async fn raw_modern_surface_includes_result_type_complete() {
 }
 
 #[tokio::test]
-async fn raw_legacy_responses_omit_result_type() {
+async fn raw_2025_11_25_responses_omit_result_type() {
     let server = common::spawned::SpawnedServer::start().await;
-    let (session, init) = raw_legacy_session(&server.url).await;
+    let (session, init) = raw_2025_11_25_session(&server.url).await;
     assert_eq!(init.status, 200);
     let init_json = init.json.clone().unwrap();
     assert_eq!(init_json["id"], 400);
     assert_eq!(init_json["result"]["protocolVersion"], "2025-11-25");
     assert_eq!(
         init_json["result"]["capabilities"],
-        common_capabilities_json()
+        capabilities_2025_11_25_json()
     );
 
-    let list = raw_legacy(&server.url, &session, 10, "tools/list", json!({})).await;
+    let list = raw_2025_11_25(&server.url, &session, 10, "tools/list", json!({})).await;
     assert_eq!(list.status, 200);
     assert!(
         list.content_type.starts_with("text/event-stream"),
-        "legacy responses arrive over SSE: {}",
+        "2025-11-25 responses arrive over SSE: {}",
         list.content_type
     );
     let json = list.json.unwrap();
     assert_eq!(json["id"], 10);
     assert!(
         json["result"].get("resultType").is_none(),
-        "legacy responses must omit resultType: {json}"
+        "2025-11-25 responses must omit resultType: {json}"
     );
     assert_eq!(
         json["result"]["tools"].as_array().unwrap().len(),
         common::EXPECTED_TOOLS.len()
     );
 
-    let call = raw_legacy(
+    let call = raw_2025_11_25(
         &server.url,
         &session,
         11,
@@ -855,10 +812,10 @@ async fn raw_legacy_responses_omit_result_type() {
 }
 
 #[tokio::test]
-async fn raw_modern_cache_fields_present_legacy_absent() {
+async fn raw_2026_07_28_cache_fields_present_2025_11_25_absent() {
     let server = common::spawned::SpawnedServer::start().await;
 
-    // Modern: every cacheable list family carries ttlMs 0 + cacheScope
+    // 2026-07-28: every cacheable list family carries ttlMs 0 + cacheScope
     // private on the wire.
     for (id, method, params, name) in [
         (30, "tools/list", json!({}), None),
@@ -866,19 +823,19 @@ async fn raw_modern_cache_fields_present_legacy_absent() {
         (32, "resources/templates/list", json!({}), None),
         (33, "prompts/list", json!({}), None),
     ] {
-        let raw = raw_modern(&server.url, id, method, params, name).await;
-        assert_eq!(raw.status, 200, "{method} modern -> 200");
+        let raw = raw_2026_07_28(&server.url, id, method, params, name).await;
+        assert_eq!(raw.status, 200, "{method} 2026-07-28 -> 200");
         let json = raw.json.unwrap();
-        assert_eq!(json["result"]["ttlMs"], 0, "{method} modern ttlMs");
+        assert_eq!(json["result"]["ttlMs"], 0, "{method} 2026-07-28 ttlMs");
         assert_eq!(
             json["result"]["cacheScope"], "private",
-            "{method} modern cacheScope"
+            "{method} 2026-07-28 cacheScope"
         );
     }
 
-    // Modern resources/read for both static URI kinds.
+    // 2026-07-28 resources/read for both static URI kinds.
     for (id, uri) in [(34u64, "serial://ports"), (35u64, "serial://connections")] {
-        let raw = raw_modern(
+        let raw = raw_2026_07_28(
             &server.url,
             id,
             "resources/read",
@@ -886,37 +843,37 @@ async fn raw_modern_cache_fields_present_legacy_absent() {
             Some(uri),
         )
         .await;
-        assert_eq!(raw.status, 200, "modern read {uri} -> 200");
+        assert_eq!(raw.status, 200, "2026-07-28 read {uri} -> 200");
         let json = raw.json.unwrap();
-        assert_eq!(json["result"]["ttlMs"], 0, "modern read {uri} ttlMs");
+        assert_eq!(json["result"]["ttlMs"], 0, "2026-07-28 read {uri} ttlMs");
         assert_eq!(
             json["result"]["cacheScope"], "private",
-            "modern read {uri} cacheScope"
+            "2026-07-28 read {uri} cacheScope"
         );
     }
 
-    // Legacy: neither cache field may leak to legacy peers.
-    let (session, _init) = raw_legacy_session(&server.url).await;
+    // 2025-11-25: neither cache field may leak to legacy peers.
+    let (session, _init) = raw_2025_11_25_session(&server.url).await;
     for (id, method, params) in [
         (36, "tools/list", json!({})),
         (37, "resources/list", json!({})),
         (38, "resources/templates/list", json!({})),
         (39, "prompts/list", json!({})),
     ] {
-        let raw = raw_legacy(&server.url, &session, id, method, params).await;
-        assert_eq!(raw.status, 200, "{method} legacy -> 200");
+        let raw = raw_2025_11_25(&server.url, &session, id, method, params).await;
+        assert_eq!(raw.status, 200, "{method} 2025-11-25 -> 200");
         let json = raw.json.unwrap();
         assert!(
             json["result"].get("ttlMs").is_none(),
-            "{method} legacy must omit ttlMs: {json}"
+            "{method} 2025-11-25 must omit ttlMs: {json}"
         );
         assert!(
             json["result"].get("cacheScope").is_none(),
-            "{method} legacy must omit cacheScope: {json}"
+            "{method} 2025-11-25 must omit cacheScope: {json}"
         );
     }
 
-    let raw = raw_legacy(
+    let raw = raw_2025_11_25(
         &server.url,
         &session,
         40,
@@ -924,26 +881,26 @@ async fn raw_modern_cache_fields_present_legacy_absent() {
         json!({"uri": "serial://ports"}),
     )
     .await;
-    assert_eq!(raw.status, 200, "legacy read -> 200");
+    assert_eq!(raw.status, 200, "2025-11-25 read -> 200");
     let json = raw.json.unwrap();
     assert!(
         json["result"].get("ttlMs").is_none(),
-        "legacy read must omit ttlMs: {json}"
+        "2025-11-25 read must omit ttlMs: {json}"
     );
     assert!(
         json["result"].get("cacheScope").is_none(),
-        "legacy read must omit cacheScope: {json}"
+        "2025-11-25 read must omit cacheScope: {json}"
     );
 }
 
 #[tokio::test]
-async fn raw_modern_list_cursor_pages_are_honored() {
+async fn raw_2026_07_28_list_cursor_pages_are_honored() {
     let server = common::spawned::SpawnedServer::start().await;
     // The manual tools/list + prompts/list handlers paginate through the
     // same `paginate` helper as resources. A cursor past the single-page
     // catalog yields an empty page and no next cursor.
     let cursor = base64::engine::general_purpose::STANDARD.encode("999".as_bytes());
-    let raw = raw_modern(
+    let raw = raw_2026_07_28(
         &server.url,
         41,
         "tools/list",
@@ -962,7 +919,7 @@ async fn raw_modern_list_cursor_pages_are_honored() {
         "no next cursor after the end"
     );
 
-    let raw = raw_modern(
+    let raw = raw_2026_07_28(
         &server.url,
         42,
         "prompts/list",
@@ -983,9 +940,9 @@ async fn raw_modern_list_cursor_pages_are_honored() {
 }
 
 #[tokio::test]
-async fn raw_modern_unknown_resource_is_invalid_params_with_uri() {
+async fn raw_2026_07_28_unknown_resource_is_invalid_params_with_uri() {
     let server = common::spawned::SpawnedServer::start().await;
-    let raw = raw_modern(
+    let raw = raw_2026_07_28(
         &server.url,
         12,
         "resources/read",
@@ -993,15 +950,18 @@ async fn raw_modern_unknown_resource_is_invalid_params_with_uri() {
         Some("serial://does-not-exist"),
     )
     .await;
-    assert_eq!(raw.status, 400, "modern unknown resource -> HTTP 400");
+    assert_eq!(raw.status, 400, "2026-07-28 unknown resource -> HTTP 400");
     assert!(
         raw.content_type.starts_with("application/json"),
-        "modern errors are direct JSON: {}",
+        "2026-07-28 errors are direct JSON: {}",
         raw.content_type
     );
     let json = raw.json.unwrap();
     assert_eq!(json["id"], 12, "request id echoed");
-    assert_eq!(json["error"]["code"], -32602, "INVALID_PARAMS for modern");
+    assert_eq!(
+        json["error"]["code"], -32602,
+        "INVALID_PARAMS for 2026-07-28"
+    );
     assert_eq!(
         json["error"]["data"]["uri"], "serial://does-not-exist",
         "error data carries the requested URI"
@@ -1009,10 +969,10 @@ async fn raw_modern_unknown_resource_is_invalid_params_with_uri() {
 }
 
 #[tokio::test]
-async fn raw_legacy_unknown_resource_keeps_resource_not_found() {
+async fn raw_2025_11_25_unknown_resource_keeps_resource_not_found() {
     let server = common::spawned::SpawnedServer::start().await;
-    let (session, _init) = raw_legacy_session(&server.url).await;
-    let raw = raw_legacy(
+    let (session, _init) = raw_2025_11_25_session(&server.url).await;
+    let raw = raw_2025_11_25(
         &server.url,
         &session,
         13,
@@ -1020,18 +980,18 @@ async fn raw_legacy_unknown_resource_keeps_resource_not_found() {
         json!({"uri": "serial://does-not-exist"}),
     )
     .await;
-    assert_eq!(raw.status, 200, "legacy error stays inside an SSE 200");
+    assert_eq!(raw.status, 200, "2025-11-25 error stays inside an SSE 200");
     let json = raw.json.unwrap();
     assert_eq!(json["id"], 13);
     assert_eq!(
         json["error"]["code"], -32002,
-        "legacy keeps RESOURCE_NOT_FOUND"
+        "2025-11-25 keeps RESOURCE_NOT_FOUND"
     );
     assert_eq!(json["error"]["data"]["uri"], "serial://does-not-exist");
 }
 
 #[tokio::test]
-async fn raw_modern_missing_required_meta_returns_400() {
+async fn raw_2026_07_28_missing_required_meta_returns_400() {
     let server = common::spawned::SpawnedServer::start().await;
 
     // server/discover without _meta: invalid params, no header can save it.
@@ -1082,10 +1042,10 @@ async fn raw_modern_missing_required_meta_returns_400() {
 }
 
 #[tokio::test]
-async fn raw_modern_header_meta_version_mismatch_returns_400() {
+async fn raw_2026_07_28_header_meta_version_mismatch_returns_400() {
     let server = common::spawned::SpawnedServer::start().await;
     let mut params = json!({});
-    params["_meta"] = modern_meta();
+    params["_meta"] = meta_2026_07_28();
     let raw = raw_post(
         &server.url,
         Some(16),
@@ -1104,7 +1064,7 @@ async fn raw_modern_header_meta_version_mismatch_returns_400() {
 }
 
 #[tokio::test]
-async fn raw_modern_unsupported_version_returns_400_with_supported_list() {
+async fn raw_2026_07_28_unsupported_version_returns_400_with_supported_list() {
     let server = common::spawned::SpawnedServer::start().await;
     let mut params = json!({});
     params["_meta"] = json!({
@@ -1139,7 +1099,7 @@ async fn raw_modern_unsupported_version_returns_400_with_supported_list() {
 }
 
 #[tokio::test]
-async fn raw_modern_routing_rejects_legacy_only_methods() {
+async fn raw_2026_07_28_routing_rejects_legacy_only_methods() {
     let server = common::spawned::SpawnedServer::start().await;
 
     for (id, method, params, name) in [
@@ -1158,11 +1118,11 @@ async fn raw_modern_routing_rejects_legacy_only_methods() {
             Some("serial://ports"),
         ),
     ] {
-        let raw = raw_modern(&server.url, id, method, params, name).await;
+        let raw = raw_2026_07_28(&server.url, id, method, params, name).await;
         assert_eq!(raw.status, 404, "{method} -> HTTP 404");
         assert!(
             raw.content_type.starts_with("application/json"),
-            "{method} modern error is direct JSON: {}",
+            "{method} 2026-07-28 error is direct JSON: {}",
             raw.content_type
         );
         let json = raw.json.unwrap();
@@ -1175,7 +1135,7 @@ async fn raw_modern_routing_rejects_legacy_only_methods() {
 }
 
 #[tokio::test]
-async fn raw_modern_initialize_is_rejected_with_method_not_found() {
+async fn raw_2026_07_28_initialize_is_rejected_with_method_not_found() {
     let server = common::spawned::SpawnedServer::start().await;
     // The server only allows `initialize` for the legacy `2025-11-25`
     // lifecycle; a modern `2026-07-28` initialize is rejected in
@@ -1190,7 +1150,7 @@ async fn raw_modern_initialize_is_rejected_with_method_not_found() {
         "capabilities": {},
         "clientInfo": {"name": "serial-mcp-test", "version": "1"},
     });
-    params["_meta"] = modern_meta();
+    params["_meta"] = meta_2026_07_28();
     let raw = raw_post(
         &server.url,
         Some(22),
@@ -1202,10 +1162,10 @@ async fn raw_modern_initialize_is_rejected_with_method_not_found() {
         None,
     )
     .await;
-    assert_eq!(raw.status, 404, "modern initialize -> HTTP 404");
+    assert_eq!(raw.status, 404, "2026-07-28 initialize -> HTTP 404");
     assert!(
         raw.content_type.starts_with("application/json"),
-        "modern initialize error is direct JSON: {}",
+        "2026-07-28 initialize error is direct JSON: {}",
         raw.content_type
     );
     assert!(
@@ -1216,21 +1176,21 @@ async fn raw_modern_initialize_is_rejected_with_method_not_found() {
     assert_eq!(json["id"], 22, "request id echoed");
     assert_eq!(
         json["error"]["code"], -32601,
-        "modern initialize -> METHOD_NOT_FOUND"
+        "2026-07-28 initialize -> METHOD_NOT_FOUND"
     );
     assert_eq!(json["error"]["message"], "initialize");
 }
 
 #[tokio::test]
-async fn raw_legacy_ping_succeeds_and_subscription_methods_are_method_not_found() {
+async fn raw_2025_11_25_ping_succeeds_and_subscription_methods_are_method_not_found() {
     let server = common::spawned::SpawnedServer::start().await;
-    let (session, _init) = raw_legacy_session(&server.url).await;
+    let (session, _init) = raw_2025_11_25_session(&server.url).await;
 
-    let ping = raw_legacy(&server.url, &session, 23, "ping", json!({})).await;
+    let ping = raw_2025_11_25(&server.url, &session, 23, "ping", json!({})).await;
     assert_eq!(ping.status, 200);
     let json = ping.json.unwrap();
     assert_eq!(json["id"], 23);
-    assert_eq!(json["result"], json!({}), "legacy ping -> empty result");
+    assert_eq!(json["result"], json!({}), "2025-11-25 ping -> empty result");
 
     for (id, method, params) in [
         (24, "resources/subscribe", json!({"uri": "serial://ports"})),
@@ -1240,8 +1200,11 @@ async fn raw_legacy_ping_succeeds_and_subscription_methods_are_method_not_found(
             json!({"uri": "serial://ports"}),
         ),
     ] {
-        let raw = raw_legacy(&server.url, &session, id, method, params).await;
-        assert_eq!(raw.status, 200, "{method} legacy error stays in SSE 200");
+        let raw = raw_2025_11_25(&server.url, &session, id, method, params).await;
+        assert_eq!(
+            raw.status, 200,
+            "{method} 2025-11-25 error stays in SSE 200"
+        );
         let json = raw.json.unwrap();
         assert_eq!(json["id"], id);
         assert_eq!(
@@ -1252,7 +1215,7 @@ async fn raw_legacy_ping_succeeds_and_subscription_methods_are_method_not_found(
 }
 
 #[tokio::test]
-async fn raw_legacy_listen_stays_method_not_found() {
+async fn raw_2025_11_25_listen_stays_method_not_found() {
     // Phase 3: modern `subscriptions/listen` is implemented (typed coverage
     // lives in tests/resource_subscriptions.rs — a raw modern listen is a
     // long-lived SSE stream that only completes on cancellation, so it is
@@ -1260,8 +1223,8 @@ async fn raw_legacy_listen_stays_method_not_found() {
     // must NOT see the modern subscription surface: rmcp gates the method
     // and the server returns `-32601` inside an SSE 200.
     let server = common::spawned::SpawnedServer::start().await;
-    let (session, _init) = raw_legacy_session(&server.url).await;
-    let legacy = raw_legacy(
+    let (session, _init) = raw_2025_11_25_session(&server.url).await;
+    let legacy = raw_2025_11_25(
         &server.url,
         &session,
         27,
@@ -1269,16 +1232,19 @@ async fn raw_legacy_listen_stays_method_not_found() {
         json!({"notifications": {"resourceSubscriptions": []}}),
     )
     .await;
-    assert_eq!(legacy.status, 200, "legacy listen error stays in SSE 200");
+    assert_eq!(
+        legacy.status, 200,
+        "2025-11-25 listen error stays in SSE 200"
+    );
     assert!(
         legacy.content_type.starts_with("text/event-stream"),
-        "legacy listen error arrives over SSE: {}",
+        "2025-11-25 listen error arrives over SSE: {}",
         legacy.content_type
     );
     let json = legacy.json.unwrap();
     assert_eq!(json["id"], 27);
     assert_eq!(
         json["error"]["code"], -32601,
-        "legacy listen METHOD_NOT_FOUND"
+        "2025-11-25 listen METHOD_NOT_FOUND"
     );
 }

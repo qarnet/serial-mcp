@@ -22,7 +22,7 @@ use rmcp::service::{RoleClient, Subscription, SubscriptionEnd};
 use serde_json::json;
 
 use common::controlled::controlled_connection;
-use common::{connect_modern_client, TestServer};
+use common::{connect_2025_11_25_client, connect_2026_07_28_client, TestServer};
 
 /// Start a server around a fresh manager plus a controlled (in-memory)
 /// connection, returning `(server, connection_id, rx-injector state)`.
@@ -37,7 +37,7 @@ async fn controlled_server() -> (TestServer, String, Arc<common::controlled::Con
 /// Start the connection's RX pump through a public read (creates the RX
 /// session; the pump runs from then on).
 async fn start_pump(
-    client: &rmcp::service::RunningService<RoleClient, common::TestClientHandler>,
+    client: &rmcp::service::RunningService<RoleClient, common::VersionedClientHandler>,
     connection_id: &str,
 ) {
     let result = client
@@ -95,14 +95,14 @@ async fn assert_no_notification(sub: &mut Subscription, window: Duration) {
 // =============================================================================
 
 #[tokio::test]
-async fn modern_discovery_advertises_resource_subscriptions_legacy_initialize_does_not(
-) -> Result<()> {
+async fn discovery_2026_07_28_advertises_subscriptions_2025_11_25_initialize_does_not() -> Result<()>
+{
     let server = TestServer::start().await;
 
-    let (modern, _) = connect_modern_client(&server).await?;
-    let caps = modern
+    let (client_2026_07_28, _) = connect_2026_07_28_client(&server).await?;
+    let caps = client_2026_07_28
         .peer_info()
-        .expect("modern peer info")
+        .expect("2026-07-28 peer info")
         .capabilities
         .clone();
     assert_eq!(
@@ -113,13 +113,13 @@ async fn modern_discovery_advertises_resource_subscriptions_legacy_initialize_do
             "resources": {"subscribe": true},
             "tools": {},
         }),
-        "modern discovery advertises resources.subscribe and no listChanged"
+        "2026-07-28 discovery advertises resources.subscribe and no listChanged"
     );
 
-    let (legacy, _) = common::connect_legacy_client(&server).await?;
-    let caps = legacy
+    let (client_2025_11_25, _) = connect_2025_11_25_client(&server).await?;
+    let caps = client_2025_11_25
         .peer_info()
-        .expect("legacy peer info")
+        .expect("2025-11-25 peer info")
         .capabilities
         .clone();
     assert_eq!(
@@ -130,7 +130,7 @@ async fn modern_discovery_advertises_resource_subscriptions_legacy_initialize_do
             "resources": {},
             "tools": {},
         }),
-        "legacy initialize keeps resource subscriptions disabled"
+        "2025-11-25 initialize keeps resource subscriptions disabled"
     );
     Ok(())
 }
@@ -143,7 +143,7 @@ async fn modern_discovery_advertises_resource_subscriptions_legacy_initialize_do
 async fn acknowledgement_contains_only_accepted_valid_resource_uris_in_first_occurrence_order(
 ) -> Result<()> {
     let server = TestServer::start().await;
-    let (client, _) = connect_modern_client(&server).await?;
+    let (client, _) = connect_2026_07_28_client(&server).await?;
 
     let requested = SubscriptionFilter::builder()
         .resource_subscriptions([
@@ -223,7 +223,7 @@ async fn acknowledgement_contains_only_accepted_valid_resource_uris_in_first_occ
 #[tokio::test]
 async fn acknowledgement_with_no_valid_resources_is_an_empty_accepted_filter() -> Result<()> {
     let server = TestServer::start().await;
-    let (client, _) = connect_modern_client(&server).await?;
+    let (client, _) = connect_2026_07_28_client(&server).await?;
 
     // Everything invalid: acknowledged resource list is None (no fake URI).
     let mut sub = client
@@ -250,9 +250,9 @@ async fn acknowledgement_with_no_valid_resources_is_an_empty_accepted_filter() -
 }
 
 #[tokio::test]
-async fn legacy_listen_is_method_not_found() -> Result<()> {
+async fn listen_2025_11_25_is_method_not_found() -> Result<()> {
     let server = TestServer::start().await;
-    let (legacy, _) = common::connect_legacy_client(&server).await?;
+    let (legacy, _) = connect_2025_11_25_client(&server).await?;
     let result = legacy
         .peer()
         .listen(
@@ -263,7 +263,7 @@ async fn legacy_listen_is_method_not_found() -> Result<()> {
         .await;
     assert!(
         result.is_err(),
-        "legacy clients must not reach the modern listen surface: {result:?}"
+        "2025-11-25 clients must not reach the modern listen surface: {result:?}"
     );
     legacy.cancel().await.ok();
     Ok(())
@@ -277,7 +277,7 @@ async fn legacy_listen_is_method_not_found() -> Result<()> {
 async fn rx_append_notification_arrives_only_after_bytes_readable_and_does_not_move_cursor(
 ) -> Result<()> {
     let (server, connection_id, state) = controlled_server().await;
-    let (client, _) = connect_modern_client(&server).await?;
+    let (client, _) = connect_2026_07_28_client(&server).await?;
 
     // Start the pump with a drained read (no data yet; shared cursor stays 0).
     start_pump(&client, &connection_id).await;
@@ -326,7 +326,7 @@ async fn rx_append_notification_arrives_only_after_bytes_readable_and_does_not_m
 #[tokio::test]
 async fn read_works_without_any_listener() -> Result<()> {
     let (server, connection_id, state) = controlled_server().await;
-    let (client, _) = connect_modern_client(&server).await?;
+    let (client, _) = connect_2026_07_28_client(&server).await?;
 
     // No subscription exists anywhere; the read path must be fully usable.
     start_pump(&client, &connection_id).await;
@@ -358,8 +358,8 @@ async fn read_works_without_any_listener() -> Result<()> {
 #[tokio::test]
 async fn two_stateless_listeners_receive_same_update_independently() -> Result<()> {
     let (server, connection_id, state) = controlled_server().await;
-    let (client_a, _) = connect_modern_client(&server).await?;
-    let (client_b, _) = connect_modern_client(&server).await?;
+    let (client_a, _) = connect_2026_07_28_client(&server).await?;
+    let (client_b, _) = connect_2026_07_28_client(&server).await?;
     start_pump(&client_a, &connection_id).await;
 
     let detail_uri = format!("serial://connections/{connection_id}");
@@ -411,8 +411,8 @@ async fn two_stateless_listeners_receive_same_update_independently() -> Result<(
 #[tokio::test]
 async fn cancelling_one_listener_leaves_the_other_active() -> Result<()> {
     let (server, connection_id, state) = controlled_server().await;
-    let (client_a, _) = connect_modern_client(&server).await?;
-    let (client_b, _) = connect_modern_client(&server).await?;
+    let (client_a, _) = connect_2026_07_28_client(&server).await?;
+    let (client_b, _) = connect_2026_07_28_client(&server).await?;
     start_pump(&client_a, &connection_id).await;
 
     let detail_uri = format!("serial://connections/{connection_id}");
@@ -461,7 +461,7 @@ async fn cancelling_one_listener_leaves_the_other_active() -> Result<()> {
 #[tokio::test]
 async fn listener_ignores_unrelated_events() -> Result<()> {
     let (server, connection_id, state) = controlled_server().await;
-    let (client, _) = connect_modern_client(&server).await?;
+    let (client, _) = connect_2026_07_28_client(&server).await?;
     start_pump(&client, &connection_id).await;
 
     // Listen ONLY to serial://ports. RX appends publish detail/raw/log —
@@ -502,7 +502,7 @@ async fn forced_hub_lag_yields_conservative_per_uri_recovery_without_blocking_pu
         .resource_hub(Arc::clone(&hub))
         .start()
         .await;
-    let (client, _) = connect_modern_client(&server).await?;
+    let (client, _) = connect_2026_07_28_client(&server).await?;
 
     let mut sub = client
         .peer()
@@ -558,7 +558,7 @@ async fn repeated_requested_uri_does_not_cause_duplicate_lag_recovery_notificati
         .resource_hub(Arc::clone(&hub))
         .start()
         .await;
-    let (client, _) = connect_modern_client(&server).await?;
+    let (client, _) = connect_2026_07_28_client(&server).await?;
 
     let mut sub = client
         .peer()
@@ -612,7 +612,7 @@ async fn stateless_requests_share_session_ring_and_cursor() -> Result<()> {
     // and shared read cursor visible across distinct requests (public
     // behavior, not Arc identity).
     let (server, connection_id, state) = controlled_server().await;
-    let (client, _) = connect_modern_client(&server).await?;
+    let (client, _) = connect_2026_07_28_client(&server).await?;
 
     // Request 1 (handler instance A): start the pump; nothing to drain.
     start_pump(&client, &connection_id).await;
@@ -729,7 +729,7 @@ async fn open_and_close_emit_expected_uri_hints() -> Result<()> {
         .port_provider(provider)
         .start()
         .await;
-    let (client, _) = connect_modern_client(&server).await?;
+    let (client, _) = connect_2026_07_28_client(&server).await?;
 
     // Listen for the connections list while opening.
     let mut conn_sub = client
@@ -807,7 +807,7 @@ async fn open_and_close_emit_expected_uri_hints() -> Result<()> {
 #[tokio::test]
 async fn state_and_log_operations_emit_expected_uri_hints() -> Result<()> {
     let (server, connection_id, _state) = controlled_server().await;
-    let (client, _) = connect_modern_client(&server).await?;
+    let (client, _) = connect_2026_07_28_client(&server).await?;
     start_pump(&client, &connection_id).await;
 
     let detail_uri = format!("serial://connections/{connection_id}");
@@ -974,7 +974,7 @@ async fn port_watcher_baseline_is_captured_immediately_not_after_first_interval(
         .port_watcher_interval(Duration::from_millis(1000))
         .start()
         .await;
-    let (client, _) = connect_modern_client(&server).await?;
+    let (client, _) = connect_2026_07_28_client(&server).await?;
     let mut sub = client
         .peer()
         .listen(
@@ -1011,7 +1011,7 @@ async fn port_watcher_emits_update_on_mutation_and_none_on_reorder_unchanged_or_
         .port_watcher_interval(Duration::from_millis(25))
         .start()
         .await;
-    let (client, _) = connect_modern_client(&server).await?;
+    let (client, _) = connect_2026_07_28_client(&server).await?;
     let mut sub = client
         .peer()
         .listen(

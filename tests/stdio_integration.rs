@@ -7,14 +7,14 @@
 use rmcp::{
     model::PaginatedRequestParams,
     transport::{child_process::TokioChildProcess, ConfigureCommandExt},
-    ClientLifecycleMode, ClientServiceExt, ServiceExt,
+    ClientServiceExt, ServiceExt,
 };
 use serde_json::json;
 use tempfile::TempDir;
 use tokio::process::Command;
 
 mod common;
-use common::EXPECTED_TOOLS;
+use common::{TestProtocol, EXPECTED_TOOLS};
 
 /// Start a stdio server child with an isolated temporary `--profiles-path`
 /// so the test never touches the user's actual default profile config.
@@ -41,10 +41,16 @@ async fn start_stdio_client() -> (
     (client, profiles_dir)
 }
 
-/// Start a stdio server child and connect an explicit MODERN `2026-07-28`
-/// discover-lifecycle client (self-contained per-request `_meta`).
-async fn start_stdio_modern_client() -> (
-    rmcp::service::RunningService<rmcp::service::RoleClient, ()>,
+/// Start a stdio server child and connect an explicit client for one exact
+/// protocol version: `2026-07-28` uses the discover lifecycle
+/// (self-contained per-request `_meta`), `2025-11-25` the initialize
+/// lifecycle. The common [`common::VersionedClientHandler`] serves both
+/// modes with one return type. Returns the running client plus the tempdir
+/// that must stay alive for the client's lifetime.
+async fn start_stdio_protocol_client(
+    protocol: TestProtocol,
+) -> (
+    rmcp::service::RunningService<rmcp::service::RoleClient, common::VersionedClientHandler>,
     TempDir,
 ) {
     common::binaries::ensure_serial_mcp_built()
@@ -60,41 +66,10 @@ async fn start_stdio_modern_client() -> (
 
     let transport = TokioChildProcess::new(cmd).expect("spawn stdio server");
 
-    let client = ()
-        .serve_with_lifecycle(
-            transport,
-            ClientLifecycleMode::Discover {
-                preferred_versions: vec![rmcp::model::ProtocolVersion::V_2026_07_28],
-            },
-        )
+    let client = common::VersionedClientHandler::new(protocol)
+        .serve_with_lifecycle(transport, protocol.lifecycle())
         .await
-        .expect("modern discover client");
-    (client, profiles_dir)
-}
-
-/// Start a stdio server child and connect an explicit LEGACY `2025-11-25`
-/// initialize-lifecycle client.
-async fn start_stdio_legacy_client() -> (
-    rmcp::service::RunningService<rmcp::service::RoleClient, common::LegacyClientHandler>,
-    TempDir,
-) {
-    common::binaries::ensure_serial_mcp_built()
-        .expect("serial-mcp binary available for stdio tests");
-
-    let profiles_dir = TempDir::new().expect("temp dir for isolated stdio profile store");
-    let profiles_path = profiles_dir.path().join("profiles.toml");
-
-    let cmd = Command::new(common::binaries::serial_mcp_bin()).configure(|cmd| {
-        cmd.env("RUST_LOG", "off");
-        cmd.arg("--profiles-path").arg(&profiles_path);
-    });
-
-    let transport = TokioChildProcess::new(cmd).expect("spawn stdio server");
-
-    let client = common::LegacyClientHandler
-        .serve_with_lifecycle(transport, ClientLifecycleMode::Initialize)
-        .await
-        .expect("legacy initialize client");
+        .expect("versioned stdio client");
     (client, profiles_dir)
 }
 
@@ -158,13 +133,13 @@ async fn stdio_list_resources_returns_statics_and_templates() {
 }
 
 #[tokio::test]
-async fn stdio_modern_discovery_lifecycle_selects_2026_07_28() {
-    let (client, _profiles_dir) = start_stdio_modern_client().await;
-    let info = client.peer_info().expect("modern peer info");
+async fn stdio_2026_07_28_discovery_lifecycle_negotiates_exact_version() {
+    let (client, _profiles_dir) = start_stdio_protocol_client(TestProtocol::V2026_07_28).await;
+    let info = client.peer_info().expect("2026-07-28 peer info");
     assert_eq!(
         info.protocol_version,
         rmcp::model::ProtocolVersion::V_2026_07_28,
-        "modern discover lifecycle must negotiate 2026-07-28"
+        "2026-07-28 discover lifecycle must negotiate 2026-07-28"
     );
 
     let result = client
@@ -195,12 +170,12 @@ async fn stdio_modern_discovery_lifecycle_selects_2026_07_28() {
 }
 
 #[tokio::test]
-async fn stdio_listener_cancellation_completes_cleanly() {
+async fn stdio_2026_07_28_listener_cancellation_completes_cleanly() {
     // Modern `subscriptions/listen` over stdio: the acknowledgment carries
     // the accepted filter, cancellation completes with a clean `Cancelled`
     // end state, and the server keeps serving afterwards (no hang, no
     // protocol error, child stays alive).
-    let (client, _profiles_dir) = start_stdio_modern_client().await;
+    let (client, _profiles_dir) = start_stdio_protocol_client(TestProtocol::V2026_07_28).await;
 
     let mut subscription = client
         .peer()
@@ -210,7 +185,7 @@ async fn stdio_listener_cancellation_completes_cleanly() {
                 .build(),
         )
         .await
-        .expect("modern listen over stdio");
+        .expect("2026-07-28 listen over stdio");
     assert_eq!(
         subscription
             .acknowledged()
@@ -231,7 +206,9 @@ async fn stdio_listener_cancellation_completes_cleanly() {
     );
 
     // The server is still healthy after the cancelled listener.
-    let info = client.peer_info().expect("modern peer info after cancel");
+    let info = client
+        .peer_info()
+        .expect("2026-07-28 peer info after cancel");
     assert_eq!(
         info.protocol_version,
         rmcp::model::ProtocolVersion::V_2026_07_28
@@ -241,13 +218,13 @@ async fn stdio_listener_cancellation_completes_cleanly() {
 }
 
 #[tokio::test]
-async fn stdio_legacy_initialize_lifecycle_selects_2025_11_25() {
-    let (client, _profiles_dir) = start_stdio_legacy_client().await;
-    let info = client.peer_info().expect("legacy peer info");
+async fn stdio_2025_11_25_initialize_lifecycle_negotiates_exact_version() {
+    let (client, _profiles_dir) = start_stdio_protocol_client(TestProtocol::V2025_11_25).await;
+    let info = client.peer_info().expect("2025-11-25 peer info");
     assert_eq!(
         info.protocol_version,
         rmcp::model::ProtocolVersion::V_2025_11_25,
-        "legacy initialize lifecycle must negotiate 2025-11-25"
+        "2025-11-25 initialize lifecycle must negotiate 2025-11-25"
     );
 
     let result = client
