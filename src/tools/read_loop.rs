@@ -719,10 +719,10 @@ mod tests {
         let id = connections.insert(conn).await.unwrap();
         let connection = connections.get(&id).await.unwrap();
 
-        let mgr = RxSessionManager::new(Arc::new(crate::buffer_budget::AtomicBudget::new(
-            1 << 30,
-            1 << 30,
-        )));
+        let mgr = RxSessionManager::new(
+            Arc::new(crate::buffer_budget::AtomicBudget::new(1 << 30, 1 << 30)),
+            Arc::new(crate::resource_events::ResourceEventHub::new(64)),
+        );
         let session = mgr
             .get_or_create(Arc::clone(&connection), 4096)
             .await
@@ -787,10 +787,10 @@ mod tests {
         let connection = connections.get(&id).await.unwrap();
 
         // Session with a real pump; feed bytes and wait for the ring.
-        let mgr = RxSessionManager::new(Arc::new(crate::buffer_budget::AtomicBudget::new(
-            1 << 30,
-            1 << 30,
-        )));
+        let mgr = RxSessionManager::new(
+            Arc::new(crate::buffer_budget::AtomicBudget::new(1 << 30, 1 << 30)),
+            Arc::new(crate::resource_events::ResourceEventHub::new(64)),
+        );
         let session = mgr
             .get_or_create(Arc::clone(&connection), 4096)
             .await

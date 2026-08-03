@@ -195,6 +195,52 @@ async fn stdio_modern_discovery_lifecycle_selects_2026_07_28() {
 }
 
 #[tokio::test]
+async fn stdio_listener_cancellation_completes_cleanly() {
+    // Modern `subscriptions/listen` over stdio: the acknowledgment carries
+    // the accepted filter, cancellation completes with a clean `Cancelled`
+    // end state, and the server keeps serving afterwards (no hang, no
+    // protocol error, child stays alive).
+    let (client, _profiles_dir) = start_stdio_modern_client().await;
+
+    let mut subscription = client
+        .peer()
+        .listen(
+            rmcp::model::SubscriptionFilter::builder()
+                .resource_subscription("serial://ports")
+                .build(),
+        )
+        .await
+        .expect("modern listen over stdio");
+    assert_eq!(
+        subscription
+            .acknowledged()
+            .resource_subscriptions
+            .as_deref(),
+        Some(&["serial://ports".to_string()][..]),
+        "stdio listen acknowledgment carries the accepted filter"
+    );
+
+    subscription
+        .cancel()
+        .await
+        .expect("cancelling the stdio listener");
+    assert_eq!(
+        subscription.end(),
+        Some(&rmcp::service::SubscriptionEnd::Cancelled),
+        "stdio listener cancellation completes with Cancelled"
+    );
+
+    // The server is still healthy after the cancelled listener.
+    let info = client.peer_info().expect("modern peer info after cancel");
+    assert_eq!(
+        info.protocol_version,
+        rmcp::model::ProtocolVersion::V_2026_07_28
+    );
+
+    client.cancel().await.ok();
+}
+
+#[tokio::test]
 async fn stdio_legacy_initialize_lifecycle_selects_2025_11_25() {
     let (client, _profiles_dir) = start_stdio_legacy_client().await;
     let info = client.peer_info().expect("legacy peer info");

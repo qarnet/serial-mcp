@@ -287,8 +287,16 @@ capture_boot(connection_id="9f...",
        profile_persistence: { state: "persisted", ... } }
    # durable changes are learned into the bound profile automatically;
    # a later bare open of the same device applies them
-5. close(connection_id="9f...")
+ 5. close(connection_id="9f...")
 ```
+
+Modern clients may additionally use `subscriptions/listen` as an optional
+wakeup mechanism: subscribe to `serial://ports`, `serial://connections`, or a
+concrete `serial://connections/{id}[/raw|/log]` URI and the server notifies
+you when that resource changes (port hotplug, open/close, RX bytes appended,
+log cleared). Notifications are hints only — they never carry serial payloads
+and never move the read cursor; `read` remains the primary lossless data
+path.
 
 ## Development
 

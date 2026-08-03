@@ -97,6 +97,35 @@
 
 ## [Unreleased]
 
+### Resource subscriptions (Phase 3)
+- modern `2026-07-28` `subscriptions/listen` backed by one process-wide
+  bounded resource event hub (capacity 256): `accepted_subscription_filter`
+  keeps only valid, deduplicated concrete resource URIs in first-request
+  order (list-change flags, templates, malformed ids, and unknown URIs
+  stripped) and `listen` streams `notifications/resources/updated` hints for
+  `serial://ports`, `serial://connections`, and recognized connection
+  detail/raw/log URIs; lagged listeners conservatively recover one
+  notification per accepted URI without ever blocking the publisher or the
+  RX pump;
+- modern discovery now advertises `resources.subscribe: true`; legacy
+  `2025-11-25` initialize keeps resource subscriptions disabled and
+  `subscriptions/listen` stays `-32601` for legacy clients;
+- proactive port hotplug watcher: one per server process, canonicalized
+  snapshots (sorted full `PortInfo` identity), first-success baseline,
+  no false updates on reorder/unchanged/enumeration failure, recovery
+  against the retained baseline, deterministic shutdown/join;
+- resource hints published after successful public behavior: port
+  open/close (connections list + detail), reconfigure/set-flow-control/
+  reconnect/connection-mode configure/set_dtr_rts/send_break/write/transact
+  (detail), RX ring append (detail + raw + log, after the ring append and
+  outside the pump gate), clear_log (log), input flush (detail + raw);
+  notifications never carry payloads and never move the shared read cursor;
+- one `SystemPortProvider` and one `ResourceEventHub` per server process,
+  shared by every HTTP handler factory and the watcher (stateless HTTP
+  requires process-wide ownership — see `tests/resource_subscriptions.rs`
+  for the modern-client proofs, including two stateless handler instances
+  observing the same update).
+
 ### Migration: rmcp 3 server surface (MCP `2026-07-28` groundwork)
 - rmcp 1.7 → 3.0 (`Meta` → `RequestMetaObject`, `RawResource`/`RawResourceTemplate`
   → `Resource`/`ResourceTemplate`, MRTR-aware `ReadResourceResponse`, `Role`

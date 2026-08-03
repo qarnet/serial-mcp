@@ -12,6 +12,7 @@ pub(crate) mod precedence;
 pub mod profile_store;
 pub mod profiles;
 pub mod prompts;
+pub mod resource_events;
 pub mod resources;
 pub mod rx_metadata;
 pub mod rx_ring;

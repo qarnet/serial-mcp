@@ -666,6 +666,30 @@ Scope:
 - modern subscription client tests;
 - no tool or prompt list-change support.
 
+Phase 3 notes (adopted during implementation):
+
+- **Pinned rmcp 3.0.1 ack artifact:** the wire `subscriptions/listen`
+  acknowledgement may echo a repeated requested VALID URI. rmcp computes the
+  final accepted filter as `requested.intersection(&candidate)
+  .intersection(&advertised)` (handler/server.rs), and `SubscriptionFilter::intersection`
+  is left-biased over the REQUESTED list (model.rs), so client-side
+  duplicates survive into the ack regardless of the handler's candidate.
+  serial-mcp therefore enforces deduplication in handler/listener semantics:
+  `accepted_subscription_filter` returns the valid, deduplicated,
+  first-occurrence-ordered candidate, and `listen` re-deduplicates
+  `context.accepted()` before matching and lag recovery, so duplicate
+  requested URIs never produce duplicate notifications. Do not patch or fork
+  rmcp; tests assert the acknowledged URI set + first-occurrence order and
+  explicitly permit the raw Vec echo.
+- **Stateless RX session ownership:** modern `2026-07-28` HTTP serves every
+  request with a fresh handler instance, so the RX session registry (ring +
+  pump + shared cursor) must be process-wide like the hub — a handler-local
+  `RxSessionManager` would split the ring across requests and break the
+  documented modern client flow (listen → `read`). One `Arc<RxSessionManager>`
+  is created per server process from the shared budget+hub, injected through
+  `SerialHandlerOptions`/builder, and cloned into every handler factory;
+  `build()` constructs one only when none was injected (standalone use).
+
 Files:
 
 - add `src/resource_events.rs`;

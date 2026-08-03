@@ -64,7 +64,9 @@ pub const EXPECTED_TOOLS: &[&str] = &[
 ];
 
 use std::future::Future;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex as StdMutex};
+use std::time::Duration;
 
 use anyhow::Result;
 use rmcp::handler::client::ClientHandler;
@@ -80,6 +82,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use serial_mcp::capture_store::CaptureStore;
+use serial_mcp::resource_events::{PortWatcher, ResourceEventHub};
 use serial_mcp::security::SecurityManager;
 use serial_mcp::serial::ConnectionManager;
 use serial_mcp::serial::PortProvider;
@@ -149,14 +152,55 @@ impl StaticPortProvider {
     }
 }
 
+/// Mutable [`PortProvider`] for hotplug-watcher tests: the test swaps the
+/// snapshot and injects enumeration failures while the watcher polls.
+pub struct MutexPortProvider {
+    ports: StdMutex<Vec<serial_mcp::serial::PortInfo>>,
+    fail: AtomicBool,
+}
+
+impl PortProvider for MutexPortProvider {
+    fn list_available(&self) -> serial_mcp::error::Result<Vec<serial_mcp::serial::PortInfo>> {
+        if self.fail.load(Ordering::SeqCst) {
+            Err(serial_mcp::error::SerialError::IoError(
+                std::io::Error::other("injected enumeration failure"),
+            ))
+        } else {
+            Ok(self.ports.lock().expect("ports mutex poisoned").clone())
+        }
+    }
+}
+
+impl MutexPortProvider {
+    pub fn new(ports: Vec<serial_mcp::serial::PortInfo>) -> Arc<Self> {
+        Arc::new(Self {
+            ports: StdMutex::new(ports),
+            fail: AtomicBool::new(false),
+        })
+    }
+
+    pub fn set_ports(&self, ports: Vec<serial_mcp::serial::PortInfo>) {
+        *self.ports.lock().expect("ports mutex poisoned") = ports;
+    }
+
+    pub fn set_fail(&self, fail: bool) {
+        self.fail.store(fail, Ordering::SeqCst);
+    }
+}
+
 /// In-process HTTP MCP server bound to `127.0.0.1` on an OS-assigned
 /// port. The shared [`ConnectionManager`] is exposed so tests can insert
 /// in-memory connections before the client connects.
 pub struct TestServer {
     pub url: String,
     pub manager: Arc<ConnectionManager>,
+    /// The process-wide resource event hub shared by every handler instance
+    /// (and the optional port watcher). Tests may publish directly through
+    /// it (e.g. to force broadcast lag).
+    pub hub: Arc<ResourceEventHub>,
     shutdown: CancellationToken,
     handle: tokio::task::JoinHandle<()>,
+    watcher: Option<PortWatcher>,
 }
 
 impl TestServer {
@@ -184,6 +228,8 @@ impl TestServer {
             profile_store: None,
             provider: None,
             capture_store: None,
+            resource_hub: None,
+            port_watcher_interval: None,
         }
     }
 
@@ -191,13 +237,17 @@ impl TestServer {
     /// every session handler factory so all HTTP MCP sessions observe the
     /// same profile state. `None` selects the ephemeral store default. An
     /// injected `provider` (defaults to the system provider) is shared the
-    /// same way.
+    /// same way. One `Arc<ResourceEventHub>` per server is shared by every
+    /// handler instance and the optional port watcher, exactly like
+    /// production `main.rs`.
     async fn start_inner(
         manager: Arc<ConnectionManager>,
         security: SecurityManager,
         profile_store: Option<Arc<serial_mcp::profile_store::ProfileStore>>,
         provider: Option<Arc<dyn PortProvider>>,
         capture_store: Option<Arc<CaptureStore>>,
+        resource_hub: Option<Arc<ResourceEventHub>>,
+        port_watcher_interval: Option<Duration>,
     ) -> Self {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -210,10 +260,23 @@ impl TestServer {
             Arc::new(serial_mcp::serial::SystemPortProvider) as Arc<dyn PortProvider>
         });
         let capture_store = capture_store.unwrap_or_else(|| Arc::new(CaptureStore::disabled()));
+        let hub = resource_hub.unwrap_or_else(|| Arc::new(ResourceEventHub::default()));
+        // ONE process-wide RX session registry per in-process server (ring +
+        // pump + shared cursor): cloned into every stateless HTTP handler
+        // factory so sequential modern reads share ring/cursor state.
+        let rx_sessions = Arc::new(serial_mcp::rx_session::RxSessionManager::new(
+            Arc::new(serial_mcp::buffer_budget::AtomicBudget::new(
+                1 << 30,
+                1 << 30,
+            )),
+            Arc::clone(&hub),
+        ));
         let manager_for_service = Arc::clone(&manager);
         let profile_store_for_service = Arc::clone(&profile_store);
         let provider_for_service = Arc::clone(&provider);
         let capture_store_for_service = Arc::clone(&capture_store);
+        let hub_for_service = Arc::clone(&hub);
+        let rx_sessions_for_service = Arc::clone(&rx_sessions);
         let shutdown_for_service = shutdown.child_token();
         let service = StreamableHttpService::new(
             move || {
@@ -223,12 +286,25 @@ impl TestServer {
                     .profile_store(Arc::clone(&profile_store_for_service))
                     .capture_store(Arc::clone(&capture_store_for_service))
                     .port_provider(Arc::clone(&provider_for_service))
+                    .resource_events(Arc::clone(&hub_for_service))
+                    .rx_sessions(Arc::clone(&rx_sessions_for_service))
                     .build())
             },
             LocalSessionManager::default().into(),
             StreamableHttpServerConfig::default().with_cancellation_token(shutdown_for_service),
         );
         let router = axum::Router::new().nest_service("/mcp", service);
+
+        // Optional proactive port watcher sharing the injected provider and
+        // the SAME hub as every handler instance (short interval in tests).
+        let watcher = port_watcher_interval.map(|interval| {
+            PortWatcher::start(
+                Arc::clone(&provider),
+                Arc::clone(&hub),
+                shutdown.child_token(),
+                interval,
+            )
+        });
 
         let handle = tokio::spawn(async move {
             let _ = axum::serve(listener, router).await;
@@ -237,8 +313,10 @@ impl TestServer {
         TestServer {
             url,
             manager,
+            hub,
             shutdown,
             handle,
+            watcher,
         }
     }
 }
@@ -247,6 +325,10 @@ impl Drop for TestServer {
     fn drop(&mut self) {
         self.shutdown.cancel();
         self.handle.abort();
+        if let Some(watcher) = self.watcher.take() {
+            watcher.shutdown();
+            watcher.abort();
+        }
     }
 }
 
@@ -267,6 +349,8 @@ pub struct TestServerBuilder {
     profile_store: Option<Arc<serial_mcp::profile_store::ProfileStore>>,
     provider: Option<Arc<dyn PortProvider>>,
     capture_store: Option<Arc<CaptureStore>>,
+    resource_hub: Option<Arc<ResourceEventHub>>,
+    port_watcher_interval: Option<Duration>,
 }
 
 impl TestServerBuilder {
@@ -307,6 +391,20 @@ impl TestServerBuilder {
         self
     }
 
+    /// Inject the process-wide resource event hub (for lag tests that
+    /// publish directly) instead of the fresh default.
+    pub fn resource_hub(mut self, hub: Arc<ResourceEventHub>) -> Self {
+        self.resource_hub = Some(hub);
+        self
+    }
+
+    /// Start a proactive port hotplug watcher with the given poll interval
+    /// (tests use a short interval; production uses one second).
+    pub fn port_watcher_interval(mut self, interval: Duration) -> Self {
+        self.port_watcher_interval = Some(interval);
+        self
+    }
+
     /// Build and start the server.
     pub async fn start(self) -> TestServer {
         TestServer::start_inner(
@@ -315,6 +413,8 @@ impl TestServerBuilder {
             self.profile_store,
             self.provider,
             self.capture_store,
+            self.resource_hub,
+            self.port_watcher_interval,
         )
         .await
     }

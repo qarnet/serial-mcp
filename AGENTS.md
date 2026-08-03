@@ -4,7 +4,7 @@
 
 - Root server: `src/main.rs` selects stdio vs HTTP transport, parses CLI limits (`--profiles-path`, `--capture-dir` + capture quotas included), and mounts HTTP at `/mcp`.
 - MCP surface lives in `src/server.rs`; tool handlers are split under `src/tools/`, prompts under `src/prompts/`, resources under `src/resources/`.
-- Dual MCP lifecycle (`src/server.rs`): preferred modern `2026-07-28` discovery/stateless requests (`server/discover` + self-contained per-request `_meta`) and compatible legacy `2025-11-25` initialize/session requests. `supported_protocol_versions()` returns exactly `[V_2026_07_28, V_2025_11_25]`; `get_info()`/`initialize()` serve the legacy view, `discover()` the modern view — both advertise only tools/resources/prompts/completions (no logging, subscriptions, list-change, or tasks). Phase 2 keeps `accepted_subscription_filter`/`listen` unimplemented and advertises no subscription capability (Phase 3).
+- Dual MCP lifecycle (`src/server.rs`): preferred modern `2026-07-28` discovery/stateless requests (`server/discover` + self-contained per-request `_meta`) and compatible legacy `2025-11-25` initialize/session requests. `supported_protocol_versions()` returns exactly `[V_2026_07_28, V_2025_11_25]`; `get_info()` serves the MODERN view (rmcp intersects `subscriptions/listen` filters against `get_info().capabilities`), `initialize()` returns the legacy view with subscription disabled, `discover()` the modern view with `resources.subscribe: true`. Common surface: tools/resources/prompts/completions (no logging, list-change, or tasks). Phase 3 implements `accepted_subscription_filter`/`listen` backed by one process-wide `ResourceEventHub` (`src/resource_events.rs`, capacity 256) shared by every stdio/HTTP handler and the port hotplug watcher; legacy `subscriptions/listen` stays `-32601`.
 - `SerialHandler` is built via `SerialHandler::builder()...build()` (`src/server.rs`); the old `with_manager*` telescoping constructors are gone and `with_profiles()` is gone. The builder defaults `profile_store` to an ephemeral store and `capture_store` to disabled. `SerialHandler::new()` tries the OS default profile store and falls back to an ephemeral store with a warning. Production `main.rs` injects the resolved `profile_store`, a `CaptureStore` built from `--capture-dir` + quota flags (disabled by default), and `SystemPortProvider` through the builder.
 - Profiles live in a process-wide `Arc<ProfileStore>` (`src/profile_store.rs`), shared by every stdio/HTTP session handler. `main.rs` resolves the path (`--profiles-path` or the OS user-config default, failing startup on an unavailable config dir or invalid file) and injects one store. Persistent mutations take a process-local async mutex, then `spawn_blocking` + an advisory lock on `<file>.lock`, reload-under-lock, `NamedTempFile` + `sync_all` + rename; the cache (shared `Arc<RwLock>`) is published from inside the blocking transaction right after the durable write, before the lock is released — so a cancelled awaiting tool still converges (cache never changes on failed write). `update_defaults_preserving_selector` returns the effective profile atomically (no racy second lookup). File format is schema-versioned TOML (v1 legacy auto-migrates in memory; `schema_version == 0` or `> 2` rejects startup). `Profile` carries `metadata` (revision/timestamps/generated/use_count) and a bounded `revisions` history (max 5 prior snapshots) for the profile-session feature.
 - Shared RX framing lives in `src/tools/rx_consume.rs` (`consume_frames` + `RxFrameSink` trait + `disconnect_state`); `read` routes framing through it, but its raw (no-framing) path stays per-tool by design (see "Invariants easy to break").
@@ -139,6 +139,11 @@ cargo test --test native_sim_connection_lifecycle -- --ignored --test-threads=1
 - `tests/stdio_integration.rs` spawns binary over stdin/stdout.
 - `tests/protocol_emulator*.rs` are protocol hardening tests.
 - `tests/allowlist.rs` — port allowlist enforcement via the HTTP harness.
+- `tests/resource_subscriptions.rs` — modern `subscriptions/listen` resource
+  subscriptions over the in-process HTTP harness: capability split,
+  accepted-filter stripping/dedup, RX-append-after-readable + cursor
+  immutability, listener independence/cancellation, lag recovery,
+  open/close/state/log hints, port hotplug watcher (mutable provider).
 - `tests/blob_resources.rs` — blob resources and resource templates.
 - `tests/tx_session.rs` — cross-module TxSession wiring.
 - `tests/proptest.rs` — property-based and boundary-value tests.
@@ -252,7 +257,7 @@ cargo run --manifest-path xtask/Cargo.toml -- print-paths
 - **`delete_profile`** refuses while any same-process open connection binds the profile (error lists connection IDs).
 - **Never persisted:** DTR/RTS, BREAK, read cursor, flush, payloads/encoding/match, per-call read/write/transact framing/parser/protocol overrides, health/reconnect counters/logs.
 
-## Dual MCP lifecycle (Phase 2)
+## Dual MCP lifecycle (Phase 2 + Phase 3 subscriptions)
 
 - `src/server.rs` overrides `ServerHandler::supported_protocol_versions()`
   with the product slice `[V_2026_07_28, V_2025_11_25]` (NOT
@@ -263,22 +268,69 @@ cargo run --manifest-path xtask/Cargo.toml -- print-paths
   `method_not_found::<InitializeResultMethod>` BEFORE peer bookkeeping),
   then `context.peer.set_peer_info(request.clone())` + the legacy info
   view — peer bookkeeping must not be dropped. `get_info()` returns the
-  legacy `2025-11-25` view so default `ServiceExt::serve` clients stay
-  stable. Capability views are small pure helpers (`common_capabilities`,
-  `modern_discovery_info`, `legacy_initialize_info`); they are equal in
-  Phase 2 and diverge in Phase 3 (modern resource subscriptions).
+  MODERN `2026-07-28` view (rmcp intersects `subscriptions/listen` filters
+  against `get_info().capabilities`, so it must advertise the modern
+  `resources.subscribe` capability). Capability views are small pure
+  helpers (`common_capabilities`, `modern_capabilities`,
+  `modern_discovery_info`, `legacy_initialize_info`); modern has
+  `resources.subscribe: true`, legacy stays the common set.
 - Modern stateless HTTP requests additionally require SEP-2243
   `Mcp-Method`/`Mcp-Name` headers and an `MCP-Protocol-Version` header
   matching the request `_meta` (rmcp 3.0.1 transport enforcement). A
   modern `initialize` is rejected by the handler and rmcp maps the
   `-32601` through the stateless routing to HTTP 404 (direct JSON, no
   `Mcp-Session-Id` header). Modern `ping`/`logging/setLevel`/
-  `resources/subscribe`/`resources/unsubscribe`/`subscriptions/listen`
+  `resources/subscribe`/`resources/unsubscribe`
   are `-32601` mapped to HTTP 404; legacy keeps `ping` working and
   `resources/subscribe`/`resources/unsubscribe`/`subscriptions/listen`
-  at `-32601` inside SSE 200 responses. Modern unknown resources are
+  at `-32601` inside SSE 200 responses (modern `subscriptions/listen` is
+  implemented — Phase 3). Modern unknown resources are
   remapped to `-32602` (SEP-2164); legacy keeps `-32002`. Cache policy
-  (`ttlMs`/`cacheScope`) is Phase 4 scope — no Phase 2 cache assertions.
+  (`ttlMs`/`cacheScope`) is Phase 4 scope.
+- **Resource subscriptions (Phase 3):** one process-wide
+  `ResourceEventHub` (`src/resource_events.rs`, `ResourceEvent::Updated`,
+  capacity 256, synchronous non-blocking `publish_updated`) is created in
+  production `main.rs` and injected through `SerialHandlerOptions`/builder
+  into every stdio/HTTP handler plus the `PortWatcher` (1s poll, canonical
+  sorted `PortInfo` snapshots, first-success baseline, no false updates on
+  reorder/unchanged/error, recovery against retained baseline,
+  `shutdown_and_join`). `accepted_subscription_filter` keeps valid,
+  deduplicated concrete URIs (`serial://ports`, `serial://connections`,
+  detail/raw/log via `is_subscribable_uri` round-trip) in first-request
+  order and strips list-change flags/templates/unknown URIs; `listen`
+  notifies matching `Updated(uri)` events, ignores unrelated ones, and on
+  broadcast lag notifies every accepted URI once — never blocking the
+  publisher or pump. **rmcp 3.0.1 ack artifact (documented, not patched):**
+  the wire acknowledgement may echo a repeated requested VALID URI because
+  rmcp computes the final accepted filter via
+  `requested.intersection(&candidate).intersection(&advertised)`, both
+  left-biased over the requested list. Handler/listener semantics always
+  deduplicate (first-occurrence order): `accepted_subscription_filter`
+  returns the deduplicated candidate, and `listen` re-deduplicates
+  `context.accepted()` so normal matching and lag recovery never emit
+  duplicate hints. Tests assert the acknowledged URI SET + first-occurrence
+  order equal the deduplicated accepted set and explicitly permit the raw
+  Vec echo; `repeated_requested_uri_does_not_cause_duplicate_lag_recovery_notifications`
+  proves no duplicate recovery hints. The RX pump publishes detail/raw/log hints AFTER each
+  successful `ring.append` and OUTSIDE the `pump_gate`
+  (`pump_publishes_resource_hints_only_after_ring_append` unit proof).
+  Tool paths publish after successful behavior only (open/close →
+  connections+detail; reconfigure/set_flow_control/reconnect/connection
+  configure/set_dtr_rts/send_break/write/transact → detail; clear_log →
+  log; flush input/both → detail+raw). Notifications are hints — no
+  payloads, no cursor movement. Modern HTTP is STATELESS: a fresh
+  `SerialHandler` serves each request, so every process-wide dependency
+  (`ConnectionManager`, `ProfileStore`, `CaptureStore`, `PortProvider`,
+  hub, `RxSessionManager` — ring + pump + shared cursor) must be injected
+  and shared — never handler-local. One `Arc<RxSessionManager>` per server
+  process (built from the shared budget+hub) is injected through
+  `SerialHandlerOptions::rx_sessions`/builder and cloned into every handler
+  factory; `build()` constructs one only when none was injected.
+  `stateless_requests_share_session_ring_and_cursor` proves two distinct
+  stateless requests observe the same session/ring/cursor. Proofs:
+  `tests/resource_subscriptions.rs` (typed modern clients over real
+  in-process HTTP), `tests/protocol_compatibility.rs` raw legacy listen
+  `-32601`.
 - Proofs: `tests/protocol_compatibility.rs` (typed discover/initialize
   matrix + raw-wire status/code/header assertions against the spawned
   binary), stdio lifecycle tests in `tests/stdio_integration.rs`, and

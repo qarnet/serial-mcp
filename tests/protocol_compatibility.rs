@@ -38,12 +38,24 @@ fn modern_meta() -> Value {
     })
 }
 
-/// Expected modern capability wire shape (common set only).
+/// Expected legacy capability wire shape (common set only).
 fn common_capabilities_json() -> Value {
     json!({
         "completions": {},
         "prompts": {},
         "resources": {},
+        "tools": {},
+    })
+}
+
+/// Expected modern capability wire shape: common set plus
+/// `resources.subscribe` (Phase 3 resource subscriptions; no list-change
+/// flags).
+fn modern_capabilities_json() -> Value {
+    json!({
+        "completions": {},
+        "prompts": {},
+        "resources": {"subscribe": true},
         "tools": {},
     })
 }
@@ -285,7 +297,7 @@ async fn typed_legacy_read_serial_ports_resource_succeeds() {
 }
 
 #[tokio::test]
-async fn typed_modern_capabilities_are_exact_common_set() {
+async fn typed_modern_capabilities_advertise_resource_subscriptions() {
     typed_modern(|client| async move {
         let caps = client
             .peer_info()
@@ -294,8 +306,8 @@ async fn typed_modern_capabilities_are_exact_common_set() {
             .clone();
         assert_eq!(
             serde_json::to_value(caps).unwrap(),
-            common_capabilities_json(),
-            "modern capabilities"
+            modern_capabilities_json(),
+            "modern capabilities advertise resources.subscribe"
         );
         Ok(())
     })
@@ -304,7 +316,7 @@ async fn typed_modern_capabilities_are_exact_common_set() {
 }
 
 #[tokio::test]
-async fn typed_legacy_capabilities_are_exact_common_set() {
+async fn typed_legacy_capabilities_keep_subscription_disabled() {
     typed_legacy(|client| async move {
         let caps = client
             .peer_info()
@@ -314,7 +326,7 @@ async fn typed_legacy_capabilities_are_exact_common_set() {
         assert_eq!(
             serde_json::to_value(caps).unwrap(),
             common_capabilities_json(),
-            "legacy capabilities"
+            "legacy capabilities keep resource subscriptions disabled"
         );
         Ok(())
     })
@@ -524,7 +536,7 @@ async fn raw_discover_succeeds_without_session_and_lists_versions_modern_first()
         json!(["2026-07-28", "2025-11-25"]),
         "supportedVersions exactly modern then legacy"
     );
-    assert_eq!(result["capabilities"], common_capabilities_json());
+    assert_eq!(result["capabilities"], modern_capabilities_json());
     // Cache policy (`ttlMs` / `cacheScope`) is Phase 4 scope; no cache
     // assertion belongs in the Phase 2 discovery acceptance.
 }
@@ -948,30 +960,14 @@ async fn raw_legacy_ping_succeeds_and_subscription_methods_are_method_not_found(
 }
 
 #[tokio::test]
-async fn raw_listen_is_method_not_found_for_both_protocols() {
+async fn raw_legacy_listen_stays_method_not_found() {
+    // Phase 3: modern `subscriptions/listen` is implemented (typed coverage
+    // lives in tests/resource_subscriptions.rs — a raw modern listen is a
+    // long-lived SSE stream that only completes on cancellation, so it is
+    // exercised through typed clients). The legacy `2025-11-25` lifecycle
+    // must NOT see the modern subscription surface: rmcp gates the method
+    // and the server returns `-32601` inside an SSE 200.
     let server = common::spawned::SpawnedServer::start().await;
-
-    let modern = raw_modern(
-        &server.url,
-        26,
-        "subscriptions/listen",
-        json!({"notifications": {"resourceSubscriptions": []}}),
-        None,
-    )
-    .await;
-    assert_eq!(modern.status, 404, "modern listen -> HTTP 404");
-    assert!(
-        modern.content_type.starts_with("application/json"),
-        "modern listen error is direct JSON: {}",
-        modern.content_type
-    );
-    let json = modern.json.unwrap();
-    assert_eq!(json["id"], 26);
-    assert_eq!(
-        json["error"]["code"], -32601,
-        "modern listen METHOD_NOT_FOUND"
-    );
-
     let (session, _init) = raw_legacy_session(&server.url).await;
     let legacy = raw_legacy(
         &server.url,
