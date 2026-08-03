@@ -208,7 +208,7 @@ bounded; a hung or slow run must fail the job, not idle.
   libFuzzer `-max_total_time=300` wrapped in GNU `timeout 360`, job
   `timeout-minutes: 12`. Ubuntu + `libudev-dev pkg-config`. On failure,
   upload `fuzz/artifacts/<target>/` + `fuzz/corpus/<target>/` via
-  `actions/upload-artifact@v4` (`if-no-files-found: warn`, `retention-days: 7`)
+  `actions/upload-artifact@v7` (`if-no-files-found: warn`, `retention-days: 7`)
   — missing paths warn but never mask the original failure.
 - **Mutation** — project Rust `dtolnay/rust-toolchain@1.97.1` (NOT nightly;
   cargo-fuzz/nightly are isolated fuzz tooling, not an MSRV bump) + pinned
