@@ -3,8 +3,9 @@
 # Standalone package (NOT a root workspace member) compiled against the exact
 # pre-migration rmcp 1.7.0 so the CURRENT serial-mcp server can be exercised
 # by a real historical client implementation over both HTTP and stdio. Owns a
-# committed Cargo.lock (built with --locked); see the drift guard in
-# tests/doc_drift.rs for the pinned package/checksum contract.
+# committed Cargo.lock (built with --locked); a Phase 4 policy drift guard
+# (tests/doc_drift.rs) will enforce the pinned rmcp 1.7.0 entry and its
+# historical checksum.
 #
 # This package is never published.
 

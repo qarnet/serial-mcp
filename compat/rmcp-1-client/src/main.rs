@@ -208,11 +208,21 @@ async fn verify(client: &RunningService<RoleClient, ()>) -> std::result::Result<
         ));
     }
 
-    // 4. Exact 25-tool name set equals the fixture-local constant.
+    // 4. Exact 25-tool surface. Set equality alone cannot catch duplicates,
+    //    so the RAW count is asserted first (exact 25, not "at least the
+    //    expected set"), then the name set must equal the fixture-local
+    //    constant exactly.
     let tools = client
         .list_all_tools()
         .await
         .map_err(|e| format!("list_all_tools failed: {e}"))?;
+    if tools.len() != EXPECTED_TOOLS.len() {
+        return Err(format!(
+            "tool count mismatch: got {} tool(s), expected {}",
+            tools.len(),
+            EXPECTED_TOOLS.len()
+        ));
+    }
     let tool_names: BTreeSet<&str> = tools.iter().map(|t| t.name.as_ref()).collect();
     let expected_tools: BTreeSet<&str> = EXPECTED_TOOLS.into_iter().collect();
     if tool_names != expected_tools {
@@ -223,50 +233,80 @@ async fn verify(client: &RunningService<RoleClient, ()>) -> std::result::Result<
         ));
     }
 
-    // 5. Static resource URIs are exactly serial://ports + serial://connections.
+    // 5. Static resource URIs are exactly serial://ports + serial://connections
+    //    (raw count 2 first, then exact set equality).
     let resources = client
         .list_all_resources()
         .await
         .map_err(|e| format!("list_all_resources failed: {e}"))?;
+    if resources.len() != EXPECTED_RESOURCES.len() {
+        return Err(format!(
+            "resource count mismatch: got {} resource(s), expected {}",
+            resources.len(),
+            EXPECTED_RESOURCES.len()
+        ));
+    }
     let resource_uris: BTreeSet<&str> = resources.iter().map(|r| r.uri.as_str()).collect();
     let expected_resources: BTreeSet<&str> = EXPECTED_RESOURCES.into_iter().collect();
     if resource_uris != expected_resources {
         return Err(format!(
-            "resource URI set mismatch: got {resource_uris:?}, expected {expected_resources:?}"
+            "resource URI set mismatch: got {} resource(s) {resource_uris:?}, expected {}",
+            resource_uris.len(),
+            expected_resources.len()
         ));
     }
 
     // 6. Resource template URIs are exactly the connection detail/raw/log
-    //    templates.
+    //    templates (raw count 3 first, then exact set equality).
     let templates = client
         .list_all_resource_templates()
         .await
         .map_err(|e| format!("list_all_resource_templates failed: {e}"))?;
+    if templates.len() != EXPECTED_RESOURCE_TEMPLATES.len() {
+        return Err(format!(
+            "resource template count mismatch: got {} template(s), expected {}",
+            templates.len(),
+            EXPECTED_RESOURCE_TEMPLATES.len()
+        ));
+    }
     let template_uris: BTreeSet<&str> = templates.iter().map(|t| t.uri_template.as_str()).collect();
     let expected_templates: BTreeSet<&str> = EXPECTED_RESOURCE_TEMPLATES.into_iter().collect();
     if template_uris != expected_templates {
         return Err(format!(
-            "resource template URI set mismatch: got {template_uris:?}, expected \
-             {expected_templates:?}"
+            "resource template URI set mismatch: got {} template(s) {template_uris:?}, expected {}",
+            template_uris.len(),
+            expected_templates.len()
         ));
     }
 
-    // 7. Prompt names are exactly diagnose_port + interactive_terminal.
+    // 7. Prompt names are exactly diagnose_port + interactive_terminal (raw
+    //    count 2 first, then exact set equality).
     let prompts = client
         .list_all_prompts()
         .await
         .map_err(|e| format!("list_all_prompts failed: {e}"))?;
+    if prompts.len() != EXPECTED_PROMPTS.len() {
+        return Err(format!(
+            "prompt count mismatch: got {} prompt(s), expected {}",
+            prompts.len(),
+            EXPECTED_PROMPTS.len()
+        ));
+    }
     let prompt_names: BTreeSet<&str> = prompts.iter().map(|p| p.name.as_str()).collect();
     let expected_prompts: BTreeSet<&str> = EXPECTED_PROMPTS.into_iter().collect();
     if prompt_names != expected_prompts {
         return Err(format!(
-            "prompt name set mismatch: got {prompt_names:?}, expected {expected_prompts:?}"
+            "prompt name set mismatch: got {} prompt(s) {prompt_names:?}, expected {}",
+            prompt_names.len(),
+            expected_prompts.len()
         ));
     }
 
     // 8. compute_checksum with the standard fixture arguments succeeds and
     //    the structured result carries integer checksum=111 and string
-    //    checksum_hex="6F".
+    //    checksum_hex="6F". A tool-error result must never pass merely
+    //    because it carries fields: explicitly require is_error == Some(false)
+    //    before accepting the structured content.
     let mut arguments = Map::new();
     arguments.insert("algorithm".to_string(), Value::String("xor".to_string()));
     arguments.insert("data".to_string(), Value::String("$GPGGA,1".to_string()));
@@ -275,6 +315,12 @@ async fn verify(client: &RunningService<RoleClient, ()>) -> std::result::Result<
         .call_tool(CallToolRequestParams::new("compute_checksum").with_arguments(arguments))
         .await
         .map_err(|e| format!("compute_checksum call failed: {e}"))?;
+    if call.is_error != Some(false) {
+        return Err(format!(
+            "compute_checksum result is an error: is_error={:?}",
+            call.is_error
+        ));
+    }
     let structured = call
         .structured_content
         .ok_or_else(|| "compute_checksum result carries no structured_content".to_string())?;

@@ -47,13 +47,14 @@ CONFORMANCE_PACKAGE="@modelcontextprotocol/conformance@0.2.0-alpha.10"
 # checks (see conformance/expected-failures.yaml). A baseline entry that
 # starts passing fails the run as stale; any other failure is unexpected.
 EXPECTED_FAILURES="$ROOT/conformance/expected-failures.yaml"
-# Legacy (2025-11-25) scenario set. server-initialize covers the legacy
-# initialize/session lifecycle in the pinned package (the handoff's
-# `server-session-lifecycle` name does not exist in
-# @modelcontextprotocol/conformance@0.2.0-alpha.10).
-LEGACY_SCENARIOS="server-initialize ping completion-complete tools-list resources-list prompts-list"
-# Modern (2026-07-28) scenario set.
-MODERN_SCENARIOS="server-stateless completion-complete tools-list resources-list prompts-list caching sep-2164-resource-not-found"
+# Scenario set for MCP protocol version 2025-11-25 (legacy initialize/session
+# lifecycle). server-initialize covers the legacy initialize/session
+# lifecycle in the pinned package (the handoff's `server-session-lifecycle`
+# name does not exist in @modelcontextprotocol/conformance@0.2.0-alpha.10).
+SCENARIOS_2025_11_25="server-initialize ping completion-complete tools-list resources-list prompts-list"
+# Scenario set for MCP protocol version 2026-07-28 (modern discovery /
+# stateless lifecycle).
+SCENARIOS_2026_07_28="server-stateless completion-complete tools-list resources-list prompts-list caching sep-2164-resource-not-found"
 # GNU timeout for every fixture invocation and conformance scenario.
 GATE_TIMEOUT=180
 
@@ -165,33 +166,33 @@ fi
 step "historical rmcp 1.7 fixture over HTTP ($MCP_URL)"
 timeout "$GATE_TIMEOUT" "$FIXTURE_BIN" http "$MCP_URL"
 
-# --- 7. legacy conformance (2025-11-25) ---------------------------------------
-for sc in $LEGACY_SCENARIOS; do
-  step "conformance $sc (legacy 2025-11-25)"
+# --- 7. conformance (2025-11-25) ----------------------------------------------
+for sc in $SCENARIOS_2025_11_25; do
+  step "conformance $sc (2025-11-25)"
   timeout "$GATE_TIMEOUT" npx -y "$CONFORMANCE_PACKAGE" server \
     --url "$MCP_URL" --scenario "$sc" --spec-version 2025-11-25 \
     --expected-failures "$EXPECTED_FAILURES" \
-    -o "$REPORT_DIR/$sc-legacy"
+    -o "$REPORT_DIR/$sc-2025-11-25"
 done
 
-# --- 8. modern conformance (2026-07-28) ---------------------------------------
-for sc in $MODERN_SCENARIOS; do
-  step "conformance $sc (modern 2026-07-28)"
+# --- 8. conformance (2026-07-28) ----------------------------------------------
+for sc in $SCENARIOS_2026_07_28; do
+  step "conformance $sc (2026-07-28)"
   timeout "$GATE_TIMEOUT" npx -y "$CONFORMANCE_PACKAGE" server \
     --url "$MCP_URL" --scenario "$sc" --spec-version 2026-07-28 \
     --expected-failures "$EXPECTED_FAILURES" \
-    -o "$REPORT_DIR/$sc-modern"
+    -o "$REPORT_DIR/$sc-2026-07-28"
 done
 
 # --- 9. Inspector 2.0.0 interoperability smoke --------------------------------
-step "Inspector 2.0.0 interoperability smoke (modern)"
+step "Inspector 2.0.0 interoperability smoke (2026-07-28)"
 node "$ROOT/scripts/inspector-smoke.mjs" "$MCP_URL"
 
 # --- success summary ----------------------------------------------------------
 printf '\n==== mcp-compat: all gates passed ====\n'
 echo "  rmcp-1 stdio smoke:               ok"
 echo "  rmcp-1 http smoke:                ok"
-echo "  conformance legacy (2025-11-25):  ok ($(echo "$LEGACY_SCENARIOS" | wc -w) scenarios)"
-echo "  conformance modern (2026-07-28):  ok ($(echo "$MODERN_SCENARIOS" | wc -w) scenarios)"
+echo "  conformance 2025-11-25:           ok ($(echo "$SCENARIOS_2025_11_25" | wc -w) scenarios)"
+echo "  conformance 2026-07-28:           ok ($(echo "$SCENARIOS_2026_07_28" | wc -w) scenarios)"
 echo "  inspector smoke:                  ok"
 echo "  reports: $REPORT_DIR"
