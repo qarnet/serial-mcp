@@ -36,10 +36,7 @@ const CONNECTION_NAME: &str = "lifecycle-uart";
 // ── MCP helpers ──────────────────────────────────────────────────────────────
 
 async fn open_pty(
-    client: &rmcp::service::RunningService<
-        rmcp::service::RoleClient,
-        common::NotificationCollector,
-    >,
+    client: &rmcp::service::RunningService<rmcp::service::RoleClient, common::TestClientHandler>,
     pty_path: &str,
     name: &str,
 ) -> String {
@@ -65,10 +62,7 @@ async fn open_pty(
 }
 
 async fn open_pty_with_flow(
-    client: &rmcp::service::RunningService<
-        rmcp::service::RoleClient,
-        common::NotificationCollector,
-    >,
+    client: &rmcp::service::RunningService<rmcp::service::RoleClient, common::TestClientHandler>,
     pty_path: &str,
     name: &str,
     flow_control: &str,
@@ -96,10 +90,7 @@ async fn open_pty_with_flow(
 }
 
 async fn write_cmd(
-    client: &rmcp::service::RunningService<
-        rmcp::service::RoleClient,
-        common::NotificationCollector,
-    >,
+    client: &rmcp::service::RunningService<rmcp::service::RoleClient, common::TestClientHandler>,
     connection_id: &str,
     cmd: &str,
 ) {
@@ -115,10 +106,7 @@ async fn write_cmd(
 }
 
 async fn flush_both(
-    client: &rmcp::service::RunningService<
-        rmcp::service::RoleClient,
-        common::NotificationCollector,
-    >,
+    client: &rmcp::service::RunningService<rmcp::service::RoleClient, common::TestClientHandler>,
     connection_id: &str,
 ) {
     client
@@ -132,10 +120,7 @@ async fn flush_both(
 }
 
 async fn close_connection(
-    client: &rmcp::service::RunningService<
-        rmcp::service::RoleClient,
-        common::NotificationCollector,
-    >,
+    client: &rmcp::service::RunningService<rmcp::service::RoleClient, common::TestClientHandler>,
     connection_id: &str,
 ) {
     let result = client
@@ -152,10 +137,7 @@ async fn close_connection(
 /// Wait for the firmware's boot banner to appear, then flush buffers so
 /// the connection starts from a known state.
 async fn sync_boot(
-    client: &rmcp::service::RunningService<
-        rmcp::service::RoleClient,
-        common::NotificationCollector,
-    >,
+    client: &rmcp::service::RunningService<rmcp::service::RoleClient, common::TestClientHandler>,
     connection_id: &str,
 ) {
     let result = client

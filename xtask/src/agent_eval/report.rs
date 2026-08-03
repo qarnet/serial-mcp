@@ -257,7 +257,7 @@ mod tests {
         for banned in ["timestamp", "hostname", "/tmp/", "/home/", "epoch"] {
             assert!(!text.contains(banned), "report must not contain {banned}");
         }
-        assert_eq!(parsed["catalog"]["tool_count"], serde_json::json!(27));
+        assert_eq!(parsed["catalog"]["tool_count"], serde_json::json!(25));
     }
 
     #[test]

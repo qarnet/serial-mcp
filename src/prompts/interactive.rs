@@ -35,9 +35,8 @@ the current prompt, then report back and wait for the user's first command.",
         line_ending = line_ending,
         prompt = device_prompt
     );
-    GetPromptResult::new(vec![PromptMessage::new_text(PromptMessageRole::User, user)])
-        .with_description(format!(
-            "Interactive REPL session over connection {}",
-            args.connection_id
-        ))
+    GetPromptResult::new(vec![PromptMessage::new_text(Role::User, user)]).with_description(format!(
+        "Interactive REPL session over connection {}",
+        args.connection_id
+    ))
 }

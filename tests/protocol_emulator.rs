@@ -13,7 +13,7 @@ use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 mod common;
-use common::{connect_client, next_notification, pty::PtyPair, tool_request, TestServer};
+use common::{connect_client, pty::PtyPair, tool_request, TestServer};
 
 // ------------------------------------------------------------------
 // Device emulator: implements the ESP32 weather-station serial protocol
@@ -122,8 +122,7 @@ async fn emulator_task(mut master: File) {
 // Full agent workflow test
 // ------------------------------------------------------------------
 
-// Ignored: the read and subscribe stages now run through the ring-based
-// read/subscribe pipeline.
+// Ignored: the read stages now run through the ring-based read pipeline.
 #[tokio::test]
 async fn protocol_emulator_workflow() {
     // ---- Stage 0: Open PTY, spawn emulator, start server, open port ----
@@ -133,7 +132,7 @@ async fn protocol_emulator_workflow() {
     let emulator_handle = tokio::spawn(emulator_task(master));
 
     let server = TestServer::start().await;
-    let (client, mut rx) = connect_client(&server).await.unwrap();
+    let (client, _rx) = connect_client(&server).await.unwrap();
 
     let open_result = client
         .peer()
@@ -170,7 +169,7 @@ async fn protocol_emulator_workflow() {
         "ports must be an array"
     );
 
-    // ---- Stage 2: write + subscribe (background mode) ----
+    // ---- Stage 2: write + read (KV) ----
     let _flush = client
         .peer()
         .call_tool(tool_request(
@@ -200,67 +199,34 @@ async fn protocol_emulator_workflow() {
         "expected >=9 bytes written"
     );
 
-    // Subscribe is always background. Data arrives as
-    // notifications rather than inline in the tool result.
-    // Use from: "buffer_start" to replay the emulator's response that
-    // was already captured in the ring after the write.
-    let sub_result = client
+    // The emulator responds synchronously; give the always-on pump a moment
+    // to capture the full response, then read it back with a match spanning
+    // the complete KV line (so the matched payload carries every field).
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let kv_result = client
         .peer()
         .call_tool(tool_request(
-            "subscribe",
+            "read",
             json!({
                 "connection_id": connection_id,
                 "timeout_ms": 3000,
                 "encoding": "utf8",
-                "poll_interval_ms": 50,
-                "from": {"type": "buffer_start"},
+                "match": {
+                    "pattern": "T=26.75 H=53.30 P=980.9 C=409",
+                    "config": { "mode": "literal_substring", "pattern_encoding": "utf8" }
+                }
             }),
         ))
         .await
         .unwrap();
-    assert_ne!(sub_result.is_error, Some(true), "{sub_result:?}");
-    // Subscribe ack is always immediate.
-
-    // Collect data from background notifications.
-    let mut collected = String::new();
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
-    loop {
-        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        if remaining.is_zero() {
-            break;
-        }
-        match tokio::time::timeout(remaining, rx.recv()).await {
-            Ok(Some(event)) => {
-                if let Some(data_str) = event.data.get("data").and_then(|v| v.as_str()) {
-                    collected.push_str(data_str);
-                    if collected.contains("T=26.75")
-                        && collected.contains("H=53.30")
-                        && collected.contains("P=980.9")
-                        && collected.contains("C=409")
-                    {
-                        break;
-                    }
-                }
-            }
-            _ => break,
-        }
-    }
+    assert_ne!(kv_result.is_error, Some(true), "{kv_result:?}");
+    let kv_structured = kv_result.structured_content.expect("structured");
+    assert_eq!(kv_structured["matched"], json!(true), "{kv_structured:?}");
+    let collected = kv_structured["data"].as_str().unwrap();
     assert!(collected.contains("T=26.75"), "data must contain temp");
     assert!(collected.contains("H=53.30"), "data must contain humidity");
     assert!(collected.contains("P=980.9"), "data must contain pressure");
     assert!(collected.contains("C=409"), "data must contain co2");
-
-    // Unsubscribe to stop the background stream before read competes with the
-    // pump for serial RX data. unsubscribe now awaits the stream task and pump
-    // exit, so the port is quiescent on return — no sleep band-aid needed.
-    client
-        .peer()
-        .call_tool(tool_request(
-            "unsubscribe",
-            json!({ "connection_id": connection_id }),
-        ))
-        .await
-        .unwrap();
 
     // ---- Stage 3: write + read (CSV) ----
     client
@@ -460,46 +426,6 @@ async fn protocol_emulator_workflow() {
         "must have matched=false"
     );
 
-    // ---- Stage 7: subscribe fire-and-forget + notifications ----
-    let ff_result = client
-        .peer()
-        .call_tool(tool_request(
-            "subscribe",
-            json!({
-                "connection_id": connection_id,
-                "poll_interval_ms": 50,
-            }),
-        ))
-        .await
-        .unwrap();
-    assert_ne!(ff_result.is_error, Some(true), "{ff_result:?}");
-
-    client
-        .peer()
-        .call_tool(tool_request(
-            "write",
-            json!({
-                "connection_id": connection_id,
-                "data": "READ KV\r\n",
-                "encoding": "utf8",
-            }),
-        ))
-        .await
-        .unwrap();
-
-    let notification = next_notification(&mut rx, Duration::from_secs(2))
-        .await
-        .unwrap();
-    assert_eq!(
-        notification.logger.as_deref(),
-        Some(&format!("serial:{connection_id}")[..])
-    );
-    let notif_data = notification.data["data"].as_str().unwrap();
-    assert!(
-        notif_data.contains("T=26.75"),
-        "notification must contain temp"
-    );
-
     // ---- Stage 8: read timeout ----
     client
         .peer()
@@ -550,35 +476,7 @@ async fn protocol_emulator_workflow() {
         "read timeout stop_reason must be 'timeout'"
     );
 
-    // ---- Stage 9: subscribe with timeout, no data ----
-    client
-        .peer()
-        .call_tool(tool_request(
-            "flush",
-            json!({ "connection_id": connection_id, "target": "input" }),
-        ))
-        .await
-        .unwrap();
-
-    let empty_sub = client
-        .peer()
-        .call_tool(tool_request(
-            "subscribe",
-            json!({
-                "connection_id": connection_id,
-                "timeout_ms": 300,
-                "encoding": "utf8",
-                "poll_interval_ms": 50,
-            }),
-        ))
-        .await
-        .unwrap();
-    // Subscribe ack is always immediate.
-    assert_ne!(empty_sub.is_error, Some(true), "{empty_sub:?}");
-    // The stream will auto-stop after timeout in background, emitting a
-    // stop notification with bytes_read=0.
-
-    // ---- Stage 10: flushes, DTR/RTS, break, unsubscribe ----
+    // ---- Stage 10: flushes, DTR/RTS, break ----
     let flush_out = client
         .peer()
         .call_tool(tool_request(
@@ -651,45 +549,6 @@ async fn protocol_emulator_workflow() {
         actual_duration >= 30,
         "send_break actual_duration {actual_duration} should be >= 30"
     );
-
-    // Re-subscribe so we can test unsubscribe was_active == true
-    let sub_again = client
-        .peer()
-        .call_tool(tool_request(
-            "subscribe",
-            json!({
-                "connection_id": connection_id,
-                "poll_interval_ms": 50,
-            }),
-        ))
-        .await
-        .unwrap();
-    assert_ne!(sub_again.is_error, Some(true), "{sub_again:?}");
-
-    let unsub1 = client
-        .peer()
-        .call_tool(tool_request(
-            "unsubscribe",
-            json!({ "connection_id": connection_id }),
-        ))
-        .await
-        .unwrap();
-    assert_ne!(unsub1.is_error, Some(true), "{unsub1:?}");
-    let unsub1_structured = unsub1.structured_content.expect("structured");
-    assert_eq!(unsub1_structured["was_active"], json!(true));
-
-    let unsub2 = client
-        .peer()
-        .call_tool(tool_request(
-            "unsubscribe",
-            json!({ "connection_id": connection_id }),
-        ))
-        .await
-        .unwrap();
-    assert_ne!(unsub2.is_error, Some(true), "{unsub2:?}");
-    let unsub2_structured = unsub2.structured_content.expect("structured");
-    // After unsubscribe once, second call should report was_active == false
-    assert_eq!(unsub2_structured["was_active"], json!(false));
 
     // ---- Stage 11: resources ----
     let ports_res = client

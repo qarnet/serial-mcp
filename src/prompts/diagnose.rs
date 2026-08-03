@@ -48,6 +48,6 @@ Report: device identification (vendor, role, protocol), the working serial param
         port = args.port,
         starting = starting
     );
-    GetPromptResult::new(vec![PromptMessage::new_text(PromptMessageRole::User, user)])
+    GetPromptResult::new(vec![PromptMessage::new_text(Role::User, user)])
         .with_description(format!("Diagnosis plan for port {}", args.port))
 }

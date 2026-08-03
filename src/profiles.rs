@@ -449,11 +449,6 @@ pub struct ProfileDefaults {
     #[serde(default = "default_max_buffered_bytes_profile")]
     #[schemars(schema_with = "crate::schema_helpers::read_max_buffered_bytes_schema")]
     pub max_buffered_bytes: usize,
-    /// Default poll interval for `subscribe` in milliseconds (was per-call on
-    /// SubscribeArgs, now profile-level). Default 200.
-    #[serde(default = "default_subscribe_poll_ms_profile")]
-    #[schemars(schema_with = "crate::schema_helpers::poll_interval_ms_schema")]
-    pub poll_interval_ms: u64,
     /// Default reconnect policy. Open-time only; reopen to apply. Default: disabled.
     #[serde(default)]
     pub reconnect_policy: crate::serial::ReconnectPolicy,
@@ -487,9 +482,6 @@ fn default_rx_buffer_size_profile() -> usize {
 fn default_max_buffered_bytes_profile() -> usize {
     32768
 }
-fn default_subscribe_poll_ms_profile() -> u64 {
-    200
-}
 fn default_log_capacity_profile() -> usize {
     1024
 }
@@ -512,7 +504,6 @@ impl Default for ProfileDefaults {
             protocol: None,
             rx_buffer_size: default_rx_buffer_size_profile(),
             max_buffered_bytes: default_max_buffered_bytes_profile(),
-            poll_interval_ms: default_subscribe_poll_ms_profile(),
             reconnect_policy: crate::serial::ReconnectPolicy::default(),
             log_capacity: default_log_capacity_profile(),
             log_enabled: default_true_profile(),

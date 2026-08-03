@@ -22,10 +22,8 @@ use std::net::TcpListener;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use rmcp::model::LoggingMessageNotificationParam;
 use rmcp::service::{RoleClient, RunningService};
 use tokio::process::{Child, Command};
-use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use super::binaries::{ensure_serial_mcp_built, serial_mcp_bin};
@@ -206,13 +204,10 @@ async fn wait_for_port(port: u16, timeout: Duration) -> Result<()> {
 }
 
 /// Connect an `rmcp` HTTP client to a `SpawnedServer`. Returns the
-/// running client service plus the receiving end of the shared
-/// notification collector.
+/// running client service plus a unit receiver (kept for caller symmetry;
+/// there are no logging-message notifications anymore).
 pub async fn spawn_client(
     server: &SpawnedServer,
-) -> Result<(
-    RunningService<RoleClient, super::NotificationCollector>,
-    mpsc::UnboundedReceiver<LoggingMessageNotificationParam>,
-)> {
+) -> Result<(RunningService<RoleClient, super::TestClientHandler>, ())> {
     super::connect_to_url(server.url.as_str()).await
 }

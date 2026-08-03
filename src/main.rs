@@ -10,9 +10,7 @@ use serial_mcp::limits::{
 };
 use serial_mcp::security::SecurityManager;
 use serial_mcp::serial::ConnectionManager;
-use serial_mcp::server::StreamRegistry;
 use serial_mcp::SerialHandler;
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::{error, info};
@@ -308,10 +306,8 @@ async fn run_stdio(
 ) -> Result<(), Box<dyn std::error::Error>> {
     info!("Starting Serial MCP Server v{}", env!("CARGO_PKG_VERSION"));
     let connections = Arc::new(ConnectionManager::new());
-    let streams: StreamRegistry = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
     let handler = SerialHandler::builder()
         .connections(connections)
-        .streams(streams)
         .security(security)
         .budget(budget)
         .profile_store(profile_store)
@@ -343,9 +339,7 @@ async fn run_http(
 
     let shutdown = tokio_util::sync::CancellationToken::new();
     let manager = Arc::new(ConnectionManager::new());
-    let streams: StreamRegistry = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
     let manager_for_service = Arc::clone(&manager);
-    let streams_for_service = Arc::clone(&streams);
     let budget_for_service = Arc::clone(&budget);
     let profile_store_for_service = Arc::clone(&profile_store);
     let capture_store_for_service = Arc::clone(&capture_store);
@@ -354,7 +348,6 @@ async fn run_http(
         move || {
             Ok(SerialHandler::builder()
                 .connections(Arc::clone(&manager_for_service))
-                .streams(Arc::clone(&streams_for_service))
                 .security(security.clone())
                 .budget(Arc::clone(&budget_for_service))
                 .profile_store(Arc::clone(&profile_store_for_service))

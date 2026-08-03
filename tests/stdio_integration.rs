@@ -45,12 +45,19 @@ async fn stdio_initialize_handshake_succeeds() {
     let (client, _profiles_dir) = start_stdio_client().await;
     let info = client.peer_info();
     assert!(info.is_some(), "no peer_info returned");
-    assert_eq!(info.unwrap().server_info.name, "serial-mcp");
+    assert_eq!(
+        info.unwrap()
+            .server_info
+            .as_ref()
+            .expect("server_info present")
+            .name,
+        "serial-mcp"
+    );
     client.cancel().await.ok();
 }
 
 #[tokio::test]
-async fn stdio_list_tools_returns_all_twenty_seven_tools() {
+async fn stdio_list_tools_returns_all_twenty_five_tools() {
     let (client, _profiles_dir) = start_stdio_client().await;
 
     let result = client
@@ -456,6 +463,9 @@ async fn stdio_server_starts_with_capture_dir() {
     let transport = TokioChildProcess::new(cmd).expect("spawn stdio server");
     let client = ().serve(transport).await.expect("initialize client");
     let info = client.peer_info().expect("peer info");
-    assert_eq!(info.server_info.name, "serial-mcp");
+    assert_eq!(
+        info.server_info.as_ref().expect("server_info present").name,
+        "serial-mcp"
+    );
     client.cancel().await.ok();
 }

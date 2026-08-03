@@ -962,7 +962,6 @@ pub async fn configure(
         *conn.reconnect_policy.lock().expect("poisoned") = args.defaults.reconnect_policy.clone();
         // Apply scalar defaults (Atomic).
         conn.set_max_buffered_bytes_default(args.defaults.max_buffered_bytes);
-        conn.set_poll_interval_ms_default(args.defaults.poll_interval_ms);
         // log_capacity/log_enabled: LogBuffer has NO live setters. Documented as
         // profile-only. rx_buffer_size: ring is fixed at open. Also profile-only.
 
@@ -1358,7 +1357,6 @@ mod tests {
                 protocol: None,
                 rx_buffer_size: crate::limits::DEFAULT_RX_BUFFER_SIZE,
                 max_buffered_bytes: 32768,
-                poll_interval_ms: 200,
             },
             Box::new(FakeIo),
         );

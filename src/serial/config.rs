@@ -219,10 +219,6 @@ pub struct ConnectionConfig {
     #[serde(default = "default_max_buffered_bytes")]
     #[schemars(schema_with = "crate::schema_helpers::read_max_buffered_bytes_schema")]
     pub max_buffered_bytes: usize,
-    /// Default poll interval for `subscribe` in milliseconds.
-    #[serde(default = "default_poll_interval_ms")]
-    #[schemars(schema_with = "crate::schema_helpers::poll_interval_ms_schema")]
-    pub poll_interval_ms: u64,
 }
 
 fn default_rx_buffer_size() -> usize {
@@ -238,10 +234,6 @@ fn default_true() -> bool {
 
 fn default_max_buffered_bytes() -> usize {
     32768
-}
-
-fn default_poll_interval_ms() -> u64 {
-    200
 }
 
 // ---- Connection state -------------------------------------------------------

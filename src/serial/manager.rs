@@ -277,7 +277,6 @@ mod tests {
             protocol: None,
             rx_buffer_size: crate::limits::DEFAULT_RX_BUFFER_SIZE,
             max_buffered_bytes: 32768,
-            poll_interval_ms: 200,
         });
         let owner_id = mgr.insert(c1).await.unwrap();
 

@@ -7,7 +7,7 @@
 //! ```
 //!
 //! Shared by `io_ops::write` (tx_framing), `io_ops::read` (rx_framing +
-//! rx_parser), and `stream_ops::subscribe` (rx_framing + rx_parser). Keeping
+//! rx_parser), and `control_ops::capture_boot` read-half matching. Keeping
 //! the ladder in one place prevents the three hand-written copies from
 //! drifting and makes every precedence boundary directly unit-testable.
 

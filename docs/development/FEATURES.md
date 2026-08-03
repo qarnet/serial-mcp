@@ -21,7 +21,7 @@
 - collect local metadata on tool-call frequency, stop-reason
   distribution, option-usage frequency (which `from` variants agents
   actually pick, how often `match`/`framing` options get used, average
-  `max_buffered_bytes` / `poll_interval_ms` actually configured, etc.) to
+  `max_buffered_bytes` actually configured, etc.) to
   drive evidence-based decisions on which options to keep, trim, or default
   differently
 - strictly local: write to a file on the host (e.g. under
@@ -31,8 +31,7 @@
 - the goal is development insight (which tools/options are dead weight,
   which defaults are wrong), not user tracking — design the schema
   around questions we actually want to answer ("is `from: {"type":"now"}` used
-  enough to justify keeping it?", "do agents ever set
-  `poll_interval_ms`?")
+  enough to justify keeping it?")
 - pairs with the shipped `configure` tool + connection-default trim (the
   stats inform which fields to cut, and cutting fields makes the remaining
   stats cleaner)

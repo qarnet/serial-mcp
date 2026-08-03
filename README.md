@@ -15,15 +15,15 @@ presets (`at_command`, `slip`, `json_lines`, `cobs`, `ndjson`, `nmea0183`,
 full line control (DTR/RTS, BREAK, flow control) let Claude, Codex, or any MCP
 client flash, reset, and talk to a board on their own.
 
-**MCP 2025-11-25 compliant**, with resource change notifications, a port allowlist, and stdio plus HTTP transports.
+**MCP 2025-11-25 compliant**, with a port allowlist and stdio plus HTTP transports.
 
 ## Capabilities
 
-**27 tools:** list_ports, list_connections, open, close, read, write, transact, capture_boot, flush, set_dtr_rts, set_flow_control, send_break, subscribe, unsubscribe, get_status, reconfigure, list_profiles, open_profile, save_profile, delete_profile, configure, rollback_profile, get_log, clear_log, export_log, reconnect, compute_checksum
+**25 tools:** list_ports, list_connections, open, close, read, write, transact, capture_boot, flush, set_dtr_rts, set_flow_control, send_break, get_status, reconfigure, list_profiles, open_profile, save_profile, delete_profile, configure, rollback_profile, get_log, clear_log, export_log, reconnect, compute_checksum
 **5 resources:** `serial://ports`, `serial://connections`, `serial://connections/{id}`, `serial://connections/{id}/raw`, `serial://connections/{id}/log` (3 resource templates plus 2 static)  
 **2 prompt templates:** `diagnose_port`, `interactive_terminal`  
 
-The RX side uses an always-on ring buffer with absolute stream offsets: every byte from `open` to `close` is captured, so `read` behaves like `cat` (returns buffered-but-unread bytes immediately) and `subscribe` like `tail -f` (with optional history replay via `from`). `read`'s `from` parameter (`{"type":"cursor"}` default / `{"type":"now"}` / `{"type":"buffer_start"}` / `{"type":"offset","offset":N}`) resolves the start position non-destructively — pass `from: {"type":"now"}` to skip buffered backlog to the live edge, or re-pass the same `from` to re-read the same bytes. Pattern matching checks buffered history first. Data loss from ring wrap is always observable via `bytes_lost`, never silent. **RX payloads are lossless:** when the requested `encoding` cannot represent received bytes (e.g. binary data under `utf8`), `read`, `subscribe`, and `capture_boot` automatically re-encode the same bytes as exact lowercase spaced hex and report `encoding: "hex"` on the payload — bytes are never dropped, repeated, or lossy-converted, and a successful fallback is never counted as a dropped notification/frame. **Note:** with hardware flow control (RTS/CTS) enabled, the always-on pump drains the kernel RX buffer continuously, so the kernel never deasserts RTS and the device streams freely — a setup that relied on flow control to pause a device until the host reads will behave differently (the device no longer pauses).
+The RX side uses an always-on ring buffer with absolute stream offsets: every byte from `open` to `close` is captured, so `read` behaves like `cat` (returns buffered-but-unread bytes immediately) and can also wait for new data, match patterns, and replay history. `read`'s `from` parameter (`{"type":"cursor"}` default / `{"type":"now"}` / `{"type":"buffer_start"}` / `{"type":"offset","offset":N}`) resolves the start position non-destructively — pass `from: {"type":"now"}` to skip buffered backlog to the live edge, or re-pass the same `from` to re-read the same bytes. Pattern matching checks buffered history first. Data loss from ring wrap is always observable via `bytes_lost`, never silent. **RX payloads are lossless:** when the requested `encoding` cannot represent received bytes (e.g. binary data under `utf8`), `read` and `capture_boot` automatically re-encode the same bytes as exact lowercase spaced hex and report `encoding: "hex"` on the payload — bytes are never dropped, repeated, or lossy-converted, and a successful fallback is never counted as a dropped notification/frame. **Note:** with hardware flow control (RTS/CTS) enabled, the always-on pump drains the kernel RX buffer continuously, so the kernel never deasserts RTS and the device streams freely — a setup that relied on flow control to pause a device until the host reads will behave differently (the device no longer pauses).
 
 ## Install
 
@@ -187,7 +187,7 @@ generated, revision, dirty, candidates, last persistence error):
   transient.
 - **Explicit open fields override the selected profile's defaults**
   (baud, data bits, stop bits, parity, flow control, log, reconnect policy,
-  framing/parser/protocol, ring size, read/subscribe defaults). Omitted
+  framing/parser/protocol, ring size, read defaults). Omitted
   fields come from the profile, then built-in 115200/8-N-1 defaults.
 - **Automatic write-through learning:** a dirty open override is persisted
   right after the successful hardware open, and durable live changes
@@ -202,8 +202,8 @@ generated, revision, dirty, candidates, last persistence error):
   profile write fails, the tool result stays successful, `state` is
   `failed` with the error, the binding turns `dirty`, and the next durable
   mutation or clean close retries. Transient line control (DTR/RTS, BREAK),
-  per-call read/write/transact framing, payloads, cursors, and subscription
-  lifecycle never touch profile defaults or revisions.
+  per-call read/write/transact framing, payloads, and cursors never touch
+  profile defaults or revisions.
 - **Revision-CAS conflicts:** persistence is guarded by the bound
   revision. If another client bumps or rolls back the profile, the next
   learning attempt reports an explicit conflict (`failed`, binding
@@ -280,8 +280,7 @@ capture_boot(connection_id="9f...",
             pattern_encoding: "utf8" } }, timeout_ms=3000)
    → { stop_reason: "match_found", data: "status\r\n...OK>", ... }
    # one call = write + awaited response (prefer over write+read);
-   # use read() for buffered or unsolicited data, subscribe() only for
-   # ongoing notifications
+   # use read() for buffered or unsolicited data
 4. reconfigure(connection_id="9f...", baud_rate=230400)
    → { baud_rate: 230400,
        profile: { profile_name: "auto-fake-usb-serial", dirty: false, ... },

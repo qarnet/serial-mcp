@@ -1,7 +1,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use rmcp::{model::Meta, Json, Peer, RoleServer};
+use rmcp::{model::RequestMetaObject, Json, Peer, RoleServer};
 use tokio::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
@@ -113,7 +113,7 @@ pub async fn capture_boot(
     connections: &Arc<ConnectionManager>,
     rx_sessions: &Arc<crate::rx_session::RxSessionManager>,
     budget: &Arc<dyn crate::buffer_budget::BufferBudget>,
-    meta: Meta,
+    meta: RequestMetaObject,
     ct: tokio_util::sync::CancellationToken,
     peer: Peer<RoleServer>,
     args: CaptureBootArgs,
@@ -440,7 +440,7 @@ pub async fn set_flow_control(
 
 pub async fn send_break(
     connections: &Arc<ConnectionManager>,
-    meta: Meta,
+    meta: RequestMetaObject,
     ct: tokio_util::sync::CancellationToken,
     peer: Peer<RoleServer>,
     args: SendBreakArgs,
@@ -490,12 +490,11 @@ pub async fn send_break(
     let progress_token = meta.get_progress_token();
     if let Some(token) = progress_token.clone() {
         let _ = peer
-            .notify_progress(rmcp::model::ProgressNotificationParam {
-                progress_token: token,
-                progress: 0.0,
-                total: Some(args.duration_ms as f64),
-                message: Some("break asserted".into()),
-            })
+            .notify_progress(
+                rmcp::model::ProgressNotificationParam::new(token, 0.0)
+                    .with_total(args.duration_ms as f64)
+                    .with_message("break asserted"),
+            )
             .await;
     }
 
@@ -515,14 +514,16 @@ pub async fn send_break(
                     // Skip emitting progress at t=0 (redundant with initial message)
                     if progress_emitted || elapsed > 0 {
                         progress_emitted = true;
-                        let _ = peer
-                            .notify_progress(rmcp::model::ProgressNotificationParam {
-                                progress_token: token,
-                                progress: elapsed as f64,
-                                total: Some(args.duration_ms as f64),
-                                message: Some("holding break".into()),
-                            })
-                            .await;
+                            let _ = peer
+                                .notify_progress(
+                                    rmcp::model::ProgressNotificationParam::new(
+                                        token,
+                                        elapsed as f64,
+                                    )
+                                    .with_total(args.duration_ms as f64)
+                                    .with_message("holding break"),
+                                )
+                                .await;
                     }
                 }
             }
@@ -544,12 +545,11 @@ pub async fn send_break(
 
     if let Some(token) = progress_token {
         let _ = peer
-            .notify_progress(rmcp::model::ProgressNotificationParam {
-                progress_token: token,
-                progress: args.duration_ms as f64,
-                total: Some(args.duration_ms as f64),
-                message: Some("break released".into()),
-            })
+            .notify_progress(
+                rmcp::model::ProgressNotificationParam::new(token, args.duration_ms as f64)
+                    .with_total(args.duration_ms as f64)
+                    .with_message("break released"),
+            )
             .await;
     }
 

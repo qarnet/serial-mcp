@@ -16,7 +16,5 @@ fuzz_target!(|data: &[u8]| {
     let _ = serde_json::from_str::<FlushArgs>(s);
     let _ = serde_json::from_str::<SetDtrRtsArgs>(s);
     let _ = serde_json::from_str::<SendBreakArgs>(s);
-    let _ = serde_json::from_str::<SubscribeArgs>(s);
-    let _ = serde_json::from_str::<UnsubscribeArgs>(s);
     let _ = serde_json::from_str::<SetFlowControlArgs>(s);
 });

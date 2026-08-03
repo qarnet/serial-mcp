@@ -106,8 +106,8 @@ mod tests {
     #[test]
     fn catalog_matches_served_tool_count() {
         let metrics = catalog_metrics();
-        assert_eq!(metrics.tool_count, 27);
-        assert_eq!(metrics.per_tool_bytes.len(), 27);
+        assert_eq!(metrics.tool_count, 25);
+        assert_eq!(metrics.per_tool_bytes.len(), 25);
         // The aggregate is larger than the sum of per-tool bytes (the
         // envelope adds keys/array framing).
         let per_tool_sum: usize = metrics.per_tool_bytes.iter().map(|t| t.total_bytes).sum();

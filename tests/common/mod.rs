@@ -48,8 +48,6 @@ pub const EXPECTED_TOOLS: &[&str] = &[
     "set_dtr_rts",
     "set_flow_control",
     "send_break",
-    "subscribe",
-    "unsubscribe",
     "get_status",
     "reconfigure",
     "list_profiles",
@@ -65,16 +63,12 @@ pub const EXPECTED_TOOLS: &[&str] = &[
     "compute_checksum",
 ];
 
-use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
-use std::time::Duration;
 
 use anyhow::Result;
 use rmcp::handler::client::ClientHandler;
-use rmcp::model::{
-    CallToolRequestParams, LoggingMessageNotificationParam, ProgressNotificationParam,
-};
+use rmcp::model::{CallToolRequestParams, ProgressNotificationParam};
 use rmcp::service::{NotificationContext, RoleClient, RunningService};
 use rmcp::transport::streamable_http_server::{
     session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
@@ -89,7 +83,6 @@ use serial_mcp::capture_store::CaptureStore;
 use serial_mcp::security::SecurityManager;
 use serial_mcp::serial::ConnectionManager;
 use serial_mcp::serial::PortProvider;
-use serial_mcp::server::StreamRegistry;
 use serial_mcp::SerialHandler;
 
 /// Static [`PortProvider`]: returns a fixed list of
@@ -211,7 +204,6 @@ impl TestServer {
         let url = format!("http://{addr}/mcp");
         let shutdown = CancellationToken::new();
 
-        let streams: StreamRegistry = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
         let profile_store = profile_store
             .unwrap_or_else(|| Arc::new(serial_mcp::profile_store::ProfileStore::ephemeral()));
         let provider = provider.unwrap_or_else(|| {
@@ -219,7 +211,6 @@ impl TestServer {
         });
         let capture_store = capture_store.unwrap_or_else(|| Arc::new(CaptureStore::disabled()));
         let manager_for_service = Arc::clone(&manager);
-        let streams_for_service = Arc::clone(&streams);
         let profile_store_for_service = Arc::clone(&profile_store);
         let provider_for_service = Arc::clone(&provider);
         let capture_store_for_service = Arc::clone(&capture_store);
@@ -228,7 +219,6 @@ impl TestServer {
             move || {
                 Ok(SerialHandler::builder()
                     .connections(Arc::clone(&manager_for_service))
-                    .streams(Arc::clone(&streams_for_service))
                     .security(security.clone())
                     .profile_store(Arc::clone(&profile_store_for_service))
                     .capture_store(Arc::clone(&capture_store_for_service))
@@ -330,73 +320,42 @@ impl TestServerBuilder {
     }
 }
 
-/// [`ClientHandler`] that forwards every received `notifications/message`
-/// onto an unbounded mpsc channel. The receiver half is returned from
-/// [`connect_client`] so tests can await events.
-#[derive(Clone)]
-pub struct NotificationCollector {
-    tx: mpsc::UnboundedSender<LoggingMessageNotificationParam>,
-}
+/// No-op [`ClientHandler`] used by the standard test client. Old
+/// logging-message collection is gone with MCP logging removal; progress
+/// notifications are collected only through the dedicated
+/// [`ProgressNotificationCollector`] client.
+#[derive(Clone, Default)]
+pub struct TestClientHandler;
 
-impl ClientHandler for NotificationCollector {
-    fn on_logging_message(
-        &self,
-        params: LoggingMessageNotificationParam,
-        _ctx: NotificationContext<RoleClient>,
-    ) -> impl Future<Output = ()> + Send + '_ {
-        let tx = self.tx.clone();
-        async move {
-            let _ = tx.send(params);
-        }
-    }
-}
+impl ClientHandler for TestClientHandler {}
 
 /// Connect an `rmcp` HTTP client to the given test server. Returns the
-/// running client service plus the receiving end of the notification
-/// collector.
+/// running client service plus a unit receiver (kept for caller symmetry;
+/// there are no logging-message notifications anymore).
 pub async fn connect_client(
     server: &TestServer,
-) -> Result<(
-    RunningService<RoleClient, NotificationCollector>,
-    mpsc::UnboundedReceiver<LoggingMessageNotificationParam>,
-)> {
+) -> Result<(RunningService<RoleClient, TestClientHandler>, ())> {
     connect_to_url(server.url.as_str()).await
 }
 
 /// Connect an `rmcp` HTTP client to a server URL (in-process or
-/// spawned-binary). Returns the running client service plus the
-/// receiving end of the notification collector.
+/// spawned-binary). Returns the running client service plus a unit
+/// receiver (kept for caller symmetry).
 pub async fn connect_to_url(
     url: &str,
-) -> Result<(
-    RunningService<RoleClient, NotificationCollector>,
-    mpsc::UnboundedReceiver<LoggingMessageNotificationParam>,
-)> {
-    let (tx, rx) = mpsc::unbounded_channel();
-    let handler = NotificationCollector { tx };
+) -> Result<(RunningService<RoleClient, TestClientHandler>, ())> {
+    let handler = TestClientHandler;
     let transport = StreamableHttpClientTransport::from_uri(url);
     let client = handler.serve(transport).await?;
-    Ok((client, rx))
+    Ok((client, ()))
 }
 
 #[derive(Clone)]
 pub struct ProgressNotificationCollector {
-    log_tx: mpsc::UnboundedSender<LoggingMessageNotificationParam>,
     progress_tx: mpsc::UnboundedSender<ProgressNotificationParam>,
 }
 
 impl ClientHandler for ProgressNotificationCollector {
-    fn on_logging_message(
-        &self,
-        params: LoggingMessageNotificationParam,
-        _ctx: NotificationContext<RoleClient>,
-    ) -> impl Future<Output = ()> + Send + '_ {
-        let tx = self.log_tx.clone();
-        async move {
-            let _ = tx.send(params);
-        }
-    }
-
     fn on_progress(
         &self,
         params: ProgressNotificationParam,
@@ -413,18 +372,13 @@ pub async fn connect_client_with_progress(
     server: &TestServer,
 ) -> Result<(
     RunningService<RoleClient, ProgressNotificationCollector>,
-    mpsc::UnboundedReceiver<LoggingMessageNotificationParam>,
     mpsc::UnboundedReceiver<ProgressNotificationParam>,
 )> {
-    let (log_tx, log_rx) = mpsc::unbounded_channel();
     let (progress_tx, progress_rx) = mpsc::unbounded_channel();
-    let handler = ProgressNotificationCollector {
-        log_tx,
-        progress_tx,
-    };
+    let handler = ProgressNotificationCollector { progress_tx };
     let transport = StreamableHttpClientTransport::from_uri(server.url.as_str());
     let client = handler.serve(transport).await?;
-    Ok((client, log_rx, progress_rx))
+    Ok((client, progress_rx))
 }
 
 /// Build a `CallToolRequestParams::arguments` JSON object from a
@@ -439,17 +393,6 @@ pub fn args_object(value: serde_json::Value) -> Map<String, serde_json::Value> {
 /// Convenience: build a tool-call request with named arguments.
 pub fn tool_request(name: &'static str, args: serde_json::Value) -> CallToolRequestParams {
     CallToolRequestParams::new(name).with_arguments(args_object(args))
-}
-
-/// Receive the next notification from the collector with a timeout.
-pub async fn next_notification(
-    rx: &mut mpsc::UnboundedReceiver<LoggingMessageNotificationParam>,
-    within: Duration,
-) -> Result<LoggingMessageNotificationParam> {
-    tokio::time::timeout(within, rx.recv())
-        .await
-        .map_err(|_| anyhow::anyhow!("no notification arrived within {within:?}"))?
-        .ok_or_else(|| anyhow::anyhow!("notification channel closed"))
 }
 
 // ---- Unix PTY pair (Layer 3) ------------------------------------------------

@@ -166,8 +166,6 @@ pub struct SerialConnection {
     protocol_default: StdMutex<Option<crate::framing::ProtocolPreset>>,
     /// Default max buffered bytes for `read` (from profile/open, mutable live).
     max_buffered_bytes_default: AtomicUsize,
-    /// Default poll interval for `subscribe` in ms (from profile/open, mutable live).
-    poll_interval_ms_default: AtomicU64,
     /// Active profile-session binding. `None` for connections
     /// inserted directly by low-level tests.
     active_profile: StdMutex<Option<ActiveProfileBinding>>,
@@ -226,7 +224,6 @@ impl SerialConnection {
                 protocol: None,
                 rx_buffer_size: crate::limits::DEFAULT_RX_BUFFER_SIZE,
                 max_buffered_bytes: 32768,
-                poll_interval_ms: 200,
             },
             io,
         )
@@ -265,7 +262,6 @@ impl SerialConnection {
             rx_parser_default: StdMutex::new(config.rx_parser),
             protocol_default: StdMutex::new(config.protocol),
             max_buffered_bytes_default: AtomicUsize::new(config.max_buffered_bytes),
-            poll_interval_ms_default: AtomicU64::new(config.poll_interval_ms),
             active_profile: StdMutex::new(None),
             learning_lock: tokio::sync::Mutex::new(()),
             control_lock: tokio::sync::Mutex::new(()),
@@ -349,12 +345,6 @@ impl SerialConnection {
             .load(std::sync::atomic::Ordering::SeqCst)
     }
 
-    /// Default poll interval for `subscribe` in milliseconds. Mutable live.
-    pub fn poll_interval_ms_default(&self) -> u64 {
-        self.poll_interval_ms_default
-            .load(std::sync::atomic::Ordering::SeqCst)
-    }
-
     /// The active profile-session binding, if this connection was opened
     /// through a public open path.
     pub fn active_profile_binding(&self) -> Option<ActiveProfileBinding> {
@@ -414,7 +404,6 @@ impl SerialConnection {
             protocol: self.protocol_default(),
             rx_buffer_size: self.rx_buffer_size(),
             max_buffered_bytes: self.max_buffered_bytes_default(),
-            poll_interval_ms: self.poll_interval_ms_default(),
             reconnect_policy: self.reconnect_policy.lock().expect("poisoned").clone(),
             log_capacity: self.log.capacity(),
             log_enabled: self.log.is_enabled(),
@@ -451,12 +440,6 @@ impl SerialConnection {
     /// Set the default max buffered bytes on a live connection.
     pub(crate) fn set_max_buffered_bytes_default(&self, v: usize) {
         self.max_buffered_bytes_default
-            .store(v, std::sync::atomic::Ordering::SeqCst);
-    }
-
-    /// Set the default poll interval on a live connection.
-    pub(crate) fn set_poll_interval_ms_default(&self, v: u64) {
-        self.poll_interval_ms_default
             .store(v, std::sync::atomic::Ordering::SeqCst);
     }
 
@@ -577,7 +560,6 @@ impl SerialConnection {
             protocol: self.protocol_default(),
             rx_buffer_size: self.rx_buffer_size(),
             max_buffered_bytes: self.max_buffered_bytes_default(),
-            poll_interval_ms: self.poll_interval_ms_default(),
         }
     }
 

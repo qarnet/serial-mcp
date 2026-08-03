@@ -1,6 +1,6 @@
-//! RX request validation shared by `read` and `subscribe`: per-tool limits
-//! (`RxLimits`), the common resolved argument set (`ResolvedRxArgs`), the
-//! `RxRequestArgs` accessor trait with its `ReadArgs`/`SubscribeArgs` impls,
+//! RX request validation for `read`: per-tool limits (`RxLimits`),
+//! the common resolved argument set (`ResolvedRxArgs`), the
+//! `RxRequestArgs` accessor trait with its `ReadArgs` impls,
 //! and `validate_rx_request`. General primitives (clamping, connection
 //! lookup, encoding parsing, shared limits) live in the sibling `helpers`
 //! module.
@@ -14,15 +14,15 @@ use crate::tools::helpers::{
     clamp_or_err, clamp_timeout_or_err, lookup_connection, parse_encoding, require_min_or_err,
     MAX_TIMEOUT_MS,
 };
-use crate::tools::types::{ReadArgs, SubscribeArgs};
+use crate::tools::types::ReadArgs;
 
 // ------------------------------------------------------------------
-// RX request validation (shared by read and subscribe)
+// RX request validation (used by read)
 // ------------------------------------------------------------------
 
 /// Per-tool limits and the error-message label for [`validate_rx_request`].
 pub struct RxLimits {
-    /// Tool name used to prefix error messages ("read" or "subscribe").
+    /// Tool name used to prefix error messages.
     pub tool: &'static str,
     /// Minimum allowed `max_buffered_bytes`.
     pub min_buffered: usize,
@@ -30,7 +30,7 @@ pub struct RxLimits {
     pub max_buffered: usize,
 }
 
-/// The common, validated inputs shared by `read` and `subscribe`.
+/// The common, validated inputs for `read`.
 #[derive(Debug)]
 pub struct ResolvedRxArgs {
     pub encoding: Encoding,
@@ -39,7 +39,7 @@ pub struct ResolvedRxArgs {
     pub matcher: Option<Matcher>,
 }
 
-/// Accessors for the request fields common to `read` and `subscribe`.
+/// Accessors for the request fields for `read`.
 pub trait RxRequestArgs {
     fn connection_id(&self) -> &str;
     fn encoding(&self) -> &str;
@@ -66,33 +66,14 @@ impl RxRequestArgs for ReadArgs {
     }
 }
 
-impl RxRequestArgs for SubscribeArgs {
-    fn connection_id(&self) -> &str {
-        &self.connection_id
-    }
-    fn encoding(&self) -> &str {
-        &self.encoding
-    }
-    fn timeout_ms(&self) -> Option<u64> {
-        self.timeout_ms
-    }
-    fn no_new_rx_timeout_ms(&self) -> Option<u64> {
-        self.no_new_rx_timeout_ms
-    }
-    fn match_request(&self) -> Option<&MatchRequest> {
-        self.r#match.as_ref()
-    }
-}
-
-/// Validate and resolve the inputs common to `read` and `subscribe`: encoding,
+/// Validate and resolve the inputs for `read`: encoding,
 /// connection lookup, `max_buffered_bytes` bounds, `timeout_ms` / silence
 /// timeout, and matcher resolution. Error messages are prefixed with
 /// `limits.tool` to match each tool's existing wording.
 ///
 /// `max_buffered_bytes` is passed explicitly (resolved from the connection
 /// default by the handler).
-/// Does NOT reserve the buffer budget — the caller does that (subscribe must
-/// drop any prior subscription before reserving).
+/// Does NOT reserve the buffer budget — the caller does that.
 pub async fn validate_rx_request<A: RxRequestArgs>(
     connections: &Arc<ConnectionManager>,
     args: &A,
@@ -148,9 +129,7 @@ pub async fn validate_rx_request<A: RxRequestArgs>(
 mod tests {
     use super::*;
 
-    use crate::tools::helpers::{
-        MAX_READ_BYTES, MAX_STREAM_CHUNK_BYTES, MIN_READ_BYTES, MIN_STREAM_CHUNK_BYTES,
-    };
+    use crate::tools::helpers::{MAX_READ_BYTES, MIN_READ_BYTES};
 
     // ── RX request validation ──────────────────────────────────────────────
 
@@ -262,15 +241,15 @@ mod tests {
         let (connections, id, _peer) = fake_conn().await;
         let mut a = valid_args(&id);
         a.no_new_rx_timeout_ms = Some(0);
-        let subscribe_limits = RxLimits {
-            tool: "subscribe",
-            min_buffered: MIN_STREAM_CHUNK_BYTES,
-            max_buffered: MAX_STREAM_CHUNK_BYTES,
+        let read_limits = RxLimits {
+            tool: "read",
+            min_buffered: MIN_READ_BYTES,
+            max_buffered: MAX_READ_BYTES,
         };
-        let err = validate_rx_request(&connections, &a, subscribe_limits, 256)
+        let err = validate_rx_request(&connections, &a, read_limits, 256)
             .await
             .unwrap_err();
-        assert_eq!(err, "subscribe.no_new_rx_timeout_ms must be > 0");
+        assert_eq!(err, "read.no_new_rx_timeout_ms must be > 0");
     }
 
     #[tokio::test]

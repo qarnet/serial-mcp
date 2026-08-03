@@ -97,6 +97,24 @@
 
 ## [Unreleased]
 
+### Migration: rmcp 3 server surface (MCP `2026-07-28` groundwork)
+- rmcp 1.7 → 3.0 (`Meta` → `RequestMetaObject`, `RawResource`/`RawResourceTemplate`
+  → `Resource`/`ResourceTemplate`, MRTR-aware `ReadResourceResponse`, `Role`
+  prompt roles, constructor-built progress/notification params);
+- MCP logging support removed (`notifications/message` no longer used) and the
+  serial-mcp `subscribe`/`unsubscribe` tools deleted; legacy
+  `resources/subscribe`/`resources/unsubscribe` handlers and the logging,
+  resource-subscribe, and list-change capability flags removed;
+- `poll_interval_ms` removed from open/profile/configure/connection defaults and
+  the stream-only chunk/poll limit constants and schema helpers; existing
+  profile files containing the old key still load (serde ignores it) and the
+  next durable rewrite drops it — no schema-version bump;
+- tool count drops from 27 → 25; `read` remains the complete RX path (buffered,
+  match, framing, cursor replay, loss reporting, lossless hex fallback) and
+  `capture_boot` is unchanged;
+- MCP `2026-07-28` discovery and standard `subscriptions/listen` are NOT yet
+  implemented (planned: dual-protocol Phase 2, resource events Phase 3).
+
 ## [0.9.1]
 
 ### Security / maintenance

@@ -133,7 +133,6 @@ pub fn controlled_connection(
         protocol: None,
         rx_buffer_size,
         max_buffered_bytes: 32768,
-        poll_interval_ms: 200,
     };
     let conn = SerialConnection::from_io_with_config(
         config,

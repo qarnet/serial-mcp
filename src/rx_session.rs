@@ -8,9 +8,8 @@
 //! active tool calls. The ring is a budgeted allocation charged at open and
 //! released at close.
 //!
-//! Both `read` and `subscribe` read from the ring via private or shared
-//! cursors. `read` advances a shared cursor; `subscribe` has per-call
-//! private cursors that do not move the shared read cursor.
+//! `read` reads from the ring via private or shared cursors. `read` advances a
+//! shared cursor; a private cursor mode does not move the shared read cursor.
 //!
 //! - always-on pump from open to close
 //! - RxRing capture (all bytes preserved)
@@ -36,7 +35,7 @@ use crate::serial::SerialConnection;
 /// Manages one pump task and its registered consumers for a single connection.
 ///
 /// The [`RxRing`] captures all RX bytes from open to close. The pump appends
-/// to the ring. Both `read` and `subscribe` read from the ring via cursors.
+/// to the ring. `read` reads from the ring via cursors.
 pub struct RxSession {
     connection_id: String,
     connection: Arc<SerialConnection>,

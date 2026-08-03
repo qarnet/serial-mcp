@@ -17,7 +17,7 @@ use serde_json::json;
 use tokio::io::AsyncWriteExt;
 
 mod common;
-use common::{connect_client, next_notification, pty::PtyPair, tool_request, TestServer};
+use common::{connect_client, pty::PtyPair, tool_request, TestServer};
 
 /// Open a real PTY pair, then walk an MCP client through opening the
 /// slave path as a serial port. Returns the test server (kept alive by
@@ -25,8 +25,8 @@ use common::{connect_client, next_notification, pty::PtyPair, tool_request, Test
 /// connection_id.
 async fn setup() -> (
     TestServer,
-    rmcp::service::RunningService<rmcp::service::RoleClient, common::NotificationCollector>,
-    tokio::sync::mpsc::UnboundedReceiver<rmcp::model::LoggingMessageNotificationParam>,
+    rmcp::service::RunningService<rmcp::service::RoleClient, common::TestClientHandler>,
+    (),
     PtyPair,
     String,
 ) {
@@ -143,48 +143,6 @@ async fn pty_device_binary_read_falls_back_to_exact_hex() {
             || structured["stop_reason"] == json!("timeout"),
         "unexpected stop_reason: {structured:?}"
     );
-    client.cancel().await.ok();
-}
-
-#[tokio::test]
-async fn pty_subscribe_streams_device_writes_as_notifications() {
-    let (_server, client, mut rx, mut pty, connection_id) = setup().await;
-
-    client
-        .peer()
-        .call_tool(tool_request(
-            "subscribe",
-            json!({
-                "connection_id": connection_id,
-            }),
-        ))
-        .await
-        .unwrap();
-
-    pty.write_device(b"hello from device\r\n").await.unwrap();
-
-    let event = next_notification(&mut rx, Duration::from_secs(2))
-        .await
-        .unwrap();
-    assert_eq!(
-        event.logger.as_deref(),
-        Some(&format!("serial:{connection_id}")[..])
-    );
-    let data = event.data.as_object().unwrap();
-    assert_eq!(
-        data["connection_id"],
-        serde_json::Value::String(connection_id.clone())
-    );
-    // The PTY may deliver the bytes in one chunk or split — concatenate
-    // until we have the whole payload.
-    let mut received = data["data"].as_str().unwrap().to_string();
-    while !received.contains("hello from device") {
-        let more = next_notification(&mut rx, Duration::from_secs(1))
-            .await
-            .unwrap();
-        received.push_str(more.data["data"].as_str().unwrap());
-    }
-    assert!(received.contains("hello from device"));
     client.cancel().await.ok();
 }
 
@@ -349,76 +307,16 @@ async fn pty_read_match_without_context_returns_full_accumulated() {
 }
 
 #[tokio::test]
-async fn pty_subscribe_match_with_context_includes_shaped_data() {
-    let (_server, client, mut rx, mut pty, connection_id) = setup().await;
+async fn pty_read_literal_match_index_over_chunked_stream() {
+    let (_server, client, _rx, mut pty, connection_id) = setup().await;
 
-    client
-        .peer()
-        .call_tool(tool_request(
-            "subscribe",
-            json!({
-                "connection_id": connection_id,
-                "match": {
-                    "pattern": "OK>",
-                    "config": {
-                        "mode": "literal_substring",
-                        "pattern_encoding": "utf8",
-                        "context_amount_of_matched_bytes": 8
-                    }
-                }
-            }),
-        ))
-        .await
-        .unwrap();
-
-    pty.write_device(b"AAAAAAAAAABBBBOK>tail").await.unwrap();
-
-    // Collect notifications until we get the match stop notification.
-    let mut found_match_stop = false;
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-    while tokio::time::Instant::now() < deadline {
-        match next_notification(&mut rx, Duration::from_secs(2)).await {
-            Ok(event) => {
-                let data = event.data.as_object().unwrap();
-                if data.get("matched").and_then(|v| v.as_bool()) == Some(true) {
-                    found_match_stop = true;
-                    assert_eq!(data["stop_reason"], json!("match_found"));
-                    let match_index = data["match_index"].as_u64().expect("match_index") as usize;
-                    let shaped_data = data["data"].as_str().expect("data in stop notification");
-                    // "OK>" starts at byte 14 in "AAAAAAAAAABBBBOK>tail"
-                    // context=8 → pre_start = 14-8 = 6 → bytes[6..17] = "AABBBBOK>"
-                    assert!(
-                        shaped_data.ends_with("OK>"),
-                        "shaped data should end with OK>: {shaped_data:?}"
-                    );
-                    assert_eq!(
-                        match_index, 8,
-                        "match_index should be 8 in shaped payload: {data:?}"
-                    );
-                    break;
-                }
-            }
-            Err(_) => break,
-        }
-    }
-    assert!(
-        found_match_stop,
-        "should have received match stop notification"
-    );
-    client.cancel().await.ok();
-}
-
-#[tokio::test]
-async fn pty_read_and_subscribe_report_same_literal_match_index() {
-    let (_server, client, mut rx, mut pty, connection_id) = setup().await;
-
-    // Same chunked sequence for both tools: two device writes, 100ms apart.
+    // Same chunked sequence: two device writes, 100ms apart.
     pty.write_device(b"warming up... ").await.unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
     pty.write_device(b"OK> ready").await.unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    // read: cross-chunk literal at global index 13.
+    // read: cross-chunk literal at global index 14.
     let result = client
         .peer()
         .call_tool(tool_request(
@@ -435,174 +333,6 @@ async fn pty_read_and_subscribe_report_same_literal_match_index() {
     let structured = result.structured_content.expect("structured");
     assert_eq!(structured["matched"], json!(true), "{structured:?}");
     assert_eq!(structured["match_index"], json!(14), "{structured:?}");
-
-    // subscribe replays the same retained stream from buffer_start and must
-    // report the same match outcome and index.
-    client
-        .peer()
-        .call_tool(tool_request(
-            "subscribe",
-            json!({
-                "connection_id": connection_id,
-                "from": { "type": "buffer_start" },
-                "timeout_ms": 3000,
-                "match": { "pattern": "OK>" },
-            }),
-        ))
-        .await
-        .unwrap();
-
-    let mut saw_match_stop = false;
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-    while tokio::time::Instant::now() < deadline {
-        match next_notification(&mut rx, Duration::from_secs(2)).await {
-            Ok(event) => {
-                let data = event.data.as_object().unwrap();
-                if data.get("stop_reason").is_some() {
-                    saw_match_stop = true;
-                    assert_eq!(data["matched"], json!(true), "{data:?}");
-                    assert_eq!(data["match_index"], json!(14), "{data:?}");
-                    break;
-                }
-            }
-            Err(_) => break,
-        }
-    }
-    assert!(
-        saw_match_stop,
-        "subscribe should emit a match stop notification"
-    );
-    client.cancel().await.ok();
-}
-
-#[tokio::test]
-async fn pty_subscribe_match_global_index_after_window_truncation() {
-    let (_server, client, mut rx, mut pty, connection_id) = setup().await;
-
-    // Small bounded window: 16 bytes + literal overlap (2) = 18 retained.
-    // 20 junk bytes then "OK>" force matcher front truncation mid-stream.
-    client
-        .peer()
-        .call_tool(tool_request(
-            "configure",
-            json!({
-                "connection_id": connection_id,
-                "defaults": { "max_buffered_bytes": 16 },
-            }),
-        ))
-        .await
-        .unwrap();
-
-    client
-        .peer()
-        .call_tool(tool_request(
-            "subscribe",
-            json!({
-                "connection_id": connection_id,
-                "match": { "pattern": "OK>" },
-            }),
-        ))
-        .await
-        .unwrap();
-
-    // Feed in small chunks so several bounded pushes happen.
-    for _ in 0..5 {
-        pty.write_device(b"AAAA").await.unwrap();
-        tokio::time::sleep(Duration::from_millis(30)).await;
-    }
-    pty.write_device(b"OK>").await.unwrap();
-
-    let mut saw_match_stop = false;
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
-    while tokio::time::Instant::now() < deadline {
-        match next_notification(&mut rx, Duration::from_secs(2)).await {
-            Ok(event) => {
-                let data = event.data.as_object().unwrap();
-                if data.get("stop_reason").is_some() {
-                    saw_match_stop = true;
-                    // "OK>" starts at global byte 20 — a window-local index
-                    // would have been wrong after front truncation.
-                    assert_eq!(data["stop_reason"], json!("match_found"), "{data:?}");
-                    assert_eq!(data["matched"], json!(true), "{data:?}");
-                    assert_eq!(data["match_index"], json!(20), "{data:?}");
-                    break;
-                }
-            }
-            Err(_) => break,
-        }
-    }
-    assert!(
-        saw_match_stop,
-        "subscribe should emit a match stop notification"
-    );
-    client.cancel().await.ok();
-}
-
-#[tokio::test]
-async fn pty_subscribe_match_context_shaped_after_window_truncation() {
-    let (_server, client, mut rx, mut pty, connection_id) = setup().await;
-
-    client
-        .peer()
-        .call_tool(tool_request(
-            "configure",
-            json!({
-                "connection_id": connection_id,
-                "defaults": { "max_buffered_bytes": 16 },
-            }),
-        ))
-        .await
-        .unwrap();
-
-    client
-        .peer()
-        .call_tool(tool_request(
-            "subscribe",
-            json!({
-                "connection_id": connection_id,
-                "match": {
-                    "pattern": "OK>",
-                    "config": {
-                        "mode": "literal_substring",
-                        "pattern_encoding": "utf8",
-                        "context_amount_of_matched_bytes": 8
-                    }
-                },
-            }),
-        ))
-        .await
-        .unwrap();
-
-    // 20 junk bytes then the match, crossing the retention boundary.
-    for _ in 0..5 {
-        pty.write_device(b"AAAA").await.unwrap();
-        tokio::time::sleep(Duration::from_millis(30)).await;
-    }
-    pty.write_device(b"OK>").await.unwrap();
-
-    let mut saw_match_stop = false;
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
-    while tokio::time::Instant::now() < deadline {
-        match next_notification(&mut rx, Duration::from_secs(2)).await {
-            Ok(event) => {
-                let data = event.data.as_object().unwrap();
-                if data.get("stop_reason").is_some() {
-                    saw_match_stop = true;
-                    assert_eq!(data["matched"], json!(true), "{data:?}");
-                    // Exactly 8 requested context bytes before the match,
-                    // with a relative match_index of 8.
-                    assert_eq!(data["data"], json!("AAAAAAAAOK>"), "{data:?}");
-                    assert_eq!(data["match_index"], json!(8), "{data:?}");
-                    break;
-                }
-            }
-            Err(_) => break,
-        }
-    }
-    assert!(
-        saw_match_stop,
-        "subscribe should emit a match stop notification"
-    );
     client.cancel().await.ok();
 }
 
@@ -722,300 +452,36 @@ async fn pty_send_break_short_duration_timing() {
 }
 
 #[tokio::test]
-async fn pty_subscribe_match_stops_without_context() {
-    let (_server, client, mut rx, mut pty, connection_id) = setup().await;
-
-    client
-        .peer()
-        .call_tool(tool_request(
-            "subscribe",
-            json!({
-                "connection_id": connection_id,
-                "match": {
-                    "pattern": "STOP",
-                    "config": {
-                        "mode": "literal_substring",
-                        "pattern_encoding": "utf8"
-                    }
-                }
-            }),
-        ))
-        .await
-        .unwrap();
-
-    pty.write_device(b"noise noise STOP tail").await.unwrap();
-
-    let mut found_match_stop = false;
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-    while tokio::time::Instant::now() < deadline {
-        match next_notification(&mut rx, Duration::from_secs(2)).await {
-            Ok(event) => {
-                let data = event.data.as_object().unwrap();
-                if data.get("matched").and_then(|v| v.as_bool()) == Some(true) {
-                    found_match_stop = true;
-                    assert_eq!(data["stop_reason"], json!("match_found"));
-                    assert!(
-                        data["match_index"].as_u64().is_some(),
-                        "match_index present"
-                    );
-                    break;
-                }
-            }
-            Err(_) => break,
-        }
-    }
-    assert!(
-        found_match_stop,
-        "subscribe should emit match stop notification"
-    );
-    client.cancel().await.ok();
-}
-
-#[tokio::test]
-async fn pty_subscribe_silence_timeout_stops() {
-    let (_server, client, mut rx, _pty, connection_id) = setup().await;
-
-    // Subscribe with silence timeout. PTY device side is silent — no writes.
-    client
-        .peer()
-        .call_tool(tool_request(
-            "subscribe",
-            json!({
-                "connection_id": connection_id,
-                "no_new_rx_timeout_ms": 300
-            }),
-        ))
-        .await
-        .unwrap();
-
-    // Should arrive within ~600ms.
-    let event = next_notification(&mut rx, Duration::from_secs(3))
-        .await
-        .expect("subscribe should emit stop notification on silence timeout");
-
-    let data = event.data.as_object().unwrap();
-    assert_eq!(
-        data["stop_reason"],
-        json!("no_new_rx_timeout"),
-        "stop_reason should be no_new_rx_timeout: {data:?}"
-    );
-    assert_ne!(data.get("matched").and_then(|v| v.as_bool()), Some(true));
-    client.cancel().await.ok();
-}
-
-#[tokio::test]
-async fn pty_subscribe_framing_emits_per_frame_notifications() {
-    let (_server, client, mut rx, mut pty, connection_id) = setup().await;
-
-    client
-        .peer()
-        .call_tool(tool_request(
-            "subscribe",
-            json!({
-                "connection_id": connection_id,
-                "rx_framing": { "type": "line" },
-            }),
-        ))
-        .await
-        .unwrap();
-
-    pty.write_device(b"alpha\nbeta\n").await.unwrap();
-
-    // Collect frame notifications until we've seen "alpha" and "beta".
-    let mut seen: Vec<(u64, String)> = Vec::new();
-    while !(seen.iter().any(|(_, d)| d.contains("alpha"))
-        && seen.iter().any(|(_, d)| d.contains("beta")))
-    {
-        let n = next_notification(&mut rx, Duration::from_secs(2))
-            .await
-            .unwrap();
-        let obj = n.data.as_object().unwrap();
-        // Frame notifications carry frame_index; the stop notification does not.
-        if let Some(idx) = obj.get("frame_index").and_then(|v| v.as_u64()) {
-            assert_eq!(obj["frame_type"], json!("line"), "frame_type: {obj:?}");
-            seen.push((idx, obj["data"].as_str().unwrap().to_string()));
-        }
-    }
-
-    let alpha = seen.iter().find(|(_, d)| d.contains("alpha")).unwrap();
-    let beta = seen.iter().find(|(_, d)| d.contains("beta")).unwrap();
-    assert_eq!(alpha.0, 0, "alpha is frame 0");
-    assert_eq!(beta.0, 1, "beta is frame 1");
-    client.cancel().await.ok();
-}
-
-#[tokio::test]
-async fn pty_subscribe_framing_match_stops_at_frame() {
-    let (_server, client, mut rx, mut pty, connection_id) = setup().await;
-
-    client
-        .peer()
-        .call_tool(tool_request(
-            "subscribe",
-            json!({
-                "connection_id": connection_id,
-                "rx_framing": { "type": "line" },
-                "match": { "pattern": "beta" },
-            }),
-        ))
-        .await
-        .unwrap();
-
-    pty.write_device(b"alpha\nbeta\ngamma\n").await.unwrap();
-
-    // Drain notifications until the final stop notification (no frame_index,
-    // carries stop_reason).
-    loop {
-        let n = next_notification(&mut rx, Duration::from_secs(2))
-            .await
-            .unwrap();
-        let obj = n.data.as_object().unwrap();
-        if let Some(reason) = obj.get("stop_reason").and_then(|v| v.as_str()) {
-            assert_eq!(reason, "match_found", "stop: {obj:?}");
-            assert_eq!(obj["matched"], json!(true));
-            assert_eq!(obj["match_frame_index"], json!(1), "beta is frame 1");
-            break;
-        }
-    }
-    client.cancel().await.ok();
-}
-
-#[tokio::test]
-async fn pty_subscribe_framing_match_context_second_frame_only() {
-    let (_server, client, mut rx, mut pty, connection_id) = setup().await;
-
-    client
-        .peer()
-        .call_tool(tool_request(
-            "subscribe",
-            json!({
-                "connection_id": connection_id,
-                "rx_framing": { "type": "line" },
-                "match": {
-                    "pattern": "beta",
-                    "config": { "context_amount_of_matched_bytes": 16 }
-                },
-            }),
-        ))
-        .await
-        .unwrap();
-
-    // Two frames; the match lands in the SECOND frame ("xxbeta"). Only 16
-    // requested context bytes, but only 2 exist inside the frame — the
-    // shaped payload must be exactly "xxbeta", never a mix with frame 0.
-    pty.write_device(b"alpha\nxxbeta\ngamma\n").await.unwrap();
-
-    // Drain until the final stop notification.
-    let mut stop: Option<serde_json::Value> = None;
-    for _ in 0..16 {
-        let n = next_notification(&mut rx, Duration::from_secs(2))
-            .await
-            .unwrap();
-        let obj = n.data.as_object().unwrap();
-        if obj.get("stop_reason").is_some() {
-            stop = Some(n.data.clone());
-            break;
-        }
-    }
-    let stop = stop.expect("received match_found stop notification");
-    assert_eq!(stop["stop_reason"], json!("match_found"));
-    assert_eq!(stop["matched"], json!(true));
-    // Matching frame is the second frame.
-    assert_eq!(stop["match_frame_index"], json!(1), "xxbeta is frame 1");
-    // Final stop data = requested pre-context + literal from the second
-    // frame only.
-    assert_eq!(stop["data"], json!("xxbeta"));
-    // Relative match_index equals the actual returned pre-context count.
-    assert_eq!(stop["match_index"], json!(2));
-    // Encoding remains the requested utf8.
-    assert_eq!(stop["encoding"], json!("utf8"));
-    // No cross-frame bytes: frame 0's "alpha" must not appear anywhere.
-    assert!(!stop["data"].as_str().unwrap().contains("alpha"));
-    client.cancel().await.ok();
-}
-
-#[tokio::test]
-async fn pty_subscribe_line_auto_promotes_on_bare_cr_and_flushes_pending() {
-    let (_server, client, mut rx, mut pty, connection_id) = setup().await;
-
-    client
-        .peer()
-        .call_tool(tool_request(
-            "subscribe",
-            json!({
-                "connection_id": connection_id,
-                "rx_framing": { "type": "line" },
-            }),
-        ))
-        .await
-        .unwrap();
+async fn pty_read_line_auto_promotes_on_bare_cr_and_flushes_pending() {
+    let (_server, client, _rx, mut pty, connection_id) = setup().await;
 
     // Pending CR, no frame yet.
     pty.write_device(b"line1\r").await.unwrap();
     // Second byte 'l' (non-\n) confirms bare CR → emit "line1", promote to
     // CrMode, then "line2\r" splits on \r → emit "line2".
     pty.write_device(b"line2\r").await.unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let mut seen: Vec<(u64, String)> = Vec::new();
-    while !(seen.iter().any(|(_, d)| d == "line1") && seen.iter().any(|(_, d)| d == "line2")) {
-        let n = next_notification(&mut rx, Duration::from_secs(2))
-            .await
-            .unwrap();
-        let obj = n.data.as_object().unwrap();
-        if let Some(idx) = obj.get("frame_index").and_then(|v| v.as_u64()) {
-            assert_eq!(obj["frame_type"], json!("line"), "frame_type: {obj:?}");
-            let data = obj["data"].as_str().unwrap().to_string();
-            assert!(!data.contains('\r'), "terminator stripped: {data:?}");
-            seen.push((idx, data));
-        }
-    }
-
-    let line1 = seen.iter().find(|(_, d)| d == "line1").unwrap();
-    let line2 = seen.iter().find(|(_, d)| d == "line2").unwrap();
-    assert_eq!(line1.0, 0, "line1 is frame 0");
-    assert_eq!(line2.0, 1, "line2 is frame 1");
-    client.cancel().await.ok();
-}
-
-#[tokio::test]
-async fn pty_subscribe_slip_malformed_escape_emits_framing_error() {
-    let (_server, client, mut rx, mut pty, connection_id) = setup().await;
-
-    client
+    let result = client
         .peer()
         .call_tool(tool_request(
-            "subscribe",
+            "read",
             json!({
                 "connection_id": connection_id,
-                "rx_framing": { "type": "slip" },
+                "timeout_ms": 3000,
+                "rx_framing": { "type": "line" },
             }),
         ))
         .await
         .unwrap();
-
-    // END, ESC, invalid byte 0x41, END → malformed escape.
-    pty.write_device(b"\xC0\xDB\x41\xC0").await.unwrap();
-
-    // Collect notifications until the stop notification appears.
-    let mut stop: Option<serde_json::Value> = None;
-    for _ in 0..16 {
-        let n = next_notification(&mut rx, Duration::from_secs(2))
-            .await
-            .unwrap();
-        let obj = n.data.as_object().unwrap();
-        if obj.get("stop_reason").is_some() {
-            stop = Some(n.data.clone());
-            break;
-        }
-    }
-    let stop = stop.expect("received framing_error stop notification");
-    assert_eq!(stop["stop_reason"], json!("framing_error"));
-    let err = stop["error"].as_str().expect("error field present");
-    assert!(err.contains("SLIP framing error"), "error msg: {err}");
-    assert!(
-        err.contains("0x41"),
-        "error msg names violating byte: {err}"
-    );
+    assert_ne!(result.is_error, Some(true), "{result:?}");
+    let structured = result.structured_content.expect("structured");
+    let frames = structured["frames"].as_array().expect("frames array");
+    assert_eq!(frames.len(), 2, "{structured:?}");
+    assert_eq!(frames[0]["frame_type"], json!("line"));
+    assert_eq!(frames[0]["data"], json!("line1"), "{structured:?}");
+    assert_eq!(frames[1]["frame_type"], json!("line"));
+    assert_eq!(frames[1]["data"], json!("line2"), "{structured:?}");
     client.cancel().await.ok();
 }
 
@@ -1293,210 +759,6 @@ async fn pty_flush_both_discards_retained_rx_backlog() {
         !data.contains("OLD-MARKER-4711"),
         "stale pre-flush bytes must be discarded by flush(target=both): {s:?}"
     );
-    client.cancel().await.ok();
-}
-
-// ── Step 7 (12e): subscribe from variants ─────────────────────────────────────
-
-/// subscribe with `from: "cursor"` replays bytes after the last read.
-#[tokio::test]
-async fn pty_subscribe_from_cursor_replays_after_read() {
-    let (_server, client, mut rx, mut pty, connection_id) = setup().await;
-
-    pty.write_device(b"ABCDEF").await.unwrap();
-    tokio::time::sleep(Duration::from_millis(100)).await;
-
-    // Configure max_buffered_bytes=3 so the read only returns 3 bytes.
-    client
-        .peer()
-        .call_tool(tool_request(
-            "configure",
-            json!({
-                "connection_id": connection_id,
-                "defaults": { "max_buffered_bytes": 3 },
-            }),
-        ))
-        .await
-        .unwrap();
-
-    // Read first 3 bytes — cursor advances to 3.
-    let result = client
-        .peer()
-        .call_tool(tool_request(
-            "read",
-            json!({
-                "connection_id": connection_id,
-                "timeout_ms": 500,
-            }),
-        ))
-        .await
-        .unwrap();
-    assert_ne!(result.is_error, Some(true), "{result:?}");
-
-    // subscribe from cursor — should see "DEF" (bytes after offset 3).
-    client
-        .peer()
-        .call_tool(tool_request(
-            "subscribe",
-            json!({
-                "connection_id": connection_id,
-                "from": { "type": "cursor" },
-                "timeout_ms": 1000,
-            }),
-        ))
-        .await
-        .unwrap();
-
-    let event = next_notification(&mut rx, Duration::from_secs(2))
-        .await
-        .unwrap();
-    let data_str = event.data["data"].as_str().unwrap_or("");
-    assert!(
-        data_str.contains("DEF"),
-        "subscribe from cursor should replay bytes after read: got {data_str:?}"
-    );
-    client.cancel().await.ok();
-}
-
-/// subscribe with `from: {"offset": 0}` after flush+write reports gap.
-#[tokio::test]
-async fn pty_subscribe_from_offset_below_start_reports_gap() {
-    let pty = PtyPair::open().expect("openpty");
-    let slave_path = pty.slave_path.to_string_lossy().into_owned();
-
-    let server = TestServer::start().await;
-    let (client, mut rx) = connect_client(&server).await.unwrap();
-
-    // Open with small ring to force wrap behavior.
-    let result = client
-        .peer()
-        .call_tool(tool_request(
-            "open",
-            json!({ "port": slave_path, "baud_rate": 115200, "rx_buffer_size": 16 }),
-        ))
-        .await
-        .unwrap();
-    assert_ne!(result.is_error, Some(true), "{result:?}");
-    let connection_id = result.structured_content.expect("structured")["connection_id"]
-        .as_str()
-        .expect("string")
-        .to_string();
-
-    let (mut pty_file, _slave_fd) = pty.into_parts();
-
-    // Write 20 bytes to 16-byte ring to force wrap: start=4, end=20.
-    pty_file.write_all(b"ABCDEFGHIJKLMNOPQRST").await.unwrap(); // 20 bytes
-    tokio::time::sleep(Duration::from_millis(200)).await;
-
-    // subscribe from offset 0 (below ring start=4) → gap of 4 bytes.
-    client
-        .peer()
-        .call_tool(tool_request(
-            "subscribe",
-            json!({
-                "connection_id": connection_id,
-                "from": { "type": "offset", "offset": 0 },
-                "timeout_ms": 2000,
-            }),
-        ))
-        .await
-        .unwrap();
-
-    // Collect all notifications.
-    let mut found_gap = false;
-    let mut attempts = 0;
-    while attempts < 20 {
-        let event = match next_notification(&mut rx, Duration::from_millis(500)).await {
-            Ok(e) => e,
-            Err(_) => break,
-        };
-        if event.data.get("stop_reason").is_some() {
-            if let Some(bl) = event.data.get("bytes_lost").and_then(|v| v.as_u64()) {
-                if bl > 0 {
-                    found_gap = true;
-                }
-            }
-            break;
-        }
-        if let Some(bl) = event.data.get("bytes_lost").and_then(|v| v.as_u64()) {
-            if bl > 0 {
-                found_gap = true;
-            }
-        }
-        attempts += 1;
-    }
-    assert!(
-        found_gap,
-        "should report bytes_lost > 0 when cursor is below ring start"
-    );
-    client.cancel().await.ok();
-}
-
-/// subscribe with `from: "buffer_start"` across ring wrap replays retained bytes.
-#[tokio::test]
-async fn pty_subscribe_from_buffer_start_across_ring_wrap() {
-    let pty = PtyPair::open().expect("openpty");
-    let slave_path = pty.slave_path.to_string_lossy().into_owned();
-
-    let server = TestServer::start().await;
-    let (client, mut rx) = connect_client(&server).await.unwrap();
-
-    // Open with tiny rx_buffer_size to force wrap.
-    let result = client
-        .peer()
-        .call_tool(tool_request(
-            "open",
-            json!({ "port": slave_path, "baud_rate": 115200, "rx_buffer_size": 8 }),
-        ))
-        .await
-        .unwrap();
-    assert_ne!(result.is_error, Some(true), "{result:?}");
-    let connection_id = result.structured_content.expect("structured")["connection_id"]
-        .as_str()
-        .expect("string")
-        .to_string();
-
-    let (mut pty_file, _slave_fd) = pty.into_parts();
-
-    // Write 16 bytes to 8-byte ring → start=8, end=16, 8 bytes lost.
-    pty_file.write_all(b"abcdefghijklmnop").await.unwrap();
-    tokio::time::sleep(Duration::from_millis(200)).await;
-
-    // subscribe from buffer_start — replays retained bytes (positions 8-16).
-    client
-        .peer()
-        .call_tool(tool_request(
-            "subscribe",
-            json!({
-                "connection_id": connection_id,
-                "from": { "type": "buffer_start" },
-                "timeout_ms": 2000,
-            }),
-        ))
-        .await
-        .unwrap();
-
-    // Collect notifications until stop.
-    let mut received = String::new();
-    let mut attempts = 0;
-    while attempts < 20 {
-        let event = match next_notification(&mut rx, Duration::from_millis(500)).await {
-            Ok(e) => e,
-            Err(_) => break,
-        };
-        if event.data.get("stop_reason").is_some() {
-            break;
-        }
-        if let Some(d) = event.data.get("data").and_then(|v| v.as_str()) {
-            received.push_str(d);
-        }
-        attempts += 1;
-    }
-    assert!(
-        received.contains("ijklmnop"),
-        "should replay retained bytes, got {received:?}"
-    );
-    // buffer_start begins at ring start_offset (=8 after wrap); no gap.
     client.cancel().await.ok();
 }
 
@@ -1954,10 +1216,7 @@ fn tool_error_text(result: &rmcp::model::CallToolResult) -> String {
     result
         .content
         .iter()
-        .filter_map(|c| match &c.raw {
-            rmcp::model::RawContent::Text(t) => Some(t.text.clone()),
-            _ => None,
-        })
+        .filter_map(|c| c.as_text().map(|t| t.text.clone()))
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -1990,10 +1249,7 @@ async fn session_profile_snapshot<H: rmcp::handler::client::ClientHandler>(
 
 /// Open a port through the public MCP tool with the given extra JSON fields.
 async fn open_port(
-    client: &rmcp::service::RunningService<
-        rmcp::service::RoleClient,
-        common::NotificationCollector,
-    >,
+    client: &rmcp::service::RunningService<rmcp::service::RoleClient, common::TestClientHandler>,
     port: &str,
     extra: serde_json::Value,
 ) -> serde_json::Value {
@@ -2014,10 +1270,7 @@ async fn open_port(
 }
 
 async fn close_port(
-    client: &rmcp::service::RunningService<
-        rmcp::service::RoleClient,
-        common::NotificationCollector,
-    >,
+    client: &rmcp::service::RunningService<rmcp::service::RoleClient, common::TestClientHandler>,
     connection_id: &str,
 ) {
     let result = client
@@ -2034,8 +1287,7 @@ async fn close_port(
 /// One PTY + provider + server + client wired for profile-session tests.
 struct SessionHarness {
     _server: TestServer,
-    _client:
-        rmcp::service::RunningService<rmcp::service::RoleClient, common::NotificationCollector>,
+    _client: rmcp::service::RunningService<rmcp::service::RoleClient, common::TestClientHandler>,
     _dir: tempfile::TempDir,
     profiles_path: PathBuf,
 }
@@ -2961,10 +2213,7 @@ async fn save_profile_on_generated_bound_connection_promotes_to_user_owned() {
 
 /// Reconfigure one connection and return the structured result.
 async fn reconfigure_baud(
-    client: &rmcp::service::RunningService<
-        rmcp::service::RoleClient,
-        common::NotificationCollector,
-    >,
+    client: &rmcp::service::RunningService<rmcp::service::RoleClient, common::TestClientHandler>,
     connection_id: &str,
     baud: u32,
 ) -> serde_json::Value {
@@ -3213,9 +2462,9 @@ async fn learning_multiple_changes_create_bounded_revision_history() {
 }
 
 /// 5. Non-durable operations never change profile defaults or revision:
-///    BREAK, flush, subscribe/unsubscribe, and per-call framing/match on
-///    read/write. (DTR/RTS is covered by the http_integration loopback
-///    suite; PTYs cannot drive modem lines — ENOTTY.)
+///    BREAK, flush, and per-call framing/match on read/write. (DTR/RTS is
+///    covered by the http_integration loopback suite; PTYs cannot drive
+///    modem lines — ENOTTY.)
 #[tokio::test]
 async fn non_learning_operations_do_not_alter_profile() {
     let mut pty = PtyPair::open().expect("openpty");
@@ -3260,26 +2509,6 @@ async fn non_learning_operations_do_not_alter_profile() {
         .await
         .unwrap();
     assert_ne!(fl.is_error, Some(true), "{fl:?}");
-
-    // Subscribe (short timeout) then unsubscribe.
-    let sub = client
-        .peer()
-        .call_tool(tool_request(
-            "subscribe",
-            json!({ "connection_id": connection_id, "timeout_ms": 100 }),
-        ))
-        .await
-        .unwrap();
-    assert_ne!(sub.is_error, Some(true), "{sub:?}");
-    let unsub = client
-        .peer()
-        .call_tool(tool_request(
-            "unsubscribe",
-            json!({ "connection_id": connection_id }),
-        ))
-        .await
-        .unwrap();
-    assert_ne!(unsub.is_error, Some(true), "{unsub:?}");
 
     // Per-call write with tx_framing (device drains).
     let w = client
