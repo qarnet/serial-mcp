@@ -525,7 +525,8 @@ async fn raw_discover_succeeds_without_session_and_lists_versions_modern_first()
         "supportedVersions exactly modern then legacy"
     );
     assert_eq!(result["capabilities"], common_capabilities_json());
-    assert_eq!(result["ttlMs"], 0, "no positive cache TTL in Phase 2");
+    // Cache policy (`ttlMs` / `cacheScope`) is Phase 4 scope; no cache
+    // assertion belongs in the Phase 2 discovery acceptance.
 }
 
 #[tokio::test]
@@ -870,15 +871,16 @@ async fn raw_modern_routing_rejects_legacy_only_methods() {
 }
 
 #[tokio::test]
-async fn raw_modern_initialize_is_served_statelessly() {
+async fn raw_modern_initialize_is_rejected_with_method_not_found() {
     let server = common::spawned::SpawnedServer::start().await;
-    // rmcp 3.0.1 serves a modern initialize through the stateless path
-    // (`NegotiatingStatelessHttpService` re-negotiates the requested known
-    // version), so it succeeds with HTTP 200 and NO session header. The
-    // Phase 2 handoff predicted rejection here; the pinned source
-    // (`transport/streamable_http_server/tower.rs` stateless branch) and
-    // this raw observation agree on the stateless success, which is pinned
-    // as the exact rmcp-exposed behavior.
+    // The server only allows `initialize` for the legacy `2025-11-25`
+    // lifecycle; a modern `2026-07-28` initialize is rejected in
+    // `SerialHandler::initialize` with METHOD_NOT_FOUND before any peer
+    // bookkeeping. rmcp routes the stateless (discover-lifecycle) request
+    // through `serve_negotiated_request_directly`, which maps the handler's
+    // `-32601` to HTTP 404 with a direct JSON body — the same modern
+    // routing semantics as ping/logging/setLevel/subscribe. No session is
+    // established, so no `Mcp-Session-Id` header appears.
     let mut params = json!({
         "protocolVersion": "2026-07-28",
         "capabilities": {},
@@ -896,15 +898,23 @@ async fn raw_modern_initialize_is_served_statelessly() {
         None,
     )
     .await;
-    assert_eq!(raw.status, 200);
+    assert_eq!(raw.status, 404, "modern initialize -> HTTP 404");
+    assert!(
+        raw.content_type.starts_with("application/json"),
+        "modern initialize error is direct JSON: {}",
+        raw.content_type
+    );
     assert!(
         raw.session_id.is_none(),
-        "stateless: no Mcp-Session-Id header"
+        "rejected initialize establishes no session header"
     );
     let json = raw.json.unwrap();
-    assert_eq!(json["id"], 22);
-    assert_eq!(json["result"]["protocolVersion"], "2026-07-28");
-    assert_eq!(json["result"]["capabilities"], common_capabilities_json());
+    assert_eq!(json["id"], 22, "request id echoed");
+    assert_eq!(
+        json["error"]["code"], -32601,
+        "modern initialize -> METHOD_NOT_FOUND"
+    );
+    assert_eq!(json["error"]["message"], "initialize");
 }
 
 #[tokio::test]

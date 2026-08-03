@@ -258,25 +258,27 @@ cargo run --manifest-path xtask/Cargo.toml -- print-paths
   with the product slice `[V_2026_07_28, V_2025_11_25]` (NOT
   `ProtocolVersion::KNOWN_VERSIONS`), `discover()` with
   `DiscoverResult::from_server_info` (ordered versions + the modern
-  discovery info view), and `initialize()` with
-  `context.peer.set_peer_info(request.clone())` + the legacy info view —
-  peer bookkeeping must not be dropped. `get_info()` returns the legacy
-  `2025-11-25` view so default `ServiceExt::serve` clients stay stable.
-  Capability views are small pure helpers (`common_capabilities`,
+  discovery info view), and `initialize()` with a version gate: only
+  `V_2025_11_25` may initialize (anything else returns
+  `method_not_found::<InitializeResultMethod>` BEFORE peer bookkeeping),
+  then `context.peer.set_peer_info(request.clone())` + the legacy info
+  view — peer bookkeeping must not be dropped. `get_info()` returns the
+  legacy `2025-11-25` view so default `ServiceExt::serve` clients stay
+  stable. Capability views are small pure helpers (`common_capabilities`,
   `modern_discovery_info`, `legacy_initialize_info`); they are equal in
   Phase 2 and diverge in Phase 3 (modern resource subscriptions).
 - Modern stateless HTTP requests additionally require SEP-2243
   `Mcp-Method`/`Mcp-Name` headers and an `MCP-Protocol-Version` header
-  matching the request `_meta` (rmcp 3.0.1 transport enforcement). rmcp
-  serves a modern `initialize` statelessly via
-  `NegotiatingStatelessHttpService` — HTTP 200 with a negotiated
-  `InitializeResult` and NO `Mcp-Session-Id` header; it is not rejected.
-  Modern `ping`/`logging/setLevel`/`resources/subscribe`/
-  `resources/unsubscribe`/`subscriptions/listen` are `-32601` mapped to
-  HTTP 404; legacy keeps `ping` working and `resources/subscribe`/
-  `resources/unsubscribe`/`subscriptions/listen` at `-32601` inside SSE
-  200 responses. Modern unknown resources are remapped to `-32602`
-  (SEP-2164); legacy keeps `-32002`.
+  matching the request `_meta` (rmcp 3.0.1 transport enforcement). A
+  modern `initialize` is rejected by the handler and rmcp maps the
+  `-32601` through the stateless routing to HTTP 404 (direct JSON, no
+  `Mcp-Session-Id` header). Modern `ping`/`logging/setLevel`/
+  `resources/subscribe`/`resources/unsubscribe`/`subscriptions/listen`
+  are `-32601` mapped to HTTP 404; legacy keeps `ping` working and
+  `resources/subscribe`/`resources/unsubscribe`/`subscriptions/listen`
+  at `-32601` inside SSE 200 responses. Modern unknown resources are
+  remapped to `-32602` (SEP-2164); legacy keeps `-32002`. Cache policy
+  (`ttlMs`/`cacheScope`) is Phase 4 scope — no Phase 2 cache assertions.
 - Proofs: `tests/protocol_compatibility.rs` (typed discover/initialize
   matrix + raw-wire status/code/header assertions against the spawned
   binary), stdio lifecycle tests in `tests/stdio_integration.rs`, and

@@ -808,6 +808,14 @@ impl ServerHandler for SerialHandler {
         request: InitializeRequestParams,
         context: RequestContext<RoleServer>,
     ) -> Result<InitializeResult, McpError> {
+        // Only the legacy `2025-11-25` lifecycle may initialize. Modern
+        // `2026-07-28` clients negotiate via `server/discover`; a modern
+        // `initialize` is rejected BEFORE peer bookkeeping so no session
+        // state is established for it. rmcp maps the handler's
+        // METHOD_NOT_FOUND through the transport routing of the request.
+        if request.protocol_version != ProtocolVersion::V_2025_11_25 {
+            return Err(McpError::method_not_found::<InitializeResultMethod>());
+        }
         // Preserve rmcp peer bookkeeping: the session worker's peer_info()
         // must reflect this client's initialize parameters so subsequent
         // requests route with the negotiated (legacy) protocol version.
