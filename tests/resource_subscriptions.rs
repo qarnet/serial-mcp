@@ -957,6 +957,46 @@ fn watcher_port(name: &str, serial: &str) -> serial_mcp::serial::PortInfo {
 }
 
 #[tokio::test]
+async fn port_watcher_baseline_is_captured_immediately_not_after_first_interval() -> Result<()> {
+    // With a 1s poll interval, the baseline must be captured by the FIRST
+    // (immediate) poll — never after one interval elapses. A mutation issued
+    // right after connect/listen (well before the first 1s interval) must
+    // therefore emit an update; a sleep-first loop would swallow it as the
+    // silent baseline and this test would time out.
+    let a = watcher_port("/dev/ttyWatch0", "SN-A");
+    let b = watcher_port("/dev/ttyWatch1", "SN-B");
+
+    let provider = common::MutexPortProvider::new(vec![a.clone()]);
+    let provider_trait: Arc<dyn serial_mcp::serial::PortProvider> = provider.clone();
+    let manager = Arc::new(serial_mcp::serial::ConnectionManager::new());
+    let server = TestServer::builder(manager)
+        .port_provider(provider_trait)
+        .port_watcher_interval(Duration::from_millis(1000))
+        .start()
+        .await;
+    let (client, _) = connect_modern_client(&server).await?;
+    let mut sub = client
+        .peer()
+        .listen(
+            SubscriptionFilter::builder()
+                .resource_subscription("serial://ports")
+                .build(),
+        )
+        .await?;
+
+    // Mutate immediately — the watcher's immediate first poll already
+    // established the baseline during connect/listen. The update arrives at
+    // the second poll (~1s); a sleep-first baseline would never emit it.
+    provider.set_ports(vec![a.clone(), b.clone()]);
+    let uris = collect_updates(&mut sub, 1).await;
+    assert_hint_set(uris, &["serial://ports"]);
+
+    sub.cancel().await?;
+    client.cancel().await.ok();
+    Ok(())
+}
+
+#[tokio::test]
 async fn port_watcher_emits_update_on_mutation_and_none_on_reorder_unchanged_or_error() -> Result<()>
 {
     let a = watcher_port("/dev/ttyWatch0", "SN-A");
@@ -981,12 +1021,13 @@ async fn port_watcher_emits_update_on_mutation_and_none_on_reorder_unchanged_or_
         )
         .await?;
 
-    // Let the first successful snapshot establish the baseline.
-    tokio::time::sleep(Duration::from_millis(150)).await;
-    assert_no_notification(&mut sub, Duration::from_millis(200)).await;
+    // The FIRST poll runs immediately at watcher start (baseline captured
+    // during connect/listen — no interval wait). No spurious event while it
+    // lands, then the mutation-after-baseline checks below.
+    assert_no_notification(&mut sub, Duration::from_millis(80)).await;
 
     // Unchanged: no event.
-    assert_no_notification(&mut sub, Duration::from_millis(200)).await;
+    assert_no_notification(&mut sub, Duration::from_millis(80)).await;
 
     // Reorder (OS enumeration order changed, same devices): no event.
     provider.set_ports(vec![b.clone(), a.clone()]);

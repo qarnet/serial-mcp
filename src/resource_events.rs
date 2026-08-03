@@ -253,17 +253,27 @@ async fn port_watcher_loop(
 ) {
     let mut baseline: Option<Vec<PortInfo>> = None;
     loop {
-        tokio::select! {
-            _ = shutdown.cancelled() => return,
-            _ = tokio::time::sleep(interval) => {}
-        }
+        // Enumerate immediately, BEFORE any sleep: the first successful
+        // baseline is captured as soon as the watcher task starts, so a
+        // port change between server startup and the first poll can never
+        // become the (silent) baseline. Waits happen between subsequent
+        // polls.
         match provider.list_available() {
             Ok(ports) => apply_snapshot(&mut baseline, ports, &hub),
             Err(e) => {
                 // Enumeration failure: warn and keep the prior successful
-                // baseline so recovery compares against it.
+                // baseline so recovery compares against it. If the FIRST
+                // call fails, the next success establishes the baseline
+                // without notification.
                 warn!("port watcher: enumeration failed: {e}");
             }
+        }
+        // Cancellation-aware wait before the next poll. Cancellation stays
+        // prompt and deterministic (the select returns immediately once the
+        // token is cancelled, even mid-sleep).
+        tokio::select! {
+            _ = shutdown.cancelled() => return,
+            _ = tokio::time::sleep(interval) => {}
         }
     }
 }
@@ -591,6 +601,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn watcher_captures_immediate_baseline_before_first_interval() {
+        // The FIRST poll must run immediately when the watcher task starts
+        // — never after one interval. Proven with an interval far longer
+        // than the mutation window: the baseline is captured during the
+        // yield below (no interval elapses), a mutation issued right after
+        // it emits an update. A sleep-first loop would swallow that mutation
+        // as the silent baseline and this test would time out.
+        let provider = MutPortProvider::new(vec![usb_port("/dev/ttyUSB0", "SN-1")]);
+        let hub = Arc::new(ResourceEventHub::new(16));
+        let mut rx = hub.subscribe();
+        let shutdown = CancellationToken::new();
+        let watcher = PortWatcher::start(
+            Arc::clone(&provider) as Arc<dyn PortProvider>,
+            Arc::clone(&hub),
+            shutdown.clone(),
+            Duration::from_millis(1000), // one second: no interval may elapse here
+        );
+
+        // Yield so the spawned watcher runs its FIRST (immediate) poll and
+        // establishes the baseline [a] without sleeping an interval.
+        tokio::task::yield_now().await;
+        tokio::task::yield_now().await;
+        assert!(matches!(
+            rx.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
+
+        // Mutate immediately — well before the first 1s interval would have
+        // elapsed. The mutation must emit an update (baseline was [a], not
+        // the mutated set).
+        provider.set_ports(vec![
+            usb_port("/dev/ttyUSB0", "SN-1"),
+            usb_port("/dev/ttyUSB1", "SN-2"),
+        ]);
+        let event = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("mutation after immediate baseline must emit an update")
+            .expect("hub not closed");
+        assert_eq!(event, ResourceEvent::Updated("serial://ports".into()));
+
+        watcher.shutdown_and_join().await;
+    }
+
+    #[tokio::test]
     async fn watcher_loop_emits_on_change_recovers_after_failure_and_ignores_reorder() {
         let provider = MutPortProvider::new(vec![usb_port("/dev/ttyUSB0", "SN-1")]);
         let hub = Arc::new(ResourceEventHub::new(16));
@@ -603,8 +657,16 @@ mod tests {
             Duration::from_millis(15),
         );
 
-        // Let the first snapshot establish the baseline.
-        tokio::time::sleep(Duration::from_millis(80)).await;
+        // The FIRST poll runs immediately (no interval wait): yield lets the
+        // spawned watcher establish the baseline [a] right away.
+        tokio::task::yield_now().await;
+        tokio::task::yield_now().await;
+        assert!(matches!(
+            rx.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
+        // Unchanged snapshots over a few polls: still no event.
+        tokio::time::sleep(Duration::from_millis(60)).await;
         assert!(matches!(
             rx.try_recv(),
             Err(broadcast::error::TryRecvError::Empty)
