@@ -21,7 +21,7 @@
 - collect local metadata on tool-call frequency, stop-reason
   distribution, option-usage frequency (which `from` variants agents
   actually pick, how often `match`/`framing` options get used, average
-  `max_buffered_bytes` / `poll_interval_ms` actually configured, etc.) to
+  `max_buffered_bytes` actually configured, etc.) to
   drive evidence-based decisions on which options to keep, trim, or default
   differently
 - strictly local: write to a file on the host (e.g. under
@@ -31,8 +31,7 @@
 - the goal is development insight (which tools/options are dead weight,
   which defaults are wrong), not user tracking — design the schema
   around questions we actually want to answer ("is `from: {"type":"now"}` used
-  enough to justify keeping it?", "do agents ever set
-  `poll_interval_ms`?")
+  enough to justify keeping it?")
 - pairs with the shipped `configure` tool + connection-default trim (the
   stats inform which fields to cut, and cutting fields makes the remaining
   stats cleaner)
@@ -90,6 +89,38 @@
 - export capture or frames to external decoder tools if in-process support stays small
 
 ## Later
+
+### MCP Tasks extension for long-running operations
+- SEP-2663 / `io.modelcontextprotocol/tasks`: let a tool return a task handle
+  immediately, then expose `tasks/get`, `tasks/update`, and `tasks/cancel` with
+  cooperative cancellation and bounded result retention/TTL
+- candidates: long `read`, `transact`, `capture_boot`, `send_break`, and any
+  future firmware/file-transfer operation; keep normal synchronous execution
+  for clients that do not declare Tasks support
+- not a replacement for open-ended RX availability notifications: rmcp 3.0.1
+  clients must poll task state and task-status delivery through
+  `subscriptions/listen` is not available yet
+- needs ownership/lifecycle design for connection close, client disconnect,
+  server restart, task expiry, profile learning, and partial serial results
+
+### Positive MCP cache hints
+- MCP 2026-07-28 list/read results carry `ttlMs` + `cacheScope`; migration uses
+  non-cacheable `ttlMs=0`, `private` values for valid modern wire shapes
+- possible later policy: long/public for static tool, prompt, and resource-
+  template catalogs; short/private for live port lists; zero/private for open
+  connections, logs, status, and RX data
+- only enable positive TTL after resource/list notification invalidation,
+  authorization partitioning, pagination keys, and rmcp's stale-on-error client
+  behavior have public-boundary tests
+
+### Standard HTTP parameter headers
+- MCP 2026-07-28 + rmcp 3 automatically provide `Mcp-Method` and `Mcp-Name`;
+  selected primitive tool inputs can later opt into `Mcp-Param-*` through
+  top-level `x-mcp-header` schema annotations
+- possible low-risk first field: `connection_id`; assess `port` and `profile`
+  separately because proxies commonly log headers
+- never promote commands, serial payloads, match data, selectors, credentials,
+  or capture filenames into infrastructure-visible headers
 
 ### Flow-control-aware ring backpressure (pause-on-full)
 - follow-up to the 0.8.0 RX ring redesign: the always-on pump
@@ -191,12 +222,28 @@
 - proxy observation, reverse engineering, test harnessing
 - very complex
 
+### MCP Bundle (MCPB) distribution
+- package existing native release binaries as an MCP Bundle for one-click local
+  stdio installation in supporting desktop clients
+- promising fit: `server.type = "binary"`, no language runtime, platform-specific
+  command overrides, and optional user configuration
+- separate release/distribution project, not protocol work; decide one
+  cross-platform bundle versus per-platform bundles, manifest version, signing,
+  update flow, and clean-machine Claude Desktop tests before implementation
+- validate/pack with a pinned `@anthropic-ai/mcpb` release when scheduled
+
 ## Wish
 
-### Hotplug watch
-- subscribe-style notification when serial ports appear/disappear
-- pairs with profiles + auto-reconnect for flaky USB adapters
-- low priority: agents can poll `list_ports` today
+### Earlier MCP protocol revisions (pre-2025-11-25)
+- potential future feature only — NOT current support and not a near-term
+  commitment: the supported set remains exactly `2026-07-28` (preferred) and
+  permanent `2025-11-25`;
+- possible older candidates are `2025-06-18`, `2025-03-26`, and `2024-11-05`;
+- implement only with concrete user/client demand — never merely because
+  rmcp lists the version in `KNOWN_VERSIONS`;
+- each version would require: an explicit product policy row,
+  lifecycle/capability/cache review, raw-wire tests, official conformance
+  support where available, and a real historical client fixture.
 
 ### User-facing loopback / virtual port backend
 - expose a virtual echo/scripted device as an openable backend (the
@@ -220,6 +267,12 @@
 
 ## Explicit skip for now
 
+- **MRTR product flows** — rmcp 3 supports SEP-2322 multi-round tool/resource/
+  prompt requests (`InputRequiredResult`) for client elicitation and retries,
+  but current schemas, defaults, destructive hints, and cancellation cover the
+  serial workflows we have. Revisit only for a concrete need such as physical
+  power-cycle guidance or destructive reset confirmation; any echoed
+  `requestState` must be integrity-protected.
 - **Remote monitor** — skip, keep off active roadmap
 - **SECURITY.md / vulnerability disclosure policy** — not important at the
   current project size; revisit if outside contributors arrive

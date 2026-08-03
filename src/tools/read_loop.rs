@@ -269,8 +269,8 @@ pub(crate) async fn read_from_private_cursor(
     if matcher.is_some() && !initial_slice.bytes.is_empty() {
         let take = initial_slice.bytes.len().min(max_bytes);
         let hist = &initial_slice.bytes[..take];
-        // Bounded push: same matcher-owned window policy as the live path and
-        // subscribe. The initial slice is at most `max_bytes`, so no
+        // Bounded push: same matcher-owned window policy as read's live path.
+        // The initial slice is at most `max_bytes`, so no
         // truncation occurs here and the history match stays exact.
         let match_result = matcher.as_mut().map(|m| m.push_bounded(hist, max_bytes));
         if let Some(MatchResult::Found(idx)) = match_result {
@@ -592,7 +592,7 @@ pub(crate) async fn read_from_private_cursor(
         // Raw matcher path (no framing).
         if decoder.is_none() {
             // Bounded push: same matcher-owned window policy as the
-            // initial-history path and subscribe.
+            // initial-history path and read path.
             let match_result = matcher.as_mut().map(|m| m.push_bounded(chunk, max_bytes));
             let buffered_len = acc.returned_bytes.len();
             let data_count = chunk.len();
@@ -600,7 +600,7 @@ pub(crate) async fn read_from_private_cursor(
                 ctrl.push_data(data_count, buffered_len, match_result)
             {
                 // Live matches apply matcher-owned context shaping (same
-                // policy as subscribe). Only the returned payload and the
+                // policy as read path. Only the returned payload and the
                 // relative match_index change — cursor consumption and the
                 // stream offsets stay based on the consumed bytes.
                 let (match_bytes, match_index) = match outcome.match_index {
@@ -719,10 +719,10 @@ mod tests {
         let id = connections.insert(conn).await.unwrap();
         let connection = connections.get(&id).await.unwrap();
 
-        let mgr = RxSessionManager::new(Arc::new(crate::buffer_budget::AtomicBudget::new(
-            1 << 30,
-            1 << 30,
-        )));
+        let mgr = RxSessionManager::new(
+            Arc::new(crate::buffer_budget::AtomicBudget::new(1 << 30, 1 << 30)),
+            Arc::new(crate::resource_events::ResourceEventHub::new(64)),
+        );
         let session = mgr
             .get_or_create(Arc::clone(&connection), 4096)
             .await
@@ -787,10 +787,10 @@ mod tests {
         let connection = connections.get(&id).await.unwrap();
 
         // Session with a real pump; feed bytes and wait for the ring.
-        let mgr = RxSessionManager::new(Arc::new(crate::buffer_budget::AtomicBudget::new(
-            1 << 30,
-            1 << 30,
-        )));
+        let mgr = RxSessionManager::new(
+            Arc::new(crate::buffer_budget::AtomicBudget::new(1 << 30, 1 << 30)),
+            Arc::new(crate::resource_events::ResourceEventHub::new(64)),
+        );
         let session = mgr
             .get_or_create(Arc::clone(&connection), 4096)
             .await

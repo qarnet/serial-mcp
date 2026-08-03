@@ -4,11 +4,13 @@
 
 - Root server: `src/main.rs` selects stdio vs HTTP transport, parses CLI limits (`--profiles-path`, `--capture-dir` + capture quotas included), and mounts HTTP at `/mcp`.
 - MCP surface lives in `src/server.rs`; tool handlers are split under `src/tools/`, prompts under `src/prompts/`, resources under `src/resources/`.
+- MCP version policy (`src/mcp_protocol.rs`): the product-owned `SUPPORTED_PROTOCOLS` table is the SINGLE source for advertised versions, lifecycle admission, capability views, and cache shaping. Exactly two rows — `2026-07-28` (preferred, `DiscoverStateless`, `ImmediatePrivate` cache, subscriptions on) and permanent `2025-11-25` (`InitializeSession`, `Omit` cache, subscriptions off). Lookup is exact-match only (`policy_for`); `cache_fields_for(Option<ProtocolVersion>)` grants fields ONLY to rows with `CachePolicy::ImmediatePrivate` — never by date/range, and unknown/future versions inherit no policy. `supported_protocol_versions()` / preferred policy derive from the table, never from `ProtocolVersion::KNOWN_VERSIONS`.
+- Dual MCP lifecycle (`src/server.rs`): preferred modern `2026-07-28` discovery/stateless requests (`server/discover` + self-contained per-request `_meta`) and compatible legacy `2025-11-25` initialize/session requests. `get_info()` serves the MODERN view (rmcp intersects `subscriptions/listen` filters against `get_info().capabilities`), `initialize()` returns the legacy view with subscription disabled, `discover()` the modern view with `resources.subscribe: true`. Common surface: tools/resources/prompts/completions (no logging, list-change, or tasks). Phase 3 implements `accepted_subscription_filter`/`listen` backed by one process-wide `ResourceEventHub` (`src/resource_events.rs`, capacity 256) shared by every stdio/HTTP handler and the port hotplug watcher; legacy `subscriptions/listen` stays `-32601`.
 - `SerialHandler` is built via `SerialHandler::builder()...build()` (`src/server.rs`); the old `with_manager*` telescoping constructors are gone and `with_profiles()` is gone. The builder defaults `profile_store` to an ephemeral store and `capture_store` to disabled. `SerialHandler::new()` tries the OS default profile store and falls back to an ephemeral store with a warning. Production `main.rs` injects the resolved `profile_store`, a `CaptureStore` built from `--capture-dir` + quota flags (disabled by default), and `SystemPortProvider` through the builder.
 - Profiles live in a process-wide `Arc<ProfileStore>` (`src/profile_store.rs`), shared by every stdio/HTTP session handler. `main.rs` resolves the path (`--profiles-path` or the OS user-config default, failing startup on an unavailable config dir or invalid file) and injects one store. Persistent mutations take a process-local async mutex, then `spawn_blocking` + an advisory lock on `<file>.lock`, reload-under-lock, `NamedTempFile` + `sync_all` + rename; the cache (shared `Arc<RwLock>`) is published from inside the blocking transaction right after the durable write, before the lock is released — so a cancelled awaiting tool still converges (cache never changes on failed write). `update_defaults_preserving_selector` returns the effective profile atomically (no racy second lookup). File format is schema-versioned TOML (v1 legacy auto-migrates in memory; `schema_version == 0` or `> 2` rejects startup). `Profile` carries `metadata` (revision/timestamps/generated/use_count) and a bounded `revisions` history (max 5 prior snapshots) for the profile-session feature.
-- Shared RX framing lives in `src/tools/rx_consume.rs` (`consume_frames` + `RxFrameSink` trait + `disconnect_state`); both `read` and `subscribe` route framing through it, but their raw (no-framing) paths stay per-tool by design (see "Invariants easy to break").
-- Connection lifecycle is in `src/serial/`; shared RX/TX coordination is in `src/rx_session.rs` (always-on pump + ring buffer), `src/tx_session.rs`, and `src/stop_controller.rs`. The pump appends all received bytes to `src/rx_ring.rs`; both `read` and `subscribe` read from the ring via cursors.
-- Low-level shared primitives: `src/util.rs` (`find_subsequence`, the byte-substring search imported directly by `framing` and the matcher) and `src/precedence.rs` (`resolve_field`, the four-layer framing/parser/protocol precedence helper shared by `io_ops` + `stream_ops`). Both `pub(crate)`.
+- Shared RX framing lives in `src/tools/rx_consume.rs` (`consume_frames` + `RxFrameSink` trait + `disconnect_state`); `read` routes framing through it, but its raw (no-framing) path stays per-tool by design (see "Invariants easy to break").
+- Connection lifecycle is in `src/serial/`; shared RX/TX coordination is in `src/rx_session.rs` (always-on pump + ring buffer), `src/tx_session.rs`, and `src/stop_controller.rs`. The pump appends all received bytes to `src/rx_ring.rs`; `read` reads from the ring via cursors. `ConnectionManager`'s connection-opening boundary is an injectable `ConnectionOpener` (`with_opener`): production uses `SystemConnectionOpener` (`SerialConnection::open`); tests inject in-memory backends (`tests/common/controlled.rs::ControlledConnectionOpener`) so the public MCP surface runs cross-platform without an OS serial port (macOS tty opens fail ENOTTY).
+- Low-level shared primitives: `src/util.rs` (`find_subsequence`, the byte-substring search imported directly by `framing` and the matcher) and `src/precedence.rs` (`resolve_field`, the four-layer framing/parser/protocol precedence helper shared by `io_ops`). Both `pub(crate)`.
 - `build.rs` injects `GIT_HASH` / `GIT_HASH_AVAILABLE` / `BUILD_TARGET`.
 
 ## Commands worth using
@@ -34,11 +36,23 @@ cargo test --locked --test config_schema_validation -- --ignored
 cargo test --test native_sim_validation -- --ignored
 cargo test --test native_sim_connection_lifecycle -- --ignored --test-threads=1
 
+# The one complete MCP version compatibility gate (local and CI share this
+# exact path): locked binary build, focused Rust protocol/stdio/subscription
+# tests, real historical rmcp 1.7.0 client over stdio + HTTP, official
+# conformance scenario sets for both versions, and the pinned Inspector
+# smoke. Exact pins/scenarios live in the script, not in this file.
+bash scripts/test-mcp-compat.sh
+
+# standalone historical fixture fmt/clippy (exact rmcp =1.7.0, own lockfile)
+cargo fmt --manifest-path compat/rmcp-1-client/Cargo.toml --all -- --check
+cargo clippy --locked --manifest-path compat/rmcp-1-client/Cargo.toml \
+  --all-targets --target-dir target/mcp-compat-rmcp-1 -- -D warnings
+
 # registry manifest builder unittest suite (offline, deterministic)
 python3 -m unittest discover -s scripts/tests -v
 ```
 
-- CI runs exactly: fmt -> build -> test -> clippy, plus named Ubuntu gates for config-schema validation (`cargo test --locked --test config_schema_validation`) and release/documentation consistency (`cargo test --locked --test doc_drift`).
+- CI runs exactly: fmt -> build -> test -> clippy, plus named Ubuntu gates for config-schema validation (`cargo test --locked --test config_schema_validation`), release/documentation consistency (`cargo test --locked --test doc_drift`), and the pinned `mcp-conformance` gate, which delegates ALL compatibility execution to `scripts/test-mcp-compat.sh` (current typed/raw/stdio/subscription tests, actual rmcp 1.7.0 HTTP + stdio, both official conformance sets, and the Inspector 2.0.0 smoke — see the Phase 4 section).
 - CI and schema workflows set `RUSTFLAGS="-D warnings"`. Treat warnings as errors locally too.
 - `nix flake check` is part of CI. The source filter admits the complete `schemas/` tree (all four vendored schemas validate hermetically offline — missing fixtures fail) plus the `.github/workflows/` and `scripts/` trees (doc_drift and the registry-manifest builder tests read them at runtime — missing fixtures fail). The flake `checks` prove the filtered source ships every workflow fixture (`workflow-fixtures-present`) and that the builder unittest suite passes (`registry-manifest-builder-tests`). On Nix, prefer `nix develop` before changing firmware or release workflow bits.
 
@@ -58,14 +72,11 @@ python3 -m unittest discover -s scripts/tests -v
   History: b12b09fd, bc37a0b0, and the PortInfo (vid/pid/interface) regression
   that slipped through because the old guard only checked uint/uint32/uint64.
 - `open` must enforce allowlist checks before `ConnectionManager::open()`.
-- Open/close changes must notify resource subscribers via `notify_resource_list_changed()`.
-- `read` and `subscribe` share stop-reason vocabulary via `RxStopController`. Both read from the ring via cursors: `read` advances the shared cursor (unless `from` jumps it elsewhere first); `subscribe` uses a per-call private cursor via the `from` parameter (`{"type":"now"}`/`{"type":"cursor"}`/`{"type":"buffer_start"}`/`{"type":"offset","offset":N}`). Subscriptions do NOT move the shared read cursor. `read`'s `from` parameter resolves the start position and writes the shared cursor before reading (atomic seek+read).
-- Both tools catch cross-chunk matches in raw mode because matcher state is sliding-window based. In framed mode both match per-frame, so patterns spanning frames are intentionally not matched.
-- Raw `read` and `subscribe` share ONE matcher-owned bounded-window policy (`Matcher::push_bounded` in `src/match_config.rs`), used at read's initial-history and live paths and at subscribe's raw path. Retained window ≤ `max_buffered_bytes + overlap`, where literal overlap = `needle.len().saturating_sub(1)` and regex/glob overlap = 256 (`REGEX_GLOB_OVERLAP_ALLOWANCE`); retained length after every call never exceeds that limit, including after `NoMatch`. `Found(index)` is GLOBAL (total bytes fed since last `reset_window`): front truncation advances an internal base by exactly the bytes removed, so match indexes stay stream-relative after subscription truncation. Literal pre-match context is matcher-owned: `shape_literal_match_context(global_index)` returns the payload shaped at match time — over the retained window for bounded raw paths (pre-match context capped at `min(requested_context, max_buffered_bytes)`) and over the matching frame's bytes for framed subscribe, which gets full configured context bounded naturally by the frame (read's initial-history path keeps its exact hist-based shaping; read's live path and subscribe both use the matcher's). Regex/glob store no shaped context. Glob truncation marks the first retained line partial when the byte before the new window start was not `\n`; an incomplete prefix is never treated as a complete line. `reset_window` (framed per-frame matching in `rx_consume`) clears window + base + saved context so frame indexes stay frame-local; `rx_consume` never uses bounded push. No wire fields/limits change.
-- `bytes_returned` in both tools is cumulative emitted bytes. `read` match meta now uses the same definition as `subscribe`.
-- `from` parameter on `read` and `subscribe` shares the `ReadFrom` enum: `{"type":"now"}` (default for subscribe, live edge), `{"type":"cursor"}` (default for `read`, shared read cursor), `{"type":"buffer_start"}` (oldest retained byte), or `{"type":"offset","offset":N}` (absolute). Replayed history flows through the same framing/match pipeline as live data. `read`'s `from` parameter resolves the start position and writes the shared cursor BEFORE reading (atomic seek+read). `subscribe` defaults to `{"type":"now"}` and does NOT move the shared cursor.
-- Slow subscriptions observe `bytes_lost` gap in notifications — never silently die.
-- Both tools hard-fail framing construction errors (`FrameDecoder::new`). Read already did; subscribe now validates before spawning the background task.
+- `read` reads from the ring via the shared cursor: `read` advances the shared cursor (unless `from` jumps it elsewhere first). `read`'s `from` parameter resolves the start position and writes the shared cursor before reading (atomic seek+read).
+- Raw `read` uses ONE matcher-owned bounded-window policy (`Matcher::push_bounded` in `src/match_config.rs`), used at read's initial-history and live paths. Retained window ≤ `max_buffered_bytes + overlap`, where literal overlap = `needle.len().saturating_sub(1)` and regex/glob overlap = 256 (`REGEX_GLOB_OVERLAP_ALLOWANCE`); retained length after every call never exceeds that limit, including after `NoMatch`. `Found(index)` is GLOBAL (total bytes fed since last `reset_window`): front truncation advances an internal base by exactly the bytes removed, so match indexes stay stream-relative. Literal pre-match context is matcher-owned: `shape_literal_match_context(global_index)` returns the payload shaped at match time — over the retained window for bounded raw paths (pre-match context capped at `min(requested_context, max_buffered_bytes)`) and over the matching frame's bytes for framed reads, which get full configured context bounded naturally by the frame (read's initial-history path keeps its exact hist-based shaping; read's live path uses the matcher's). Regex/glob store no shaped context. Glob truncation marks the first retained line partial when the byte before the new window start was not `\n`; an incomplete prefix is never treated as a complete line. `reset_window` (framed per-frame matching in `rx_consume`) clears window + base + saved context so frame indexes stay frame-local; `rx_consume` never uses bounded push. No wire fields/limits change.
+- `bytes_returned` in `read` is cumulative emitted bytes.
+- `from` parameter on `read` uses the `ReadFrom` enum: `{"type":"cursor"}` (default, shared read cursor), `{"type":"now"}` (live edge), `{"type":"buffer_start"}` (oldest retained byte), or `{"type":"offset","offset":N}` (absolute). Replayed history flows through the same framing/match pipeline as live data. `read`'s `from` parameter resolves the start position and writes the shared cursor BEFORE reading (atomic seek+read).
+- `read` hard-fails framing construction errors (`FrameDecoder::new`).
 - Production code convention here: no `unwrap`/`expect`, no `println!`, no committed `todo!()` / `unimplemented!()`.
 - `.lock().expect("X mutex poisoned")` for std Mutex; `unwrap` in tests.
 
@@ -82,8 +93,9 @@ python3 -m unittest discover -s scripts/tests -v
   `include_terminators`; SLIP + COBS; no `auto` line ending; adds `Nmea`
   for auto-checksum TX).
 - `FrameDecoder::new(&RxFramingConfig, Option<&ParserConfig>)` — 2-arg; parser
-  is a sibling, NOT nested in `RxFramingConfig`. `ReadArgs`/`SubscribeArgs` carry
-  `rx_framing` + `rx_parser` + `protocol` as siblings. `WriteArgs` carries
+  is a sibling, NOT nested in `RxFramingConfig`. `ReadArgs`/`TransactArgs`/
+  `CaptureBootArgs` carry `rx_framing` + `rx_parser` + `protocol` as
+  siblings. `WriteArgs` carries
   `tx_framing` + `protocol` (no parser).
 - `FrameDecoder::push()` returns `PushOutcome { frames, frames_dropped,
   error }` — frames decoded before a stream-fatal error are preserved and
@@ -93,13 +105,13 @@ python3 -m unittest discover -s scripts/tests -v
   errors; checksum mismatches with `validate: true` (NMEA `*XX`, Modbus LRC)
   are per-frame drop-and-count (increment `frames_dropped`, `warn!`, decoder
   continues — does NOT set `error`). Runtime decode errors (not construction
-  errors) STOP both read and subscribe — there is NO resume-on-error in the
-  loop (resync state in the decoder is defensive only; the loops stop on
+  errors) STOP `read` — there is NO resume-on-error in the
+  loop (resync state in the decoder is defensive only; the loop stops on
   first stream-fatal error). This is a deliberate asymmetry exception vs
   the construction-error asymmetry below.
 - `LineEnding::Auto` promotes to CR-split mode mid-stream when a bare `\r` is
   confirmed (next non-`\n` byte or stop flush). Per-call state — resets on the
-  next read/subscribe. Confirmation timer reuses `no_new_rx_timeout_ms`; the
+  next read. Confirmation timer reuses `no_new_rx_timeout_ms`; the
   decoder is byte-driven (no timer callback).
 - `ProtocolPreset` (7 variants: `at_command`, `slip`, `json_lines`, `cobs`,
   `ndjson`, `nmea0183`, `modbus_ascii`) is a `#[serde(tag = "type")]` enum —
@@ -108,41 +120,32 @@ python3 -m unittest discover -s scripts/tests -v
 - Framing/parser/protocol field precedence is FOUR layers per field: explicit
   call field > call-time `protocol` preset > connection default (from
   profile/open) > connection `protocol` preset. Resolution lives in
-  `src/precedence.rs` (`resolve_field`), called from `io_ops::write`/`read` +
-  `stream_ops::subscribe`. `ConnectionConfig` + `SerialConnection` store the
+  `src/precedence.rs` (`resolve_field`), called from `io_ops::write`/`read`.
+  `ConnectionConfig` + `SerialConnection` store the
   defaults; accessors `*_default()`.
-- **Lossless RX encoding parity:** `read`, `subscribe`, and `capture_boot`
+- **Lossless RX encoding:** `read` and `capture_boot`
   encode every RX payload via the shared `codec::encode_or_hex` primitive
   (`src/codec.rs`): try the requested encoding; on failure re-encode the SAME
   bytes as exact lowercase spaced hex and report the payload's effective
   `encoding` as `"hex"` (`EncodedPayload.fallback_reason` carries the original
   error text). A successful fallback warns (`tracing::warn!`) but is NEVER a
-  drop: no `notification_dropped` log event, no `record_notification_drop`,
-  no `frames_dropped` increment, no `SubscribeEncodingErrorNotification`.
-  Applies to raw reads, each decoded frame (encoded independently from the
-  REQUESTED encoding — a valid UTF-8 frame before malformed binary SLIP stays
-  UTF-8 while the raw tail is hex), subscribe raw chunks, framed frame
-  notifications, partial-frame flushes, and shaped match-context `data` in the
-  final stop notification (`SubscribeStopNotification.encoding` accompanies
-  `data`, serialized only when `data` is present). Never lossy UTF-8. Only a
-  TRUE encode+hex failure counts as a drop: read becomes a tool-result
-  construction error, subscribe's raw path keeps the legacy
-  `SubscribeEncodingErrorNotification` + drop count, and frame/partial/context
-  paths warn + count. `SubscribeEncodingErrorNotification` stays on the wire
-  surface (true-failure path only).
+  drop: no drop log event, no drop counter, no `frames_dropped` increment.
+  Applies to `read`, `transact`, and `capture_boot` raw bytes and each
+  decoded frame (encoded independently from
+  the REQUESTED encoding — a valid UTF-8 frame before malformed binary SLIP
+  stays UTF-8 while the raw tail is hex). Never lossy UTF-8. Only a TRUE
+  encode+hex failure counts as a drop: read-style paths become a tool-result
+  construction error.
 - `RxStopReason::FramingError` is a runtime decode-error stop reason (SLIP
   malformed escape, COBS invalid code). NOT a normal stop
   (`is_normal_stop` excludes it). `read` surfaces it as a normal tool result
   (`is_error: false`) with `stop_reason: "framing_error"`, an `error` field
   carrying the `FrameDecodeError` text, and a hex-fallback `data` field when
   the requested encoding can't represent the raw bytes (binary SLIP/COBS
-  data under utf8 → falls back to hex with `encoding: "hex"`); subscribe as a
-  final notification with `stop_reason: "framing_error"` + `error` field.
-  Both carry partial data (frames decoded before the error + raw bytes).
-- Both tools hard-fail framing construction errors (`FrameDecoder::new`).
-  `subscribe` validates the decoder in the handler before spawning the
-  background task — a bad config returns `Err(String)` (tool error), not
-  a degraded raw-mode stream. This matches `read`'s behavior.
+  data under utf8 → falls back to hex with `encoding: "hex"`).
+  The result carries partial data (frames decoded before the error + raw bytes).
+- `read` hard-fails framing construction errors (`FrameDecoder::new`) — a bad
+  config returns a tool error, not a degraded raw-mode stream.
 
 ## Test map
 
@@ -152,13 +155,18 @@ python3 -m unittest discover -s scripts/tests -v
 - `tests/stdio_integration.rs` spawns binary over stdin/stdout.
 - `tests/protocol_emulator*.rs` are protocol hardening tests.
 - `tests/allowlist.rs` — port allowlist enforcement via the HTTP harness.
+- `tests/resource_subscriptions.rs` — modern `subscriptions/listen` resource
+  subscriptions over the in-process HTTP harness: capability split,
+  accepted-filter stripping/dedup, RX-append-after-readable + cursor
+  immutability, listener independence/cancellation, lag recovery,
+  open/close/state/log hints, port hotplug watcher (mutable provider).
 - `tests/blob_resources.rs` — blob resources and resource templates.
-- `tests/resource_subscriptions.rs` — MCP resource subscribe/unsubscribe protocol.
 - `tests/tx_session.rs` — cross-module TxSession wiring.
 - `tests/proptest.rs` — property-based and boundary-value tests.
-- `tests/doc_drift.rs` — prose-vs-code drift guards: tool count across README/Cargo.toml/server.json, protocol-preset mentions, tagged `from` wire forms, capture CLI option sync, FEATURES.md shipped-items absence, `server.json` package/version rules, and a CHANGELOG release contract (release-table row + body heading for the Cargo package version, `## [Unreleased]` before the current release) with synthetic negative proofs for each rule.
+- `tests/doc_drift.rs` — prose-vs-code drift guards: tool count across README/Cargo.toml/server.json, protocol-preset mentions, tagged `from` wire forms, capture CLI option sync, FEATURES.md shipped-items absence, `server.json` package/version rules, a CHANGELOG release contract (release-table row + body heading for the Cargo package version, `## [Unreleased]` before the current release) with synthetic negative proofs for each rule, and the Phase 4 gate guards: exactly the four documented expected-failure IDs in `conformance/expected-failures.yaml`, the pinned conformance/Inspector/Node versions in the `mcp-conformance` job (delegation to the shared runner only — no duplicated scenario loops, no `--suite all`, no `server-session-lifecycle`), the exact version-indexed scenario sets parsed from the runner's quoted shell assignments (`SCENARIOS_2025_11_25` / `SCENARIOS_2026_07_28` with exact `--spec-version` values and `-2025-11-25` / `-2026-07-28` report suffixes), the historical fixture pin (exact `=1.7.0`, `default-features = false`, required client/transport features, single lock entry, checksum `0810a9f7…f4058e`), the contract/docs wiring (policy doc, README, FEATURES, runner, expected-failure count), the Inspector smoke script wiring, and the README dual-protocol compliance claim.
+- `tests/protocol_compatibility.rs` — version-indexed compatibility matrix indexed by exact `TestProtocol::{V2026_07_28,V2025_11_25}` (a table-driven coverage lock compares `TestProtocol::ALL` against the raw `server/discover` `supportedVersions` wire output) plus the Phase 4 cache wire proofs: typed modern `ttlMs: Some(0)` / `cacheScope: Private` on every cacheable family and typed legacy absence; raw modern `ttlMs: 0` / `cacheScope: "private"` presence and raw legacy absence; `resultType` modern-present/legacy-absent; cursor-page behavior of the manual `tools/list`/`prompts/list` handlers. Raw expectations are fixture-local, never derived from production `src/mcp_protocol.rs`.
 - `tests/config_schema_validation.rs` validates all three vendored example configs (Claude Code, Codex, opencode) hermetically and offline — the vendored `models.dev` document is registered in memory under its original URI, a no-network retriever fails on anything else, and missing/malformed schema or instance fixtures fail the run (no skip path). Only the ignored case fetches latest upstream schemas.
-- `tests/native_sim_validation.rs` — native_sim firmware over PTY. 57 tests, pure software, fast (no hardware). Env: `SERIAL_MCP_NATIVE_SIM_BIN` (default `build/native_sim/firmware/zephyr/zephyr.exe`). Thin wrapper; all tests + helpers live in `tests/native_sim_validation/unix.rs` (Unix-only via `#[cfg(unix)]` module gate), with an empty `windows.rs` stub for future Windows-specific tests.
+- `tests/native_sim_validation.rs` — native_sim firmware over PTY. 43 tests, pure software, fast (no hardware). Env: `SERIAL_MCP_NATIVE_SIM_BIN` (default `build/native_sim/firmware/zephyr/zephyr.exe`). Thin wrapper; all tests + helpers live in `tests/native_sim_validation/unix.rs` (Unix-only via `#[cfg(unix)]` module gate), with an empty `windows.rs` stub for future Windows-specific tests.
 - `tests/native_sim_connection_lifecycle.rs` — software-only lifecycle (6 tests): named connection, `set_flow_control`, close-while-read, reopen, touch-command bootloader entry. Run with `--test-threads=1`.
 - There are no hardware-required tests in this repo. All test coverage is runnable on a normal Linux host.
 
@@ -206,7 +214,7 @@ bounded; a hung or slow run must fail the job, not idle.
   libFuzzer `-max_total_time=300` wrapped in GNU `timeout 360`, job
   `timeout-minutes: 12`. Ubuntu + `libudev-dev pkg-config`. On failure,
   upload `fuzz/artifacts/<target>/` + `fuzz/corpus/<target>/` via
-  `actions/upload-artifact@v4` (`if-no-files-found: warn`, `retention-days: 7`)
+  `actions/upload-artifact@v7` (`if-no-files-found: warn`, `retention-days: 7`)
   — missing paths warn but never mask the original failure.
 - **Mutation** — project Rust `dtolnay/rust-toolchain@1.97.1` (NOT nightly;
   cargo-fuzz/nightly are isolated fuzz tooling, not an MSRV bump) + pinned
@@ -251,8 +259,8 @@ cargo run --manifest-path xtask/Cargo.toml -- print-paths
 
 ## Connection defaults & profiles
 
-- **`configure`** has two modes: profile (persist defaults to TOML) and connection (mutate live connection defaults). Live mutation covers the four framing defaults (StdMutex<Option<T>> wrappers on `SerialConnection`), `reconnect_policy` (existing StdMutex), `max_buffered_bytes_default` (AtomicUsize), and `poll_interval_ms_default` (AtomicU64). `log_capacity`/`log_enabled` are profile-only — LogBuffer has no live setter.
-- **`ProfileDefaults`** carries `max_buffered_bytes`, `poll_interval_ms`, `reconnect_policy`, `log_capacity`, `log_enabled` plus the serial-line fields; they flow profile → `OpenArgs` → `ConnectionConfig` → `SerialConnection`. Per-call `max_buffered_bytes` / `poll_interval_ms` do NOT exist on `ReadArgs`/`SubscribeArgs` — both come from connection defaults (mutable via `configure`).
+- **`configure`** has two modes: profile (persist defaults to TOML) and connection (mutate live connection defaults). Live mutation covers the four framing defaults (StdMutex<Option<T>> wrappers on `SerialConnection`), `reconnect_policy` (existing StdMutex), and `max_buffered_bytes_default` (AtomicUsize). `log_capacity`/`log_enabled` are profile-only — LogBuffer has no live setter.
+- **`ProfileDefaults`** carries `max_buffered_bytes`, `reconnect_policy`, `log_capacity`, `log_enabled` plus the serial-line fields; they flow profile → `OpenArgs` → `ConnectionConfig` → `SerialConnection`. Per-call `max_buffered_bytes` does NOT exist on `ReadArgs` — it comes from connection defaults (mutable via `configure`). The obsolete `poll_interval_ms` key from older profile files is ignored on load and dropped on the next durable rewrite (no schema-version bump).
 - **`precedence::resolve_field`** takes `conn_default` by value (`Option<T>`); the framing-default accessors on `SerialConnection` return cloned values.
 - **`transact`** = write-then-await-response in one call, read half defaults `from: {"type":"now"}` to skip pre-write backlog (`src/tools/io_ops.rs`). **`compute_checksum`** (xor/lrc) is a pure utility with no connection (`src/tools/utility_ops.rs`). Shared TX preparation (`decode_tx_payload` / `apply_tx_framing` / `TxFramingError`) lives in `io_ops.rs` and serves both `write` and `transact` — route future TX paths through it instead of duplicating decode/framing.
 - **`PortProvider` trait + `SystemPortProvider`** (`src/serial/port_info.rs`): process-wide injectable port enumeration used by `list_ports`, bare `open` identity capture, `open_profile` matching, `serial://ports`, resource port counts, and completions. Tests inject `StaticPortProvider` (`tests/common/mod.rs`) whose `PortInfo.name` points at a real PTY slave.
@@ -267,14 +275,169 @@ cargo run --manifest-path xtask/Cargo.toml -- print-paths
 - **Durable ops hold the connection `learning_lock`** across live mutation → `effective_defaults()` snapshot → CAS → binding update: `reconfigure`, `set_flow_control`, connection-mode `configure`, clean `close` (snapshot retries dirty state after hardware close; failure never reopens hardware or errors the close), and dirty open-override learning (in `open_connection`, before `OpenResult` returns).
 - **Result fields:** `OpenResult.profile_persistence`; `ReconfigureResult`/`SetFlowControlResult`/`ConfigureResult`/`CloseResult` carry additive `profile` + `profile_persistence`. Hardware success + persistence failure = `is_error != true` with `state="failed"`; hardware failure keeps the existing tool error and performs no store call.
 - **`delete_profile`** refuses while any same-process open connection binds the profile (error lists connection IDs).
-- **Never persisted:** DTR/RTS, BREAK, read cursor, flush, subscription lifecycle, payloads/encoding/match, per-call read/write/transact framing/parser/protocol overrides, health/reconnect counters/logs.
+- **Never persisted:** DTR/RTS, BREAK, read cursor, flush, payloads/encoding/match, per-call read/write/transact framing/parser/protocol overrides, health/reconnect counters/logs.
+
+## Dual MCP lifecycle (Phase 2 + Phase 3 subscriptions)
+
+- `src/server.rs` overrides `ServerHandler::supported_protocol_versions()`
+  with the product slice `[V_2026_07_28, V_2025_11_25]` (NOT
+  `ProtocolVersion::KNOWN_VERSIONS`), `discover()` with
+  `DiscoverResult::from_server_info` (ordered versions + the modern
+  discovery info view), and `initialize()` with a version gate: only
+  `V_2025_11_25` may initialize (anything else returns
+  `method_not_found::<InitializeResultMethod>` BEFORE peer bookkeeping),
+  then `context.peer.set_peer_info(request.clone())` + the legacy info
+  view — peer bookkeeping must not be dropped. `get_info()` returns the
+  MODERN `2026-07-28` view (rmcp intersects `subscriptions/listen` filters
+  against `get_info().capabilities`, so it must advertise the modern
+  `resources.subscribe` capability). Capability views are small pure
+  helpers (`common_capabilities`, `modern_capabilities`,
+  `modern_discovery_info`, `legacy_initialize_info`); modern has
+  `resources.subscribe: true`, legacy stays the common set.
+- Modern stateless HTTP requests additionally require SEP-2243
+  `Mcp-Method`/`Mcp-Name` headers and an `MCP-Protocol-Version` header
+  matching the request `_meta` (rmcp 3.0.1 transport enforcement). A
+  modern `initialize` is rejected by the handler and rmcp maps the
+  `-32601` through the stateless routing to HTTP 404 (direct JSON, no
+  `Mcp-Session-Id` header). Modern `ping`/`logging/setLevel`/
+  `resources/subscribe`/`resources/unsubscribe`
+  are `-32601` mapped to HTTP 404; legacy keeps `ping` working and
+  `resources/subscribe`/`resources/unsubscribe`/`subscriptions/listen`
+  at `-32601` inside SSE 200 responses (modern `subscriptions/listen` is
+  implemented — Phase 3). Modern unknown resources are
+  remapped to `-32602` (SEP-2164); legacy keeps `-32002`. Cache policy
+  (`ttlMs`/`cacheScope`) is Phase 4 scope — see the Phase 4 section below.
+- **Resource subscriptions (Phase 3):** one process-wide
+  `ResourceEventHub` (`src/resource_events.rs`, `ResourceEvent::Updated`,
+  capacity 256, synchronous non-blocking `publish_updated`) is created in
+  production `main.rs` and injected through `SerialHandlerOptions`/builder
+  into every stdio/HTTP handler plus the `PortWatcher` (1s poll, canonical
+  sorted `PortInfo` snapshots, first-success baseline, no false updates on
+  reorder/unchanged/error, recovery against retained baseline,
+  `shutdown_and_join`). `accepted_subscription_filter` keeps valid,
+  deduplicated concrete URIs (`serial://ports`, `serial://connections`,
+  detail/raw/log via `is_subscribable_uri` round-trip) in first-request
+  order and strips list-change flags/templates/unknown URIs; `listen`
+  notifies matching `Updated(uri)` events, ignores unrelated ones, and on
+  broadcast lag notifies every accepted URI once — never blocking the
+  publisher or pump. **rmcp 3.0.1 ack artifact (documented, not patched):**
+  the wire acknowledgement may echo a repeated requested VALID URI because
+  rmcp computes the final accepted filter via
+  `requested.intersection(&candidate).intersection(&advertised)`, both
+  left-biased over the requested list. Handler/listener semantics always
+  deduplicate (first-occurrence order): `accepted_subscription_filter`
+  returns the deduplicated candidate, and `listen` re-deduplicates
+  `context.accepted()` so normal matching and lag recovery never emit
+  duplicate hints. Tests assert the acknowledged URI SET + first-occurrence
+  order equal the deduplicated accepted set and explicitly permit the raw
+  Vec echo; `repeated_requested_uri_does_not_cause_duplicate_lag_recovery_notifications`
+  proves no duplicate recovery hints. The RX pump publishes detail/raw/log hints AFTER each
+  successful `ring.append` and OUTSIDE the `pump_gate`
+  (`pump_publishes_resource_hints_only_after_ring_append` unit proof).
+  Tool paths publish after successful behavior only (open/close →
+  connections+detail; reconfigure/set_flow_control/reconnect/connection
+  configure/set_dtr_rts/send_break/write/transact → detail; clear_log →
+  log; flush input/both → detail+raw). Notifications are hints — no
+  payloads, no cursor movement. Modern HTTP is STATELESS: a fresh
+  `SerialHandler` serves each request, so every process-wide dependency
+  (`ConnectionManager`, `ProfileStore`, `CaptureStore`, `PortProvider`,
+  hub, `RxSessionManager` — ring + pump + shared cursor) must be injected
+  and shared — never handler-local. One `Arc<RxSessionManager>` per server
+  process (built from the shared budget+hub) is injected through
+  `SerialHandlerOptions::rx_sessions`/builder and cloned into every handler
+  factory; `build()` constructs one only when none was injected.
+  `stateless_requests_share_session_ring_and_cursor` proves two distinct
+  stateless requests observe the same session/ring/cursor. Proofs:
+  `tests/resource_subscriptions.rs` (typed modern clients over real
+  in-process HTTP), `tests/protocol_compatibility.rs` raw legacy listen
+  `-32601`.
+- Proofs: `tests/protocol_compatibility.rs` (typed discover/initialize
+  matrix + raw-wire status/code/header assertions against the spawned
+  binary), stdio lifecycle tests in `tests/stdio_integration.rs`, and
+  lifecycle helpers (`TestProtocol` with exact `V2026_07_28`/`V2025_11_25`
+  variants, `VersionedClientHandler`, `connect_protocol_client` +
+  spawned mirrors) in `tests/common/{mod,spawned}.rs`.
+
+## Cache compliance + pinned conformance gates (Phase 4)
+
+The full scenario/pin matrix (exact per-version conformance scenario sets,
+package pins, report layout) lives in
+`docs/development/mcp-version-compatibility-policy.md`; this section keeps
+only the implementation invariants an agent must not break.
+
+- **Version-correct SEP-2549 cache fields.** ONLY the explicit `2026-07-28`
+  policy row receives `ttlMs: 0` / `cacheScope: "private"` on every cacheable
+  family: `tools/list`, `resources/list`, `resources/templates/list`,
+  `resources/read` complete results for every URI kind, and `prompts/list`.
+  Legacy `2025-11-25` peers see NEITHER field — rmcp strips `resultType` for
+  legacy but does NOT strip cache fields, so the server omits them itself.
+  The gate is one pure helper `cache_fields_for(Option<ProtocolVersion>)` in
+  `src/mcp_protocol.rs` (exact policy-row match — never a `2026-07-28+`
+  date/range rule); a second helper `read_result_with_cache_fields` in
+  `src/server.rs` applies the fields to read results. Tool calls,
+  `prompts/get`, completion, and discovery (rmcp's own required zero/private
+  fields) have no added cache fields. `tools/list`/`prompts/list` are
+  explicit handlers over the SAME routers (`Self::tool_router()`/
+  `Self::prompt_router()`) with cursor pagination (PAGE_SIZE 100,
+  `paginate`). **Do not re-add `#[prompt_handler]`**: rmcp-macros 3.1.0
+  unconditionally REPLACES any `list_prompts`/`get_prompt` in the annotated
+  block (unlike `#[tool_handler]`'s has-method check), which would silently
+  drop the cache fields — the two methods stay hand-written against the
+  router. Wire proofs: `tests/protocol_compatibility.rs` (typed modern
+  fields + typed legacy absence + raw modern `ttlMs:0`/
+  `cacheScope:"private"` + raw legacy absence + cursor-page tests for the
+  manual list handlers).
+- **Single shared runner + expected-failure hard gate.** ALL compatibility
+  execution — local and CI — delegates to `scripts/test-mcp-compat.sh`
+  (`set -euo pipefail`, GNU `timeout` per fixture/conformance invocation);
+  the CI `mcp-conformance` job owns only environment setup, the time bound,
+  and report upload — no duplicated scenario loops, no `--suite all`.
+  `conformance/expected-failures.yaml` baselines exactly the four documented
+  fixture-dependent checks in per-check `<scenario>:<check-id>` form — a
+  baseline entry that starts passing FAILS the run as stale; any other
+  failure is an unexpected regression. Never add fixture endpoints to
+  serial-mcp; runner exit status is never suppressed.
+- **Historical rmcp 1.7.0 client fixture** (`compat/rmcp-1-client/`, exact
+  `rmcp = "=1.7.0"` with `default-features = false` and only
+  `client`/`transport-child-process`/`transport-streamable-http-client-reqwest`
+  features, own committed lockfile, `publish = false`): a standalone package
+  compiled against the pre-migration SDK proving the CURRENT server
+  interoperates with a real historical client over BOTH HTTP and stdio
+  (negotiated `2025-11-25`, server identity, exact 25-tool surface,
+  resources/templates/prompts, `compute_checksum` → `111`/`6F`). The lock's
+  single rmcp entry resolves `1.7.0` with checksum
+  `0810a9f717d9828f475fe1f629f4c305c8464b7f496c3a854b58d29e65f4058e`
+  (drift-guarded). It never depends on serial-mcp internals.
+- **Pinned Inspector 2.0.0 interoperability smoke** — interoperability, NOT
+  conformance (named separately in the same CI job):
+  `node scripts/inspector-smoke.mjs <server-url>` — Node-stdlib-only, exact
+  installed binary (`INSPECTOR_CMD`/`--inspector-cmd`) or exact pinned `npx`
+  package `@modelcontextprotocol/inspector@2.0.0` fallback, per-command hard
+  timeout, parses `--format json`, noninteractive
+  (`MCP_AUTO_OPEN_ENABLED=false`, bounded `--connect-timeout`, non-TTY — no
+  `--stored-auth-only`). It writes a temp session config with
+  `protocolEra: "modern"` (the Inspector's ad-hoc `--server-url` default is
+  legacy) and asserts the modern surface — identity, negotiated `2026-07-28`,
+  exactly 25 unique tools, both resources, both prompts, `compute_checksum`
+  → raw `111` / hex `6F`. Any assertion failure or nonzero CLI exit fails
+  the script (hard gate).
+- **Future protocol admission invariant.** A new MCP version is added only
+  through one exact `ProtocolPolicy` row plus a complete test row (typed +
+  raw-wire + stdio + conformance at the exact `--spec-version` + drift
+  expectations). Adding a version never mutates or evicts another row, never
+  enables cache fields by date, and never inherits support from
+  `ProtocolVersion::KNOWN_VERSIONS`. `2025-11-25` is PERMANENT product
+  compatibility — its row, fixture, raw-wire tests, conformance set, and
+  drift guards must not be removed or weakened by a future protocol or rmcp
+  update. Pre-`2025-11-25` revisions stay unsupported (demand-driven feature
+  idea in `FEATURES.md` only).
 
 ## Discovery & evaluation
 
 - **`list_ports` previews profile selection**: `ListPortsResult.profile_matches` parallels `ports` (same length/order, always serialized). Per-port: `confidence` + `outcome` (`selected`/`ambiguous`/`ineligible`/`duplicate`/`none`), `selected_profile`, and ordered `candidates` (name/generated/revision/last_used_at_ms). Preview is read-only — no `mark_used`, no file mutation. Pure computation in `port_ops::compute_profile_matches(ports, profiles)`: one `ProfileStore::list_fresh()` per `list_ports` call (corrupt store = tool error); high identity reuses the identity rules exactly (unique max `last_used_at_ms`, `None` sorts oldest, equal top rank = `Ambiguous`; name is display-only and never breaks a tie); duplicate live fingerprints = `Duplicate` for every such port; weak identity lists explicitly matching non-empty selectors as `Ineligible`. The `serial://ports` resource serves the same map.
 - **Decision-tree teaching**: server `instructions` + the 12 common tool descriptions + README flow + both prompts teach `list_ports` → bare `open` → `transact`/`read`/`write` → inspect `profile`/`profile_persistence` → `open_profile` only for explicit choice/weak identity, `rollback_profile` for recovery → escalate to framing/cursor/reconnect/line-control/log tools only when needed. `from` wire examples stay tagged (`{"type":"now"}` etc.) — no string shorthand.
-- **Tool count: 27** — `server::tool_catalog()` returns the exact 27 `rmcp::model::Tool` attrs served by MCP; schema tests and the xtask evaluator consume it (exact-count test `tool_catalog_has_exactly_twenty_seven_tools` guards drift). Update all references when adding/removing tools.
-- **Evaluator**: `cargo run --manifest-path xtask/Cargo.toml -- agent-eval [--output-dir PATH] [--baseline PATH] [--write-baseline PATH]` — deterministic catalog + scenario metrics under `target/agent-interface-eval/` (`report.json`/`report.md`), no network/user config/timestamps. Committed baseline `docs/development/agent-interface-baseline.json` (26 tools / 258964 bytes) is HISTORICAL — it measures the pre-`capture_boot` catalog; the consolidated current report lives in `docs/development/agent-interface-evaluation.md` (27 tools / 288177 bytes). Thresholds and yes/no decisions (automatic profiles + `transact` + atomic `capture_boot` accepted; shorthand/recipes/versioned facade rejected) are computed by the evaluator from fixed rules. Modeled (non-implemented) candidates are marked `modeled` with their expansion into current calls.
+- **Tool count: 25** — `server::tool_catalog()` returns the exact 25 `rmcp::model::Tool` attrs served by MCP (the `subscribe`/`unsubscribe` tools were removed with MCP logging in the rmcp 3 migration); schema tests and the xtask evaluator consume it (exact-count test `tool_catalog_has_exactly_twenty_five_tools` guards drift). Update all references when adding/removing tools.
+- **Evaluator**: `cargo run --manifest-path xtask/Cargo.toml -- agent-eval [--output-dir PATH] [--baseline PATH] [--write-baseline PATH]` — deterministic catalog + scenario metrics under `target/agent-interface-eval/` (`report.json`/`report.md`), no network/user config/timestamps. Committed baseline `docs/development/agent-interface-baseline.json` (26 tools / 258964 bytes) is HISTORICAL — it measures the pre-`capture_boot` catalog; the consolidated current report lives in `docs/development/agent-interface-evaluation.md` (25 tools / 269740 bytes). Thresholds and yes/no decisions (automatic profiles + `transact` + atomic `capture_boot` accepted; shorthand/recipes/versioned facade rejected) are computed by the evaluator from fixed rules. Modeled (non-implemented) candidates are marked `modeled` with their expansion into current calls.
 
 ## Atomic boot capture
 

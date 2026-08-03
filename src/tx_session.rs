@@ -237,7 +237,10 @@ mod tests {
         let conn = Arc::new(conn);
         let budget: Arc<dyn crate::buffer_budget::BufferBudget> =
             Arc::new(AtomicBudget::new(1024 * 1024, 1024 * 1024));
-        let rx_mgr = RxSessionManager::new(budget);
+        let rx_mgr = RxSessionManager::new(
+            budget,
+            std::sync::Arc::new(crate::resource_events::ResourceEventHub::new(64)),
+        );
         let _rx_session = rx_mgr.get_or_create(Arc::clone(&conn), 1024).await.unwrap();
 
         let tx_session = TxSession::new(Arc::clone(&conn));
@@ -312,7 +315,10 @@ mod tests {
         use crate::rx_session::RxSessionManager;
         let budget: Arc<dyn crate::buffer_budget::BufferBudget> =
             Arc::new(AtomicBudget::new(1024 * 1024, 1024 * 1024));
-        let rx_mgr = RxSessionManager::new(budget);
+        let rx_mgr = RxSessionManager::new(
+            budget,
+            std::sync::Arc::new(crate::resource_events::ResourceEventHub::new(64)),
+        );
         let rx_session = rx_mgr.get_or_create(Arc::clone(&conn), 1024).await.unwrap();
         drop(rx_session); // pump is running, no need to hold a consumer
 

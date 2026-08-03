@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use rmcp::{model::Meta, Json, Peer, RoleServer};
+use rmcp::{model::RequestMetaObject, Json, Peer, RoleServer};
 use tracing::{debug, info, warn};
 
 use crate::buffer_budget::BufferBudget;
@@ -79,7 +79,7 @@ pub async fn read(
     connections: &Arc<ConnectionManager>,
     rx_sessions: &Arc<RxSessionManager>,
     budget: &Arc<dyn BufferBudget>,
-    meta: Meta,
+    meta: RequestMetaObject,
     ct: tokio_util::sync::CancellationToken,
     peer: Peer<RoleServer>,
     args: ReadArgs,
@@ -187,7 +187,7 @@ pub async fn transact(
     tx_sessions: &Arc<TxSessionManager>,
     rx_sessions: &Arc<RxSessionManager>,
     budget: &Arc<dyn BufferBudget>,
-    meta: Meta,
+    meta: RequestMetaObject,
     ct: tokio_util::sync::CancellationToken,
     peer: Peer<RoleServer>,
     args: TransactArgs,

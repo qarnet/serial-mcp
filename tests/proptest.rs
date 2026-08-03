@@ -21,14 +21,12 @@ use serial_mcp::limits::*;
 use serial_mcp::profiles::{allocate_generated_name, normalize_generated_label, Profile};
 use serial_mcp::serial::{DataBits, FlowControl, Parity, StopBits};
 use serial_mcp::tools::helpers::{
-    clamp_or_err, clamp_poll_interval_or_err, clamp_timeout_or_err, parse_open_args,
-    require_min_or_err,
+    clamp_or_err, clamp_timeout_or_err, parse_open_args, require_min_or_err,
 };
 use serial_mcp::tools::types::{
     CloseArgs, CloseResult, FlushArgs, FlushResult, ListConnectionsResult, OpenArgs, OpenResult,
     ReadArgs, ReadResult, SendBreakArgs, SendBreakResult, SetDtrRtsArgs, SetDtrRtsResult,
-    SetFlowControlResult, SubscribeArgs, SubscribeResult, UnsubscribeArgs, UnsubscribeResult,
-    WriteArgs, WriteResult,
+    SetFlowControlResult, WriteArgs, WriteResult,
 };
 
 // ── Schema helper ────────────────────────────────────────────────────────────
@@ -138,10 +136,6 @@ fn valid_stop_reason() -> impl Strategy<Value = String> {
         "max_buffered_bytes".into(),
         "connection_closed".into(),
         "cancelled".into(),
-        "read_error".into(),
-        "channel_closed".into(),
-        "peer_disconnected".into(),
-        "budget_exhausted".into(),
         "no_new_rx_timeout".into(),
     ])
 }
@@ -183,7 +177,6 @@ proptest! {
             protocol: None,
             rx_buffer_size: Some(serial_mcp::limits::DEFAULT_RX_BUFFER_SIZE),
             max_buffered_bytes: Some(32768),
-            poll_interval_ms: Some(200),
             profile_mode: None,
         };
         assert_roundtrip!(args);
@@ -282,32 +275,6 @@ proptest! {
         let args = SendBreakArgs { connection_id: id, duration_ms: duration };
         assert_roundtrip!(args);
     }
-
-    #[test]
-    fn subscribe_args_roundtrip(
-        id in opaque_id(),
-        timeout in optional_u64(),
-        enc in valid_encoding(),
-    ) {
-        let args = SubscribeArgs {
-            connection_id: id,
-            timeout_ms: timeout,
-            no_new_rx_timeout_ms: None,
-            encoding: enc,
-            from: None,
-            r#match: None,
-            rx_framing: None,
-            rx_parser: None,
-            protocol: None,
-        };
-        assert_roundtrip!(args);
-    }
-
-    #[test]
-    fn unsubscribe_args_roundtrip(id in opaque_id()) {
-        let args = UnsubscribeArgs { connection_id: id };
-        assert_roundtrip!(args);
-    }
 }
 
 // ── Schema validation — all result types against their schemas ──────────────
@@ -368,28 +335,6 @@ proptest! {
         let r = SendBreakResult { connection_id: id, name: None, duration_ms: dur, actual_duration_ms: actual };
         let v = serde_json::to_value(&r).unwrap();
         assert_schema_valid!(SendBreakResult, v);
-    }
-
-    #[test]
-    fn subscribe_result_schema_valid(
-        id in opaque_id(), enc in valid_encoding(),
-        max_buffered_bytes in any_usize(), poll in any_u64(), replaced: bool,
-    ) {
-        // SubscribeResult — subscribe is always background.
-        let r = SubscribeResult {
-            connection_id: id.clone(), name: None, encoding: enc.clone(),
-            max_buffered_bytes, poll_interval_ms: poll,
-            replaced_previous: replaced,
-        };
-        let v = serde_json::to_value(&r).unwrap();
-        assert_schema_valid!(SubscribeResult, v);
-    }
-
-    #[test]
-    fn unsubscribe_result_schema_valid(id in opaque_id(), was_active: bool) {
-        let r = UnsubscribeResult { connection_id: id, name: None, was_active };
-        let v = serde_json::to_value(&r).unwrap();
-        assert_schema_valid!(UnsubscribeResult, v);
     }
 }
 
@@ -663,24 +608,14 @@ proptest! {
     }
 
     #[test]
-    fn clamp_poll_interval_or_err_never_panics(value in any_u64(), min in any_u64()) {
-        let _ = clamp_poll_interval_or_err("test", value, min);
-    }
-
-    #[test]
     fn clamp_or_err_with_known_limits(value in any_usize()) {
         let _ = clamp_or_err("read.max_buffered_bytes", value, MAX_READ_BYTES);
-        let _ = clamp_or_err("subscribe.max_buffered_bytes", value, MAX_STREAM_CHUNK_BYTES);
+        let _ = clamp_or_err("write.max_bytes", value, MAX_WRITE_BYTES);
     }
 
     #[test]
     fn clamp_timeout_with_known_limit(value in any_u64()) {
         let _ = clamp_timeout_or_err("test", value, MAX_TIMEOUT_MS);
-    }
-
-    #[test]
-    fn clamp_poll_interval_with_known_limit(value in any_u64()) {
-        let _ = clamp_poll_interval_or_err("test", value, MIN_POLL_INTERVAL_MS);
     }
 
     #[test]
@@ -752,7 +687,6 @@ proptest! {
             protocol: None,
             rx_buffer_size: Some(serial_mcp::limits::DEFAULT_RX_BUFFER_SIZE),
             max_buffered_bytes: Some(32768),
-            poll_interval_ms: Some(200),
             profile_mode: None,
         };
         assert_roundtrip!(args);
@@ -785,52 +719,11 @@ fn all_result_types_have_valid_schema() {
             "SendBreakResult",
             schemars_to_jsonschema::<SendBreakResult>(),
         ),
-        (
-            "SubscribeResult",
-            schemars_to_jsonschema::<SubscribeResult>(),
-        ),
-        (
-            "UnsubscribeResult",
-            schemars_to_jsonschema::<UnsubscribeResult>(),
-        ),
     ];
     for (name, schema) in &types {
         jsonschema::validator_for(schema)
             .unwrap_or_else(|e| panic!("{name} schema fails to compile: {e}"));
     }
-}
-
-// ── SubscribeResult null-data is valid per schema ───────────────────────────
-
-#[test]
-fn subscribe_result_ff_null_fields_match_schema() {
-    // Subscribe is always background; no nullable vestigial fields remain.
-    let r = SubscribeResult {
-        connection_id: "abc".into(),
-        name: None,
-        encoding: "utf8".into(),
-        max_buffered_bytes: 1024,
-        poll_interval_ms: 200,
-        replaced_previous: false,
-    };
-    let v = serde_json::to_value(&r).unwrap();
-    validate_schema::<SubscribeResult>(&v);
-    roundtrip_stable(&r);
-}
-
-#[test]
-fn subscribe_result_blocking_filled_fields_match_schema() {
-    let r = SubscribeResult {
-        connection_id: "abc".into(),
-        name: None,
-        encoding: "utf8".into(),
-        max_buffered_bytes: 2048,
-        poll_interval_ms: 100,
-        replaced_previous: true,
-    };
-    let v = serde_json::to_value(&r).unwrap();
-    validate_schema::<SubscribeResult>(&v);
-    roundtrip_stable(&r);
 }
 
 // ── Stateful connection lifecycle ───────────────────────────────────────────
@@ -841,7 +734,6 @@ enum Op {
     DoubleClose,
     ReadAfterClose,
     WriteAfterClose,
-    SubscribeThenClose,
 }
 
 fn run_lifecycle_scenario(op: Op) {
@@ -876,9 +768,6 @@ fn run_lifecycle_scenario(op: Op) {
                 manager.close(&cid).await.unwrap();
                 let _ = conn.write(b"data").await;
             }
-            Op::SubscribeThenClose => {
-                manager.close(&cid).await.unwrap();
-            }
         }
     });
 }
@@ -901,33 +790,6 @@ fn lifecycle_read_after_close_no_panic() {
 #[test]
 fn lifecycle_write_after_close_no_panic() {
     run_lifecycle_scenario(Op::WriteAfterClose);
-}
-
-#[test]
-fn lifecycle_subscribe_then_close_no_panic() {
-    run_lifecycle_scenario(Op::SubscribeThenClose);
-}
-
-#[test]
-fn lifecycle_unsubscribe_noop_does_not_panic() {
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_time()
-        .build()
-        .unwrap();
-    rt.block_on(async {
-        let manager = Arc::new(serial_mcp::serial::ConnectionManager::new());
-        let (conn, _) = serial_mcp::serial::test_support::loopback_connection("unsub-noop");
-        let cid = manager.insert(conn).await.unwrap();
-
-        let streams: Arc<tokio::sync::Mutex<std::collections::HashMap<String, ()>>> =
-            Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
-        let mut guard = streams.lock().await;
-        let was_active = guard.remove(&cid).is_some();
-        assert!(
-            !was_active,
-            "no-op unsubscribe must report was_active=false"
-        );
-    });
 }
 
 // ── RxFramingConfig roundtrip ──────────────────────────────────────────────

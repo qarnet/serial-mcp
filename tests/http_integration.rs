@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use rmcp::model::{
     CallToolRequest, CallToolRequestParams, CancelledNotificationParam, ClientRequest,
-    GetPromptRequestParams, PaginatedRequestParams, ReadResourceRequestParams,
+    GetPromptRequestParams, PaginatedRequestParams, ReadResourceRequestParams, Role,
 };
 use rmcp::service::{PeerRequestOptions, RoleClient, RunningService};
 use serde_json::json;
@@ -25,22 +25,22 @@ use serial_mcp::serial::{test_support::loopback_connection, ConnectionManager};
 
 mod common;
 use common::controlled::ControlledState;
-use common::{
-    args_object, connect_client, next_notification, tool_request, NotificationCollector,
-    TestServer, EXPECTED_TOOLS,
-};
+use common::{args_object, connect_client, tool_request, TestServer, EXPECTED_TOOLS};
 
 #[tokio::test]
 async fn initialize_handshake_succeeds() {
     let server = common::spawned::SpawnedServer::start().await;
     let (client, _rx) = common::spawned::spawn_client(&server).await.unwrap();
     let info = client.peer().peer_info().expect("peer_info");
-    assert_eq!(info.server_info.name, "serial-mcp");
+    assert_eq!(
+        info.server_info.as_ref().expect("server_info present").name,
+        "serial-mcp"
+    );
     client.cancel().await.ok();
 }
 
 #[tokio::test]
-async fn list_tools_returns_all_twenty_seven_tools() {
+async fn list_tools_returns_all_twenty_five_tools() {
     let server = common::spawned::SpawnedServer::start().await;
     let (client, _rx) = common::spawned::spawn_client(&server).await.unwrap();
 
@@ -724,7 +724,7 @@ async fn get_prompt_diagnose_port_returns_user_message() {
         .unwrap();
     assert!(!result.messages.is_empty());
     let first = &result.messages[0];
-    assert!(matches!(first.role, rmcp::model::PromptMessageRole::User));
+    assert!(matches!(first.role, Role::User));
     let rendered = serde_json::to_string(&first.content).unwrap();
     assert!(rendered.contains("/dev/ttyUSB7"));
     client.cancel().await.ok();
@@ -830,7 +830,7 @@ async fn read_tool_description_uses_tagged_readfrom_examples() {
     client.cancel().await.ok();
 }
 
-/// The generated input schemas for `read`/`subscribe`/`transact` carry the
+/// The generated input schemas for `read`/`transact` carry the
 /// agent-visible `from` guidance in the property description. It must
 /// advertise the tagged `ReadFrom` wire form, never bare string shorthand —
 /// agents copy these descriptions when constructing calls.
@@ -845,7 +845,7 @@ async fn read_tool_input_schema_uses_tagged_readfrom_examples() {
         .await
         .unwrap();
 
-    for name in ["read", "subscribe", "transact"] {
+    for name in ["read", "transact"] {
         let tool = result
             .tools
             .iter()
@@ -910,176 +910,6 @@ async fn write_tool_sends_bytes_to_loopback_peer() {
     peer.read_exact(&mut buf).await.unwrap();
     assert_eq!(&buf, b"hello over http");
     client.cancel().await.ok();
-}
-
-#[tokio::test]
-async fn subscribe_then_peer_write_pushes_notification() {
-    let manager = Arc::new(ConnectionManager::new());
-    let (conn, mut peer) = loopback_connection("loop-sub");
-    let connection_id = manager.insert(conn).await.unwrap();
-
-    let server = TestServer::start_with(manager).await;
-    let (client, mut rx) = connect_client(&server).await.unwrap();
-
-    client
-        .peer()
-        .call_tool(tool_request(
-            "subscribe",
-            json!({
-                "connection_id": connection_id,
-            }),
-        ))
-        .await
-        .unwrap();
-
-    peer.write_all(b"streaming!").await.unwrap();
-    peer.flush().await.unwrap();
-
-    let event = next_notification(&mut rx, Duration::from_secs(2))
-        .await
-        .unwrap();
-    assert_eq!(
-        event.logger.as_deref(),
-        Some(&format!("serial:{connection_id}")[..])
-    );
-    let data = event.data.as_object().unwrap();
-    assert_eq!(
-        data["connection_id"],
-        serde_json::Value::String(connection_id.clone())
-    );
-    assert_eq!(data["data"], serde_json::Value::String("streaming!".into()));
-    client.cancel().await.ok();
-}
-
-#[tokio::test]
-async fn subscribe_with_timeout_auto_stops_in_background() {
-    let manager = Arc::new(ConnectionManager::new());
-    let (conn, mut peer) = loopback_connection("loop-sub-timed");
-    let connection_id = manager.insert(conn).await.unwrap();
-
-    let server = TestServer::start_with(manager).await;
-    let (client, mut rx) = connect_client(&server).await.unwrap();
-
-    // Pre-fill the duplex buffer so data is immediately available when
-    // subscribe starts.
-    peer.write_all(b"hello-timed").await.unwrap();
-    peer.flush().await.unwrap();
-
-    let result = client
-        .peer()
-        .call_tool(tool_request(
-            "subscribe",
-            json!({
-                "connection_id": connection_id,
-                "timeout_ms": 500,
-                "encoding": "utf8",
-            }),
-        ))
-        .await
-        .unwrap();
-
-    assert_ne!(result.is_error, Some(true), "{result:?}");
-    // Subscribe ack is always immediate.
-
-    // Data arrives as a background notification.
-    let event = next_notification(&mut rx, Duration::from_secs(2))
-        .await
-        .unwrap();
-    let data = event.data.as_object().unwrap();
-    assert_eq!(
-        data["data"],
-        serde_json::Value::String("hello-timed".into())
-    );
-
-    client.cancel().await.ok();
-}
-
-#[tokio::test]
-async fn subscribe_without_timeout_is_fire_and_forget() {
-    let manager = Arc::new(ConnectionManager::new());
-    let (conn, mut peer) = loopback_connection("loop-sub-ff");
-    let connection_id = manager.insert(conn).await.unwrap();
-
-    let server = TestServer::start_with(manager).await;
-    let (client, mut rx) = connect_client(&server).await.unwrap();
-
-    let result = client
-        .peer()
-        .call_tool(tool_request(
-            "subscribe",
-            json!({
-                "connection_id": connection_id,
-            }),
-        ))
-        .await
-        .unwrap();
-    assert_ne!(result.is_error, Some(true), "{result:?}");
-
-    // Subscribe ack is always immediate.
-
-    // Background stream still runs: write something and it arrives as notification
-    peer.write_all(b"post-subscribe").await.unwrap();
-    peer.flush().await.unwrap();
-    let event = next_notification(&mut rx, Duration::from_secs(2))
-        .await
-        .unwrap();
-    assert_eq!(event.data["data"], json!("post-subscribe"));
-
-    client.cancel().await.ok();
-}
-
-#[tokio::test]
-async fn subscribe_closed_from_other_session_stops_streaming_task() {
-    let manager = Arc::new(ConnectionManager::new());
-    let (conn, mut peer) = loopback_connection("loop-cross-session-close");
-    let connection_id = manager.insert(conn).await.unwrap();
-
-    let server = TestServer::start_with(manager).await;
-    let (client_a, mut rx_a) = connect_client(&server).await.unwrap();
-    let (client_b, _rx_b) = connect_client(&server).await.unwrap();
-
-    let subscribe_result = client_a
-        .peer()
-        .call_tool(tool_request(
-            "subscribe",
-            json!({
-                "connection_id": connection_id,
-            }),
-        ))
-        .await
-        .unwrap();
-    assert_ne!(
-        subscribe_result.is_error,
-        Some(true),
-        "{subscribe_result:?}"
-    );
-
-    let close_result = client_b
-        .peer()
-        .call_tool(tool_request(
-            "close",
-            json!({ "connection_id": connection_id }),
-        ))
-        .await
-        .unwrap();
-    assert_ne!(close_result.is_error, Some(true), "{close_result:?}");
-
-    let _ = peer.write_all(b"should not stream after close").await;
-    // After close, the subscribe task exits and may emit a stop notification.
-    // We should NOT receive a data streaming event, but a stop notification
-    // is expected and acceptable.
-    let maybe_event = tokio::time::timeout(Duration::from_millis(250), rx_a.recv()).await;
-    if let Ok(Some(event)) = maybe_event {
-        // If we got an event, it should be a stop notification, not data.
-        let data = event.data.as_object().unwrap();
-        assert!(
-            data.contains_key("stop_reason"),
-            "received unexpected data event after close: {data:?}"
-        );
-    }
-
-    client_a.cancel().await.ok();
-    client_b.cancel().await.ok();
 }
 
 // ── Lossless RX encoding fallback ─────────────────────────────────────────
@@ -1180,238 +1010,14 @@ async fn read_framing_error_keeps_valid_frame_utf8_and_raw_hex() {
 
     client.cancel().await.ok();
 }
-
 #[tokio::test]
-async fn subscribe_binary_chunk_emits_hex_advances_and_counts_no_drop() {
-    let manager = Arc::new(ConnectionManager::new());
-    let (conn, mut peer) = loopback_connection("loop-sub-binary-hex");
-    let connection_id = manager.insert(conn).await.unwrap();
-
-    let server = TestServer::start_with(manager).await;
-    let (client, mut rx) = connect_client(&server).await.unwrap();
-
-    let result = client
-        .peer()
-        .call_tool(tool_request(
-            "subscribe",
-            json!({
-                "connection_id": connection_id,
-                "timeout_ms": 600,
-                "encoding": "utf8",
-            }),
-        ))
-        .await
-        .unwrap();
-    assert_ne!(result.is_error, Some(true), "{result:?}");
-
-    // Write AFTER the ack so `from: now` is resolved before the bytes exist.
-    peer.write_all(&[0xDE, 0xAD, 0xFF]).await.unwrap();
-    peer.flush().await.unwrap();
-
-    // One chunk notification with exact spaced hex + effective encoding.
-    let event = next_notification(&mut rx, Duration::from_secs(2))
-        .await
-        .expect("binary chunk notification");
-    let data = event.data.as_object().unwrap();
-    assert_eq!(data["connection_id"], json!(connection_id));
-    assert_eq!(data["bytes_read"], json!(3));
-    assert_eq!(data["data"], json!("de ad ff"));
-    assert_eq!(data["encoding"], json!("hex"));
-    // No SubscribeEncodingErrorNotification: `encoding_error` must be absent.
-    assert!(
-        data.get("encoding_error").is_none(),
-        "fallback must not emit the error notification: {data:?}"
-    );
-
-    // The chunk advances the private cursor: no repeated notification, and
-    // the stream ends by timeout with no drop counted.
-    let stop = next_notification(&mut rx, Duration::from_secs(3))
-        .await
-        .expect("stop notification");
-    let stop_data = stop.data.as_object().unwrap();
-    assert_eq!(stop_data["stop_reason"], json!("timeout"));
-    assert_eq!(stop_data["bytes_returned"], json!(3));
-
-    // Successful fallback never increments the notification drop count.
-    let status = client
-        .peer()
-        .call_tool(tool_request(
-            "get_status",
-            json!({ "connection_id": connection_id }),
-        ))
-        .await
-        .unwrap();
-    let s = status.structured_content.expect("structured status");
-    assert_eq!(s["notification_drop_count"], json!(0));
-    assert_eq!(s["truncation_count"], json!(0));
-
-    client.cancel().await.ok();
-}
-
-#[tokio::test]
-async fn subscribe_binary_framed_frame_emits_hex_without_drop() {
-    let manager = Arc::new(ConnectionManager::new());
-    let (conn, mut peer) = loopback_connection("loop-sub-slip-binary");
-    let connection_id = manager.insert(conn).await.unwrap();
-
-    let server = TestServer::start_with(manager).await;
-    let (client, mut rx) = connect_client(&server).await.unwrap();
-
-    let result = client
-        .peer()
-        .call_tool(tool_request(
-            "subscribe",
-            json!({
-                "connection_id": connection_id,
-                "timeout_ms": 600,
-                "encoding": "utf8",
-                "rx_framing": { "type": "slip" },
-            }),
-        ))
-        .await
-        .unwrap();
-    assert_ne!(result.is_error, Some(true), "{result:?}");
-
-    // One SLIP frame whose payload is a single binary byte (0xFF).
-    peer.write_all(&[0xC0, 0xFF, 0xC0]).await.unwrap();
-    peer.flush().await.unwrap();
-
-    let event = next_notification(&mut rx, Duration::from_secs(2))
-        .await
-        .expect("frame notification");
-    let data = event.data.as_object().unwrap();
-    assert_eq!(data["frame_type"], json!("slip"));
-    assert_eq!(data["frame_index"], json!(0));
-    assert_eq!(data["data"], json!("ff"));
-    assert_eq!(data["encoding"], json!("hex"));
-    assert!(
-        data.get("encoding_error").is_none(),
-        "fallback must not emit the error notification: {data:?}"
-    );
-
-    let stop = next_notification(&mut rx, Duration::from_secs(3))
-        .await
-        .expect("stop notification");
-    let stop_data = stop.data.as_object().unwrap();
-    assert_eq!(stop_data["stop_reason"], json!("timeout"));
-    assert_eq!(stop_data["frames_emitted"], json!(1));
-    assert_eq!(stop_data["frames_dropped"], json!(0));
-
-    client.cancel().await.ok();
-}
-
-#[tokio::test]
-async fn subscribe_binary_partial_flush_emits_hex_with_effective_encoding() {
-    let manager = Arc::new(ConnectionManager::new());
-    let (conn, mut peer) = loopback_connection("loop-sub-partial-binary");
-    let connection_id = manager.insert(conn).await.unwrap();
-
-    let server = TestServer::start_with(manager).await;
-    let (client, mut rx) = connect_client(&server).await.unwrap();
-
-    let result = client
-        .peer()
-        .call_tool(tool_request(
-            "subscribe",
-            json!({
-                "connection_id": connection_id,
-                "timeout_ms": 400,
-                "encoding": "utf8",
-                "rx_framing": { "type": "line" },
-            }),
-        ))
-        .await
-        .unwrap();
-    assert_ne!(result.is_error, Some(true), "{result:?}");
-
-    // Binary bytes with NO line terminator: the decoder buffers them and
-    // flush_partial emits them at stop.
-    peer.write_all(&[0xFF, 0xFE, 0x00]).await.unwrap();
-    peer.flush().await.unwrap();
-
-    let event = next_notification(&mut rx, Duration::from_secs(2))
-        .await
-        .expect("partial-frame notification");
-    let data = event.data.as_object().unwrap();
-    assert_eq!(data["partial"], json!(true));
-    assert_eq!(data["data"], json!("ff fe 00"));
-    assert_eq!(data["encoding"], json!("hex"));
-
-    let stop = next_notification(&mut rx, Duration::from_secs(2))
-        .await
-        .expect("stop notification");
-    let stop_data = stop.data.as_object().unwrap();
-    assert_eq!(stop_data["stop_reason"], json!("timeout"));
-    // All observed partial bytes were emitted, so bytes_returned is the exact
-    // partial raw length and nothing is reported as truncated.
-    assert_eq!(stop_data["bytes_returned"], json!(3));
-    assert_eq!(stop_data["truncated"], json!(false));
-
-    client.cancel().await.ok();
-}
-
-#[tokio::test]
-async fn subscribe_matched_binary_context_reports_hex_data_and_encoding() {
-    let manager = Arc::new(ConnectionManager::new());
-    let (conn, mut peer) = loopback_connection("loop-sub-match-binary");
-    let connection_id = manager.insert(conn).await.unwrap();
-
-    let server = TestServer::start_with(manager).await;
-    let (client, mut rx) = connect_client(&server).await.unwrap();
-
-    let result = client
-        .peer()
-        .call_tool(tool_request(
-            "subscribe",
-            json!({
-                "connection_id": connection_id,
-                "timeout_ms": 2000,
-                "encoding": "utf8",
-                "match": {
-                    "pattern": "ff",
-                    "config": { "mode": "literal_substring",
-                                "pattern_encoding": "hex",
-                                "context_amount_of_matched_bytes": 16 },
-                },
-            }),
-        ))
-        .await
-        .unwrap();
-    assert_ne!(result.is_error, Some(true), "{result:?}");
-
-    // Raw chunk with a binary match target (0xFF).
-    peer.write_all(&[0xDE, 0xAD, 0xFF]).await.unwrap();
-    peer.flush().await.unwrap();
-
-    // Chunk notification (hex fallback) then the matched stop notification.
-    let event = next_notification(&mut rx, Duration::from_secs(2))
-        .await
-        .expect("chunk notification");
-    assert_eq!(event.data["data"], json!("de ad ff"));
-    assert_eq!(event.data["encoding"], json!("hex"));
-
-    let stop = next_notification(&mut rx, Duration::from_secs(2))
-        .await
-        .expect("stop notification");
-    let stop_data = stop.data.as_object().unwrap();
-    assert_eq!(stop_data["stop_reason"], json!("match_found"));
-    assert_eq!(stop_data["matched"], json!(true));
-    // Shaped context is the full chunk (pre-match + matched bytes).
-    assert_eq!(stop_data["data"], json!("de ad ff"));
-    assert_eq!(stop_data["encoding"], json!("hex"));
-    assert_eq!(stop_data["match_index"], json!(2));
-
-    client.cancel().await.ok();
-}
-
-#[tokio::test]
-async fn read_and_subscribe_same_literal_match_index_over_chunked_stream() {
+async fn read_match_index_over_chunked_stream_preserved() {
     let manager = Arc::new(ConnectionManager::new());
     let (conn, mut peer) = loopback_connection("loop-match-parity");
     let connection_id = manager.insert(conn).await.unwrap();
 
     let server = TestServer::start_with(manager).await;
-    let (client, mut rx) = connect_client(&server).await.unwrap();
+    let (client, _rx) = connect_client(&server).await.unwrap();
 
     // Chunked stream: the literal spans the boundary between two writes.
     peer.write_all(b"ABCD").await.unwrap();
@@ -1439,45 +1045,7 @@ async fn read_and_subscribe_same_literal_match_index_over_chunked_stream() {
     assert_eq!(s["matched"], json!(true), "{s:?}");
     assert_eq!(s["match_index"], json!(6), "{s:?}");
 
-    // subscribe replays the same retained bytes from buffer_start and must
-    // report the same match outcome and index.
-    client
-        .peer()
-        .call_tool(tool_request(
-            "subscribe",
-            json!({
-                "connection_id": connection_id,
-                "from": { "type": "buffer_start" },
-                "timeout_ms": 2000,
-                "match": { "pattern": "OK>" },
-            }),
-        ))
-        .await
-        .unwrap();
-
-    let mut saw_match_stop = false;
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while Instant::now() < deadline {
-        match next_notification(&mut rx, Duration::from_secs(2)).await {
-            Ok(event) => {
-                let data = event.data.as_object().unwrap();
-                if data.get("stop_reason").is_some() {
-                    saw_match_stop = true;
-                    assert_eq!(data["matched"], json!(true), "{data:?}");
-                    assert_eq!(data["match_index"], json!(6), "{data:?}");
-                    break;
-                }
-            }
-            Err(_) => break,
-        }
-    }
-    assert!(
-        saw_match_stop,
-        "subscribe should emit a match stop notification"
-    );
-
-    // No-match parity: a pattern absent from the stream times out without a
-    // match on both tools.
+    // No-match: a pattern absent from the stream times out without a match.
     let result = client
         .peer()
         .call_tool(tool_request(
@@ -1495,38 +1063,6 @@ async fn read_and_subscribe_same_literal_match_index_over_chunked_stream() {
     let s = result.structured_content.expect("structured");
     assert_eq!(s["matched"], json!(false), "{s:?}");
 
-    client
-        .peer()
-        .call_tool(tool_request(
-            "subscribe",
-            json!({
-                "connection_id": connection_id,
-                "timeout_ms": 600,
-                "match": never_match(),
-            }),
-        ))
-        .await
-        .unwrap();
-    let mut saw_no_match_stop = false;
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while Instant::now() < deadline {
-        match next_notification(&mut rx, Duration::from_secs(2)).await {
-            Ok(event) => {
-                let data = event.data.as_object().unwrap();
-                if data.get("stop_reason").is_some() {
-                    saw_no_match_stop = true;
-                    assert_ne!(data.get("matched"), Some(&json!(true)), "{data:?}");
-                    break;
-                }
-            }
-            Err(_) => break,
-        }
-    }
-    assert!(
-        saw_no_match_stop,
-        "subscribe should emit a timeout stop notification"
-    );
-
     client.cancel().await.ok();
 }
 
@@ -1539,16 +1075,10 @@ async fn validation_limits_return_tool_errors_over_http() {
     let server = TestServer::start_with(manager).await;
     let (client, _rx) = connect_client(&server).await.unwrap();
 
-    let cases = [
-        tool_request(
-            "send_break",
-            json!({ "connection_id": connection_id, "duration_ms": MAX_TIMEOUT_MS + 1 }),
-        ),
-        tool_request(
-            "subscribe",
-            json!({ "connection_id": connection_id, "timeout_ms": MAX_TIMEOUT_MS + 1 }),
-        ),
-    ];
+    let cases = [tool_request(
+        "send_break",
+        json!({ "connection_id": connection_id, "duration_ms": MAX_TIMEOUT_MS + 1 }),
+    )];
 
     for request in cases {
         let result = client.peer().call_tool(request).await.unwrap();
@@ -1844,33 +1374,6 @@ async fn write_with_invalid_encoding_returns_tool_error() {
     client.cancel().await.ok();
 }
 
-// ── Gap-fill: unsubscribe on non-existent connection ─────────────────────────
-
-#[tokio::test]
-async fn unsubscribe_on_unknown_connection_returns_was_active_false() {
-    let server = TestServer::start().await;
-    let (client, _rx) = connect_client(&server).await.unwrap();
-
-    let result = client
-        .peer()
-        .call_tool(tool_request(
-            "unsubscribe",
-            json!({ "connection_id": "nonexistent-deadbeef" }),
-        ))
-        .await
-        .unwrap();
-    // unsubscribe on unknown connection should return success with was_active=false
-    assert_ne!(result.is_error, Some(true), "{result:?}");
-    let s = result.structured_content.expect("structured content");
-    assert_eq!(
-        s["was_active"],
-        json!(false),
-        "expected was_active=false for unknown connection: {s:?}"
-    );
-
-    client.cancel().await.ok();
-}
-
 // ── Gap-fill: read silence timeout ───────────────────────────────────────────
 
 #[tokio::test]
@@ -1907,62 +1410,6 @@ async fn read_silence_timeout_stops_with_no_new_rx_timeout() {
         "expected no_new_rx_timeout stop_reason: {s:?}"
     );
     assert_eq!(s["bytes_read"], json!(0));
-
-    client.cancel().await.ok();
-}
-
-// ── Gap-fill: subscribe replaced_previous ────────────────────────────────────
-
-#[tokio::test]
-async fn subscribe_replaced_previous_field_is_correct() {
-    let manager = Arc::new(ConnectionManager::new());
-    let (conn, _peer) = loopback_connection("loop-sub-replace");
-    let connection_id = manager.insert(conn).await.unwrap();
-
-    let server = TestServer::start_with(manager).await;
-    let (client, _rx) = connect_client(&server).await.unwrap();
-
-    // First subscribe
-    let result = client
-        .peer()
-        .call_tool(tool_request(
-            "subscribe",
-            json!({
-                "connection_id": connection_id,
-            }),
-        ))
-        .await
-        .unwrap();
-    assert_ne!(result.is_error, Some(true), "{result:?}");
-    let s = result
-        .structured_content
-        .expect("first subscribe structured");
-    assert_eq!(
-        s["replaced_previous"],
-        json!(false),
-        "first subscribe should have replaced_previous=false: {s:?}"
-    );
-
-    // Second subscribe — replaces first
-    let result = client
-        .peer()
-        .call_tool(tool_request(
-            "subscribe",
-            json!({
-                "connection_id": connection_id,
-            }),
-        ))
-        .await
-        .unwrap();
-    assert_ne!(result.is_error, Some(true), "{result:?}");
-    let s = result
-        .structured_content
-        .expect("second subscribe structured");
-    assert_eq!(
-        s["replaced_previous"],
-        json!(true),
-        "second subscribe should have replaced_previous=true: {s:?}"
-    );
 
     client.cancel().await.ok();
 }
@@ -2081,7 +1528,6 @@ async fn bogus_connection_id_returns_tool_error_for_all_id_tools() {
             json!({ "connection_id": bogus_id, "flow_control": "none" }),
         ),
         ("send_break", json!({ "connection_id": bogus_id })),
-        ("subscribe", json!({ "connection_id": bogus_id })),
     ];
 
     for (tool_name, args) in &cases {
@@ -2095,25 +1541,6 @@ async fn bogus_connection_id_returns_tool_error_for_all_id_tools() {
             Some(true),
             "{tool_name} with bogus id should return tool error: {result:?}"
         );
-    }
-
-    // unsubscribe returns was_active=false for non-existent connection (not an error)
-    {
-        let result = client
-            .peer()
-            .call_tool(tool_request(
-                "unsubscribe",
-                json!({ "connection_id": bogus_id }),
-            ))
-            .await
-            .unwrap();
-        assert_ne!(
-            result.is_error,
-            Some(true),
-            "unsubscribe with bogus id should succeed with was_active=false: {result:?}"
-        );
-        let s = result.structured_content.unwrap();
-        assert_eq!(s["was_active"], json!(false), "{s:?}");
     }
 
     // list_connections does not take connection_id — just verify it succeeds
@@ -2165,7 +1592,6 @@ async fn get_status_returns_config_and_counters() {
     assert_eq!(s["read_ops"], json!(0));
     assert_eq!(s["write_ops"], json!(0));
     assert_eq!(s["truncation_count"], json!(0));
-    assert_eq!(s["notification_drop_count"], json!(0));
     assert!(s["last_activity_ms"].is_null());
     assert!(
         s["port_info"].is_null(),
@@ -2212,7 +1638,6 @@ async fn get_status_returns_config_and_counters() {
     assert_eq!(s["read_ops"], json!(1), "read_ops should be 1: {s:?}");
     assert_eq!(s["write_ops"], json!(1), "write_ops should be 1: {s:?}");
     assert_eq!(s["truncation_count"], json!(0));
-    assert_eq!(s["notification_drop_count"], json!(0));
     assert!(
         !s["last_activity_ms"].is_null(),
         "last_activity_ms should be set after I/O: {s:?}"
@@ -2955,7 +2380,7 @@ async fn controlled_server(
     rx_buffer_size: usize,
 ) -> (
     TestServer,
-    RunningService<RoleClient, NotificationCollector>,
+    RunningService<RoleClient, common::TestClientHandler>,
     String,
     Arc<ControlledState>,
 ) {
@@ -3172,10 +2597,10 @@ async fn capture_boot_cancellation_releases_lines_request_scoped() {
     // level (read_loop.rs) and the wire-level release is proven below.
     handle
         .peer
-        .notify_cancelled(CancelledNotificationParam {
-            request_id: handle.id.clone(),
-            reason: Some("test cancel".into()),
-        })
+        .notify_cancelled(CancelledNotificationParam::new(
+            Some(handle.id.clone()),
+            Some("test cancel".into()),
+        ))
         .await
         .unwrap();
 
@@ -3266,10 +2691,10 @@ async fn capture_boot_cancellation_with_failed_release_retries_cleanup_via_contr
     // state and FAILS; the guard must stay armed.
     handle
         .peer
-        .notify_cancelled(CancelledNotificationParam {
-            request_id: handle.id.clone(),
-            reason: Some("release-failure cancel".into()),
-        })
+        .notify_cancelled(CancelledNotificationParam::new(
+            Some(handle.id.clone()),
+            Some("release-failure cancel".into()),
+        ))
         .await
         .unwrap();
 
@@ -4007,7 +3432,6 @@ fn empty_log_config(port: &str) -> ConnectionConfig {
         protocol: None,
         rx_buffer_size: serial_mcp::limits::DEFAULT_RX_BUFFER_SIZE,
         max_buffered_bytes: 32768,
-        poll_interval_ms: 200,
     }
 }
 
@@ -4611,13 +4035,16 @@ async fn spawned_server_starts_with_capture_dir() {
     let (client, _rx) = common::spawned::spawn_client(&server).await.unwrap();
 
     let info = client.peer_info().expect("peer info");
-    assert_eq!(info.server_info.name, "serial-mcp");
+    assert_eq!(
+        info.server_info.as_ref().expect("server_info present").name,
+        "serial-mcp"
+    );
     let tools = client
         .peer()
         .list_tools(Some(PaginatedRequestParams::default()))
         .await
         .unwrap();
-    assert_eq!(tools.tools.len(), 27);
+    assert_eq!(tools.tools.len(), 25);
 
     client.cancel().await.ok();
 }

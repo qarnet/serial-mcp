@@ -105,6 +105,66 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: python3 -m unittest discover -s scripts/tests -v
 
+  mcp-conformance:
+    # Pinned official MCP conformance suite + Inspector interoperability smoke
+    # against the real HTTP binary, plus the historical rmcp 1.7.0 client gate.
+    # Execution delegates to scripts/test-mcp-compat.sh so local and CI share
+    # ONE executable path: the script owns the exact pinned package
+    # (@modelcontextprotocol/conformance@0.2.0-alpha.10, no floating tags),
+    # the exact scenario sets at their exact protocol versions (never
+    # `--suite all`), the expected-failure baseline, and the pinned Inspector
+    # invocation. The four expected failures in
+    # conformance/expected-failures.yaml are fixture-dependent checks
+    # serial-mcp deliberately cannot satisfy (no fixture endpoints are ever
+    # added to the product). A baseline entry that starts passing fails the
+    # job as stale; any other failure is an unexpected regression.
+    # Inspector is interoperability (NOT conformance): a separate smoke that
+    # drives the exact pinned @modelcontextprotocol/inspector@2.0.0 CLI.
+    # This job only owns environment setup, the 15-minute bound, cleanup, and
+    # report upload.
+    name: MCP conformance + Inspector smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev pkg-config
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@1.97.1
+
+      - name: Report Rust toolchain
+        run: rustc --version --verbose
+
+      - name: Cache cargo registry + build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Setup Node (exact pinned version)
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22.19.0"
+
+      # The shared runner builds the locked binary, runs the focused Rust
+      # gates, builds + runs the historical rmcp 1.7.0 client over stdio and
+      # HTTP, starts the loopback server with a bounded readiness probe, runs
+      # the exact legacy/modern conformance scenario sets, and runs the
+      # Inspector smoke. It stops the server and cleans its own temp dir via
+      # a trap on success, failure, signal, or timeout.
+      - name: Run shared MCP compatibility gate
+        run: bash scripts/test-mcp-compat.sh
+
+      - name: Upload conformance reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: conformance-results
+          path: target/conformance-results/
+          if-no-files-found: warn
+          retention-days: 7
   native-sim:
     name: native_sim firmware + test
     runs-on: ubuntu-latest

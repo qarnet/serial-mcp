@@ -1,8 +1,8 @@
 //! Shared stop-decision controller for all RX operations.
 //!
-//! A single `RxStopController` evaluates stop conditions for both `read` and
-//! `subscribe`. Same inputs yield the same stop reason regardless of which
-//! tool calls in.
+//! A single `RxStopController` evaluates stop conditions for `read` (and the
+//! `transact` read half / `capture_boot` read pipeline). Same inputs yield
+//! the same stop reason regardless of which call path drives it.
 //!
 //! Silence-timeout support (`no_new_rx_timeout_ms`) lets operations stop
 //! after a period of no incoming data.
@@ -23,9 +23,6 @@
 //! Error stops (something went wrong):
 //! - `connection_closed` — underlying serial port closed
 //! - `cancelled`        — MCP client cancelled the request
-//! - `read_error`       — I/O error on the serial port
-//! - `channel_closed`   — RX pump channel closed (internal)
-//! - `peer_disconnected` — MCP peer went away during streaming
 
 use std::time::Instant;
 
@@ -53,8 +50,9 @@ pub struct RxStopOutcome {
 
 /// Shared stop-decision controller for all RX operations.
 ///
-/// Both `read` and `subscribe` call into the same controller instance for
-/// the duration of one operation. The controller tracks:
+/// All RX read paths (`read`, `transact` read half, `capture_boot`) call
+/// into the same controller instance for the duration of one operation. The
+/// controller tracks:
 /// - deadline (from `timeout_ms`)
 /// - silence deadline (from `no_new_rx_timeout_ms`)
 /// - byte counters (observed and returned)
@@ -200,32 +198,6 @@ impl RxStopController {
         RxStopDecision::Continue
     }
 
-    /// Record a data chunk without checking stop conditions (for settle phase
-    /// or streaming data notifications where the caller decides when to stop).
-    ///
-    /// Only updates byte counters; does not evaluate matcher or max_buffered_bytes.
-    /// The caller must call `check_timeout` or `check_max_buffered_bytes` next.
-    pub fn record_data(&mut self, chunk_len: usize, buffered_len: usize) {
-        self.bytes_observed += chunk_len;
-        self.bytes_returned = buffered_len;
-    }
-
-    /// Check whether the buffer has reached `max_buffered_bytes`.
-    ///
-    /// Useful for settle-phase evaluation where data was recorded separately
-    /// from the stop check.
-    pub fn check_max_buffered_bytes(&self) -> RxStopDecision {
-        if self.bytes_returned >= self.max_bytes && self.bytes_observed > 0 {
-            RxStopDecision::Stop(RxStopOutcome {
-                meta: RxStopMetadata::max_buffered_bytes(self.bytes_observed, self.bytes_returned),
-                matched: self.matched,
-                match_index: self.match_index,
-            })
-        } else {
-            RxStopDecision::Continue
-        }
-    }
-
     /// Produce the stop outcome for a connection-closed event.
     pub fn connection_closed(&self) -> RxStopOutcome {
         RxStopOutcome {
@@ -235,38 +207,10 @@ impl RxStopController {
         }
     }
 
-    /// Produce the stop outcome for a channel-closed event (pump exited).
-    pub fn channel_closed(&self) -> RxStopOutcome {
-        RxStopOutcome {
-            meta: RxStopMetadata::channel_closed()
-                .with_bytes(self.bytes_observed, self.bytes_returned),
-            matched: self.matched,
-            match_index: self.match_index,
-        }
-    }
-
     /// Produce the stop outcome for a client-initiated cancellation.
     pub fn cancelled(&self) -> RxStopOutcome {
         RxStopOutcome {
             meta: RxStopMetadata::cancelled().with_bytes(self.bytes_observed, self.bytes_returned),
-            matched: self.matched,
-            match_index: self.match_index,
-        }
-    }
-
-    /// Produce the stop outcome for a serial-port read error.
-    pub fn read_error(&self) -> RxStopOutcome {
-        RxStopOutcome {
-            meta: RxStopMetadata::read_error().with_bytes(self.bytes_observed, self.bytes_returned),
-            matched: self.matched,
-            match_index: self.match_index,
-        }
-    }
-
-    /// Produce the stop outcome for a peer disconnected during streaming.
-    pub fn peer_disconnected(&self) -> RxStopOutcome {
-        RxStopOutcome {
-            meta: RxStopMetadata::peer_disconnected(self.bytes_observed),
             matched: self.matched,
             match_index: self.match_index,
         }
@@ -327,10 +271,9 @@ impl RxStopController {
 
 /// Classify a stop reason as "normal" (not an error).
 ///
-/// Normal stop reasons are returned as successful results from `read` and
-/// as informational notifications from `subscribe`. Error stop reasons
-/// are returned as `Err` from `read` and surfaced differently
-/// in `subscribe` final notifications.
+/// Normal stop reasons are returned as successful results from `read`.
+/// Error stop reasons are not normal stops and are surfaced through the
+/// result's `stop_reason` / `error` fields instead.
 pub fn is_normal_stop(reason: RxStopReason) -> bool {
     matches!(
         reason,
@@ -427,7 +370,7 @@ mod tests {
     fn connection_closed_outcome() {
         let start = Instant::now();
         let mut ctrl = RxStopController::new(start, None, 1024, None);
-        ctrl.record_data(100, 80);
+        ctrl.push_data(100, 80, None);
         let outcome = ctrl.connection_closed();
         assert_eq!(outcome.meta.stop_reason, RxStopReason::ConnectionClosed);
         assert_eq!(outcome.meta.bytes_observed, 100);
@@ -435,32 +378,13 @@ mod tests {
     }
 
     #[test]
-    fn channel_closed_outcome() {
-        let start = Instant::now();
-        let mut ctrl = RxStopController::new(start, None, 1024, None);
-        ctrl.record_data(50, 50);
-        let outcome = ctrl.channel_closed();
-        assert_eq!(outcome.meta.stop_reason, RxStopReason::ChannelClosed);
-        assert_eq!(outcome.meta.bytes_observed, 50);
-    }
-
-    #[test]
     fn cancelled_outcome() {
         let start = Instant::now();
         let mut ctrl = RxStopController::new(start, None, 1024, None);
-        ctrl.record_data(30, 30);
+        ctrl.push_data(30, 30, None);
         let outcome = ctrl.cancelled();
         assert_eq!(outcome.meta.stop_reason, RxStopReason::Cancelled);
         assert_eq!(outcome.meta.bytes_observed, 30);
-    }
-
-    #[test]
-    fn read_error_outcome() {
-        let start = Instant::now();
-        let ctrl = RxStopController::new(start, None, 1024, None);
-        let outcome = ctrl.read_error();
-        assert_eq!(outcome.meta.stop_reason, RxStopReason::ReadError);
-        assert!(!outcome.matched);
     }
 
     #[test]
@@ -474,20 +398,10 @@ mod tests {
     }
 
     #[test]
-    fn peer_disconnected_outcome() {
-        let start = Instant::now();
-        let mut ctrl = RxStopController::new(start, None, 1024, None);
-        ctrl.record_data(200, 200);
-        let outcome = ctrl.peer_disconnected();
-        assert_eq!(outcome.meta.stop_reason, RxStopReason::PeerDisconnected);
-        assert_eq!(outcome.meta.bytes_observed, 200);
-    }
-
-    #[test]
     fn data_complete_outcome() {
         let start = Instant::now();
         let mut ctrl = RxStopController::new(start, None, 1024, None);
-        ctrl.record_data(42, 42);
+        ctrl.push_data(42, 42, None);
         let outcome = ctrl.data_complete();
         assert_eq!(outcome.meta.stop_reason, RxStopReason::DataComplete);
         assert!(!outcome.matched);
@@ -502,10 +416,6 @@ mod tests {
 
         assert!(!is_normal_stop(RxStopReason::ConnectionClosed));
         assert!(!is_normal_stop(RxStopReason::Cancelled));
-        assert!(!is_normal_stop(RxStopReason::ReadError));
-        assert!(!is_normal_stop(RxStopReason::ChannelClosed));
-        assert!(!is_normal_stop(RxStopReason::PeerDisconnected));
-        assert!(!is_normal_stop(RxStopReason::BudgetExhausted));
     }
 
     #[test]
@@ -530,7 +440,7 @@ mod tests {
         let mut ctrl = RxStopController::new(start, Some(0), 1024, None);
         // Record some data but don't find match yet (this simulates
         // a scenario where data arrived before timeout was checked).
-        ctrl.record_data(5, 5);
+        ctrl.push_data(5, 5, None);
         // Now check timeout — should include bytes info.
         let decision = ctrl.check_timeout();
         if let RxStopDecision::Stop(outcome) = decision {
@@ -540,31 +450,6 @@ mod tests {
         } else {
             panic!("expected Stop decision for expired deadline");
         }
-    }
-
-    #[test]
-    fn check_max_buffered_bytes_after_record_data() {
-        let start = Instant::now();
-        let mut ctrl = RxStopController::new(start, None, 10, None);
-        ctrl.record_data(10, 10);
-        let decision = ctrl.check_max_buffered_bytes();
-        assert!(matches!(decision, RxStopDecision::Stop(_)));
-        if let RxStopDecision::Stop(outcome) = decision {
-            assert_eq!(outcome.meta.stop_reason, RxStopReason::MaxBufferedBytes);
-        }
-    }
-
-    #[test]
-    fn record_data_does_not_trigger_stops() {
-        let start = Instant::now();
-        let mut ctrl = RxStopController::new(start, None, 5, None);
-        ctrl.record_data(100, 100);
-        // record_data just updates counters; caller must check separately.
-        assert_eq!(ctrl.bytes_observed(), 100);
-        assert_eq!(ctrl.bytes_returned(), 100);
-        // But check_max_buffered_bytes should now stop.
-        let decision = ctrl.check_max_buffered_bytes();
-        assert!(matches!(decision, RxStopDecision::Stop(_)));
     }
 
     #[test]
@@ -628,7 +513,7 @@ mod tests {
     fn silence_timeout_with_data_produces_bytes_in_outcome() {
         let start = Instant::now();
         let mut ctrl = RxStopController::new(start, None, 1024, Some(0));
-        ctrl.record_data(100, 80);
+        ctrl.push_data(100, 80, None);
         let decision = ctrl.check_silence_timeout();
         if let RxStopDecision::Stop(outcome) = decision {
             assert_eq!(outcome.meta.stop_reason, RxStopReason::NoNewRxTimeout);
@@ -681,31 +566,6 @@ mod tests {
         ctrl.notify_data_received();
         assert!(matches!(
             ctrl.check_silence_timeout(),
-            RxStopDecision::Continue
-        ));
-    }
-
-    #[test]
-    fn check_max_buffered_bytes_continues_when_buffer_not_full() {
-        let start = Instant::now();
-        let mut ctrl = RxStopController::new(start, None, 100, None);
-        // bytes_observed > 0 but bytes_returned < max_bytes — must continue.
-        ctrl.record_data(5, 5);
-        assert!(matches!(
-            ctrl.check_max_buffered_bytes(),
-            RxStopDecision::Continue
-        ));
-    }
-
-    #[test]
-    fn check_max_buffered_bytes_continues_when_no_data_observed() {
-        let start = Instant::now();
-        // max_bytes=0 means unlimited in push_data, but check_max_buffered_bytes
-        // still requires bytes_observed > 0 before stopping.
-        let ctrl = RxStopController::new(start, None, 0, None);
-        // bytes_returned(0) >= max_bytes(0) is true, but bytes_observed==0 → Continue.
-        assert!(matches!(
-            ctrl.check_max_buffered_bytes(),
             RxStopDecision::Continue
         ));
     }

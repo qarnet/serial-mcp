@@ -6,7 +6,7 @@ GitHub-hosted runners.
 
 ## Question
 
-The `native_sim` e2e suite is Unix-only (PTY-based; 57 tests ignored on the
+The `native_sim` e2e suite is Unix-only (PTY-based; 43 tests ignored on the
 Windows runner). Windows CI only compiles and unit-tests. Can Windows real
 serial E2E be added, e.g. with a com0com-style virtual port pair?
 

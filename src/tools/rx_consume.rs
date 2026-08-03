@@ -1,10 +1,9 @@
-//! Shared RX frame-consumption logic for `read` and `subscribe`.
+//! Shared RX frame-consumption logic for `read`.
 //!
-//! The two tools share frame decoding + per-frame matching + `max_frames`, but
-//! differ in the per-frame ACTION (read collects frames; subscribe emits
-//! notifications). [`RxFrameSink`] captures that action; [`consume_frames`]
-//! drives it. The raw (no-framing) path is intentionally NOT shared — read and
-//! subscribe differ there semantically (scan extent).
+//! The tools share frame decoding + per-frame matching + `max_frames`, but
+//! differ in the per-frame ACTION (read collects and notifies frames). [`RxFrameSink`]
+//! captures that action; [`consume_frames`] drives it. The raw (no-framing) path
+//! is intentionally NOT shared — read differs there semantically (scan extent).
 
 use crate::framing::{Frame, FrameDecodeError, FrameDecoder};
 use crate::match_config::{MatchResult, Matcher};
@@ -17,7 +16,7 @@ use tracing;
 pub enum SinkFlow {
     /// Keep processing frames.
     Continue,
-    /// Stop processing with this reason (e.g. subscribe stops at its match, or a
+    /// Stop processing with this reason (e.g. read stops at its match, or a
     /// peer disconnected while emitting).
     Stop(RxStopReason),
 }
@@ -34,13 +33,12 @@ pub enum FrameOutcome {
     DecodeError(FrameDecodeError),
 }
 
-/// Per-frame output action. `read` collects frames; `subscribe` emits
-/// notifications.
+/// Per-frame output action. `read` collects and notifies frames.
 #[async_trait::async_trait]
 pub trait RxFrameSink {
     /// Handle one decoded frame. `matched` / `match_index` come from the
     /// driver's per-frame matcher run. Return [`SinkFlow::Stop`] to halt
-    /// processing (subscribe stops at its match; read returns `Continue`).
+    /// processing (read stops at its match; read returns `Continue` when continuing).
     async fn on_frame(
         &mut self,
         frame: Frame,
@@ -67,7 +65,7 @@ pub async fn consume_frames<S: RxFrameSink>(
     let frames = outcome.frames;
     // Dispatch frames decoded before the error FIRST, then return the
     // decode error if one occurred. This preserves frames-before-error
-    // for both read (collects them) and subscribe (notifies them).
+    // for read (collects and notifies them).
     for frame in frames {
         *frames_seen += 1;
         let match_index = match matcher.as_mut() {
@@ -135,8 +133,7 @@ pub fn disconnect_state(conn: &SerialConnection, ctrl: &mut RxStopController) ->
 /// corresponding `RxStopOutcome`. For `DecodeError`, records the error
 /// text in `frame_error_msg` and emits the `error!` log line.
 ///
-/// Shared by `read_bytes_from_ring` (read_loop.rs) and
-/// `stream_rx_from_ring` (stream_ops.rs) so the FrameOutcome dispatch
+/// Shared by `read_bytes_from_ring` (`read_loop.rs`) so the FrameOutcome dispatch
 /// lives in one place.
 pub(crate) fn frame_outcome_to_stop(
     outcome: FrameOutcome,
@@ -172,7 +169,6 @@ pub(crate) fn frame_outcome_to_stop(
                     match_index: match_offset,
                 })
             }
-            crate::rx_metadata::RxStopReason::PeerDisconnected => Some(ctrl.peer_disconnected()),
             other => {
                 tracing::warn!(
                     "unexpected sink stop reason {other:?} on {conn_id}; treating as connection_closed"
@@ -305,8 +301,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn consume_frames_match_takes_priority_over_max_frames_subscribe_semantics() {
-        // subscribe: SinkStop(MatchFound) wins over MaxFrames.
+    async fn consume_frames_match_takes_priority_over_max_frames() {
+        // SinkStop(MatchFound) wins over MaxFrames.
         let mut dec = line_decoder();
         let mut matcher = Matcher::new_literal(b"b".to_vec());
         let mut seen = 0;

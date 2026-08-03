@@ -12,7 +12,10 @@ reading this before talking to a device, read at least the
 
 ## Framing and parsers at a glance
 
-Every `read`, `subscribe`, and `write` call can carry three sibling fields:
+RX fields `rx_framing`, `rx_parser`, and `protocol` apply on `read`, the
+`transact` read half, and `capture_boot`; TX fields `tx_framing` and
+`protocol` apply on `write` and the `transact` write half. The sibling
+fields are:
 
 - **`rx_framing` / `tx_framing`** — how the byte stream is split into
   frames. RX modes: `line`, `delimiter`, `length_prefixed`, `start_end`,
@@ -89,7 +92,7 @@ or binary packet streams where the delimiter must never appear in the data.
 ```
 
 A malformed SLIP escape sequence (0xDB followed by anything other than 0xDC
-or 0xDD) is a **stream-fatal** decode error: the call/subscription stops
+or 0xDD) is a **stream-fatal** decode error: the call/read pipeline stops
 with `stop_reason: "framing_error"`, returning the frames decoded before
 the error as a partial result. See [Checksum and error behavior](#checksum-and-error-behavior).
 
@@ -194,7 +197,7 @@ explicit `rx_parser` was given). This lets you override one layer without
 rewriting the whole bundle.
 
 The resolution lives in `src/precedence.rs` (`resolve_field`) and is shared
-by `write`, `read`, and `subscribe` so the three cannot drift.
+by `write`, `read`, `transact`, and `capture_boot` so these cannot drift.
 
 ## Checksum and error behavior
 
@@ -206,8 +209,8 @@ A single corrupted sentence in a burst does **not** abort the call. The
 frame is:
 
 - **dropped** (not emitted, not counted in `Frame.index`),
-- **counted** in `ReadResult.frames_dropped` (read) or the subscription's
-  final stop notification `frames_dropped` field (subscribe),
+- **counted** in `ReadResult.frames_dropped` (`TransactResult.read` and
+  `CaptureBootResult.read` carry the same result shape),
 - logged at `WARN` with the expected/received checksum values,
 
 and decoding continues with the next frame. `Frame.index` stays contiguous
@@ -226,10 +229,10 @@ and nothing is dropped.
 These mean the byte stream itself is corrupt, not just one frame's
 payload. The call stops with `stop_reason: "framing_error"` and returns
 the frames/bytes decoded **before** the error as a partial result. `read`
-returns a normal tool result (not `is_error`) carrying the partial data;
-`subscribe` emits a final notification with `stop_reason: "framing_error"`
-and an `error` field. The frames already decoded this chunk are preserved
-in both cases — they are not discarded.
+returns a normal tool result (not `is_error`) carrying the partial data and
+an `error` field; `TransactResult.read` and `CaptureBootResult.read` carry
+the same shape. The frames already decoded this chunk are preserved — they
+are not discarded.
 
 Summary table:
 
@@ -253,11 +256,6 @@ Summary table:
   lossless fallback. Each frame is encoded independently from the requested
   encoding, so a valid UTF-8 frame preceding malformed binary data stays
   UTF-8 while the raw bytes use hex.
-- `SubscribeStopNotification.encoding` — effective encoding of the matched
-  `data` context; serialized only when `data` is present. A successful
-  fallback emits the normal payload with `encoding: "hex"` and never uses
-  `SubscribeEncodingErrorNotification`; that error notification is retained
-  for a true encode+hex failure only.
 - `ReadResult.stop_reason` — includes `"framing_error"` for stream-fatal
   decode errors. Not a normal stop; the result still carries partial data.
 - `Frame.index` — 0-based, contiguous across dropped frames and across

@@ -797,7 +797,6 @@ pub async fn get_status(
         read_ops: status.read_ops,
         write_ops: status.write_ops,
         truncation_count: status.truncation_count,
-        notification_drop_count: status.notification_drop_count,
         port_info: status.port_info,
         state: status.state,
         reconnect_attempts: status.reconnect_attempts,
@@ -962,7 +961,6 @@ pub async fn configure(
         *conn.reconnect_policy.lock().expect("poisoned") = args.defaults.reconnect_policy.clone();
         // Apply scalar defaults (Atomic).
         conn.set_max_buffered_bytes_default(args.defaults.max_buffered_bytes);
-        conn.set_poll_interval_ms_default(args.defaults.poll_interval_ms);
         // log_capacity/log_enabled: LogBuffer has NO live setters. Documented as
         // profile-only. rx_buffer_size: ring is fixed at open. Also profile-only.
 
@@ -1003,7 +1001,7 @@ pub async fn save_profile(
     // Snapshot the connection's full effective defaults from the shared
     // helper (never a handler-local session manager); it covers serial
     // parameters, framing/parser/protocol defaults, the stored RX buffer
-    // size, read/subscribe defaults, reconnect policy, log config, and the
+    // size, read defaults, reconnect policy, log config, and the
     // connection name.
     let defaults = conn.effective_defaults();
 
@@ -1358,7 +1356,6 @@ mod tests {
                 protocol: None,
                 rx_buffer_size: crate::limits::DEFAULT_RX_BUFFER_SIZE,
                 max_buffered_bytes: 32768,
-                poll_interval_ms: 200,
             },
             Box::new(FakeIo),
         );

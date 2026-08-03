@@ -5,7 +5,6 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::framing::ParsedFrame;
 use crate::serial::{ConnectionSummary, FlowControl, FlushTarget, PortInfo};
 
 // ---- Argument structs ------------------------------------------------------
@@ -49,17 +48,17 @@ pub struct OpenArgs {
     /// Default TX framing applied when subsequent `write` calls omit `tx_framing`.
     #[serde(default)]
     pub tx_framing: Option<crate::framing::TxFramingConfig>,
-    /// Default RX framing applied when subsequent `read`/`subscribe` omit `rx_framing`.
+    /// Default RX framing applied when subsequent `read` omits `rx_framing`.
     #[serde(default)]
     pub rx_framing: Option<crate::framing::RxFramingConfig>,
-    /// Default RX parser applied when subsequent `read`/`subscribe` omit `rx_parser`.
+    /// Default RX parser applied when subsequent `read` omits `rx_parser`.
     #[serde(default)]
     pub rx_parser: Option<crate::framing::ParserConfig>,
     /// Default protocol preset. Expands to fill framing/parser gaps.
     #[serde(default)]
     pub protocol: Option<crate::framing::ProtocolPreset>,
     /// Per-connection RX ring buffer size in bytes. The ring retains
-    /// this much RX history between reads/subscribes. Default 256 KiB
+    /// this much RX history between reads. Default 256 KiB
     /// (~23s of 115200-baud traffic). Open-time only; reopen to resize.
     /// Validated against the buffer budget pool and a 16 MiB ceiling.
     #[serde(default)]
@@ -70,11 +69,6 @@ pub struct OpenArgs {
     #[serde(default)]
     #[schemars(schema_with = "crate::schema_helpers::option_uint_schema")]
     pub max_buffered_bytes: Option<usize>,
-    /// Default poll interval for `subscribe` in milliseconds.
-    /// Default 200.
-    #[serde(default)]
-    #[schemars(schema_with = "crate::schema_helpers::option_uint_schema")]
-    pub poll_interval_ms: Option<u64>,
     /// Automatic profile-session mode. Default `auto`: bare open reuses the
     /// most recently used high-confidence profile or creates a durable
     /// generated profile for a new high-confidence device; weak or ambiguous
@@ -181,13 +175,11 @@ pub struct SendBreakArgs {
     pub duration_ms: u64,
 }
 
-/// Where to start reading from, shared by `read` and `subscribe`.
+/// Where to start reading from.
 ///
 /// Wire format: `{"type": "now"}`, `{"type": "cursor"}`,
 /// `{"type": "buffer_start"}`, or `{"type": "offset", "offset": N}`.
-/// Each tool resolves `None` to its own default: `read` defaults to
-/// `Cursor` (advances the shared cursor), `subscribe` defaults to `Now`
-/// (live edge, does not move the shared cursor).
+/// Read defaults to `Cursor` (advances the shared cursor).
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type")]
 pub enum ReadFrom {
@@ -206,55 +198,6 @@ pub enum ReadFrom {
         #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
         offset: u64,
     },
-}
-
-#[derive(Debug, Serialize, Deserialize, JsonSchema)]
-pub struct SubscribeArgs {
-    pub connection_id: String,
-    /// Where to start reading from. `{"type":"now"}` (default) — live edge,
-    /// `{"type":"cursor"}` — shared read cursor, `{"type":"buffer_start"}` —
-    /// oldest retained byte, or `{"type":"offset","offset":N}` — absolute
-    /// stream offset. Replayed history flows through the same framing/match
-    /// pipeline as live data.
-    #[serde(default)]
-    pub from: Option<ReadFrom>,
-    #[serde(default)]
-    #[schemars(schema_with = "crate::schema_helpers::option_timeout_ms_schema")]
-    pub timeout_ms: Option<u64>,
-    /// Silence timeout in milliseconds. When set, the subscription stops if no
-    /// new data arrives within this window. The timer starts immediately and
-    /// resets on each received byte. Omitted or `null` means disabled. `0` is
-    /// invalid.
-    #[serde(default)]
-    #[schemars(schema_with = "crate::schema_helpers::option_positive_timeout_ms_schema")]
-    pub no_new_rx_timeout_ms: Option<u64>,
-    #[serde(default = "default_encoding")]
-    pub encoding: String,
-    /// Optional match configuration. When present, the stream detects the
-    /// first match and emits a final stop notification with `matched=true`
-    /// and `match_index`, then terminates.
-    #[serde(default)]
-    pub r#match: Option<crate::match_config::MatchRequest>,
-    /// Optional RX frame decoder configuration. When present, the stream emits
-    /// one notification per decoded frame (instead of per raw chunk). Can
-    /// be combined with `match`.
-    #[serde(default)]
-    pub rx_framing: Option<crate::framing::RxFramingConfig>,
-    /// Optional RX parser configuration. When present, each decoded frame's
-    /// content is interpreted (AT commands, JSON lines, shell prompts). Sibling
-    /// to `rx_framing`; the parser operates on frames produced by `rx_framing`.
-    #[serde(default)]
-    pub rx_parser: Option<crate::framing::ParserConfig>,
-    /// Optional protocol preset. When set, fills in default `rx_framing`
-    /// and `rx_parser` for the named protocol. Explicit fields override
-    /// the preset's corresponding component.
-    #[serde(default)]
-    pub protocol: Option<crate::framing::ProtocolPreset>,
-}
-
-#[derive(Debug, Serialize, Deserialize, JsonSchema)]
-pub struct UnsubscribeArgs {
-    pub connection_id: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -463,8 +406,8 @@ pub struct ReadResult {
     pub elapsed_ms: u64,
     /// Why the operation stopped. One of: `data_complete`, `timeout`,
     /// `match_found`, `max_buffered_bytes`, `no_new_rx_timeout`,
-    /// `connection_closed`, `cancelled`, `read_error`, `channel_closed`,
-    /// `peer_disconnected`, `budget_exhausted`, `max_frames`, `framing_error`.
+    /// `connection_closed`, `cancelled`, `max_frames`, `framing_error`,
+    /// `drained`.
     pub stop_reason: String,
     /// `true` when `bytes_returned < bytes_observed` because the result
     /// data was capped (e.g. `max_buffered_bytes` limit exceeded observed
@@ -507,8 +450,7 @@ pub struct ReadResult {
     pub frames_dropped: usize,
     /// Framing/decode error message. Set when `stop_reason` is
     /// `framing_error` (a stream-fatal SLIP malformed escape or COBS
-    /// invalid code); `null` for all other stop reasons. Parity with
-    /// subscribe's final-notification `error` field.
+    /// invalid code); `null` for all other stop reasons.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     /// Absolute stream offset where this read's data starts (clamped to
@@ -589,151 +531,6 @@ pub struct SendBreakResult {
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
-pub struct SubscribeResult {
-    pub connection_id: String,
-    pub name: Option<String>,
-    /// The requested encoding echoed back at subscription start. Per-payload
-    /// notifications carry their own effective `encoding` (which may fall
-    /// back to `"hex"` per chunk/frame).
-    pub encoding: String,
-    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
-    pub max_buffered_bytes: usize,
-    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
-    pub poll_interval_ms: u64,
-    pub replaced_previous: bool,
-}
-
-/// Per-chunk notification emitted by `subscribe` while streaming. Sent
-/// as the `data` field of a `notifications/message` event with logger
-/// `"serial:<connection_id>"`.
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct SubscribeChunkNotification {
-    pub connection_id: String,
-    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
-    pub bytes_read: usize,
-    /// Effective encoding of `data`: the requested encoding on direct
-    /// success, `"hex"` after a lossless fallback.
-    pub encoding: String,
-    pub data: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(schema_with = "crate::schema_helpers::option_uint_schema")]
-    pub bytes_lost: Option<u64>,
-}
-
-/// Per-frame notification emitted by `subscribe` when framing is active.
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct SubscribeFrameNotification {
-    pub connection_id: String,
-    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
-    pub frame_index: usize,
-    pub frame_type: String,
-    /// Effective encoding of `data`: the requested encoding on direct
-    /// success, `"hex"` after a lossless fallback.
-    pub encoding: String,
-    pub data: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub parsed: Option<ParsedFrame>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub matched: Option<bool>,
-}
-
-/// Per-chunk error notification emitted by `subscribe` when a chunk cannot
-/// be represented in the requested encoding AND the lossless hex fallback
-/// also fails (effectively unreachable — hex is total — but preserved).
-/// A successful hex fallback does NOT use this notification: the chunk is
-/// emitted normally with `encoding: "hex"` instead.
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct SubscribeEncodingErrorNotification {
-    pub connection_id: String,
-    pub encoding_error: bool,
-    pub encoding: String,
-    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
-    pub bytes_dropped: usize,
-    pub reason: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(schema_with = "crate::schema_helpers::option_uint_schema")]
-    pub bytes_lost: Option<u64>,
-}
-
-/// Per-frame partial-flush notification emitted by `subscribe` at stop
-/// time when a partial frame remains in the decoder.
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct SubscribePartialFrameNotification {
-    pub connection_id: String,
-    pub partial: bool,
-    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
-    pub frame_index: usize,
-    pub frame_type: String,
-    /// Effective encoding of `data`: the requested encoding on direct
-    /// success, `"hex"` after a lossless fallback.
-    pub encoding: String,
-    pub data: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub parsed: Option<ParsedFrame>,
-}
-
-/// Final stop notification emitted by `subscribe` when the stream ends.
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct SubscribeStopNotification {
-    pub connection_id: String,
-    pub stop_reason: String,
-    pub truncated: bool,
-    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
-    pub bytes_observed: usize,
-    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
-    pub bytes_returned: usize,
-    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
-    pub elapsed_ms: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(schema_with = "crate::schema_helpers::option_uint_schema")]
-    pub timeout_ms: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(schema_with = "crate::schema_helpers::option_uint_schema")]
-    pub no_new_rx_timeout_ms: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(schema_with = "crate::schema_helpers::option_uint_schema")]
-    pub from_offset: Option<u64>,
-    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
-    pub next_offset: u64,
-    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
-    pub bytes_lost: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub matched: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(schema_with = "crate::schema_helpers::option_uint_schema")]
-    pub match_index: Option<usize>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(schema_with = "crate::schema_helpers::option_uint_schema")]
-    pub match_frame_index: Option<usize>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub data: Option<String>,
-    /// Effective encoding of `data` (`"hex"` when the requested encoding
-    /// could not represent the matched context and the payload fell back to
-    /// exact spaced hex). Serialized only when `data` is present.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub encoding: Option<String>,
-    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
-    pub frames_emitted: usize,
-    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
-    pub frames_dropped: usize,
-    /// Ring start offset (new in 0.8.0 — matches ReadResult's start_offset).
-    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
-    pub start_offset: u64,
-    /// Ring end offset (new in 0.8.0 — matches ReadResult's end_offset).
-    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
-    pub end_offset: u64,
-}
-
-#[derive(Debug, Serialize, Deserialize, JsonSchema)]
-pub struct UnsubscribeResult {
-    pub connection_id: String,
-    pub name: Option<String>,
-    pub was_active: bool,
-}
-
-#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct GetStatusResult {
     pub connection_id: String,
     pub name: Option<String>,
@@ -758,8 +555,6 @@ pub struct GetStatusResult {
     pub write_ops: u64,
     #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
     pub truncation_count: u64,
-    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
-    pub notification_drop_count: u64,
     /// OS-level port identity captured at open time. `null` for connections
     /// without identity data (e.g. loopback tests).
     pub port_info: Option<crate::serial::PortInfo>,
@@ -850,10 +645,10 @@ pub fn default_break_duration_ms() -> u64 {
 /// - `profile` mode: write defaults to a named profile in the profiles TOML.
 ///   Applies to future `open_profile` calls. Does NOT touch live connections.
 /// - `connection` mode: mutate defaults on a live connection (the four
-///   framing defaults + reconnect_policy + max_buffered_bytes +
-///   poll_interval_ms). Does NOT persist to disk. `rx_buffer_size`,
-///   serial-line params, `log_capacity`, and `log_enabled` only apply via
-///   profile + reopen (LogBuffer has no live setter for capacity/enabled).
+///   framing defaults + reconnect_policy + max_buffered_bytes). Does NOT
+///   persist to disk. `rx_buffer_size`, serial-line params,
+///   `log_capacity`, and `log_enabled` only apply via profile + reopen
+///   (LogBuffer has no live setter for capacity/enabled).
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ConfigureArgs {
     /// Profile name to write (profile mode), or connection name to mutate

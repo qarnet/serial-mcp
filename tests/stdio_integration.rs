@@ -7,13 +7,14 @@
 use rmcp::{
     model::PaginatedRequestParams,
     transport::{child_process::TokioChildProcess, ConfigureCommandExt},
-    ServiceExt,
+    ClientServiceExt, ServiceExt,
 };
+use serde_json::json;
 use tempfile::TempDir;
 use tokio::process::Command;
 
 mod common;
-use common::EXPECTED_TOOLS;
+use common::{TestProtocol, EXPECTED_TOOLS};
 
 /// Start a stdio server child with an isolated temporary `--profiles-path`
 /// so the test never touches the user's actual default profile config.
@@ -40,17 +41,56 @@ async fn start_stdio_client() -> (
     (client, profiles_dir)
 }
 
+/// Start a stdio server child and connect an explicit client for one exact
+/// protocol version: `2026-07-28` uses the discover lifecycle
+/// (self-contained per-request `_meta`), `2025-11-25` the initialize
+/// lifecycle. The common [`common::VersionedClientHandler`] serves both
+/// modes with one return type. Returns the running client plus the tempdir
+/// that must stay alive for the client's lifetime.
+async fn start_stdio_protocol_client(
+    protocol: TestProtocol,
+) -> (
+    rmcp::service::RunningService<rmcp::service::RoleClient, common::VersionedClientHandler>,
+    TempDir,
+) {
+    common::binaries::ensure_serial_mcp_built()
+        .expect("serial-mcp binary available for stdio tests");
+
+    let profiles_dir = TempDir::new().expect("temp dir for isolated stdio profile store");
+    let profiles_path = profiles_dir.path().join("profiles.toml");
+
+    let cmd = Command::new(common::binaries::serial_mcp_bin()).configure(|cmd| {
+        cmd.env("RUST_LOG", "off");
+        cmd.arg("--profiles-path").arg(&profiles_path);
+    });
+
+    let transport = TokioChildProcess::new(cmd).expect("spawn stdio server");
+
+    let client = common::VersionedClientHandler::new(protocol)
+        .serve_with_lifecycle(transport, protocol.lifecycle())
+        .await
+        .expect("versioned stdio client");
+    (client, profiles_dir)
+}
+
 #[tokio::test]
 async fn stdio_initialize_handshake_succeeds() {
     let (client, _profiles_dir) = start_stdio_client().await;
     let info = client.peer_info();
     assert!(info.is_some(), "no peer_info returned");
-    assert_eq!(info.unwrap().server_info.name, "serial-mcp");
+    assert_eq!(
+        info.unwrap()
+            .server_info
+            .as_ref()
+            .expect("server_info present")
+            .name,
+        "serial-mcp"
+    );
     client.cancel().await.ok();
 }
 
 #[tokio::test]
-async fn stdio_list_tools_returns_all_twenty_seven_tools() {
+async fn stdio_list_tools_returns_all_twenty_five_tools() {
     let (client, _profiles_dir) = start_stdio_client().await;
 
     let result = client
@@ -89,6 +129,128 @@ async fn stdio_list_resources_returns_statics_and_templates() {
         "expected 3 resource templates (connection + raw + log)"
     );
 
+    client.cancel().await.ok();
+}
+
+#[tokio::test]
+async fn stdio_2026_07_28_discovery_lifecycle_negotiates_exact_version() {
+    let (client, _profiles_dir) = start_stdio_protocol_client(TestProtocol::V2026_07_28).await;
+    let info = client.peer_info().expect("2026-07-28 peer info");
+    assert_eq!(
+        info.protocol_version,
+        rmcp::model::ProtocolVersion::V_2026_07_28,
+        "2026-07-28 discover lifecycle must negotiate 2026-07-28"
+    );
+
+    let result = client
+        .peer()
+        .list_tools(Some(PaginatedRequestParams::default()))
+        .await
+        .unwrap();
+    let names: Vec<&str> = result.tools.iter().map(|t| t.name.as_ref()).collect();
+    assert_eq!(names.len(), EXPECTED_TOOLS.len(), "got {names:?}");
+    for expected in EXPECTED_TOOLS {
+        assert!(names.contains(expected), "tool {expected} missing");
+    }
+
+    let checksum = client
+        .peer()
+        .call_tool(common::tool_request(
+            "compute_checksum",
+            json!({"data": "$GPGGA,1", "algorithm": "xor"}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(checksum.is_error, Some(false), "{checksum:?}");
+    assert_eq!(
+        checksum.structured_content.expect("structured content")["checksum"],
+        111
+    );
+    client.cancel().await.ok();
+}
+
+#[tokio::test]
+async fn stdio_2026_07_28_listener_cancellation_completes_cleanly() {
+    // Modern `subscriptions/listen` over stdio: the acknowledgment carries
+    // the accepted filter, cancellation completes with a clean `Cancelled`
+    // end state, and the server keeps serving afterwards (no hang, no
+    // protocol error, child stays alive).
+    let (client, _profiles_dir) = start_stdio_protocol_client(TestProtocol::V2026_07_28).await;
+
+    let mut subscription = client
+        .peer()
+        .listen(
+            rmcp::model::SubscriptionFilter::builder()
+                .resource_subscription("serial://ports")
+                .build(),
+        )
+        .await
+        .expect("2026-07-28 listen over stdio");
+    assert_eq!(
+        subscription
+            .acknowledged()
+            .resource_subscriptions
+            .as_deref(),
+        Some(&["serial://ports".to_string()][..]),
+        "stdio listen acknowledgment carries the accepted filter"
+    );
+
+    subscription
+        .cancel()
+        .await
+        .expect("cancelling the stdio listener");
+    assert_eq!(
+        subscription.end(),
+        Some(&rmcp::service::SubscriptionEnd::Cancelled),
+        "stdio listener cancellation completes with Cancelled"
+    );
+
+    // The server is still healthy after the cancelled listener.
+    let info = client
+        .peer_info()
+        .expect("2026-07-28 peer info after cancel");
+    assert_eq!(
+        info.protocol_version,
+        rmcp::model::ProtocolVersion::V_2026_07_28
+    );
+
+    client.cancel().await.ok();
+}
+
+#[tokio::test]
+async fn stdio_2025_11_25_initialize_lifecycle_negotiates_exact_version() {
+    let (client, _profiles_dir) = start_stdio_protocol_client(TestProtocol::V2025_11_25).await;
+    let info = client.peer_info().expect("2025-11-25 peer info");
+    assert_eq!(
+        info.protocol_version,
+        rmcp::model::ProtocolVersion::V_2025_11_25,
+        "2025-11-25 initialize lifecycle must negotiate 2025-11-25"
+    );
+
+    let result = client
+        .peer()
+        .list_tools(Some(PaginatedRequestParams::default()))
+        .await
+        .unwrap();
+    let names: Vec<&str> = result.tools.iter().map(|t| t.name.as_ref()).collect();
+    assert_eq!(names.len(), EXPECTED_TOOLS.len(), "got {names:?}");
+    for expected in EXPECTED_TOOLS {
+        assert!(names.contains(expected), "tool {expected} missing");
+    }
+
+    let checksum = client
+        .peer()
+        .call_tool(common::tool_request(
+            "compute_checksum",
+            json!({"data": "$GPGGA,1", "algorithm": "xor"}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(checksum.is_error, Some(false), "{checksum:?}");
+    assert_eq!(
+        checksum.structured_content.expect("structured content")["checksum"],
+        111
+    );
     client.cancel().await.ok();
 }
 
@@ -456,6 +618,9 @@ async fn stdio_server_starts_with_capture_dir() {
     let transport = TokioChildProcess::new(cmd).expect("spawn stdio server");
     let client = ().serve(transport).await.expect("initialize client");
     let info = client.peer_info().expect("peer info");
-    assert_eq!(info.server_info.name, "serial-mcp");
+    assert_eq!(
+        info.server_info.as_ref().expect("server_info present").name,
+        "serial-mcp"
+    );
     client.cancel().await.ok();
 }

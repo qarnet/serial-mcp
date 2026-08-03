@@ -963,6 +963,63 @@ baud_rate = 115200
         drop(dir);
     }
 
+    /// The obsolete `poll_interval_ms` key (removed with the deleted RX
+    /// subscription tools) must still load from an existing profile file —
+    /// serde ignores the unknown field — and a real durable mutation rewrites
+    /// the file without it. No schema-version bump.
+    #[tokio::test]
+    async fn obsolete_poll_interval_ms_loads_and_is_dropped_on_mutation() {
+        let (dir, path) = temp_path();
+        std::fs::write(
+            &path,
+            r#"
+schema_version = 2
+
+[[profile]]
+name = "legacy-poll"
+[profile.selector]
+vid = 0x1366
+
+[profile.defaults]
+baud_rate = 115200
+poll_interval_ms = 200
+"#,
+        )
+        .unwrap();
+
+        let store = ProfileStore::open(path.clone()).unwrap();
+        let listed = store.list().await;
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].name, "legacy-poll");
+        assert_eq!(listed[0].defaults.baud_rate, 115200);
+        assert_eq!(listed[0].metadata.revision, 0);
+
+        // A real durable mutation rewrites the file; the obsolete key is
+        // absent from the new serialization but the profile survives.
+        store
+            .update_defaults_preserving_selector(
+                "legacy-poll".into(),
+                ProfileDefaults {
+                    baud_rate: 9600,
+                    ..Default::default()
+                },
+                true,
+            )
+            .await
+            .unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !content.contains("poll_interval_ms"),
+            "mutation must drop the obsolete key:\n{content}"
+        );
+        let reloaded = ProfileStore::open(path).unwrap();
+        let p = reloaded.get("legacy-poll").await.unwrap();
+        assert_eq!(p.defaults.baud_rate, 9600, "settings preserved");
+        assert_eq!(p.metadata.revision, 1);
+        drop(dir);
+    }
+
     #[tokio::test]
     async fn upsert_creates_new_profile_with_metadata() {
         let (_dir, path) = temp_path();

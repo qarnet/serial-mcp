@@ -48,8 +48,6 @@ pub const EXPECTED_TOOLS: &[&str] = &[
     "set_dtr_rts",
     "set_flow_control",
     "send_break",
-    "subscribe",
-    "unsubscribe",
     "get_status",
     "reconfigure",
     "list_profiles",
@@ -65,31 +63,29 @@ pub const EXPECTED_TOOLS: &[&str] = &[
     "compute_checksum",
 ];
 
-use std::collections::HashMap;
 use std::future::Future;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
 use anyhow::Result;
 use rmcp::handler::client::ClientHandler;
-use rmcp::model::{
-    CallToolRequestParams, LoggingMessageNotificationParam, ProgressNotificationParam,
-};
-use rmcp::service::{NotificationContext, RoleClient, RunningService};
+use rmcp::model::{CallToolRequestParams, ProgressNotificationParam, ProtocolVersion};
+use rmcp::service::{ClientLifecycleMode, NotificationContext, RoleClient, RunningService};
 use rmcp::transport::streamable_http_server::{
     session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
 };
 use rmcp::transport::StreamableHttpClientTransport;
-use rmcp::ServiceExt;
+use rmcp::{ClientServiceExt, ServiceExt};
 use serde_json::Map;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use serial_mcp::capture_store::CaptureStore;
+use serial_mcp::resource_events::{PortWatcher, ResourceEventHub};
 use serial_mcp::security::SecurityManager;
 use serial_mcp::serial::ConnectionManager;
 use serial_mcp::serial::PortProvider;
-use serial_mcp::server::StreamRegistry;
 use serial_mcp::SerialHandler;
 
 /// Static [`PortProvider`]: returns a fixed list of
@@ -156,14 +152,55 @@ impl StaticPortProvider {
     }
 }
 
+/// Mutable [`PortProvider`] for hotplug-watcher tests: the test swaps the
+/// snapshot and injects enumeration failures while the watcher polls.
+pub struct MutexPortProvider {
+    ports: StdMutex<Vec<serial_mcp::serial::PortInfo>>,
+    fail: AtomicBool,
+}
+
+impl PortProvider for MutexPortProvider {
+    fn list_available(&self) -> serial_mcp::error::Result<Vec<serial_mcp::serial::PortInfo>> {
+        if self.fail.load(Ordering::SeqCst) {
+            Err(serial_mcp::error::SerialError::IoError(
+                std::io::Error::other("injected enumeration failure"),
+            ))
+        } else {
+            Ok(self.ports.lock().expect("ports mutex poisoned").clone())
+        }
+    }
+}
+
+impl MutexPortProvider {
+    pub fn new(ports: Vec<serial_mcp::serial::PortInfo>) -> Arc<Self> {
+        Arc::new(Self {
+            ports: StdMutex::new(ports),
+            fail: AtomicBool::new(false),
+        })
+    }
+
+    pub fn set_ports(&self, ports: Vec<serial_mcp::serial::PortInfo>) {
+        *self.ports.lock().expect("ports mutex poisoned") = ports;
+    }
+
+    pub fn set_fail(&self, fail: bool) {
+        self.fail.store(fail, Ordering::SeqCst);
+    }
+}
+
 /// In-process HTTP MCP server bound to `127.0.0.1` on an OS-assigned
 /// port. The shared [`ConnectionManager`] is exposed so tests can insert
 /// in-memory connections before the client connects.
 pub struct TestServer {
     pub url: String,
     pub manager: Arc<ConnectionManager>,
+    /// The process-wide resource event hub shared by every handler instance
+    /// (and the optional port watcher). Tests may publish directly through
+    /// it (e.g. to force broadcast lag).
+    pub hub: Arc<ResourceEventHub>,
     shutdown: CancellationToken,
     handle: tokio::task::JoinHandle<()>,
+    watcher: Option<PortWatcher>,
 }
 
 impl TestServer {
@@ -191,6 +228,8 @@ impl TestServer {
             profile_store: None,
             provider: None,
             capture_store: None,
+            resource_hub: None,
+            port_watcher_interval: None,
         }
     }
 
@@ -198,47 +237,74 @@ impl TestServer {
     /// every session handler factory so all HTTP MCP sessions observe the
     /// same profile state. `None` selects the ephemeral store default. An
     /// injected `provider` (defaults to the system provider) is shared the
-    /// same way.
+    /// same way. One `Arc<ResourceEventHub>` per server is shared by every
+    /// handler instance and the optional port watcher, exactly like
+    /// production `main.rs`.
     async fn start_inner(
         manager: Arc<ConnectionManager>,
         security: SecurityManager,
         profile_store: Option<Arc<serial_mcp::profile_store::ProfileStore>>,
         provider: Option<Arc<dyn PortProvider>>,
         capture_store: Option<Arc<CaptureStore>>,
+        resource_hub: Option<Arc<ResourceEventHub>>,
+        port_watcher_interval: Option<Duration>,
     ) -> Self {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let url = format!("http://{addr}/mcp");
         let shutdown = CancellationToken::new();
 
-        let streams: StreamRegistry = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
         let profile_store = profile_store
             .unwrap_or_else(|| Arc::new(serial_mcp::profile_store::ProfileStore::ephemeral()));
         let provider = provider.unwrap_or_else(|| {
             Arc::new(serial_mcp::serial::SystemPortProvider) as Arc<dyn PortProvider>
         });
         let capture_store = capture_store.unwrap_or_else(|| Arc::new(CaptureStore::disabled()));
+        let hub = resource_hub.unwrap_or_else(|| Arc::new(ResourceEventHub::default()));
+        // ONE process-wide RX session registry per in-process server (ring +
+        // pump + shared cursor): cloned into every stateless HTTP handler
+        // factory so sequential modern reads share ring/cursor state.
+        let rx_sessions = Arc::new(serial_mcp::rx_session::RxSessionManager::new(
+            Arc::new(serial_mcp::buffer_budget::AtomicBudget::new(
+                1 << 30,
+                1 << 30,
+            )),
+            Arc::clone(&hub),
+        ));
         let manager_for_service = Arc::clone(&manager);
-        let streams_for_service = Arc::clone(&streams);
         let profile_store_for_service = Arc::clone(&profile_store);
         let provider_for_service = Arc::clone(&provider);
         let capture_store_for_service = Arc::clone(&capture_store);
+        let hub_for_service = Arc::clone(&hub);
+        let rx_sessions_for_service = Arc::clone(&rx_sessions);
         let shutdown_for_service = shutdown.child_token();
         let service = StreamableHttpService::new(
             move || {
                 Ok(SerialHandler::builder()
                     .connections(Arc::clone(&manager_for_service))
-                    .streams(Arc::clone(&streams_for_service))
                     .security(security.clone())
                     .profile_store(Arc::clone(&profile_store_for_service))
                     .capture_store(Arc::clone(&capture_store_for_service))
                     .port_provider(Arc::clone(&provider_for_service))
+                    .resource_events(Arc::clone(&hub_for_service))
+                    .rx_sessions(Arc::clone(&rx_sessions_for_service))
                     .build())
             },
             LocalSessionManager::default().into(),
             StreamableHttpServerConfig::default().with_cancellation_token(shutdown_for_service),
         );
         let router = axum::Router::new().nest_service("/mcp", service);
+
+        // Optional proactive port watcher sharing the injected provider and
+        // the SAME hub as every handler instance (short interval in tests).
+        let watcher = port_watcher_interval.map(|interval| {
+            PortWatcher::start(
+                Arc::clone(&provider),
+                Arc::clone(&hub),
+                shutdown.child_token(),
+                interval,
+            )
+        });
 
         let handle = tokio::spawn(async move {
             let _ = axum::serve(listener, router).await;
@@ -247,8 +313,10 @@ impl TestServer {
         TestServer {
             url,
             manager,
+            hub,
             shutdown,
             handle,
+            watcher,
         }
     }
 }
@@ -257,6 +325,10 @@ impl Drop for TestServer {
     fn drop(&mut self) {
         self.shutdown.cancel();
         self.handle.abort();
+        if let Some(watcher) = self.watcher.take() {
+            watcher.shutdown();
+            watcher.abort();
+        }
     }
 }
 
@@ -277,6 +349,8 @@ pub struct TestServerBuilder {
     profile_store: Option<Arc<serial_mcp::profile_store::ProfileStore>>,
     provider: Option<Arc<dyn PortProvider>>,
     capture_store: Option<Arc<CaptureStore>>,
+    resource_hub: Option<Arc<ResourceEventHub>>,
+    port_watcher_interval: Option<Duration>,
 }
 
 impl TestServerBuilder {
@@ -317,6 +391,20 @@ impl TestServerBuilder {
         self
     }
 
+    /// Inject the process-wide resource event hub (for lag tests that
+    /// publish directly) instead of the fresh default.
+    pub fn resource_hub(mut self, hub: Arc<ResourceEventHub>) -> Self {
+        self.resource_hub = Some(hub);
+        self
+    }
+
+    /// Start a proactive port hotplug watcher with the given poll interval
+    /// (tests use a short interval; production uses one second).
+    pub fn port_watcher_interval(mut self, interval: Duration) -> Self {
+        self.port_watcher_interval = Some(interval);
+        self
+    }
+
     /// Build and start the server.
     pub async fn start(self) -> TestServer {
         TestServer::start_inner(
@@ -325,78 +413,171 @@ impl TestServerBuilder {
             self.profile_store,
             self.provider,
             self.capture_store,
+            self.resource_hub,
+            self.port_watcher_interval,
         )
         .await
     }
 }
 
-/// [`ClientHandler`] that forwards every received `notifications/message`
-/// onto an unbounded mpsc channel. The receiver half is returned from
-/// [`connect_client`] so tests can await events.
+/// No-op [`ClientHandler`] used by the standard test client. Old
+/// logging-message collection is gone with MCP logging removal; progress
+/// notifications are collected only through the dedicated
+/// [`ProgressNotificationCollector`] client.
+#[derive(Clone, Default)]
+pub struct TestClientHandler;
+
+impl ClientHandler for TestClientHandler {}
+
+/// One cloneable client handler that explicitly advertises one exact MCP
+/// protocol version (instead of relying on rmcp's default,
+/// `ProtocolVersion::LATEST`). One type serves both lifecycle modes so the
+/// common connect helpers share a single return type. `get_info()` returns
+/// default client info tagged with `self.protocol.version()` for every case.
 #[derive(Clone)]
-pub struct NotificationCollector {
-    tx: mpsc::UnboundedSender<LoggingMessageNotificationParam>,
+pub struct VersionedClientHandler {
+    protocol: TestProtocol,
 }
 
-impl ClientHandler for NotificationCollector {
-    fn on_logging_message(
-        &self,
-        params: LoggingMessageNotificationParam,
-        _ctx: NotificationContext<RoleClient>,
-    ) -> impl Future<Output = ()> + Send + '_ {
-        let tx = self.tx.clone();
-        async move {
-            let _ = tx.send(params);
+impl VersionedClientHandler {
+    /// Build a handler advertising the given explicit protocol version.
+    pub fn new(protocol: TestProtocol) -> Self {
+        Self { protocol }
+    }
+}
+
+impl ClientHandler for VersionedClientHandler {
+    fn get_info(&self) -> rmcp::model::ClientInfo {
+        rmcp::model::ClientInfo::default().with_protocol_version(self.protocol.version())
+    }
+}
+
+/// Which exact MCP protocol version a typed test client negotiates.
+///
+/// Variant names carry the exact version date so a future protocol revision
+/// cannot silently reclassify a case as "modern"/"legacy".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TestProtocol {
+    /// MCP `2026-07-28` discovery / stateless requests.
+    V2026_07_28,
+    /// MCP `2025-11-25` initialize / session requests.
+    V2025_11_25,
+}
+
+impl TestProtocol {
+    /// Every advertised version, in product-preferred order. The coverage
+    /// lock in `tests/protocol_compatibility.rs` compares this list against
+    /// the raw `server/discover` `supportedVersions` so a future production
+    /// policy row requires an explicit test case.
+    pub const ALL: [Self; 2] = [Self::V2026_07_28, Self::V2025_11_25];
+
+    /// The exact rmcp protocol version constant for this case.
+    pub fn version(self) -> ProtocolVersion {
+        match self {
+            TestProtocol::V2026_07_28 => ProtocolVersion::V_2026_07_28,
+            TestProtocol::V2025_11_25 => ProtocolVersion::V_2025_11_25,
+        }
+    }
+
+    /// The rmcp client lifecycle mode for this exact version:
+    /// `2026-07-28` uses discovery with only that preferred version;
+    /// `2025-11-25` uses the legacy initialize handshake.
+    pub fn lifecycle(self) -> ClientLifecycleMode {
+        match self {
+            TestProtocol::V2026_07_28 => ClientLifecycleMode::Discover {
+                preferred_versions: vec![ProtocolVersion::V_2026_07_28],
+            },
+            TestProtocol::V2025_11_25 => ClientLifecycleMode::Initialize,
         }
     }
 }
 
 /// Connect an `rmcp` HTTP client to the given test server. Returns the
-/// running client service plus the receiving end of the notification
-/// collector.
+/// running client service plus a unit receiver (kept for caller symmetry;
+/// there are no logging-message notifications anymore).
 pub async fn connect_client(
     server: &TestServer,
-) -> Result<(
-    RunningService<RoleClient, NotificationCollector>,
-    mpsc::UnboundedReceiver<LoggingMessageNotificationParam>,
-)> {
+) -> Result<(RunningService<RoleClient, TestClientHandler>, ())> {
     connect_to_url(server.url.as_str()).await
 }
 
 /// Connect an `rmcp` HTTP client to a server URL (in-process or
-/// spawned-binary). Returns the running client service plus the
-/// receiving end of the notification collector.
+/// spawned-binary). Returns the running client service plus a unit
+/// receiver (kept for caller symmetry).
 pub async fn connect_to_url(
     url: &str,
-) -> Result<(
-    RunningService<RoleClient, NotificationCollector>,
-    mpsc::UnboundedReceiver<LoggingMessageNotificationParam>,
-)> {
-    let (tx, rx) = mpsc::unbounded_channel();
-    let handler = NotificationCollector { tx };
+) -> Result<(RunningService<RoleClient, TestClientHandler>, ())> {
+    let handler = TestClientHandler;
     let transport = StreamableHttpClientTransport::from_uri(url);
     let client = handler.serve(transport).await?;
-    Ok((client, rx))
+    Ok((client, ()))
+}
+
+/// Connect an `rmcp` HTTP client to the given test server using the
+/// explicit lifecycle for one exact protocol version. Returns the running
+/// client service plus a unit receiver (kept for caller symmetry). One
+/// return type covers every case: [`VersionedClientHandler`] advertises
+/// `protocol.version()` for both lifecycle modes.
+pub async fn connect_protocol_client(
+    server: &TestServer,
+    protocol: TestProtocol,
+) -> Result<(RunningService<RoleClient, VersionedClientHandler>, ())> {
+    connect_protocol_to_url(server.url.as_str(), protocol).await
+}
+
+/// Like [`connect_protocol_client`], but for an arbitrary server URL
+/// (in-process or spawned-binary).
+pub async fn connect_protocol_to_url(
+    url: &str,
+    protocol: TestProtocol,
+) -> Result<(RunningService<RoleClient, VersionedClientHandler>, ())> {
+    let handler = VersionedClientHandler::new(protocol);
+    let transport = StreamableHttpClientTransport::from_uri(url);
+    let client = handler
+        .serve_with_lifecycle(transport, protocol.lifecycle())
+        .await?;
+    Ok((client, ()))
+}
+
+/// Connect an `rmcp` HTTP client using the exact `2026-07-28` discover
+/// lifecycle (`server/discover` + self-contained per-request `_meta`).
+pub async fn connect_2026_07_28_client(
+    server: &TestServer,
+) -> Result<(RunningService<RoleClient, VersionedClientHandler>, ())> {
+    connect_protocol_client(server, TestProtocol::V2026_07_28).await
+}
+
+/// Like [`connect_2026_07_28_client`], but for an arbitrary server URL
+/// (in-process or spawned-binary).
+pub async fn connect_2026_07_28_to_url(
+    url: &str,
+) -> Result<(RunningService<RoleClient, VersionedClientHandler>, ())> {
+    connect_protocol_to_url(url, TestProtocol::V2026_07_28).await
+}
+
+/// Connect an `rmcp` HTTP client using the exact `2025-11-25` initialize
+/// lifecycle. The handler's `ClientInfo.protocol_version` is exactly
+/// `2025-11-25`.
+pub async fn connect_2025_11_25_client(
+    server: &TestServer,
+) -> Result<(RunningService<RoleClient, VersionedClientHandler>, ())> {
+    connect_protocol_client(server, TestProtocol::V2025_11_25).await
+}
+
+/// Like [`connect_2025_11_25_client`], but for an arbitrary server URL
+/// (in-process or spawned-binary).
+pub async fn connect_2025_11_25_to_url(
+    url: &str,
+) -> Result<(RunningService<RoleClient, VersionedClientHandler>, ())> {
+    connect_protocol_to_url(url, TestProtocol::V2025_11_25).await
 }
 
 #[derive(Clone)]
 pub struct ProgressNotificationCollector {
-    log_tx: mpsc::UnboundedSender<LoggingMessageNotificationParam>,
     progress_tx: mpsc::UnboundedSender<ProgressNotificationParam>,
 }
 
 impl ClientHandler for ProgressNotificationCollector {
-    fn on_logging_message(
-        &self,
-        params: LoggingMessageNotificationParam,
-        _ctx: NotificationContext<RoleClient>,
-    ) -> impl Future<Output = ()> + Send + '_ {
-        let tx = self.log_tx.clone();
-        async move {
-            let _ = tx.send(params);
-        }
-    }
-
     fn on_progress(
         &self,
         params: ProgressNotificationParam,
@@ -413,18 +594,13 @@ pub async fn connect_client_with_progress(
     server: &TestServer,
 ) -> Result<(
     RunningService<RoleClient, ProgressNotificationCollector>,
-    mpsc::UnboundedReceiver<LoggingMessageNotificationParam>,
     mpsc::UnboundedReceiver<ProgressNotificationParam>,
 )> {
-    let (log_tx, log_rx) = mpsc::unbounded_channel();
     let (progress_tx, progress_rx) = mpsc::unbounded_channel();
-    let handler = ProgressNotificationCollector {
-        log_tx,
-        progress_tx,
-    };
+    let handler = ProgressNotificationCollector { progress_tx };
     let transport = StreamableHttpClientTransport::from_uri(server.url.as_str());
     let client = handler.serve(transport).await?;
-    Ok((client, log_rx, progress_rx))
+    Ok((client, progress_rx))
 }
 
 /// Build a `CallToolRequestParams::arguments` JSON object from a
@@ -439,17 +615,6 @@ pub fn args_object(value: serde_json::Value) -> Map<String, serde_json::Value> {
 /// Convenience: build a tool-call request with named arguments.
 pub fn tool_request(name: &'static str, args: serde_json::Value) -> CallToolRequestParams {
     CallToolRequestParams::new(name).with_arguments(args_object(args))
-}
-
-/// Receive the next notification from the collector with a timeout.
-pub async fn next_notification(
-    rx: &mut mpsc::UnboundedReceiver<LoggingMessageNotificationParam>,
-    within: Duration,
-) -> Result<LoggingMessageNotificationParam> {
-    tokio::time::timeout(within, rx.recv())
-        .await
-        .map_err(|_| anyhow::anyhow!("no notification arrived within {within:?}"))?
-        .ok_or_else(|| anyhow::anyhow!("notification channel closed"))
 }
 
 // ---- Unix PTY pair (Layer 3) ------------------------------------------------

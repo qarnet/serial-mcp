@@ -64,7 +64,7 @@ pub enum LogEvent {
     },
     /// Max reconnect attempts exhausted.
     ReconnectExhausted,
-    /// Match found in read/subscribe.
+    /// Match found in read.
     MatchFound { pattern: String, mode: String },
     /// Data truncated (bytes_returned < bytes_observed).
     Truncated {
@@ -73,8 +73,6 @@ pub enum LogEvent {
         #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
         returned: usize,
     },
-    /// Notification dropped (encoding error or peer disconnect).
-    NotificationDropped { reason: String },
     /// Read operation started.
     ReadStarted,
     /// Read operation completed.
@@ -89,10 +87,6 @@ pub enum LogEvent {
         #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
         bytes: usize,
     },
-    /// Subscribe started.
-    SubscribeStarted,
-    /// Subscribe stopped.
-    SubscribeStopped { reason: String },
     /// Generic error.
     Error { message: String },
 }
@@ -259,15 +253,6 @@ impl LogBuffer {
 
     pub fn truncated(&self, observed: usize, returned: usize) {
         self.record(None, LogEvent::Truncated { observed, returned });
-    }
-
-    pub fn notification_dropped(&self, reason: &str) {
-        self.record(
-            None,
-            LogEvent::NotificationDropped {
-                reason: reason.to_string(),
-            },
-        );
     }
 }
 

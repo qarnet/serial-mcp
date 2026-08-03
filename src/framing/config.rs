@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 // ---- RX framing configuration ----------------------------------------------
 
-/// Framing configuration for `read` and `subscribe`.
+/// RX framing configuration applied by `read`, the `transact` read half, and `capture_boot`.
 /// Specifies how to split the byte stream into frames and optionally parse
 /// each frame's content.
 ///
@@ -133,7 +133,7 @@ pub enum LineEnding {
     /// the next byte is anything else (including end-of-stream), the `\r` is
     /// confirmed as a bare CR line ending, the pending line is emitted, and
     /// the decoder promotes to CR-split mode for the remainder of the call.
-    /// Promotion is per-call (resets on next read/subscribe).
+    /// Promotion is per-call (resets on the next read).
     #[default]
     Auto,
     /// Split on `\n` only. Do NOT strip a preceding `\r`.
@@ -151,8 +151,7 @@ fn default_encoding() -> PatternEncoding {
 // ---- Protocol presets --------------------------------------------------------
 
 /// Built-in protocol preset. A named bundle of framing/parser primitives
-/// that a single `protocol` field expands into on `write`, `read`, and
-/// `subscribe`.
+/// that a single `protocol` field expands into on `write`, `read`, `transact`, and `capture_boot`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case", tag = "type")]
 pub enum ProtocolPreset {
@@ -381,7 +380,7 @@ pub struct ParserConfig {
     /// When true, a protocol parser that defines a checksum (currently NMEA's
     /// *XX XOR, Modbus ASCII LRC) drops mismatched frames instead of emitting
     /// them. The dropped frame is counted in `PushOutcome.frames_dropped` and
-    /// does NOT halt the read or subscribe (stream-fatal errors like SLIP
+    /// does NOT halt the read (stream-fatal errors like SLIP
     /// malformed escapes still stop the decode). When false, the frame is
     /// emitted with `checksum_valid: Some(false)` (no-op for the caller).
     /// A sentence/message WITHOUT a checksum is accepted regardless.

@@ -4,20 +4,23 @@
 //! structured JSON via [`Json<T>`] so MCP clients can index fields directly
 //! instead of parsing free-form text.
 
-use std::collections::HashMap;
+use std::borrow::Cow;
 use std::sync::Arc;
 
 use base64::Engine as _;
 use rmcp::{
-    handler::server::wrapper::Parameters, model::*, prompt, prompt_handler, prompt_router,
-    service::RequestContext, tool, tool_handler, tool_router, ErrorData as McpError, Json,
+    handler::server::wrapper::Parameters, model::*, prompt, prompt_router, service::RequestContext,
+    service::SubscriptionContext, tool, tool_handler, tool_router, ErrorData as McpError, Json,
     RoleServer, ServerHandler,
 };
+use tokio::sync::broadcast;
 
-use tracing::{debug, info};
+use tracing::info;
 
 use crate::buffer_budget::BufferBudget;
 use crate::capture_store::CaptureStore;
+use crate::mcp_protocol::{cache_fields_for, ProtocolLifecycle, ProtocolPolicy};
+use crate::resource_events::{is_subscribable_uri, ResourceEvent, ResourceEventHub};
 use crate::rx_session::RxSessionManager;
 use crate::security::SecurityManager;
 use crate::serial::{ConnectionManager, PortProvider};
@@ -26,7 +29,7 @@ use crate::tx_session::TxSessionManager;
 use crate::prompts::types::*;
 use crate::prompts::{diagnose, interactive};
 use crate::tools::types::*;
-use crate::tools::{control_ops, io_ops, port_ops, stream_ops, utility_ops};
+use crate::tools::{control_ops, io_ops, port_ops, utility_ops};
 
 /// Helper for cursor-based pagination over a vector of items.
 ///
@@ -59,17 +62,35 @@ fn paginate<T: Clone>(
     (items, next_cursor)
 }
 
-// ---- Handler ---------------------------------------------------------------
+/// Apply the SEP-2549 cache fields to a read-resource result exactly when the
+/// peer's negotiated protocol version carries the `ImmediatePrivate` cache
+/// policy (currently only `2026-07-28`); every other peer keeps the bare
+/// result. `ttlMs: 0`, `cacheScope: "private"` mark every `resources/read`
+/// response as immediately stale and client-private.
+fn read_result_with_cache_fields(
+    result: ReadResourceResult,
+    protocol_version: Option<ProtocolVersion>,
+) -> ReadResourceResponse {
+    if crate::mcp_protocol::cache_fields_for(protocol_version) {
+        result.with_ttl_ms(0).with_cache_scope(CacheScope::Private)
+    } else {
+        result
+    }
+    .into()
+}
 
-pub type StreamRegistry = Arc<tokio::sync::Mutex<HashMap<String, stream_ops::StreamHandle>>>;
+// ---- Handler ---------------------------------------------------------------
 
 #[derive(Clone)]
 pub struct SerialHandler {
     pub(crate) connections: Arc<ConnectionManager>,
-    streams: StreamRegistry,
     security: SecurityManager,
-    subscribers: Arc<tokio::sync::Mutex<HashMap<String, usize>>>,
-    rx_sessions: Arc<RxSessionManager>,
+    /// Process-wide RX session registry (ring + pump + shared cursor). One
+    /// per server process, shared by every handler instance: modern HTTP is
+    /// stateless (a fresh `SerialHandler` serves each request), so a
+    /// handler-local registry would split the ring across requests and lose
+    /// reads. The builder default constructs one for standalone handlers.
+    pub(crate) rx_sessions: Arc<RxSessionManager>,
     tx_sessions: Arc<TxSessionManager>,
     budget: Arc<dyn BufferBudget>,
     profile_store: Arc<crate::profile_store::ProfileStore>,
@@ -80,6 +101,11 @@ pub struct SerialHandler {
     /// Process-wide injectable port enumeration used consistently by tools,
     /// resources, and automatic profile-session identity capture.
     port_provider: Arc<dyn PortProvider>,
+    /// Process-wide resource event hub backing modern `subscriptions/listen`.
+    /// One hub per server process, shared by every stdio/HTTP handler and
+    /// the port watcher (modern HTTP is stateless — a handler-local channel
+    /// would split publishers and listeners across handler instances).
+    resource_events: Arc<ResourceEventHub>,
 }
 
 /// Injectable configuration for [`SerialHandler`].
@@ -89,7 +115,6 @@ pub struct SerialHandler {
 #[derive(Clone)]
 pub struct SerialHandlerOptions {
     pub connections: Arc<ConnectionManager>,
-    pub streams: StreamRegistry,
     pub security: SecurityManager,
     pub budget: Arc<dyn BufferBudget>,
     /// Process-wide profile store. Defaults to an ephemeral store for
@@ -103,6 +128,16 @@ pub struct SerialHandlerOptions {
     /// Process-wide port enumeration. Defaults to the system provider;
     /// tests inject a static provider.
     pub port_provider: Arc<dyn PortProvider>,
+    /// Process-wide resource event hub for modern `subscriptions/listen`.
+    /// Defaults to a fresh hub for library/test construction; production
+    /// `main.rs` creates exactly one hub per server process.
+    pub resource_events: Arc<ResourceEventHub>,
+    /// Process-wide RX session registry (ring + pump + shared cursor).
+    /// `None` (default) lets the builder construct one for standalone
+    /// handlers; production `main.rs` and the test harness create exactly
+    /// one per server process and inject it so every stateless HTTP handler
+    /// instance shares the same ring/cursor state.
+    pub rx_sessions: Option<Arc<RxSessionManager>>,
 }
 
 impl Default for SerialHandlerOptions {
@@ -110,7 +145,6 @@ impl Default for SerialHandlerOptions {
         use crate::limits::{DEFAULT_MAX_PROGRAM_BUFFERED_BYTES, DEFAULT_MAX_TOOL_BUFFERED_BYTES};
         Self {
             connections: Arc::new(ConnectionManager::new()),
-            streams: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             security: SecurityManager::from_patterns::<[&str; 0]>([]),
             budget: Arc::new(crate::buffer_budget::AtomicBudget::new(
                 DEFAULT_MAX_PROGRAM_BUFFERED_BYTES,
@@ -119,6 +153,8 @@ impl Default for SerialHandlerOptions {
             profile_store: Arc::new(crate::profile_store::ProfileStore::ephemeral()),
             capture_store: Arc::new(CaptureStore::disabled()),
             port_provider: Arc::new(crate::serial::SystemPortProvider),
+            resource_events: Arc::new(ResourceEventHub::default()),
+            rx_sessions: None,
         }
     }
 }
@@ -132,10 +168,6 @@ pub struct SerialHandlerBuilder {
 impl SerialHandlerBuilder {
     pub fn connections(mut self, connections: Arc<ConnectionManager>) -> Self {
         self.options.connections = connections;
-        self
-    }
-    pub fn streams(mut self, streams: StreamRegistry) -> Self {
-        self.options.streams = streams;
         self
     }
     pub fn security(mut self, security: SecurityManager) -> Self {
@@ -158,31 +190,51 @@ impl SerialHandlerBuilder {
         self.options.port_provider = port_provider;
         self
     }
+    pub fn resource_events(mut self, resource_events: Arc<ResourceEventHub>) -> Self {
+        self.options.resource_events = resource_events;
+        self
+    }
+    /// Inject the process-wide RX session registry (ring + pump + shared
+    /// cursor). One per server process; clone the same `Arc` into every
+    /// HTTP handler factory so stateless requests share ring/cursor state.
+    pub fn rx_sessions(mut self, rx_sessions: Arc<RxSessionManager>) -> Self {
+        self.options.rx_sessions = Some(rx_sessions);
+        self
+    }
 
     /// Consume the builder and produce a [`SerialHandler`].
     ///
-    /// Spawns the reconnect supervisor exactly once.
+    /// Spawns the reconnect supervisor exactly once. When no
+    /// [`SerialHandlerBuilder::rx_sessions`] was injected, one manager is
+    /// constructed here for the standalone handler.
     pub fn build(self) -> SerialHandler {
         let SerialHandlerOptions {
             connections,
-            streams,
             security,
             budget,
             profile_store,
             capture_store,
             port_provider,
+            resource_events,
+            rx_sessions,
         } = self.options;
+        let rx_sessions = match rx_sessions {
+            Some(manager) => manager,
+            None => Arc::new(RxSessionManager::new(
+                Arc::clone(&budget),
+                Arc::clone(&resource_events),
+            )),
+        };
         let handler = SerialHandler {
             connections,
-            streams,
             security,
-            subscribers: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
-            rx_sessions: Arc::new(RxSessionManager::new(Arc::clone(&budget))),
+            rx_sessions,
             tx_sessions: Arc::new(TxSessionManager::new()),
             budget,
             profile_store,
             capture_store,
             port_provider,
+            resource_events,
         };
         handler.spawn_reconnect_supervisor();
         handler
@@ -268,7 +320,6 @@ impl SerialHandler {
     async fn open(
         &self,
         Parameters(args): Parameters<OpenArgs>,
-        ctx: RequestContext<RoleServer>,
     ) -> Result<Json<OpenResult>, String> {
         let result = port_ops::open(
             &self.connections,
@@ -279,8 +330,10 @@ impl SerialHandler {
             args,
         )
         .await?;
-        let connection_id = result.0.connection_id.clone();
-        self.notify_resource_changed(&connection_id, &ctx).await;
+        // Publish only after the successful open: connections list + detail.
+        self.resource_events.publish_connections_changed();
+        self.resource_events
+            .publish_connection_detail_changed(&result.0.connection_id);
         Ok(result)
     }
 
@@ -292,27 +345,20 @@ impl SerialHandler {
     async fn close(
         &self,
         Parameters(args): Parameters<CloseArgs>,
-        ctx: RequestContext<RoleServer>,
     ) -> Result<Json<CloseResult>, String> {
         let connection_id = args.connection_id.clone();
         // Cancel any running reconnect task so it doesn't try to reopen.
         self.connections.cancel_reconnect(&connection_id).await;
         let result = port_ops::close(&self.connections, &self.profile_store, args).await?;
+        // Publish only after the successful close: connections list + the
+        // (now-closed) detail URI as a final hint.
+        self.resource_events.publish_connections_changed();
+        self.resource_events
+            .publish_connection_detail_changed(&connection_id);
         // Shut down RX session (pump + consumers) for this connection.
-        // This closes the pump channel, causing the subscribe task's
-        // event_rx.recv() to return None, which exits the loop and
-        // triggers flush_partial for any buffered partial frame.
         self.rx_sessions.remove(&connection_id).await;
         // Shut down TX session (worker) for this connection.
         self.tx_sessions.remove(&connection_id).await;
-        // Wait for the subscribe task to finish naturally (flush partial,
-        // emit stop notification) before cleaning up.
-        if let Some(mut handle) = self.streams.lock().await.remove(&connection_id) {
-            if let Some(j) = handle.take_join() {
-                j.await.ok();
-            }
-        }
-        self.notify_resource_changed(&connection_id, &ctx).await;
         Ok(result)
     }
 
@@ -325,23 +371,27 @@ impl SerialHandler {
         &self,
         Parameters(args): Parameters<WriteArgs>,
     ) -> Result<Json<WriteResult>, String> {
-        io_ops::write(&self.connections, &self.tx_sessions, args).await
+        let result = io_ops::write(&self.connections, &self.tx_sessions, args).await?;
+        // A successful write changes connection state (counters); hint the
+        // detail URI. RX-side hints come from the pump.
+        self.resource_events
+            .publish_connection_detail_changed(&result.0.connection_id);
+        Ok(result)
     }
 
     #[tool(
         description = "Write data, then await the response, in one call — the request/response primitive for AT/Modbus/GRBL-style traffic. Prefer `transact` over separate `write`+`read`. The read half starts at the live edge (`from: {\"type\":\"now\"}`) so it only awaits post-write bytes. Add `match` to stop on a prompt, `no_new_rx_timeout_ms`/`timeout_ms` for bounded waits; `protocol` fills framing defaults for both directions and explicit tx_framing/rx_framing/rx_parser override per direction.",
         title = "Transact (Write + Read)",
-        annotations(destructive_hint = true, open_world_hint = false),
-        execution(task_support = "optional")
+        annotations(destructive_hint = true, open_world_hint = false)
     )]
     async fn transact(
         &self,
-        meta: Meta,
+        meta: RequestMetaObject,
         ct: tokio_util::sync::CancellationToken,
         peer: rmcp::Peer<RoleServer>,
         Parameters(args): Parameters<TransactArgs>,
     ) -> Result<Json<TransactResult>, String> {
-        io_ops::transact(
+        let result = io_ops::transact(
             &self.connections,
             &self.tx_sessions,
             &self.rx_sessions,
@@ -351,18 +401,22 @@ impl SerialHandler {
             peer,
             args,
         )
-        .await
+        .await?;
+        // The write half changed connection state; hint the detail URI.
+        // RX-side hints come from the pump.
+        self.resource_events
+            .publish_connection_detail_changed(&result.0.connection_id);
+        Ok(result)
     }
 
     #[tool(
         description = "Read buffered serial data or wait for unsolicited data/patterns. Returns buffered-but-unread bytes from the connection's cursor immediately (like `cat`); use `from` to replay (`{\"type\":\"buffer_start\"}`), jump to the live edge (`{\"type\":\"now\"}`), or seek an absolute offset (`{\"type\":\"offset\",\"offset\":N}`); `{\"type\":\"cursor\"}` is the default. Use `match` to wait for a pattern (checks buffered history first, then waits). Framing (`rx_framing`), parser (`rx_parser`), and `protocol` presets apply only when connection defaults don't fit; with validate:true checksum-mismatched frames are dropped and counted. Set `no_new_rx_timeout_ms` to stop on silence. Results carry from_offset/next_offset/bytes_lost/buffered_remaining/start_offset/end_offset.",
         title = "Read Serial Data",
-        annotations(read_only_hint = true, open_world_hint = false),
-        execution(task_support = "optional")
+        annotations(read_only_hint = true, open_world_hint = false)
     )]
     async fn read(
         &self,
-        meta: Meta,
+        meta: RequestMetaObject,
         ct: tokio_util::sync::CancellationToken,
         peer: rmcp::Peer<RoleServer>,
         Parameters(args): Parameters<ReadArgs>,
@@ -388,13 +442,24 @@ impl SerialHandler {
         &self,
         Parameters(args): Parameters<FlushArgs>,
     ) -> Result<Json<FlushResult>, String> {
-        io_ops::flush(
+        let result = io_ops::flush(
             &self.connections,
             &self.rx_sessions,
             &self.tx_sessions,
             args,
         )
-        .await
+        .await?;
+        // Input-side flushes change the ring; hint detail + raw.
+        match result.0.target {
+            crate::serial::FlushTarget::Input | crate::serial::FlushTarget::Both => {
+                self.resource_events
+                    .publish_connection_detail_changed(&result.0.connection_id);
+                self.resource_events
+                    .publish_connection_raw_changed(&result.0.connection_id);
+            }
+            crate::serial::FlushTarget::Output => {}
+        }
+        Ok(result)
     }
 
     #[tool(
@@ -410,7 +475,10 @@ impl SerialHandler {
         &self,
         Parameters(args): Parameters<SetDtrRtsArgs>,
     ) -> Result<Json<SetDtrRtsResult>, String> {
-        control_ops::set_dtr_rts(&self.connections, args).await
+        let result = control_ops::set_dtr_rts(&self.connections, args).await?;
+        self.resource_events
+            .publish_connection_detail_changed(&result.0.connection_id);
+        Ok(result)
     }
 
     #[tool(
@@ -426,71 +494,29 @@ impl SerialHandler {
         &self,
         Parameters(args): Parameters<SetFlowControlArgs>,
     ) -> Result<Json<SetFlowControlResult>, String> {
-        control_ops::set_flow_control(&self.connections, &self.profile_store, args).await
+        let result =
+            control_ops::set_flow_control(&self.connections, &self.profile_store, args).await?;
+        self.resource_events
+            .publish_connection_detail_changed(&result.0.connection_id);
+        Ok(result)
     }
 
     #[tool(
         description = "Assert a BREAK condition on the TX line for duration_ms milliseconds (default 250ms), then release it. Used to signal attention on some legacy serial protocols.",
         title = "Send BREAK",
-        annotations(destructive_hint = true, open_world_hint = false),
-        execution(task_support = "optional")
+        annotations(destructive_hint = true, open_world_hint = false)
     )]
     async fn send_break(
         &self,
-        meta: Meta,
+        meta: RequestMetaObject,
         ct: tokio_util::sync::CancellationToken,
         peer: rmcp::Peer<RoleServer>,
         Parameters(args): Parameters<SendBreakArgs>,
     ) -> Result<Json<SendBreakResult>, String> {
-        control_ops::send_break(&self.connections, meta, ct, peer, args).await
-    }
-
-    #[tool(
-        description = "Stream live RX bytes as `notifications/message` events (logger=\"serial:<connection_id>\"). Use ONLY for ongoing monitoring — for command/response use `transact`, for a bounded wait use `read(match=...)`. `from` selects the start point (`{\"type\":\"now\"}` default); `match`, `rx_framing`, `rx_parser`, and `protocol` behave like `read`. Replaces any prior subscription; a final stop notification (stop_reason, bytes_observed, bytes_returned, elapsed_ms, frames_dropped) ends the stream.",
-        title = "Subscribe to RX Stream",
-        annotations(
-            destructive_hint = false,
-            idempotent_hint = true,
-            open_world_hint = false
-        ),
-        execution(task_support = "optional")
-    )]
-    async fn subscribe(
-        &self,
-        meta: Meta,
-        ct: tokio_util::sync::CancellationToken,
-        peer: rmcp::Peer<RoleServer>,
-        Parameters(args): Parameters<SubscribeArgs>,
-        ctx: RequestContext<RoleServer>,
-    ) -> Result<Json<SubscribeResult>, String> {
-        stream_ops::subscribe(
-            &self.connections,
-            &self.rx_sessions,
-            &self.budget,
-            &self.streams,
-            args,
-            meta,
-            ct,
-            peer,
-            ctx,
-        )
-        .await
-    }
-
-    #[tool(
-        description = "Cancel an active RX subscription on a connection. No-op if no subscription exists.",
-        title = "Unsubscribe from RX Stream",
-        annotations(
-            destructive_hint = false,
-            idempotent_hint = true,
-            open_world_hint = false
-        )
-    )]
-    async fn unsubscribe(
-        &self,
-        Parameters(args): Parameters<UnsubscribeArgs>,
-    ) -> Result<Json<UnsubscribeResult>, String> {
-        stream_ops::unsubscribe(&self.connections, &self.rx_sessions, &self.streams, args).await
+        let result = control_ops::send_break(&self.connections, meta, ct, peer, args).await?;
+        self.resource_events
+            .publish_connection_detail_changed(&result.0.connection_id);
+        Ok(result)
     }
 
     #[tool(
@@ -514,7 +540,10 @@ impl SerialHandler {
         &self,
         Parameters(args): Parameters<ReconfigureArgs>,
     ) -> Result<Json<ReconfigureResult>, String> {
-        port_ops::reconfigure(&self.connections, &self.profile_store, args).await
+        let result = port_ops::reconfigure(&self.connections, &self.profile_store, args).await?;
+        self.resource_events
+            .publish_connection_detail_changed(&result.0.connection_id);
+        Ok(result)
     }
 
     #[tool(
@@ -535,7 +564,6 @@ impl SerialHandler {
     async fn open_profile(
         &self,
         Parameters(args): Parameters<OpenProfileArgs>,
-        ctx: RequestContext<RoleServer>,
     ) -> Result<Json<OpenResult>, String> {
         // Clone the profile out of the store first; do not hold a store
         // lock while opening serial hardware.
@@ -550,8 +578,10 @@ impl SerialHandler {
             args,
         )
         .await?;
-        let connection_id = result.0.connection_id.clone();
-        self.notify_resource_changed(&connection_id, &ctx).await;
+        // Publish only after the successful open: connections list + detail.
+        self.resource_events.publish_connections_changed();
+        self.resource_events
+            .publish_connection_detail_changed(&result.0.connection_id);
         Ok(result)
     }
 
@@ -592,7 +622,7 @@ impl SerialHandler {
     }
 
     #[tool(
-        description = "Set defaults in two modes. Profile mode: `configure(profile=..., defaults=...)` writes a named profile in the profiles TOML (applied on future open_profile calls; overwrite=true replaces an existing profile). Connection mode: `configure(connection_id=..., defaults=...)` mutates framing/parser/protocol/reconnect_policy/max_buffered_bytes/poll_interval_ms defaults on a live connection (does NOT persist to disk; reopen to apply rx_buffer_size, serial-line params, log_capacity, log_enabled). The `defaults` object carries the full desired state — omit fields to use their defaults.",
+        description = "Set defaults in two modes. Profile mode: `configure(profile=..., defaults=...)` writes a named profile in the profiles TOML (applied on future open_profile calls; overwrite=true replaces an existing profile). Connection mode: `configure(connection_id=..., defaults=...)` mutates framing/parser/protocol/reconnect_policy/max_buffered_bytes defaults on a live connection (does NOT persist to disk; reopen to apply rx_buffer_size, serial-line params, log_capacity, log_enabled). The `defaults` object carries the full desired state — omit fields to use their defaults.",
         title = "Configure Defaults",
         annotations(destructive_hint = true, open_world_hint = false)
     )]
@@ -600,7 +630,17 @@ impl SerialHandler {
         &self,
         Parameters(args): Parameters<ConfigureArgs>,
     ) -> Result<Json<ConfigureResult>, String> {
-        port_ops::configure(&self.connections, &self.profile_store, args).await
+        // Connection mode mutates live defaults (detail changes). Profile
+        // mode has no live connection URI — no event.
+        let connection_id = args.connection_id.clone();
+        let result = port_ops::configure(&self.connections, &self.profile_store, args).await?;
+        if result.0.mode == "connection" {
+            if let Some(connection_id) = connection_id.as_deref() {
+                self.resource_events
+                    .publish_connection_detail_changed(connection_id);
+            }
+        }
+        Ok(result)
     }
 
     #[tool(
@@ -624,7 +664,10 @@ impl SerialHandler {
         &self,
         Parameters(args): Parameters<ClearLogArgs>,
     ) -> Result<Json<ClearLogResult>, String> {
-        port_ops::clear_log(&self.connections, args).await
+        let result = port_ops::clear_log(&self.connections, args).await?;
+        self.resource_events
+            .publish_connection_log_changed(&result.0.connection_id);
+        Ok(result)
     }
 
     #[tool(
@@ -648,18 +691,21 @@ impl SerialHandler {
         &self,
         Parameters(args): Parameters<ReconnectArgs>,
     ) -> Result<Json<ReconnectResult>, String> {
-        port_ops::reconnect(&self.connections, args).await
+        let result = port_ops::reconnect(&self.connections, args).await?;
+        // Reconnect/state change: hint the detail URI.
+        self.resource_events
+            .publish_connection_detail_changed(&result.0.connection_id);
+        Ok(result)
     }
 
     #[tool(
         description = "Atomic boot/reset capture: purges unread OS input, marks the RX live edge under the pump gate (no pre-mark byte can leak in), optionally pulses DTR/RTS (release guaranteed on completion, cancellation, or failure), then captures ONLY post-mark bytes through the existing match/framing/parser/timeout/silence pipeline. Uses a private read cursor — the shared `read` cursor and ring history are untouched. `reset=null` = arm-only capture for externally reset devices (lines never touched). Result is bounded in memory by the connection's max_buffered_bytes; no file output. `read.from_offset` equals `mark_offset` unless the ring wrapped (then `bytes_lost` reports it). Destructive: configured reset lines may reboot hardware.",
         title = "Capture Boot Output",
-        annotations(destructive_hint = true, open_world_hint = false),
-        execution(task_support = "optional")
+        annotations(destructive_hint = true, open_world_hint = false)
     )]
     async fn capture_boot(
         &self,
-        meta: Meta,
+        meta: RequestMetaObject,
         ct: tokio_util::sync::CancellationToken,
         peer: rmcp::Peer<RoleServer>,
         Parameters(args): Parameters<CaptureBootArgs>,
@@ -713,8 +759,6 @@ pub fn tool_catalog() -> Vec<rmcp::model::Tool> {
         SerialHandler::set_dtr_rts_tool_attr(),
         SerialHandler::set_flow_control_tool_attr(),
         SerialHandler::send_break_tool_attr(),
-        SerialHandler::subscribe_tool_attr(),
-        SerialHandler::unsubscribe_tool_attr(),
         SerialHandler::get_status_tool_attr(),
         SerialHandler::reconfigure_tool_attr(),
         SerialHandler::list_profiles_tool_attr(),
@@ -732,6 +776,68 @@ pub fn tool_catalog() -> Vec<rmcp::model::Tool> {
 }
 
 // ---- ServerHandler boilerplate ----------------------------------------------
+
+/// Capability set for one policy row: tools/resources/prompts/completions for
+/// every row; resource subscriptions only where the row's policy enables
+/// them. Deliberately omits MCP logging, list-change flags, tasks, and
+/// unrelated capabilities in every view.
+fn capabilities_for(policy: &ProtocolPolicy) -> ServerCapabilities {
+    let mut builder = ServerCapabilities::builder()
+        .enable_tools()
+        .enable_resources()
+        .enable_prompts()
+        .enable_completions();
+    if policy.resource_subscriptions {
+        builder = builder.enable_resources_subscribe();
+    }
+    builder.build()
+}
+
+/// Shared server info shape for one policy row: identity, instructions, the
+/// row's capability set, and the row's protocol version. All version/feature
+/// decisions come from the policy table — no hard-coded version helpers.
+fn server_info_for(policy: &ProtocolPolicy) -> ServerInfo {
+    ServerInfo::new(capabilities_for(policy))
+        .with_server_info(Implementation::new(
+            env!("CARGO_PKG_NAME"),
+            env!("CARGO_PKG_VERSION"),
+        ))
+        .with_protocol_version(policy.version.clone())
+        .with_instructions(
+            "Serial port MCP server. Normal workflow:\n\
+             1. Call `list_ports` and inspect `profile_matches` (parallel to `ports`): \
+             it previews which profile a bare `open(port=...)` would reuse.\n\
+             2. Normally call bare `open` with the port only — baud defaults to \
+             115200/8-N-1 and the server automatically reuses the most recently used \
+             high-confidence profile for a known device or creates a durable generated \
+              profile for a new one (both observable in the result's `profile`).\n\
+               3. Use `transact` for command/response, `read` for buffered or unsolicited \
+              data (with `match` to wait for a pattern), `write` for send-only.\n\
+              4. For boot/reset capture (Arduino auto-reset, power-cycle banner, boot \
+             prompt) use `capture_boot` — one call that atomically marks the live edge, \
+             optionally pulses DTR/RTS, and captures only post-mark bytes (private \
+             cursor; in-memory only). `reset=null` arms capture for externally reset \
+             devices.\n\
+              5. After durable changes inspect `profile` / `profile_persistence` on the \
+             result, or `get_status` for the live binding.\n\
+              6. Use `open_profile` only for explicit choice or weak identity; \
+             `rollback_profile` restores a retained configuration after a bad learned \
+             change.\n\
+              7. Escalate to framing/parser, cursor replay, reconnect, line control, and \
+             log tools only when the common path needs them. `export_log` persists the \
+             event log as JSONL only when the server started with `--capture-dir`; it \
+             takes a portable filename (never a path), never overwrites, and is \
+             quota-bounded.\n\
+              8. Optional wakeup: modern clients may call `subscriptions/listen` with \
+             resource URIs (`serial://ports`, `serial://connections`, or \
+             `serial://connections/{id}[/raw|/log]`) to be notified when those resources \
+             change. Notifications are hints only — `read` remains the primary lossless \
+             data path.\n\
+             Resources: serial://ports (same preview as list_ports), serial://connections, \
+             serial://connections/{id}. Prompts: diagnose_port, interactive_terminal."
+                .to_string(),
+        )
+}
 
 impl Default for SerialHandler {
     fn default() -> Self {
@@ -767,27 +873,7 @@ impl SerialHandler {
                     vec![]
                 }
             }
-        }
-    }
-
-    async fn notify_resource_changed(&self, connection_id: &str, ctx: &RequestContext<RoleServer>) {
-        if let Err(e) = ctx.peer.notify_resource_list_changed().await {
-            debug!("Failed to notify resource list changed: {e}");
-        }
-        let conn_uri = format!("{URI_CONNECTION_PREFIX}{connection_id}");
-        let subs = self.subscribers.lock().await;
-        let should_notify = subs.get(&conn_uri).is_some_and(|count| *count > 0);
-        drop(subs);
-        if should_notify {
-            if let Err(e) = ctx
-                .peer
-                .notify_resource_updated(rmcp::model::ResourceUpdatedNotificationParam::new(
-                    conn_uri,
-                ))
-                .await
-            {
-                debug!("Failed to notify resource updated: {e}");
-            }
+            _ => vec![],
         }
     }
 }
@@ -824,115 +910,212 @@ impl SerialHandler {
     }
 }
 
+// NOTE: no `#[prompt_handler]` here — that macro *unconditionally replaces*
+// any `list_prompts`/`get_prompt` in the annotated block with generated
+// versions that leave the SEP-2549 cache fields unset (rmcp-macros 3.1.0,
+// unlike `#[tool_handler]`, does not honor existing methods). The two
+// methods are therefore written explicitly below using the SAME
+// `Self::prompt_router()` the macro would use.
 #[tool_handler]
-#[prompt_handler]
 impl ServerHandler for SerialHandler {
     fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(
-            ServerCapabilities::builder()
-                .enable_tools()
-                .enable_tool_list_changed()
-                .enable_resources()
-                .enable_resources_list_changed()
-                .enable_resources_subscribe()
-                .enable_prompts()
-                .enable_logging()
-                .enable_completions()
-                .build(),
-        )
-        .with_server_info(Implementation::new(
-            env!("CARGO_PKG_NAME"),
-            env!("CARGO_PKG_VERSION"),
-        ))
-        .with_protocol_version(ProtocolVersion::V_2025_11_25)
-        .with_instructions(
-            "Serial port MCP server. Normal workflow:\n\
-             1. Call `list_ports` and inspect `profile_matches` (parallel to `ports`): \
-             it previews which profile a bare `open(port=...)` would reuse.\n\
-             2. Normally call bare `open` with the port only — baud defaults to \
-             115200/8-N-1 and the server automatically reuses the most recently used \
-             high-confidence profile for a known device or creates a durable generated \
-             profile for a new one (both observable in the result's `profile`).\n\
-             3. Use `transact` for command/response, `read` for buffered or unsolicited \
-             data (with `match` to wait for a pattern), `write` for send-only, and \
-             `subscribe` only for ongoing notifications.\n\
-             4. For boot/reset capture (Arduino auto-reset, power-cycle banner, boot \
-             prompt) use `capture_boot` — one call that atomically marks the live edge, \
-             optionally pulses DTR/RTS, and captures only post-mark bytes (private \
-             cursor; in-memory only). `reset=null` arms capture for externally reset \
-             devices.\n\
-             5. After durable changes inspect `profile` / `profile_persistence` on the \
-             result, or `get_status` for the live binding.\n\
-             6. Use `open_profile` only for explicit choice or weak identity; \
-             `rollback_profile` restores a retained configuration after a bad learned \
-             change.\n\
-             7. Escalate to framing/parser, cursor replay, reconnect, line control, and \
-             log tools only when the common path needs them. `export_log` persists the \
-             event log as JSONL only when the server started with `--capture-dir`; it \
-             takes a portable filename (never a path), never overwrites, and is \
-             quota-bounded.\n\
-             Resources: serial://ports (same preview as list_ports), serial://connections, \
-             serial://connections/{id}. Prompts: diagnose_port, interactive_terminal."
-                .to_string(),
-        )
+        // Preferred-policy view. rmcp intersects `subscriptions/listen`
+        // filters against `get_info().capabilities`, so this must advertise
+        // the preferred (`2026-07-28`) resource-subscription capability;
+        // `initialize()` still returns the legacy row's view explicitly for
+        // `2025-11-25` clients.
+        server_info_for(crate::mcp_protocol::preferred_policy())
     }
 
     async fn initialize(
         &self,
-        _req: InitializeRequestParams,
-        _ctx: RequestContext<RoleServer>,
+        request: InitializeRequestParams,
+        context: RequestContext<RoleServer>,
     ) -> Result<InitializeResult, McpError> {
+        // Exact policy lookup admits only the `InitializeSession` lifecycle.
+        // Modern `2026-07-28` clients negotiate via `server/discover`; a
+        // modern `initialize` (and any unknown/unsupported version) is
+        // rejected BEFORE peer bookkeeping so no session state is
+        // established for it. rmcp maps the handler's METHOD_NOT_FOUND
+        // through the transport routing of the request.
+        let Some(policy) = crate::mcp_protocol::policy_for(&request.protocol_version) else {
+            return Err(McpError::method_not_found::<InitializeResultMethod>());
+        };
+        if policy.lifecycle != ProtocolLifecycle::InitializeSession {
+            return Err(McpError::method_not_found::<InitializeResultMethod>());
+        }
+        // Preserve rmcp peer bookkeeping: the session worker's peer_info()
+        // must reflect this client's initialize parameters so subsequent
+        // requests route with the negotiated (legacy) protocol version.
+        context.peer.set_peer_info(request.clone());
         info!("Serial MCP server initialized");
-        Ok(self.get_info())
+        Ok(server_info_for(policy))
+    }
+
+    fn supported_protocol_versions(&self) -> Cow<'static, [ProtocolVersion]> {
+        Cow::Owned(crate::mcp_protocol::supported_protocol_versions())
+    }
+
+    async fn discover(
+        &self,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<DiscoverResult, McpError> {
+        Ok(DiscoverResult::from_server_info(
+            crate::mcp_protocol::supported_protocol_versions(),
+            server_info_for(crate::mcp_protocol::preferred_policy()),
+        ))
+    }
+
+    fn accepted_subscription_filter(
+        &self,
+        requested: &SubscriptionFilter,
+    ) -> Option<SubscriptionFilter> {
+        // Accept only valid, deduplicated resource subscriptions, preserving
+        // first-request order. All three list-change flags are stripped
+        // (serial-mcp never emits list-change notifications). Templates,
+        // malformed/empty ids, and unknown URIs are rejected by
+        // `is_subscribable_uri`. An empty accepted resource list becomes
+        // `None` inside the filter (no fake URI); the handler itself always
+        // remains available so rmcp acknowledges with the accepted filter.
+        let mut seen = std::collections::HashSet::new();
+        let mut accepted_uris = Vec::new();
+        if let Some(requested_uris) = requested.resource_subscriptions.as_ref() {
+            for uri in requested_uris {
+                if is_subscribable_uri(uri) && seen.insert(uri.clone()) {
+                    accepted_uris.push(uri.clone());
+                }
+            }
+        }
+        let mut builder = SubscriptionFilter::builder();
+        for uri in accepted_uris {
+            builder = builder.resource_subscription(uri);
+        }
+        Some(builder.build())
+    }
+
+    async fn listen(&self, context: SubscriptionContext) -> Result<(), McpError> {
+        // 1. Snapshot the accepted URI set (first-occurrence order).
+        //
+        // rmcp 3.0.1 computes the accepted filter as
+        // `requested.intersection(&candidate).intersection(&advertised)`,
+        // both left-biased over the REQUESTED list, so a duplicate requested
+        // URI may be echoed into `context.accepted()`. Deduplicate again
+        // here (first-occurrence order) so normal matching and lag recovery
+        // never emit duplicate hints because the request repeated a URI.
+        let accepted: Vec<String> = {
+            let mut seen = std::collections::HashSet::new();
+            context
+                .accepted()
+                .resource_subscriptions
+                .clone()
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|uri| seen.insert(uri.clone()))
+                .collect()
+        };
+        // 2. One receiver per listener.
+        let mut receiver = self.resource_events.subscribe();
+        let cancelled = context.cancelled();
+        tokio::pin!(cancelled);
+        loop {
+            tokio::select! {
+                // 3. Cancellation completes the stream cleanly.
+                _ = &mut cancelled => return Ok(()),
+                result = receiver.recv() => {
+                    match result {
+                        // 4+5. Matching update -> notify; unrelated events
+                        // are ignored.
+                        Ok(ResourceEvent::Updated(uri)) => {
+                            if accepted.contains(&uri) {
+                                if let Err(error) =
+                                    context.sink().notify_resource_updated(uri).await
+                                {
+                                    // Genuine sink failure (peer gone or
+                                    // subscription ended): terminate cleanly,
+                                    // no retry loop.
+                                    tracing::debug!("listen: sink terminated: {error}");
+                                    return Ok(());
+                                }
+                            }
+                        }
+                        // 6. Lag: conservatively notify every accepted URI
+                        // once, in accepted order. Never blocks the
+                        // publisher or pump (the hub is bounded and publish
+                        // is synchronous).
+                        Err(broadcast::error::RecvError::Lagged(_)) => {
+                            for uri in &accepted {
+                                if let Err(error) =
+                                    context.sink().notify_resource_updated(uri.clone()).await
+                                {
+                                    tracing::debug!(
+                                        "listen: sink terminated during lag recovery: {error}"
+                                    );
+                                    return Ok(());
+                                }
+                            }
+                        }
+                        // 7. Closed hub: complete successfully.
+                        Err(broadcast::error::RecvError::Closed) => return Ok(()),
+                    }
+                }
+            }
+        }
     }
 
     async fn list_resources(
         &self,
         request: Option<PaginatedRequestParams>,
-        _ctx: RequestContext<RoleServer>,
+        ctx: RequestContext<RoleServer>,
     ) -> Result<ListResourcesResult, McpError> {
         const PAGE_SIZE: usize = 100;
 
         let port_count = self
             .port_provider
             .list_available()
-            .map(|v| v.len() as u32)
+            .map(|v| v.len() as u64)
             .unwrap_or(0);
-        let conn_count = self.connections.count().await as u32;
+        let conn_count = self.connections.count().await as u64;
 
         let all = vec![
-            RawResource::new(URI_PORTS, "Available serial ports")
+            Resource::new(URI_PORTS, "Available serial ports")
                 .with_description("JSON list of serial ports the OS currently exposes.".to_string())
                 .with_mime_type("application/json".to_string())
                 .with_size(port_count)
-                .with_priority(0.9)
-                .with_audience(vec![Role::User, Role::Assistant]),
-            RawResource::new(URI_CONNECTIONS, "Open serial connections")
+                .with_annotations(
+                    Annotations::default()
+                        .with_priority(0.9)
+                        .with_audience(vec![Role::User, Role::Assistant]),
+                ),
+            Resource::new(URI_CONNECTIONS, "Open serial connections")
                 .with_description(
                     "JSON list of serial connections currently held open by this server."
                         .to_string(),
                 )
                 .with_mime_type("application/json".to_string())
                 .with_size(conn_count)
-                .with_priority(0.8)
-                .with_audience(vec![Role::User, Role::Assistant]),
+                .with_annotations(
+                    Annotations::default()
+                        .with_priority(0.8)
+                        .with_audience(vec![Role::User, Role::Assistant]),
+                ),
         ];
         let (resources, next_cursor) = paginate(&all, request.and_then(|r| r.cursor), PAGE_SIZE);
-        Ok(ListResourcesResult {
-            resources,
-            next_cursor,
-            meta: None,
-        })
+        let mut result = ListResourcesResult::with_all_items(resources);
+        result.next_cursor = next_cursor;
+        if cache_fields_for(ctx.protocol_version()) {
+            result = result.with_ttl_ms(0).with_cache_scope(CacheScope::Private);
+        }
+        Ok(result)
     }
 
     async fn list_resource_templates(
         &self,
         request: Option<PaginatedRequestParams>,
-        _ctx: RequestContext<RoleServer>,
+        ctx: RequestContext<RoleServer>,
     ) -> Result<ListResourceTemplatesResult, McpError> {
         const PAGE_SIZE: usize = 100;
         let all = vec![
-            RawResourceTemplate::new(
+            ResourceTemplate::new(
                 URI_CONNECTION_TEMPLATE,
                 "Open serial connection by id",
             )
@@ -941,9 +1124,12 @@ impl ServerHandler for SerialHandler {
                     .to_string(),
             )
             .with_mime_type("application/json".to_string())
-            .with_priority(0.7)
-            .with_audience(vec![Role::User, Role::Assistant]),
-            RawResourceTemplate::new(
+            .with_annotations(
+                Annotations::default()
+                    .with_priority(0.7)
+                    .with_audience(vec![Role::User, Role::Assistant]),
+            ),
+            ResourceTemplate::new(
                 URI_CONNECTION_RAW_TEMPLATE,
                 "Raw binary data from a serial connection",
             )
@@ -952,9 +1138,12 @@ impl ServerHandler for SerialHandler {
                     .to_string(),
             )
             .with_mime_type("application/octet-stream".to_string())
-            .with_priority(0.6)
-            .with_audience(vec![Role::User, Role::Assistant]),
-            RawResourceTemplate::new(
+            .with_annotations(
+                Annotations::default()
+                    .with_priority(0.6)
+                    .with_audience(vec![Role::User, Role::Assistant]),
+            ),
+            ResourceTemplate::new(
                 URI_CONNECTION_LOG_TEMPLATE,
                 "Event log for a serial connection",
             )
@@ -963,23 +1152,27 @@ impl ServerHandler for SerialHandler {
                     .to_string(),
             )
             .with_mime_type("application/x-ndjson".to_string())
-            .with_priority(0.5)
-            .with_audience(vec![Role::User, Role::Assistant]),
+            .with_annotations(
+                Annotations::default()
+                    .with_priority(0.5)
+                    .with_audience(vec![Role::User, Role::Assistant]),
+            ),
         ];
         let (resource_templates, next_cursor) =
             paginate(&all, request.and_then(|r| r.cursor), PAGE_SIZE);
-        Ok(ListResourceTemplatesResult {
-            resource_templates,
-            next_cursor,
-            meta: None,
-        })
+        let mut result = ListResourceTemplatesResult::with_all_items(resource_templates);
+        result.next_cursor = next_cursor;
+        if cache_fields_for(ctx.protocol_version()) {
+            result = result.with_ttl_ms(0).with_cache_scope(CacheScope::Private);
+        }
+        Ok(result)
     }
 
     async fn read_resource(
         &self,
         request: ReadResourceRequestParams,
-        _ctx: RequestContext<RoleServer>,
-    ) -> Result<ReadResourceResult, McpError> {
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<ReadResourceResponse, McpError> {
         let uri = request.uri;
         match parse_resource_uri(&uri) {
             ResourceUriKind::Ports => {
@@ -999,10 +1192,12 @@ impl ServerHandler for SerialHandler {
                     profile_matches,
                 })
                 .map_err(|e| McpError::internal_error(format!("serialize: {e}"), None))?;
-                Ok(ReadResourceResult::new(vec![ResourceContents::text(
-                    body, uri,
-                )
-                .with_mime_type("application/json")]))
+                Ok(read_result_with_cache_fields(
+                    ReadResourceResult::new(vec![
+                        ResourceContents::text(body, uri).with_mime_type("application/json")
+                    ]),
+                    ctx.protocol_version(),
+                ))
             }
             ResourceUriKind::ConnectionsList => {
                 let summaries = self.connections.list_open().await;
@@ -1011,10 +1206,12 @@ impl ServerHandler for SerialHandler {
                     connections: summaries,
                 })
                 .map_err(|e| McpError::internal_error(format!("serialize: {e}"), None))?;
-                Ok(ReadResourceResult::new(vec![ResourceContents::text(
-                    body, uri,
-                )
-                .with_mime_type("application/json")]))
+                Ok(read_result_with_cache_fields(
+                    ReadResourceResult::new(vec![
+                        ResourceContents::text(body, uri).with_mime_type("application/json")
+                    ]),
+                    ctx.protocol_version(),
+                ))
             }
             ResourceUriKind::ConnectionDetail(id) => {
                 let conn = self.connections.get(&id).await.map_err(|_| {
@@ -1026,10 +1223,12 @@ impl ServerHandler for SerialHandler {
 
                 let body = serde_json::to_string_pretty(&conn.summary())
                     .map_err(|e| McpError::internal_error(format!("serialize: {e}"), None))?;
-                Ok(ReadResourceResult::new(vec![ResourceContents::text(
-                    body, uri,
-                )
-                .with_mime_type("application/json")]))
+                Ok(read_result_with_cache_fields(
+                    ReadResourceResult::new(vec![
+                        ResourceContents::text(body, uri).with_mime_type("application/json")
+                    ]),
+                    ctx.protocol_version(),
+                ))
             }
             ResourceUriKind::ConnectionDetailRaw(id) => {
                 let conn = self.connections.get(&id).await.map_err(|_| {
@@ -1043,10 +1242,12 @@ impl ServerHandler for SerialHandler {
                     .await
                     .map_err(|e| McpError::internal_error(format!("Failed to read: {e}"), None))?;
                 let b64 = base64::engine::general_purpose::STANDARD.encode(&raw_bytes);
-                Ok(ReadResourceResult::new(vec![ResourceContents::blob(
-                    b64, uri,
-                )
-                .with_mime_type("application/octet-stream")]))
+                Ok(read_result_with_cache_fields(
+                    ReadResourceResult::new(vec![
+                        ResourceContents::blob(b64, uri).with_mime_type("application/octet-stream")
+                    ]),
+                    ctx.protocol_version(),
+                ))
             }
             ResourceUriKind::ConnectionLog(id) => {
                 let conn = self.connections.get(&id).await.map_err(|_| {
@@ -1063,10 +1264,12 @@ impl ServerHandler for SerialHandler {
                     body.push_str(&line);
                     body.push('\n');
                 }
-                Ok(ReadResourceResult::new(vec![ResourceContents::text(
-                    body, uri,
-                )
-                .with_mime_type("application/x-ndjson")]))
+                Ok(read_result_with_cache_fields(
+                    ReadResourceResult::new(vec![
+                        ResourceContents::text(body, uri).with_mime_type("application/x-ndjson")
+                    ]),
+                    ctx.protocol_version(),
+                ))
             }
             ResourceUriKind::Unknown => Err(McpError::resource_not_found(
                 "resource_not_found",
@@ -1088,33 +1291,60 @@ impl ServerHandler for SerialHandler {
         Ok(CompleteResult::new(completion))
     }
 
-    async fn subscribe(
+    // Explicit `tools/list` / `prompts/list` handlers. The
+    // `#[tool_handler]` macro generates `list_tools` when absent but leaves
+    // the SEP-2549 cache fields unset, and `#[prompt_handler]` replaces any
+    // `list_prompts` outright; the explicit versions serve the SAME routers
+    // (exact deterministic catalog, titles, schemas, prompt definitions)
+    // with cursor pagination and set `ttlMs: 0` / `cacheScope: "private"`
+    // only for `2026-07-28`+ peers.
+    async fn list_tools(
         &self,
-        request: SubscribeRequestParams,
-        _ctx: RequestContext<RoleServer>,
-    ) -> Result<(), McpError> {
-        let uri = request.uri;
-        let mut subscribers = self.subscribers.lock().await;
-        *subscribers.entry(uri.clone()).or_insert(0) += 1;
-        debug!("Client subscribed to resource {}", uri);
-        Ok(())
+        request: Option<PaginatedRequestParams>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<ListToolsResult, McpError> {
+        const PAGE_SIZE: usize = 100;
+        let all = Self::tool_router().list_all();
+        let (tools, next_cursor) = paginate(&all, request.and_then(|r| r.cursor), PAGE_SIZE);
+        let mut result = ListToolsResult::with_all_items(tools);
+        result.next_cursor = next_cursor;
+        if cache_fields_for(ctx.protocol_version()) {
+            result = result.with_ttl_ms(0).with_cache_scope(CacheScope::Private);
+        }
+        Ok(result)
     }
 
-    async fn unsubscribe(
+    /// Route `prompts/get` through the same `prompt_router` the
+    /// `#[prompt_handler]` macro would use (hand-written because that macro
+    /// replaces the method unconditionally — see the impl attribute note).
+    async fn get_prompt(
         &self,
-        request: UnsubscribeRequestParams,
-        _ctx: RequestContext<RoleServer>,
-    ) -> Result<(), McpError> {
-        let uri = request.uri;
-        let mut subscribers = self.subscribers.lock().await;
-        if let Some(count) = subscribers.get_mut(&uri) {
-            *count = count.saturating_sub(1);
-            if *count == 0 {
-                subscribers.remove(&uri);
-            }
+        request: GetPromptRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<GetPromptResponse, McpError> {
+        let prompt_context = rmcp::handler::server::prompt::PromptContext::new(
+            self,
+            request.name,
+            request.arguments,
+            context,
+        );
+        Self::prompt_router().get_prompt(prompt_context).await
+    }
+
+    async fn list_prompts(
+        &self,
+        request: Option<PaginatedRequestParams>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<ListPromptsResult, McpError> {
+        const PAGE_SIZE: usize = 100;
+        let all = Self::prompt_router().list_all();
+        let (prompts, next_cursor) = paginate(&all, request.and_then(|r| r.cursor), PAGE_SIZE);
+        let mut result = ListPromptsResult::with_all_items(prompts);
+        result.next_cursor = next_cursor;
+        if cache_fields_for(ctx.protocol_version()) {
+            result = result.with_ttl_ms(0).with_cache_scope(CacheScope::Private);
         }
-        debug!("Client unsubscribed from resource {}", uri);
-        Ok(())
+        Ok(result)
     }
 }
 
@@ -1122,13 +1352,60 @@ impl ServerHandler for SerialHandler {
 
 use crate::resources::{
     parse_resource_uri, ConnectionsResource, ResourceUriKind, URI_CONNECTIONS,
-    URI_CONNECTION_LOG_TEMPLATE, URI_CONNECTION_PREFIX, URI_CONNECTION_RAW_TEMPLATE,
-    URI_CONNECTION_TEMPLATE, URI_PORTS,
+    URI_CONNECTION_LOG_TEMPLATE, URI_CONNECTION_RAW_TEMPLATE, URI_CONNECTION_TEMPLATE, URI_PORTS,
 };
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn read_result_with_cache_fields_sets_fields_only_for_modern() {
+        use rmcp::model::ReadResourceResponse;
+
+        let modern = read_result_with_cache_fields(
+            ReadResourceResult::new(vec![]),
+            Some(ProtocolVersion::V_2026_07_28),
+        );
+        let ReadResourceResponse::Complete(modern) = modern else {
+            panic!("expected complete read result");
+        };
+        assert_eq!(modern.ttl_ms, Some(0), "modern ttlMs must be 0");
+        assert_eq!(
+            modern.cache_scope,
+            Some(CacheScope::Private),
+            "modern cacheScope must be private"
+        );
+
+        let legacy = read_result_with_cache_fields(
+            ReadResourceResult::new(vec![]),
+            Some(ProtocolVersion::V_2025_11_25),
+        );
+        let ReadResourceResponse::Complete(legacy) = legacy else {
+            panic!("expected complete read result");
+        };
+        assert_eq!(legacy.ttl_ms, None, "legacy must omit ttlMs");
+        assert_eq!(legacy.cache_scope, None, "legacy must omit cacheScope");
+    }
+
+    #[test]
+    fn read_result_with_cache_fields_gives_future_version_no_fields() {
+        // A custom future version has no policy row, so it must not inherit
+        // modern cache fields merely because its date sorts after 2026-07-28.
+        use rmcp::model::ReadResourceResponse;
+
+        let future: ProtocolVersion =
+            serde_json::from_value(serde_json::json!("2099-01-01")).unwrap();
+        let result = read_result_with_cache_fields(ReadResourceResult::new(vec![]), Some(future));
+        let ReadResourceResponse::Complete(result) = result else {
+            panic!("expected complete read result");
+        };
+        assert_eq!(result.ttl_ms, None, "future version must omit ttlMs");
+        assert_eq!(
+            result.cache_scope, None,
+            "future version must omit cacheScope"
+        );
+    }
 
     #[test]
     fn prompt_router_advertises_both_prompts() {
@@ -1218,20 +1495,6 @@ mod tests {
         assert_eq!(handler.budget.program_limit(), 4096);
     }
     #[tokio::test]
-    async fn builder_custom_streams_preserved() {
-        let streams: StreamRegistry = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
-        let handler = SerialHandler::builder()
-            .connections(Arc::new(ConnectionManager::new()))
-            .streams(Arc::clone(&streams))
-            .build();
-        // Same Arc pointer must be retained (injectable, not copied).
-        assert!(
-            Arc::ptr_eq(&handler.streams, &streams),
-            "streams Arc not retained"
-        );
-    }
-
-    #[tokio::test]
     async fn builder_injected_profile_store_is_used() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("profiles.toml");
@@ -1266,6 +1529,198 @@ mod tests {
         assert!(
             handler.profile_store.path().is_none(),
             "builder default must be an ephemeral store"
+        );
+    }
+
+    // ---- Dual MCP lifecycle (Phase 2) --------------------------------------
+
+    #[tokio::test]
+    async fn supported_protocol_versions_are_exact_modern_then_legacy() {
+        let handler = SerialHandler::builder()
+            .connections(Arc::new(ConnectionManager::new()))
+            .build();
+        let versions: Vec<ProtocolVersion> = handler.supported_protocol_versions().to_vec();
+        assert_eq!(versions.len(), 2, "exactly two supported versions");
+        assert_eq!(versions[0], ProtocolVersion::V_2026_07_28);
+        assert_eq!(versions[1], ProtocolVersion::V_2025_11_25);
+    }
+
+    #[test]
+    fn modern_capability_view_advertises_resource_subscriptions() {
+        let json = serde_json::to_value(
+            server_info_for(crate::mcp_protocol::preferred_policy()).capabilities,
+        )
+        .unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "completions": {},
+                "prompts": {},
+                "resources": {"subscribe": true},
+                "tools": {},
+            }),
+            "preferred discovery view must advertise resource subscriptions"
+        );
+    }
+
+    #[test]
+    fn legacy_capability_view_keeps_subscription_disabled() {
+        let legacy_policy = crate::mcp_protocol::policy_for(&ProtocolVersion::V_2025_11_25)
+            .expect("legacy policy row must exist");
+        let json = serde_json::to_value(server_info_for(legacy_policy).capabilities).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "completions": {},
+                "prompts": {},
+                "resources": {},
+                "tools": {},
+            }),
+            "legacy initialize view must keep resource subscriptions disabled"
+        );
+    }
+
+    #[test]
+    fn capability_views_omit_logging_list_change_and_tasks() {
+        let legacy_policy = crate::mcp_protocol::policy_for(&ProtocolVersion::V_2025_11_25)
+            .expect("legacy policy row must exist");
+        for capabilities in [
+            server_info_for(crate::mcp_protocol::preferred_policy()).capabilities,
+            server_info_for(legacy_policy).capabilities,
+        ] {
+            let json = serde_json::to_value(&capabilities).unwrap();
+            let object = json.as_object().expect("capabilities serialize as object");
+            for forbidden in [
+                "logging",
+                "experimental",
+                "extensions",
+                "roots",
+                "sampling",
+                "elicitation",
+            ] {
+                assert!(
+                    !object.contains_key(forbidden),
+                    "capability view must not advertise `{forbidden}`: {json}"
+                );
+            }
+            // tools/prompts advertise no list-change flags.
+            assert_eq!(object["tools"], serde_json::json!({}));
+            assert_eq!(object["prompts"], serde_json::json!({}));
+        }
+        // resources: preferred carries only `subscribe`, legacy only nothing —
+        // neither advertises `listChanged`.
+        let modern = serde_json::to_value(
+            server_info_for(crate::mcp_protocol::preferred_policy()).capabilities,
+        )
+        .unwrap();
+        assert_eq!(modern["resources"], serde_json::json!({"subscribe": true}));
+        let legacy = serde_json::to_value(server_info_for(legacy_policy).capabilities).unwrap();
+        assert_eq!(legacy["resources"], serde_json::json!({}));
+    }
+
+    #[test]
+    fn policy_infos_carry_their_own_protocol_version() {
+        let legacy_policy = crate::mcp_protocol::policy_for(&ProtocolVersion::V_2025_11_25)
+            .expect("legacy policy row must exist");
+        assert_eq!(
+            server_info_for(legacy_policy).protocol_version,
+            ProtocolVersion::V_2025_11_25
+        );
+        assert_eq!(
+            server_info_for(crate::mcp_protocol::preferred_policy()).protocol_version,
+            ProtocolVersion::V_2026_07_28
+        );
+    }
+
+    #[tokio::test]
+    async fn get_info_returns_modern_view_for_listen_intersection() {
+        // rmcp intersects `subscriptions/listen` filters against
+        // `get_info().capabilities`; Phase 3 requires the modern view there
+        // while `initialize()` keeps returning the legacy view.
+        let handler = SerialHandler::builder()
+            .connections(Arc::new(ConnectionManager::new()))
+            .build();
+        assert_eq!(
+            serde_json::to_value(handler.get_info().capabilities).unwrap(),
+            serde_json::json!({
+                "completions": {},
+                "prompts": {},
+                "resources": {"subscribe": true},
+                "tools": {},
+            })
+        );
+        assert_eq!(
+            handler.get_info().protocol_version,
+            ProtocolVersion::V_2026_07_28
+        );
+    }
+
+    #[tokio::test]
+    async fn accepted_subscription_filter_keeps_valid_dedup_and_strips_unsupported() {
+        let handler = SerialHandler::builder()
+            .connections(Arc::new(ConnectionManager::new()))
+            .build();
+        let requested = SubscriptionFilter::builder()
+            .resource_subscriptions([
+                "serial://ports",
+                "serial://connections",
+                "serial://ports", // duplicate — first order preserved
+                "serial://connections/abc-123",
+                "serial://connections/{id}", // template -> stripped
+                "serial://connections/",     // empty id -> stripped
+                "https://example.com/x",     // unknown scheme -> stripped
+            ])
+            .tools_list_changed()
+            .prompts_list_changed()
+            .resources_list_changed()
+            .build();
+        let accepted = handler
+            .accepted_subscription_filter(&requested)
+            .expect("handler always available");
+        assert_eq!(
+            accepted.resource_subscriptions.as_deref(),
+            Some(
+                [
+                    "serial://ports".to_string(),
+                    "serial://connections".to_string(),
+                    "serial://connections/abc-123".to_string(),
+                ]
+                .as_slice()
+            ),
+            "valid + deduplicated URIs in first-request order"
+        );
+        assert!(
+            accepted.tools_list_changed.is_none()
+                && accepted.prompts_list_changed.is_none()
+                && accepted.resources_list_changed.is_none(),
+            "all list-change flags must be stripped"
+        );
+    }
+
+    #[tokio::test]
+    async fn accepted_subscription_filter_empty_accepted_resources_is_none_not_fake_uri() {
+        let handler = SerialHandler::builder()
+            .connections(Arc::new(ConnectionManager::new()))
+            .build();
+        // Everything invalid -> accepted resource list is None.
+        let requested = SubscriptionFilter::builder()
+            .resource_subscriptions(["serial://connections/{id}", "https://example.com/x"])
+            .build();
+        let accepted = handler
+            .accepted_subscription_filter(&requested)
+            .expect("handler always available");
+        assert!(accepted.resource_subscriptions.is_none());
+
+        // Nothing requested at all -> same empty accepted filter, and the
+        // handler stays available (Some).
+        let accepted_empty = handler
+            .accepted_subscription_filter(&SubscriptionFilter::new())
+            .expect("handler always available");
+        assert!(accepted_empty.resource_subscriptions.is_none());
+        assert!(
+            accepted_empty.tools_list_changed.is_none()
+                && accepted_empty.prompts_list_changed.is_none()
+                && accepted_empty.resources_list_changed.is_none()
         );
     }
 }

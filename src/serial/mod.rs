@@ -4,7 +4,9 @@
 //! - [`PortInfo::list_available`] enumerates serial ports on the host.
 //! - [`SerialConnection::open`] opens a single configured port.
 //! - [`ConnectionManager`] holds a set of open connections indexed by id and
-//!   rejects double-opens of the same port.
+//!   rejects double-opens of the same port. Its connection-opening boundary
+//!   ([`ConnectionOpener`]) is injectable so alternate backends can drive
+//!   the full surface without an OS serial port.
 //!
 //! The implementation is split into focused submodules: configuration types
 //! and defaults (`config`), OS port enumeration (`port_info`), the connection
@@ -26,7 +28,7 @@ pub use config::{
     MAX_BAUD_RATE,
 };
 pub use connection::{SerialConnection, SerialIo};
-pub use manager::ConnectionManager;
+pub use manager::{ConnectionManager, ConnectionOpener};
 pub use port_info::{PortInfo, PortProvider, PortTransport, SystemPortProvider};
 
 // =============================================================================
@@ -89,10 +91,7 @@ mod schema {
         GetLogResult, GetStatusResult, ListConnectionsResult, ListPortsResult, ListProfilesResult,
         OpenResult, PortProfileMatch, ProfileMatchCandidate, ReadResult, ReconfigureResult,
         ReconnectResult, RollbackProfileArgs, RollbackProfileResult, SaveProfileResult,
-        SendBreakResult, SetDtrRtsResult, SetFlowControlResult, SubscribeChunkNotification,
-        SubscribeEncodingErrorNotification, SubscribeFrameNotification,
-        SubscribePartialFrameNotification, SubscribeResult, SubscribeStopNotification,
-        TransactResult, UnsubscribeResult, WriteResult,
+        SendBreakResult, SetDtrRtsResult, SetFlowControlResult, TransactResult, WriteResult,
     };
 
     /// Walk a JSON Schema `Value` and collect every `"format"` whose value
@@ -197,28 +196,6 @@ mod schema {
         SetFlowControlResult
     );
     check_schema!(send_break_result_has_no_uint_formats, SendBreakResult);
-    check_schema!(subscribe_result_has_no_uint_formats, SubscribeResult);
-    check_schema!(
-        subscribe_chunk_notification_has_no_uint_formats,
-        SubscribeChunkNotification
-    );
-    check_schema!(
-        subscribe_frame_notification_has_no_uint_formats,
-        SubscribeFrameNotification
-    );
-    check_schema!(
-        subscribe_encoding_error_notification_has_no_uint_formats,
-        SubscribeEncodingErrorNotification
-    );
-    check_schema!(
-        subscribe_partial_frame_notification_has_no_uint_formats,
-        SubscribePartialFrameNotification
-    );
-    check_schema!(
-        subscribe_stop_notification_has_no_uint_formats,
-        SubscribeStopNotification
-    );
-    check_schema!(unsubscribe_result_has_no_uint_formats, UnsubscribeResult);
     check_schema!(get_status_result_has_no_uint_formats, GetStatusResult);
     check_schema!(reconfigure_result_has_no_uint_formats, ReconfigureResult);
     check_schema!(list_profiles_result_has_no_uint_formats, ListProfilesResult);

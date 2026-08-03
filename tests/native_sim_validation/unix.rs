@@ -15,7 +15,7 @@ use std::time::Duration;
 use serde_json::json;
 
 use crate::common::firmware::NativeSimFirmware;
-use crate::common::{args_object, connect_client, next_notification, tool_request, TestServer};
+use crate::common::{args_object, connect_client, tool_request, TestServer};
 
 // ── MCP helper functions ─────────────────────────────────────────────────────
 
@@ -25,7 +25,7 @@ const NAME: &str = "native-sim-uart";
 async fn open_pty(
     client: &rmcp::service::RunningService<
         rmcp::service::RoleClient,
-        crate::common::NotificationCollector,
+        crate::common::TestClientHandler,
     >,
     pty_path: &str,
 ) -> String {
@@ -53,7 +53,7 @@ async fn open_pty(
 async fn open_with(
     client: &rmcp::service::RunningService<
         rmcp::service::RoleClient,
-        crate::common::NotificationCollector,
+        crate::common::TestClientHandler,
     >,
     pty_path: &str,
     extra_fields: serde_json::Value,
@@ -86,7 +86,7 @@ async fn open_with(
 async fn write_cmd(
     client: &rmcp::service::RunningService<
         rmcp::service::RoleClient,
-        crate::common::NotificationCollector,
+        crate::common::TestClientHandler,
     >,
     connection_id: &str,
     cmd: &str,
@@ -105,7 +105,7 @@ async fn write_cmd(
 async fn write_raw(
     client: &rmcp::service::RunningService<
         rmcp::service::RoleClient,
-        crate::common::NotificationCollector,
+        crate::common::TestClientHandler,
     >,
     connection_id: &str,
     data: &str,
@@ -121,40 +121,11 @@ async fn write_raw(
     assert_ne!(result.is_error, Some(true), "write failed: {result:?}");
 }
 
-async fn write_preset(
-    client: &rmcp::service::RunningService<
-        rmcp::service::RoleClient,
-        crate::common::NotificationCollector,
-    >,
-    connection_id: &str,
-    data: &str,
-    extra_fields: serde_json::Value,
-) {
-    let mut body = json!({
-        "connection_id": connection_id,
-        "data": data,
-        "protocol": { "type": "at_command" },
-    });
-    if let serde_json::Value::Object(ref mut map) = body {
-        if let serde_json::Value::Object(extra) = extra_fields {
-            for (k, v) in extra {
-                map.insert(k, v);
-            }
-        }
-    }
-    let result = client
-        .peer()
-        .call_tool(tool_request("write", body))
-        .await
-        .expect("write call");
-    assert_ne!(result.is_error, Some(true), "write failed: {result:?}");
-}
-
 /// Read unstructured data string via the `read` tool.
 async fn read_str(
     client: &rmcp::service::RunningService<
         rmcp::service::RoleClient,
-        crate::common::NotificationCollector,
+        crate::common::TestClientHandler,
     >,
     connection_id: &str,
     timeout_ms: u64,
@@ -184,7 +155,7 @@ async fn read_str(
 async fn read_until(
     client: &rmcp::service::RunningService<
         rmcp::service::RoleClient,
-        crate::common::NotificationCollector,
+        crate::common::TestClientHandler,
     >,
     connection_id: &str,
     expected: &str,
@@ -197,7 +168,7 @@ async fn read_until(
 async fn flush_both(
     client: &rmcp::service::RunningService<
         rmcp::service::RoleClient,
-        crate::common::NotificationCollector,
+        crate::common::TestClientHandler,
     >,
     connection_id: &str,
 ) {
@@ -219,7 +190,7 @@ fn bytes_to_hex(bytes: &[u8]) -> String {
 async fn close_connection(
     client: &rmcp::service::RunningService<
         rmcp::service::RoleClient,
-        crate::common::NotificationCollector,
+        crate::common::TestClientHandler,
     >,
     connection_id: &str,
 ) {
@@ -239,7 +210,7 @@ async fn close_connection(
 async fn sync_boot(
     client: &rmcp::service::RunningService<
         rmcp::service::RoleClient,
-        crate::common::NotificationCollector,
+        crate::common::TestClientHandler,
     >,
     connection_id: &str,
 ) {
@@ -606,131 +577,6 @@ async fn native_read_match_on_spam_complete() {
     drop(fw);
 }
 
-// ── Test 7: subscribe match stops on spam completion ─────────────────────────
-
-/// subscribe(match=...) self-stops with match_found when "Spam complete"
-/// appears mid-stream.
-#[tokio::test]
-#[ignore = "requires native_sim firmware binary"]
-async fn native_subscribe_match_stops_on_spam_complete() {
-    let fw = NativeSimFirmware::spawn().await.expect("spawn zephyr.exe");
-    let pty_path = fw.pty_path().to_string();
-
-    let server = TestServer::start().await;
-    let (client, mut rx) = connect_client(&server).await.unwrap();
-    let id = open_pty(&client, &pty_path).await;
-    sync_boot(&client, &id).await;
-
-    // Subscribe with match on the completion phrase.
-    client
-        .peer()
-        .call_tool(tool_request(
-            "subscribe",
-            json!({
-                "connection_id": id,
-                "poll_interval_ms": 50,
-                "max_buffered_bytes": 8192,
-                "match": {
-                    "pattern": "Spam complete",
-                    "config": {
-                        "mode": "literal_substring",
-                        "pattern_encoding": "utf8",
-                        "context_amount_of_matched_bytes": 64
-                    }
-                }
-            }),
-        ))
-        .await
-        .unwrap();
-
-    write_cmd(&client, &id, "spam 1024 hex").await;
-
-    let mut found_match_stop = false;
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-    while tokio::time::Instant::now() < deadline {
-        match next_notification(&mut rx, Duration::from_secs(3)).await {
-            Ok(event) => {
-                let data = event.data.as_object().unwrap();
-                if data.get("matched").and_then(|v| v.as_bool()) == Some(true) {
-                    found_match_stop = true;
-                    assert_eq!(data["stop_reason"], json!("match_found"), "{data:?}");
-                    assert!(
-                        data["match_index"].as_u64().is_some(),
-                        "match_index present"
-                    );
-                    let shaped = data.get("data").and_then(|v| v.as_str()).unwrap_or("");
-                    assert!(
-                        shaped.contains("Spam complete"),
-                        "shaped payload should contain stop phrase: {shaped:?}"
-                    );
-                    break;
-                }
-            }
-            Err(_) => break,
-        }
-    }
-    assert!(
-        found_match_stop,
-        "subscribe should have emitted match_found stop notification"
-    );
-
-    close_connection(&client, &id).await;
-    client.cancel().await.ok();
-    drop(fw);
-}
-
-// ── Test 8: subscribe silence timeout after spam ends ────────────────────────
-
-/// subscribe(no_new_rx_timeout_ms=500) stops with no_new_rx_timeout once
-/// the spam finishes and the board goes silent.
-#[tokio::test]
-#[ignore = "requires native_sim firmware binary"]
-async fn native_subscribe_silence_timeout_after_spam() {
-    let fw = NativeSimFirmware::spawn().await.expect("spawn zephyr.exe");
-    let pty_path = fw.pty_path().to_string();
-
-    let server = TestServer::start().await;
-    let (client, mut rx) = connect_client(&server).await.unwrap();
-    let id = open_pty(&client, &pty_path).await;
-    sync_boot(&client, &id).await;
-
-    // Run a small spam first to produce data, then let the firmware go silent.
-    write_cmd(&client, &id, "spam 512 hex").await;
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    flush_both(&client, &id).await;
-
-    // Now subscribe with silence timeout — firmware is quiet.
-    client
-        .peer()
-        .call_tool(tool_request(
-            "subscribe",
-            json!({
-                "connection_id": id,
-                "poll_interval_ms": 50,
-                "max_buffered_bytes": 1024,
-                "no_new_rx_timeout_ms": 500
-            }),
-        ))
-        .await
-        .unwrap();
-
-    let event = next_notification(&mut rx, Duration::from_secs(5))
-        .await
-        .expect("subscribe should emit stop notification");
-
-    let data = event.data.as_object().unwrap();
-    assert_eq!(
-        data["stop_reason"],
-        json!("no_new_rx_timeout"),
-        "expected silence timeout stop: {data:?}"
-    );
-    assert_ne!(data.get("matched").and_then(|v| v.as_bool()), Some(true));
-
-    close_connection(&client, &id).await;
-    client.cancel().await.ok();
-    drop(fw);
-}
-
 // ── Test 9: buffer budget under hex flood ────────────────────────────────────
 
 /// read(max_buffered_bytes=256) stops cleanly with max_buffered_bytes
@@ -800,128 +646,6 @@ async fn native_read_buffer_budget_stops_under_flood() {
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     close_connection(&client, &id).await;
-    client.cancel().await.ok();
-    drop(fw);
-}
-
-// ── Test 10: subscribe wall-clock timeout stops under active flood ───────────
-
-/// subscribe(timeout_ms=800) stops on wall-clock timeout even while spam
-/// data is actively flowing.
-#[tokio::test]
-#[ignore = "requires native_sim firmware binary"]
-async fn native_subscribe_timeout_stops_under_flood() {
-    let fw = NativeSimFirmware::spawn().await.expect("spawn zephyr.exe");
-    let pty_path = fw.pty_path().to_string();
-
-    let server = TestServer::start().await;
-    let (client, mut rx) = connect_client(&server).await.unwrap();
-    let id = open_pty(&client, &pty_path).await;
-    sync_boot(&client, &id).await;
-
-    // Subscribe with 800ms wall-clock timeout.
-    client
-        .peer()
-        .call_tool(tool_request(
-            "subscribe",
-            json!({
-                "connection_id": id,
-                "poll_interval_ms": 50,
-                "max_buffered_bytes": 16384,
-                "timeout_ms": 800,
-            }),
-        ))
-        .await
-        .unwrap();
-
-    write_cmd(&client, &id, "spam 1000000 hex").await;
-
-    let mut total_bytes: u64 = 0;
-    let mut stop_reason = String::new();
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-    while tokio::time::Instant::now() < deadline {
-        match next_notification(&mut rx, Duration::from_secs(3)).await {
-            Ok(event) => {
-                let data = event.data.as_object().unwrap();
-                if let Some(n) = data.get("bytes_read").and_then(|v| v.as_u64()) {
-                    total_bytes += n;
-                }
-                if let Some(reason) = data.get("stop_reason").and_then(|v| v.as_str()) {
-                    stop_reason = reason.to_string();
-                    break;
-                }
-            }
-            Err(_) => break,
-        }
-    }
-
-    assert_eq!(
-        stop_reason, "timeout",
-        "expected timeout stop: {stop_reason:?}"
-    );
-    assert!(
-        total_bytes > 0,
-        "should have received some bytes before timeout"
-    );
-
-    // Stop the flood so the process is clean.
-    write_cmd(&client, &id, "spam stop").await;
-    tokio::time::sleep(Duration::from_millis(50)).await;
-
-    close_connection(&client, &id).await;
-    client.cancel().await.ok();
-    drop(fw);
-}
-
-// ── Test 11: close while subscribe active ────────────────────────────────────
-
-/// Close the connection while a subscribe is streaming hex flood.
-/// Connection cleanup should be clean; list_connections returns 0.
-#[tokio::test]
-#[ignore = "requires native_sim firmware binary"]
-async fn native_close_while_subscribe_active() {
-    let fw = NativeSimFirmware::spawn().await.expect("spawn zephyr.exe");
-    let pty_path = fw.pty_path().to_string();
-
-    let server = TestServer::start().await;
-    let (client, _rx) = connect_client(&server).await.unwrap();
-    let id = open_pty(&client, &pty_path).await;
-    sync_boot(&client, &id).await;
-
-    client
-        .peer()
-        .call_tool(tool_request(
-            "subscribe",
-            json!({
-                "connection_id": id,
-                "poll_interval_ms": 50,
-                "max_buffered_bytes": 4096,
-            }),
-        ))
-        .await
-        .unwrap();
-
-    write_cmd(&client, &id, "spam 1000000 hex delay=5").await;
-    tokio::time::sleep(Duration::from_millis(100)).await;
-
-    write_cmd(&client, &id, "spam stop").await;
-    tokio::time::sleep(Duration::from_millis(50)).await;
-
-    close_connection(&client, &id).await;
-
-    let list = client
-        .peer()
-        .call_tool(tool_request("list_connections", json!({})))
-        .await
-        .expect("list_connections");
-    assert_ne!(list.is_error, Some(true), "{list:?}");
-    let s = list.structured_content.expect("structured");
-    assert_eq!(
-        s["count"],
-        json!(0),
-        "expected 0 connections after close: {s:?}"
-    );
-
     client.cancel().await.ok();
     drop(fw);
 }
@@ -1121,62 +845,6 @@ async fn native_flush_after_write() {
 
     close_connection(&client, &id).await;
     client.cancel().await.ok();
-    drop(fw);
-}
-
-// ── Test 16: unsubscribe followed by re-subscribe ──────────────────────────────
-
-#[tokio::test]
-#[ignore = "requires native_sim firmware binary"]
-async fn native_unsubscribe_then_resubscribe() {
-    let fw = NativeSimFirmware::spawn().await.expect("spawn zephyr.exe");
-    let pty_path = fw.pty_path().to_string();
-
-    let server = TestServer::start().await;
-    let (client, rx) = connect_client(&server).await.unwrap();
-
-    let id = open_pty(&client, &pty_path).await;
-    sync_boot(&client, &id).await;
-
-    // Subscribe
-    client
-        .peer()
-        .call_tool(tool_request(
-            "subscribe",
-            json!({
-                "connection_id": id,
-                "poll_interval_ms": 50,
-                "max_buffered_bytes": 1024,
-            }),
-        ))
-        .await
-        .expect("subscribe");
-
-    // Unsubscribe
-    let result = client
-        .peer()
-        .call_tool(tool_request("unsubscribe", json!({ "connection_id": id })))
-        .await
-        .expect("unsubscribe");
-    assert_ne!(result.is_error, Some(true), "{result:?}");
-
-    // Re-subscribe — should succeed
-    let resub = client
-        .peer()
-        .call_tool(tool_request(
-            "subscribe",
-            json!({
-                "connection_id": id,
-                "poll_interval_ms": 50,
-                "max_buffered_bytes": 1024,
-            }),
-        ))
-        .await
-        .expect("re-subscribe");
-    assert_ne!(resub.is_error, Some(true), "{resub:?}");
-
-    client.cancel().await.ok();
-    drop(rx);
     drop(fw);
 }
 
@@ -2328,95 +1996,6 @@ async fn native_read_at_parser_parses_pong() {
     drop(fw);
 }
 
-// ── Test 29: subscribe with line framing emits per-frame notifications ────
-
-#[tokio::test]
-#[ignore = "requires native_sim firmware binary"]
-async fn native_subscribe_line_framing_emits_per_frame() {
-    let fw = NativeSimFirmware::spawn().await.expect("spawn zephyr.exe");
-    let pty_path = fw.pty_path().to_string();
-
-    let server = TestServer::start().await;
-    let (client, mut rx) = connect_client(&server).await.unwrap();
-    let id = open_pty(&client, &pty_path).await;
-    sync_boot(&client, &id).await;
-
-    // Configure poll_interval_ms=50 and max_buffered_bytes=8192 for the subscribe.
-    client
-        .peer()
-        .call_tool(tool_request(
-            "configure",
-            json!({
-                "connection_id": id,
-                "defaults": { "poll_interval_ms": 50, "max_buffered_bytes": 8192 },
-            }),
-        ))
-        .await
-        .unwrap();
-
-    // Subscribe with line framing, auto-stop after 2 seconds.
-    client
-        .peer()
-        .call_tool(tool_request(
-            "subscribe",
-            json!({
-                "connection_id": id,
-                "poll_interval_ms": 50,
-                "max_buffered_bytes": 8192,
-                "timeout_ms": 2000,
-                "encoding": "utf8",
-                "rx_framing": {
-                    "type": "line"
-                }
-            }),
-        ))
-        .await
-        .unwrap();
-
-    write_cmd(&client, &id, "ping").await;
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    write_cmd(&client, &id, "info").await;
-
-    let mut frame_count = 0;
-    let mut saw_stop = false;
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-    while tokio::time::Instant::now() < deadline {
-        match next_notification(&mut rx, Duration::from_secs(2)).await {
-            Ok(event) => {
-                let data = event.data.as_object().unwrap();
-                // Stop notification has stop_reason; frame notifications have frame_index.
-                if data.contains_key("stop_reason") {
-                    saw_stop = true;
-                    assert!(data["frames_emitted"].as_u64().unwrap_or(0) > 0);
-                    break;
-                }
-                if data.contains_key("frame_index") {
-                    frame_count += 1;
-                    assert!(
-                        data.contains_key("frame_type"),
-                        "missing frame_type: {data:?}"
-                    );
-                    // Frames replace raw chunks, so no bytes_read field.
-                    assert!(
-                        !data.contains_key("bytes_read"),
-                        "frame notifications should not have bytes_read: {data:?}"
-                    );
-                }
-            }
-            Err(_) => break,
-        }
-    }
-    assert!(saw_stop, "subscribe should emit stop notification");
-    assert!(
-        frame_count >= 2,
-        "expected at least 2 frame notifications (pong, info), got {frame_count}"
-    );
-
-    close_connection(&client, &id).await;
-    client.cancel().await.ok();
-    drop(fw);
-}
-
 // ── Test 30: max_frames stops read after N frames ─────────────────────
 
 #[tokio::test]
@@ -2536,479 +2115,6 @@ async fn native_read_framing_plus_match_combined() {
             .iter()
             .any(|f| f["data"].as_str().unwrap_or("").contains("pong"));
     assert!(has_pong, "should find pong in data or frames: {s:?}");
-
-    close_connection(&client, &id).await;
-    client.cancel().await.ok();
-    drop(fw);
-}
-
-// ── Test 33: subscribe max_frames stops after N frames ────────────────
-
-#[tokio::test]
-#[ignore = "requires native_sim firmware binary"]
-async fn native_subscribe_framing_max_frames_stops() {
-    let fw = NativeSimFirmware::spawn().await.expect("spawn zephyr.exe");
-    let pty_path = fw.pty_path().to_string();
-
-    let server = TestServer::start().await;
-    let (client, mut rx) = connect_client(&server).await.unwrap();
-    let id = open_pty(&client, &pty_path).await;
-    sync_boot(&client, &id).await;
-
-    // Subscribe with max_frames=2, long timeout.
-    client
-        .peer()
-        .call_tool(tool_request(
-            "subscribe",
-            json!({
-                "connection_id": id,
-                "poll_interval_ms": 50,
-                "max_buffered_bytes": 8192,
-                "timeout_ms": 5000,
-                "encoding": "utf8",
-                "rx_framing": {
-                    "type": "line",
-                    "max_frames": 2
-                }
-            }),
-        ))
-        .await
-        .unwrap();
-
-    // Send 4 commands — each produces one line, stream stops after 2 frames.
-    write_cmd(&client, &id, "ping").await;
-    write_cmd(&client, &id, "info").await;
-    write_cmd(&client, &id, "ping").await;
-    write_cmd(&client, &id, "info").await;
-
-    let mut frame_count = 0;
-    let mut stop_reason = String::new();
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-    while tokio::time::Instant::now() < deadline {
-        match next_notification(&mut rx, Duration::from_secs(2)).await {
-            Ok(event) => {
-                let data = event.data.as_object().unwrap();
-                if let Some(reason) = data.get("stop_reason") {
-                    stop_reason = reason.as_str().unwrap_or("").to_string();
-                    break;
-                }
-                if data.contains_key("frame_index") {
-                    frame_count += 1;
-                }
-            }
-            Err(_) => break,
-        }
-    }
-    assert_eq!(
-        stop_reason, "max_frames",
-        "subscribe with max_frames=2 should stop with max_frames, got {stop_reason}"
-    );
-    assert_eq!(frame_count, 2, "expected exactly 2 frame notifications");
-
-    close_connection(&client, &id).await;
-    client.cancel().await.ok();
-    drop(fw);
-}
-
-// ── Test 34: subscribe + framing + match combined ──────────────────────
-
-#[tokio::test]
-#[ignore = "requires native_sim firmware binary"]
-async fn native_subscribe_framing_plus_match_combined() {
-    let fw = NativeSimFirmware::spawn().await.expect("spawn zephyr.exe");
-    let pty_path = fw.pty_path().to_string();
-
-    let server = TestServer::start().await;
-    let (client, mut rx) = connect_client(&server).await.unwrap();
-    let id = open_pty(&client, &pty_path).await;
-    sync_boot(&client, &id).await;
-
-    // Subscribe with line framing + match on "pong".
-    client
-        .peer()
-        .call_tool(tool_request(
-            "subscribe",
-            json!({
-                "connection_id": id,
-                "poll_interval_ms": 50,
-                "max_buffered_bytes": 8192,
-                "encoding": "utf8",
-                "rx_framing": { "type": "line" },
-                "match": {
-                    "pattern": "pong",
-                    "config": {
-                        "mode": "literal_substring",
-                        "pattern_encoding": "utf8"
-                    }
-                }
-            }),
-        ))
-        .await
-        .unwrap();
-
-    write_cmd(&client, &id, "ping").await;
-
-    let mut found_frame = false;
-    let mut found_match_stop = false;
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-    while tokio::time::Instant::now() < deadline {
-        match next_notification(&mut rx, Duration::from_secs(2)).await {
-            Ok(event) => {
-                let data = event.data.as_object().unwrap();
-                if data.contains_key("stop_reason") {
-                    found_match_stop = true;
-                    assert_eq!(data["stop_reason"], json!("match_found"));
-                    assert_eq!(data["matched"], json!(true));
-                    assert!(
-                        data["match_frame_index"].as_u64().is_some(),
-                        "should have match_frame_index"
-                    );
-                    assert!(data["frames_emitted"].as_u64().unwrap_or(0) > 0);
-                    break;
-                }
-                if data.contains_key("frame_index") {
-                    found_frame = true;
-                }
-            }
-            Err(_) => break,
-        }
-    }
-    assert!(found_frame, "should have at least one frame notification");
-    assert!(
-        found_match_stop,
-        "subscribe+framing+match should find pong match"
-    );
-
-    close_connection(&client, &id).await;
-    client.cancel().await.ok();
-    drop(fw);
-}
-
-// ── Test 35: subscribe emits partial frame on timeout ──────────────────
-
-#[tokio::test]
-#[ignore = "requires native_sim firmware binary"]
-async fn native_subscribe_framing_partial_on_timeout() {
-    let fw = NativeSimFirmware::spawn().await.expect("spawn zephyr.exe");
-    let pty_path = fw.pty_path().to_string();
-
-    let server = TestServer::start().await;
-    let (client, mut rx) = connect_client(&server).await.unwrap();
-    let id = open_pty(&client, &pty_path).await;
-    sync_boot(&client, &id).await;
-
-    // Subscribe with line framing + short timeout.
-    client
-        .peer()
-        .call_tool(tool_request(
-            "subscribe",
-            json!({
-                "connection_id": id,
-                "poll_interval_ms": 50,
-                "max_buffered_bytes": 8192,
-                "timeout_ms": 1500,
-                "encoding": "utf8",
-                "rx_framing": { "type": "line" }
-            }),
-        ))
-        .await
-        .unwrap();
-
-    // Send raw data without line terminator — no \n to trigger frame boundary.
-    write_cmd(&client, &id, "sendraw text partial_no_newline").await;
-    // Give time for the data to reach the pump.
-    tokio::time::sleep(Duration::from_millis(200)).await;
-
-    let mut saw_partial = false;
-    let mut stop_reason = String::new();
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-    while tokio::time::Instant::now() < deadline {
-        match next_notification(&mut rx, Duration::from_secs(2)).await {
-            Ok(event) => {
-                let data = event.data.as_object().unwrap();
-                if let Some(reason) = data.get("stop_reason") {
-                    stop_reason = reason.as_str().unwrap_or("").to_string();
-                    break;
-                }
-                if data.get("partial").and_then(|v| v.as_bool()) == Some(true) {
-                    saw_partial = true;
-                    assert!(data["data"]
-                        .as_str()
-                        .unwrap()
-                        .contains("partial_no_newline"));
-                }
-            }
-            Err(_) => break,
-        }
-    }
-    assert_eq!(
-        stop_reason, "timeout",
-        "subscribe should timeout after sendraw with no terminator"
-    );
-    assert!(
-        saw_partial,
-        "should emit partial frame notification on timeout"
-    );
-
-    close_connection(&client, &id).await;
-    client.cancel().await.ok();
-    drop(fw);
-}
-
-// ── Test 36: subscribe flushes partial frame on close ──────────────────
-//
-// When the connection is closed via the "close" tool, the pump channel
-// closes, the subscribe loop exits, and flush_partial emits any buffered
-// data as a partial frame notification. The close handler now waits for
-// the subscribe task to finish (join_without_abort) before cleanup.
-
-#[tokio::test]
-#[ignore = "requires native_sim firmware binary"]
-async fn native_subscribe_framing_partial_on_close() {
-    let fw = NativeSimFirmware::spawn().await.expect("spawn zephyr.exe");
-    let pty_path = fw.pty_path().to_string();
-
-    let server = TestServer::start().await;
-    let (client, mut rx) = connect_client(&server).await.unwrap();
-    let id = open_pty(&client, &pty_path).await;
-    sync_boot(&client, &id).await;
-
-    // Subscribe with line framing, no timeout.
-    client
-        .peer()
-        .call_tool(tool_request(
-            "subscribe",
-            json!({
-                "connection_id": id,
-                "poll_interval_ms": 50,
-                "max_buffered_bytes": 8192,
-                "encoding": "utf8",
-                "rx_framing": { "type": "line" }
-            }),
-        ))
-        .await
-        .unwrap();
-
-    // Send raw data without line terminator — decoder buffers it as partial.
-    write_cmd(&client, &id, "sendraw text before_close").await;
-    // Give the pump time to receive the raw data from the firmware.
-    tokio::time::sleep(Duration::from_millis(300)).await;
-
-    // Close the connection. The close handler now waits for the subscribe
-    // task to finish naturally, allowing flush_partial to emit the partial
-    // frame notification before the task is cleaned up.
-    close_connection(&client, &id).await;
-
-    let mut saw_partial = false;
-    let mut saw_stop = false;
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-    while tokio::time::Instant::now() < deadline {
-        match next_notification(&mut rx, Duration::from_secs(2)).await {
-            Ok(event) => {
-                let data = event.data.as_object().unwrap();
-                if data.get("partial").and_then(|v| v.as_bool()) == Some(true) {
-                    saw_partial = true;
-                    assert!(
-                        data["data"].as_str().unwrap().contains("before_close"),
-                        "partial frame should contain before_close: {data:?}"
-                    );
-                }
-                if data.contains_key("stop_reason") {
-                    saw_stop = true;
-                    let reason = data["stop_reason"].as_str().unwrap_or("");
-                    // Close can produce connection_closed, channel_closed,
-                    // or read_error depending on pump exit timing.
-                    assert!(
-                        reason == "connection_closed"
-                            || reason == "channel_closed"
-                            || reason == "read_error",
-                        "expected close-related stop reason, got {reason}"
-                    );
-                    break;
-                }
-            }
-            Err(_) => break,
-        }
-    }
-    assert!(
-        saw_partial,
-        "should emit partial frame notification on close"
-    );
-    assert!(saw_stop, "should emit stop notification on close");
-
-    client.cancel().await.ok();
-    drop(fw);
-}
-
-// ── Protocol preset e2e tests ─────────────────────────────────────────────<AZ>
-// (3 tests — requires native_sim firmware)
-
-#[tokio::test]
-#[ignore = "requires native_sim firmware binary"]
-async fn native_write_protocol_preset_appends_cr() {
-    let fw = NativeSimFirmware::spawn().await.expect("spawn zephyr.exe");
-    let pty_path = fw.pty_path().to_string();
-
-    let server = TestServer::start().await;
-    let (client, _rx) = connect_client(&server).await.unwrap();
-    let id = open_pty(&client, &pty_path).await;
-    sync_boot(&client, &id).await;
-    flush_both(&client, &id).await;
-
-    // Write first — ring reads drain buffered data.
-    write_preset(
-        &client,
-        &id,
-        "ping",
-        serde_json::Value::Object(Default::default()),
-    )
-    .await;
-    tokio::time::sleep(Duration::from_millis(100)).await;
-
-    let result = client
-        .peer()
-        .call_tool(tool_request(
-            "read",
-            json!({
-                "connection_id": id,
-                "timeout_ms": 3000,
-                "max_buffered_bytes": 512,
-                "encoding": "utf8",
-                "protocol": { "type": "at_command" }
-            }),
-        ))
-        .await
-        .expect("read call");
-    assert_ne!(result.is_error, Some(true), "{result:?}");
-    let s = result.structured_content.expect("structured");
-    let frames = s["frames"].as_array().expect("frames array");
-    assert!(!frames.is_empty(), "expected at least one frame");
-    // Search for the AT-parsed frame with pong (may not be frames[0]).
-    let pong_frame = frames
-        .iter()
-        .find(|f| {
-            f["parsed"]["parser"] == json!("at_command")
-                && f["parsed"]["fields"].as_array().is_some_and(|fields| {
-                    fields
-                        .iter()
-                        .any(|f| f.as_str().unwrap_or("").contains("pong"))
-                })
-        })
-        .expect("frames should contain an AT-parsed pong frame");
-    let parsed = pong_frame["parsed"].as_object().expect("parsed object");
-    assert_eq!(parsed["parser"], json!("at_command"), "parser: {parsed:?}");
-    assert_eq!(parsed["response_type"], json!("data"));
-    let fields = parsed["fields"].as_array().expect("fields array");
-    assert!(
-        fields.iter().any(|f| f.as_str().unwrap().contains("pong")),
-        "fields should contain pong: {fields:?}"
-    );
-
-    close_connection(&client, &id).await;
-    client.cancel().await.ok();
-    drop(fw);
-}
-
-#[tokio::test]
-#[ignore = "requires native_sim firmware binary"]
-async fn native_write_explicit_tx_framing_overrides_protocol() {
-    let fw = NativeSimFirmware::spawn().await.expect("spawn zephyr.exe");
-    let pty_path = fw.pty_path().to_string();
-
-    let server = TestServer::start().await;
-    let (client, _rx) = connect_client(&server).await.unwrap();
-    let id = open_pty(&client, &pty_path).await;
-    sync_boot(&client, &id).await;
-    flush_both(&client, &id).await;
-
-    // Write first — ring reads drain buffered data.
-    write_preset(
-        &client,
-        &id,
-        "ping",
-        json!({ "tx_framing": { "type": "line", "ending": "crlf" } }),
-    )
-    .await;
-    tokio::time::sleep(Duration::from_millis(100)).await;
-
-    let result = client
-        .peer()
-        .call_tool(tool_request(
-            "read",
-            json!({
-                "connection_id": id,
-                "timeout_ms": 3000,
-                "max_buffered_bytes": 512,
-                "encoding": "utf8",
-                "protocol": { "type": "at_command" }
-            }),
-        ))
-        .await
-        .expect("read call");
-    assert_ne!(result.is_error, Some(true), "{result:?}");
-    let s = result.structured_content.expect("structured");
-    let frames = s["frames"].as_array().expect("frames array");
-    assert!(!frames.is_empty(), "expected at least one frame");
-    // Search for the AT-parsed frame (may not be frames[0]).
-    let at_frame = frames
-        .iter()
-        .find(|f| f["parsed"]["parser"] == json!("at_command"))
-        .expect("frames should contain an AT-parsed frame");
-    let parsed = at_frame["parsed"].as_object().expect("parsed object");
-    assert_eq!(parsed["parser"], json!("at_command"), "parser: {parsed:?}");
-    assert_eq!(parsed["response_type"], json!("data"));
-
-    close_connection(&client, &id).await;
-    client.cancel().await.ok();
-    drop(fw);
-}
-
-#[tokio::test]
-#[ignore = "requires native_sim firmware binary"]
-async fn native_read_explicit_rx_framing_overrides_protocol() {
-    let fw = NativeSimFirmware::spawn().await.expect("spawn zephyr.exe");
-    let pty_path = fw.pty_path().to_string();
-
-    let server = TestServer::start().await;
-    let (client, _rx) = connect_client(&server).await.unwrap();
-    let id = open_pty(&client, &pty_path).await;
-    sync_boot(&client, &id).await;
-    flush_both(&client, &id).await;
-
-    // Write first — ring reads drain buffered data.
-    write_cmd(&client, &id, "ping").await;
-    tokio::time::sleep(Duration::from_millis(100)).await;
-
-    let result = client
-        .peer()
-        .call_tool(tool_request(
-            "read",
-            json!({
-                "connection_id": id,
-                "timeout_ms": 3000,
-                "max_buffered_bytes": 512,
-                "encoding": "utf8",
-                "protocol": { "type": "at_command" },
-                "rx_framing": { "type": "line", "ending": "lf" }
-            }),
-        ))
-        .await
-        .expect("read call");
-    assert_ne!(result.is_error, Some(true), "{result:?}");
-    let s = result.structured_content.expect("structured");
-    let frames = s["frames"].as_array().expect("frames array");
-    assert!(!frames.is_empty(), "expected at least one frame");
-
-    // Search for AT-parsed frame (may not be frames[0]).
-    let at_frame = frames
-        .iter()
-        .find(|f| f["parsed"]["parser"] == json!("at_command"))
-        .expect("frames should contain an AT-parsed frame");
-    let parsed = at_frame["parsed"].as_object().expect("parsed object");
-    assert_eq!(parsed["parser"], json!("at_command"), "parser: {parsed:?}");
-
-    let data = at_frame["data"].as_str().expect("frame data");
-    assert!(data.ends_with('\r'), "lf mode should retain \\r: {data:?}");
 
     close_connection(&client, &id).await;
     client.cancel().await.ok();
@@ -3387,89 +2493,6 @@ async fn native_read_length_prefixed_framing_decodes() {
     drop(fw);
 }
 
-/// Prove subscribe emits per-frame notifications with parsed content
-/// when rx_parser is configured.
-#[tokio::test]
-#[ignore = "requires native_sim firmware binary"]
-async fn native_subscribe_line_framing_with_at_parser_emits_parsed_frames() {
-    let fw = NativeSimFirmware::spawn().await.expect("spawn zephyr.exe");
-    let pty_path = fw.pty_path().to_string();
-
-    let server = TestServer::start().await;
-    let (client, mut rx) = connect_client(&server).await.unwrap();
-    let id = open_pty(&client, &pty_path).await;
-    sync_boot(&client, &id).await;
-    flush_both(&client, &id).await;
-
-    client
-        .peer()
-        .call_tool(tool_request(
-            "subscribe",
-            json!({
-                "connection_id": id,
-                "poll_interval_ms": 50,
-                "timeout_ms": 2000,
-                "encoding": "utf8",
-                "max_buffered_bytes": 8192,
-                "rx_framing": { "type": "line" },
-                "rx_parser": { "type": "at_command" }
-            }),
-        ))
-        .await
-        .unwrap();
-
-    write_cmd(&client, &id, "ping").await;
-
-    let mut saw_parsed = false;
-    loop {
-        let n = match next_notification(&mut rx, Duration::from_secs(3)).await {
-            Ok(n) => n,
-            Err(_) => break,
-        };
-        let obj = n.data.as_object().unwrap();
-        if let Some(reason) = obj.get("stop_reason").and_then(|v| v.as_str()) {
-            assert_eq!(reason, "timeout", "stop: {obj:?}");
-            break;
-        }
-        if obj.get("frame_index").is_some() {
-            if let Some(parsed) = obj.get("parsed") {
-                assert_eq!(parsed["parser"], json!("at_command"), "parsed: {parsed:?}");
-                assert_eq!(
-                    parsed["response_type"],
-                    json!("data"),
-                    "response_type: {parsed:?}"
-                );
-                saw_parsed = true;
-            }
-        }
-    }
-    assert!(
-        saw_parsed,
-        "should see at least one parsed frame notification"
-    );
-
-    close_connection(&client, &id).await;
-    client.cancel().await.ok();
-    drop(fw);
-}
-
-// ── Remaining framing e2e coverage ──────────────────────────────────────────
-
-fn extract_trace_bytes(data: &str) -> Vec<u8> {
-    let mut bytes = Vec::new();
-    for cap in data.lines() {
-        if let Some(idx) = cap.find("=0x") {
-            let hex_part = &cap[idx + 3..].trim_end();
-            if hex_part.len() >= 2 {
-                if let Ok(b) = u8::from_str_radix(&hex_part[..2], 16) {
-                    bytes.push(b);
-                }
-            }
-        }
-    }
-    bytes
-}
-
 /// Prove start_end RX framing over the real serial path.
 #[tokio::test]
 #[ignore = "requires native_sim firmware binary"]
@@ -3520,6 +2543,27 @@ async fn native_read_start_end_framing_decodes() {
     close_connection(&client, &id).await;
     client.cancel().await.ok();
     drop(fw);
+}
+
+/// Decode the firmware trace read payload back into raw bytes.
+///
+/// The firmware's `trace on` mode emits one `RX[n]=0xXX\r\n` line per
+/// received byte (valid UTF-8 text — no encoding fallback applies), so each
+/// line's `=0x` suffix is parsed as a single hex byte; lines without a valid
+/// `=0x` pair (e.g. the firmware's own command echoes) are skipped.
+fn extract_trace_bytes(data: &str) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    for cap in data.lines() {
+        if let Some(idx) = cap.find("=0x") {
+            let hex_part = &cap[idx + 3..].trim_end();
+            if hex_part.len() >= 2 {
+                if let Ok(b) = u8::from_str_radix(&hex_part[..2], 16) {
+                    bytes.push(b);
+                }
+            }
+        }
+    }
+    bytes
 }
 
 /// Prove TX framing via firmware's trace on (observes exact received bytes).

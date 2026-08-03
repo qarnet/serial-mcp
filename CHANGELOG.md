@@ -2,6 +2,7 @@
 
 | Version | Date | Highlights |
 |---|---|---|
+| [0.9.2](#092) | 2026-08-04 | rmcp 1.7 → 3.0 migration (breaking pre-1.0 surface: MCP logging + `subscribe`/`unsubscribe` tools removed, `poll_interval_ms` dropped, tool count 27 → 25; `read`/`capture_boot` retained); dual exact MCP lifecycle (preferred `2026-07-28` discovery/stateless + permanent `2025-11-25` initialize/session, exact policy table); modern resource subscriptions (process-wide event hub, port watcher, post-success hints, stateless state sharing; legacy subscriptions disabled); version-correct SEP-2549 cache compliance (`ttlMs: 0`/private on cacheable families, manual paginated list handlers); compatibility proof (version-indexed matrix, real rmcp 1.7.0 client, pinned conformance 0.2.0-alpha.10 + Inspector 2.0.0, expected-failure baseline, policy doc); release/registry security hardening (CI-trusted reusable workflows, fail-closed registry publication); fixes, refactors, dependency/toolchain updates (Rust 1.97.1) |
 | [0.9.1](#091) | 2026-08-01 | lossless RX byte preservation via shared encoding fallback (exact spaced hex, effective encoding reported, no drop accounting on success) across `read`/`subscribe`/`transact`/`capture_boot` raw/frame/partial/match-context paths; unified matcher-owned bounded window for raw read/subscribe with global indexes; framing/serial/RX-tool module splits (public surface unchanged); hermetic mandatory config-schema validation + release/drift guards; pinned `quinn-proto` 0.11.15 (RUSTSEC-2026-0185 / CVE-2026-25800); Rust 1.88.0 workflow/Nix alignment; weekly fuzz + mutation hardening; Windows serial E2E deferred |
 | [0.9.0](#090) | 2026-08-01 | process-wide versioned `ProfileStore` + automatic high-confidence profile sessions (generated/reused, open overlay, observable bindings); write-through profile learning with revision-CAS/conflict/stale/close retry; `rollback_profile` + deletion guard; `list_ports` `profile_matches` discovery; decision-tree teaching + deterministic agent evaluator; atomic pump-gated cancellation-safe `capture_boot`; disabled-by-default `CaptureStore` with CLI quotas + no-clobber `export_log` (breaking: arbitrary paths removed); `flush(both)` RX backlog fix; tool count 25 → 27 |
 | [0.8.1](#081) | 2026-07-19 | `configure` tool (profile + live-connection modes), `compute_checksum` tool (xor + lrc), `transact` tool (write-then-read); `max_buffered_bytes` and `poll_interval_ms` moved from per-call to connection defaults (via `ProfileDefaults` + `configure`); `save_profile` `rx_buffer_size` snapshot bug fixed; tool count 22 → 25 |
@@ -96,6 +97,202 @@
 - Tool count drops from 23 → 22 (`seek` removed, folded into `read`).
 
 ## [Unreleased]
+
+## [0.9.2]
+
+### Breaking (pre-1.0) — rmcp 3 migration
+- rmcp 1.7 → 3.0 (`Meta` → `RequestMetaObject`, `RawResource`/`RawResourceTemplate`
+  → `Resource`/`ResourceTemplate`, MRTR-aware `ReadResourceResponse`, `Role`
+  prompt roles, constructor-built progress/notification params);
+- MCP logging support removed (`notifications/message` no longer used) and the
+  serial-mcp `subscribe`/`unsubscribe` tools deleted; legacy
+  `resources/subscribe`/`resources/unsubscribe` handlers and the logging,
+  resource-subscribe, and list-change capability flags removed;
+- `poll_interval_ms` removed from open/profile/configure/connection defaults and
+  the stream-only chunk/poll limit constants and schema helpers; existing
+  profile files containing the old key still load (serde ignores it) and the
+  next durable rewrite drops it — no schema-version bump;
+- tool count drops from 27 → 25; `read` remains the complete RX path (buffered,
+  match, framing, cursor replay, loss reporting, lossless hex fallback) and
+  `capture_boot` is unchanged.
+
+### Dual MCP lifecycle (exact protocol support)
+- Preferred modern `2026-07-28` discovery/stateless lifecycle: exact
+  supported-version slice `[2026-07-28, 2025-11-25]` (`server/discover`
+  with ordered `supportedVersions`, `resultType: "complete"`, no session
+  required), self-contained per-request `_meta` + SEP-2243 headers, and
+  modern `-32602` remap for unknown resources (SEP-2164);
+- compatible legacy `2025-11-25` initialize/session lifecycle unchanged:
+  `Mcp-Session-Id` sessions, `resultType` stripped for legacy peers,
+  `-32002` resource-not-found preserved;
+- centralized exact policy table (`src/mcp_protocol.rs`): exactly two rows,
+  preferred `2026-07-28` first and permanent `2025-11-25` second; support is
+  exact-match only — no date/range inference, no inheritance from rmcp
+  `KNOWN_VERSIONS`, unknown/future versions get no policy and no
+  version-specific fields.
+
+### Modern resource subscriptions
+- modern `2026-07-28` `subscriptions/listen` backed by one process-wide
+  bounded resource event hub (capacity 256): `accepted_subscription_filter`
+  keeps only valid, deduplicated concrete resource URIs in first-request
+  order (list-change flags, templates, malformed ids, and unknown URIs
+  stripped) and `listen` streams `notifications/resources/updated` hints for
+  `serial://ports`, `serial://connections`, and recognized connection
+  detail/raw/log URIs; lagged listeners conservatively recover one
+  notification per accepted URI without ever blocking the publisher or the
+  RX pump;
+- modern discovery advertises `resources.subscribe: true`; legacy
+  `2025-11-25` initialize keeps resource subscriptions disabled and
+  `subscriptions/listen` stays `-32601` for legacy clients;
+- proactive port hotplug watcher: one per server process, canonicalized
+  snapshots (sorted full `PortInfo` identity), first-success baseline,
+  no false updates on reorder/unchanged/enumeration failure, recovery
+  against the retained baseline, deterministic shutdown/join;
+- resource hints published after successful public behavior: port
+  open/close (connections list + detail), reconfigure/set-flow-control/
+  reconnect/connection-mode configure/set_dtr_rts/send_break/write/transact
+  (detail), RX ring append (detail + raw + log, after the ring append and
+  outside the pump gate), clear_log (log), input flush (detail + raw);
+  notifications never carry payloads and never move the shared read cursor;
+- one `SystemPortProvider` and one `ResourceEventHub` per server process,
+  shared by every HTTP handler factory and the watcher — stateless HTTP
+  requires process-wide ownership (`tests/resource_subscriptions.rs` proves
+  two stateless handler instances observe the same update).
+
+### Version-correct cache compliance + manual list handlers
+- modern `2026-07-28` peers receive the SEP-2549 cache fields
+  `ttlMs: 0` / `cacheScope: "private"` on every cacheable family
+  (`tools/list`, `resources/list`, `resources/templates/list`,
+  `resources/read` complete results for every URI kind, `prompts/list`)
+  via the exact policy-row gate `cache_fields_for` in
+  `src/mcp_protocol.rs` — only the explicit `2026-07-28` row, never a
+  `2026-07-28+` date/range rule; legacy `2025-11-25` peers continue to see
+  neither field (rmcp strips `resultType` for legacy but not cache fields,
+  so the server omits them itself — no leak to legacy clients);
+- `tools/list` / `prompts/list` are now explicit handlers over the same
+  routers (exact deterministic catalog, titles, schemas, prompt
+  definitions) with cursor pagination; `#[prompt_handler]` was dropped
+  because rmcp-macros 3.1.0 replaces any `list_prompts`/`get_prompt`
+  outright (unlike `#[tool_handler]`) — the two methods are hand-written
+  against the same `prompt_router`.
+
+### Compatibility proof (pinned gates + historical client)
+- version-indexed typed/raw/stdio matrix with a coverage lock:
+  `TestProtocol::{V2026_07_28,V2025_11_25}` drives every common-surface
+  case, raw-wire expectations stay fixture-local, and
+  `TestProtocol::ALL` must equal the raw `server/discover`
+  `supportedVersions` on the wire — a third advertised version fails loudly
+  instead of being silently classified;
+- actual historical `rmcp 1.7.0` client fixture (`compat/rmcp-1-client/`,
+  exact `=1.7.0`, `default-features = false`, own committed lockfile,
+  checksum `0810a9f7…f4058e`): proves the current server interoperates with
+  a real pre-migration client over both HTTP and stdio (negotiated
+  `2025-11-25`, server identity, exact 25-tool surface, resources/
+  templates/prompts, `compute_checksum` → `111`/`6F`);
+- pinned official `@modelcontextprotocol/conformance@0.2.0-alpha.10` gate
+  in CI (`mcp-conformance` Ubuntu job, Node 22.19.0, 15-minute bound):
+  exact scenario sets at exact protocol versions only — legacy
+  `server-initialize`, `ping`, `completion-complete`, `tools-list`,
+  `resources-list`, `prompts-list` (2025-11-25) and modern
+  `server-stateless`, `completion-complete`, `tools-list`,
+  `resources-list`, `prompts-list`, `caching`, `sep-2164-resource-not-found`
+  (2026-07-28); the four documented fixture-dependent expected failures
+  live in `conformance/expected-failures.yaml` (a baseline entry that
+  starts passing fails the run as stale; no `--suite all`, no fixture
+  endpoints added to the product); reports upload under stable
+  `target/conformance-results/` paths on success and failure;
+- pinned official `@modelcontextprotocol/inspector@2.0.0` CLI
+  interoperability smoke (`scripts/inspector-smoke.mjs`, Node stdlib only)
+  in the same job: asserts server identity `serial-mcp` with modern
+  `2026-07-28` negotiation, exactly 25 unique tools with
+  `compute_checksum`, `serial://ports` + `serial://connections` resources,
+  `diagnose_port` + `interactive_terminal` prompts, and a
+  `compute_checksum` call returning raw `111` / hex `6F`; non-interactive,
+  per-command timeouts, hard gate (inspector, not conformance);
+- shared local/CI compatibility runner `scripts/test-mcp-compat.sh`:
+  one executable gate owning the exact pinned conformance package, the
+  version-indexed scenario sets (never `--suite all`), the expected-failure
+  baseline, the Inspector smoke, and the historical fixture over both
+  transports; CI delegates to it and owns only setup, the 15-minute bound,
+  and report upload;
+- permanent `2025-11-25` contract: the legacy row, fixture, raw-wire tests,
+  conformance set, and drift guards must not be removed or weakened by a
+  future protocol or rmcp update; adding a version is strictly additive and
+  never evicts an older row; pre-`2025-11-25` revisions are tracked only as
+  a demand-driven feature idea in `FEATURES.md`;
+- durable policy document `docs/development/mcp-version-compatibility-policy.md`
+  (support table, single-source rule, compatibility directions, proof
+  layers, admission checklist, exact pins, industry rationale) plus
+  cross-file drift guards (README/AGENTS/CHANGELOG/FEATURES/policy/runner/
+  CI wiring and the historical lock pin).
+
+### Release / registry security hardening
+- CI is the sole trusted caller of both privileged workflows: on a successful
+  push to `main` (after the required CI jobs), `ci.yml` invokes the reusable
+  `release.yml` and `publish-mcp-registry.yml` `workflow_call` units with
+  job-level least-privilege `permissions` and resolved-SHA checkouts
+  (`github.sha`); PR-contributed content can never reach either call. Manual
+  release testing uses the separate `release-dry-run.yml` — a
+  `workflow_dispatch`-only, read-only workflow (`contents: read`) that builds
+  the four platform binaries and uploads Actions artifacts without touching
+  releases or crates.io;
+- release mutating jobs never execute project code: build jobs only compile,
+  and the publish job downloads the named Actions artifacts and passes them to
+  `gh release upload` by path; release mode validates the crates.io token
+  before any mutation begins;
+- registry publication is fail-closed: the offline builder
+  (`scripts/build_registry_manifest.py`) validates the strict version, the
+  historical tagged `server.json` read as data via `git show` (never
+  executed), the published-release metadata, the exact asset set with sizes
+  and SHA-256 digests, and regular non-empty local files before atomically
+  writing a staged manifest; publication consumes only the staged manifest,
+  and `publish-mcp-registry-backfill.yml` is an explicit
+  `workflow_dispatch`-only, read-only caller for already-released versions;
+- offline Python builder tests (`scripts/tests/test_build_registry_manifest.py`)
+  plus expanded drift/security guards (`tests/doc_drift.rs`) and flake checks
+  cover the trust boundaries.
+
+### Fixes
+- connection opening now uses an injectable backend boundary while production
+  still delegates to the OS serial opener; opening-port reservations are
+  released on failure and request cancellation, preventing a cancelled open
+  from wedging later attempts. Cross-platform public MCP regression coverage
+  proves `open`/`close` resource hints without relying on Linux-only PTYs;
+- port watcher establishes its baseline on first successful enumeration —
+  no false updates before the first scan and no update storm after
+  enumeration failure;
+- generated tool schema descriptions preserved under the jsonschema 0.49
+  upgrade (`preserve_annotations` adaptation) — descriptions are no longer
+  dropped from tool schemas;
+- pump barrier regression test made deterministic (retained pump read-start
+  signal) — no timing-dependent flake;
+- obsolete streaming residue removed with the rmcp 3 migration: stream-only
+  chunk/poll machinery, streaming subscription paths, and the stale
+  `tool_call_json` fuzz corpus seeds referencing the removed surface.
+
+### Refactors / maintenance
+- shared serial I/O and TX preparation (`decode_tx_payload` /
+  `apply_tx_framing` / `TxFramingError` in `src/tools/io_ops.rs`) serve both
+  `write` and `transact` — no duplicated decode/framing;
+- private read state, profile binding flow, subscription delivery, and
+  test-server setup simplified; cross-platform test helpers consolidated
+  (shared PTY/spawned/native_sim harnesses and common test plumbing);
+- docs cleanup: completed-migration notes, cleanup guidance, subscription
+  delivery wording, read-cursor test heading, and exact MCP version
+  compatibility terminology aligned across README/AGENTS/FEATURES/CHANGELOG.
+
+### Dependency / build updates
+- rmcp 1.7 → 3.0.1 (server + client, see migration above); nix 0.29 →
+  0.31.3; jsonschema 0.26.2 → 0.49.2 (with the schema-description
+  preservation fix); base64 0.22.1 → 0.23.0; toml 0.8.23 →
+  1.1.4+spec-1.1.0; proptest-derive 0.5.1 → 0.8.0; grouped Rust
+  dependency patch-and-minor updates;
+- Rust toolchain 1.88.0 → 1.97.1 (CI/release/schema-drift workflows +
+  `rust-toolchain.toml`, kept manual);
+- GitHub Actions updates: `actions/checkout` 4 → 7,
+  `actions/upload-artifact` 4 → 7, `actions/cache` 4 → 6,
+  `DeterminateSystems/nix-installer-action` 16 → 22,
+  `dtolnay/rust-toolchain` pin bump.
 
 ## [0.9.1]
 

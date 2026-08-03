@@ -202,10 +202,12 @@ pub struct ConnectionConfig {
     /// Default TX framing applied when `write` omits `tx_framing`.
     #[serde(default)]
     pub tx_framing: Option<crate::framing::TxFramingConfig>,
-    /// Default RX framing applied when `read`/`subscribe` omit `rx_framing`.
+    /// Default RX framing applied when `read`/`transact`/`capture_boot` omit
+    /// `rx_framing`.
     #[serde(default)]
     pub rx_framing: Option<crate::framing::RxFramingConfig>,
-    /// Default RX parser applied when `read`/`subscribe` omit `rx_parser`.
+    /// Default RX parser applied when `read`/`transact`/`capture_boot` omit
+    /// `rx_parser`.
     #[serde(default)]
     pub rx_parser: Option<crate::framing::ParserConfig>,
     /// Default protocol preset. Expands to fill framing/parser gaps.
@@ -219,10 +221,6 @@ pub struct ConnectionConfig {
     #[serde(default = "default_max_buffered_bytes")]
     #[schemars(schema_with = "crate::schema_helpers::read_max_buffered_bytes_schema")]
     pub max_buffered_bytes: usize,
-    /// Default poll interval for `subscribe` in milliseconds.
-    #[serde(default = "default_poll_interval_ms")]
-    #[schemars(schema_with = "crate::schema_helpers::poll_interval_ms_schema")]
-    pub poll_interval_ms: u64,
 }
 
 fn default_rx_buffer_size() -> usize {
@@ -238,10 +236,6 @@ fn default_true() -> bool {
 
 fn default_max_buffered_bytes() -> usize {
     32768
-}
-
-fn default_poll_interval_ms() -> u64 {
-    200
 }
 
 // ---- Connection state -------------------------------------------------------
@@ -435,8 +429,6 @@ pub struct ConnectionStatus {
     pub write_ops: u64,
     #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
     pub truncation_count: u64,
-    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
-    pub notification_drop_count: u64,
     /// OS-level port identity captured at open time (vid, pid, serial,
     /// manufacturer, etc.). `null` for connections opened without
     /// identity data (e.g. loopback tests).

@@ -36,10 +36,7 @@
 
 use schemars::{json_schema, Schema, SchemaGenerator};
 
-use crate::limits::{
-    MAX_READ_BYTES, MAX_STREAM_CHUNK_BYTES, MAX_TIMEOUT_MS, MIN_POLL_INTERVAL_MS, MIN_READ_BYTES,
-    MIN_STREAM_CHUNK_BYTES,
-};
+use crate::limits::{MAX_READ_BYTES, MAX_TIMEOUT_MS, MIN_READ_BYTES};
 
 /// Schema for unsigned integer fields without the non-standard `format` keyword.
 /// Emits `{"type": "integer", "minimum": 0}`.
@@ -94,21 +91,6 @@ pub fn read_max_buffered_bytes_schema(_gen: &mut SchemaGenerator) -> Schema {
         "type": "integer",
         "minimum": MIN_READ_BYTES,
         "maximum": MAX_READ_BYTES
-    })
-}
-
-pub fn stream_buffered_bytes_schema(_gen: &mut SchemaGenerator) -> Schema {
-    json_schema!({
-        "type": "integer",
-        "minimum": MIN_STREAM_CHUNK_BYTES,
-        "maximum": MAX_STREAM_CHUNK_BYTES
-    })
-}
-
-pub fn poll_interval_ms_schema(_gen: &mut SchemaGenerator) -> Schema {
-    json_schema!({
-        "type": "integer",
-        "minimum": MIN_POLL_INTERVAL_MS
     })
 }
 

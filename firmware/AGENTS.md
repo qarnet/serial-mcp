@@ -97,7 +97,7 @@ after the firmware build. Rules for anyone editing this job:
 - **Do not remove the `Free disk space` step** without first measuring
   free disk via the `df -h /` steps. The reclaim is what keeps the job
   off the ENOSPC cliff.
-- **Do not `rm -rf /home/runner/ncs`** to "save space". `actions/cache@v4`
+- **Do not `rm -rf /home/runner/ncs`** to "save space". `actions/cache@v6`
   saves that path post-job; deleting it caches an empty dir, the next run
   reports `cache-hit: true`, skips the install step, and builds with no
   toolchain. Keep the NCS cache intact.
@@ -219,7 +219,7 @@ cargo test --test native_sim_validation -- --ignored
 cargo test --test native_sim_connection_lifecycle -- --ignored --test-threads=1
 ```
 
-51 + 6 software-only tests, no hardware required. `--test-threads=1` is
+43 + 6 software-only tests, no hardware required. `--test-threads=1` is
 required for the lifecycle suite because the firmware process is killed
 on `Drop` and parallel close can race with the OS layer.
 The bootloader touch flow is exercised via the `touch` command in the

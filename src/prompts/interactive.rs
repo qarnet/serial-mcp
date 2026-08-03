@@ -28,6 +28,9 @@ which case fall back to hex and tell the user.\n\
 - Never call `close` unless the user explicitly says so.\n\
 - If the connection vanishes (tool returns Connection ID not found), tell the user \
 and stop; do not silently reopen.\n\
+- Optional: for modern clients, `subscriptions/listen` on \
+`serial://connections/{id}` can wake the session when new RX bytes arrive; \
+notifications are hints only — always use `transact`/`read` to fetch data.\n\
 \n\
 Begin by sending an empty line (transact with `{line_ending}` and the match pattern) to surface \
 the current prompt, then report back and wait for the user's first command.",
@@ -35,9 +38,8 @@ the current prompt, then report back and wait for the user's first command.",
         line_ending = line_ending,
         prompt = device_prompt
     );
-    GetPromptResult::new(vec![PromptMessage::new_text(PromptMessageRole::User, user)])
-        .with_description(format!(
-            "Interactive REPL session over connection {}",
-            args.connection_id
-        ))
+    GetPromptResult::new(vec![PromptMessage::new_text(Role::User, user)]).with_description(format!(
+        "Interactive REPL session over connection {}",
+        args.connection_id
+    ))
 }

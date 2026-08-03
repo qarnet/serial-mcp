@@ -6,10 +6,7 @@ use crate::codec::Encoding;
 use crate::serial::{ConnectionConfig, ConnectionManager, SerialConnection};
 use crate::tools::types::*;
 
-pub use crate::limits::{
-    MAX_READ_BYTES, MAX_STREAM_CHUNK_BYTES, MAX_TIMEOUT_MS, MAX_WRITE_BYTES, MIN_POLL_INTERVAL_MS,
-    MIN_READ_BYTES, MIN_STREAM_CHUNK_BYTES,
-};
+pub use crate::limits::{MAX_READ_BYTES, MAX_TIMEOUT_MS, MAX_WRITE_BYTES, MIN_READ_BYTES};
 
 pub(crate) const DEFAULT_READ_TIMEOUT_MS: u64 = 1000;
 
@@ -32,14 +29,6 @@ pub fn require_min_or_err(name: &str, value: usize, min: usize) -> Result<usize,
 pub fn clamp_timeout_or_err(name: &str, value: u64, max: u64) -> Result<u64, String> {
     if value > max {
         Err(format!("{name}={value}ms exceeds maximum {max}ms"))
-    } else {
-        Ok(value)
-    }
-}
-
-pub fn clamp_poll_interval_or_err(name: &str, value: u64, min: u64) -> Result<u64, String> {
-    if value < min {
-        Err(format!("{name}={value}ms is below minimum {min}ms"))
     } else {
         Ok(value)
     }
@@ -120,7 +109,6 @@ pub struct OpenOverlay {
     pub(crate) protocol: Option<crate::framing::ProtocolPreset>,
     pub(crate) rx_buffer_size: Option<usize>,
     pub(crate) max_buffered_bytes: Option<usize>,
-    pub(crate) poll_interval_ms: Option<u64>,
 }
 
 impl OpenOverlay {
@@ -142,7 +130,6 @@ impl OpenOverlay {
             protocol: args.protocol,
             rx_buffer_size: args.rx_buffer_size,
             max_buffered_bytes: args.max_buffered_bytes,
-            poll_interval_ms: args.poll_interval_ms,
         }
     }
 
@@ -182,7 +169,6 @@ pub struct ResolvedOpenSettings {
     pub protocol: Option<crate::framing::ProtocolPreset>,
     pub rx_buffer_size: usize,
     pub max_buffered_bytes: usize,
-    pub poll_interval_ms: u64,
 }
 
 impl PartialEq for ResolvedOpenSettings {
@@ -207,7 +193,6 @@ impl PartialEq for ResolvedOpenSettings {
             && self.protocol == other.protocol
             && self.rx_buffer_size == other.rx_buffer_size
             && self.max_buffered_bytes == other.max_buffered_bytes
-            && self.poll_interval_ms == other.poll_interval_ms
     }
 }
 
@@ -285,7 +270,6 @@ impl ResolvedOpenSettings {
             max_buffered_bytes: overlay
                 .max_buffered_bytes
                 .unwrap_or(base.max_buffered_bytes),
-            poll_interval_ms: overlay.poll_interval_ms.unwrap_or(base.poll_interval_ms),
         })
     }
 
@@ -318,7 +302,6 @@ impl ResolvedOpenSettings {
             protocol: self.protocol,
             rx_buffer_size: self.rx_buffer_size,
             max_buffered_bytes: self.max_buffered_bytes,
-            poll_interval_ms: self.poll_interval_ms,
         }
     }
 
@@ -338,7 +321,6 @@ impl ResolvedOpenSettings {
             protocol: self.protocol,
             rx_buffer_size: self.rx_buffer_size,
             max_buffered_bytes: self.max_buffered_bytes,
-            poll_interval_ms: self.poll_interval_ms,
             reconnect_policy: self.reconnect_policy.clone(),
             log_capacity: self.log_capacity,
             log_enabled: self.log_enabled,
@@ -392,7 +374,6 @@ mod tests {
             protocol: None,
             rx_buffer_size: Some(crate::limits::DEFAULT_RX_BUFFER_SIZE),
             max_buffered_bytes: Some(32768),
-            poll_interval_ms: Some(200),
             profile_mode: None,
         };
         let config = parse_open_args(args).unwrap();
@@ -420,7 +401,6 @@ mod tests {
             protocol: None,
             rx_buffer_size: Some(crate::limits::DEFAULT_RX_BUFFER_SIZE),
             max_buffered_bytes: Some(32768),
-            poll_interval_ms: Some(200),
             profile_mode: None,
         };
         let err = parse_open_args(args).unwrap_err();
@@ -448,7 +428,6 @@ mod tests {
             protocol: None,
             rx_buffer_size: None,
             max_buffered_bytes: None,
-            poll_interval_ms: None,
             profile_mode: None,
         };
         let resolved = ResolvedOpenSettings::resolve(
@@ -465,7 +444,6 @@ mod tests {
             crate::limits::DEFAULT_RX_BUFFER_SIZE
         );
         assert_eq!(resolved.max_buffered_bytes, 32768);
-        assert_eq!(resolved.poll_interval_ms, 200);
         assert!(!resolved.reconnect_policy.enabled);
         assert_eq!(
             resolved.into_connection_config(None).baud_rate,
@@ -505,7 +483,6 @@ mod tests {
             protocol: None,
             rx_buffer_size: None,
             max_buffered_bytes: None,
-            poll_interval_ms: None,
             profile_mode: None,
         };
         let resolved = ResolvedOpenSettings::resolve(
@@ -557,7 +534,6 @@ mod tests {
                 protocol: None,
                 rx_buffer_size: None,
                 max_buffered_bytes: None,
-                poll_interval_ms: None,
                 profile_mode: None,
             }
         };
@@ -621,13 +597,6 @@ mod tests {
         assert!(
             clamp_timeout_or_err("test.timeout_ms", MAX_TIMEOUT_MS + 1, MAX_TIMEOUT_MS).is_err()
         );
-    }
-
-    #[test]
-    fn clamp_poll_interval_or_err_rejects_undersized_interval() {
-        assert!(clamp_poll_interval_or_err("test.poll_ms", 10, MIN_POLL_INTERVAL_MS).is_ok());
-        assert!(clamp_poll_interval_or_err("test.poll_ms", 9, MIN_POLL_INTERVAL_MS).is_err());
-        assert!(clamp_poll_interval_or_err("test.poll_ms", 0, MIN_POLL_INTERVAL_MS).is_err());
     }
 
     #[test]

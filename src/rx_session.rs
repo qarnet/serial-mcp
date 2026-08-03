@@ -8,9 +8,8 @@
 //! active tool calls. The ring is a budgeted allocation charged at open and
 //! released at close.
 //!
-//! Both `read` and `subscribe` read from the ring via private or shared
-//! cursors. `read` advances a shared cursor; `subscribe` has per-call
-//! private cursors that do not move the shared read cursor.
+//! `read` reads from the ring via private or shared cursors. `read` advances a
+//! shared cursor; a private cursor mode does not move the shared read cursor.
 //!
 //! - always-on pump from open to close
 //! - RxRing capture (all bytes preserved)
@@ -28,6 +27,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info};
 
 use crate::buffer_budget::{BufferBudget, BufferReservation};
+use crate::resource_events::ResourceEventHub;
 use crate::rx_ring::RxRing;
 use crate::serial::SerialConnection;
 
@@ -36,7 +36,7 @@ use crate::serial::SerialConnection;
 /// Manages one pump task and its registered consumers for a single connection.
 ///
 /// The [`RxRing`] captures all RX bytes from open to close. The pump appends
-/// to the ring. Both `read` and `subscribe` read from the ring via cursors.
+/// to the ring. `read` reads from the ring via cursors.
 pub struct RxSession {
     connection_id: String,
     connection: Arc<SerialConnection>,
@@ -49,6 +49,10 @@ pub struct RxSession {
     pump_gate: Arc<AsyncMutex<()>>,
     /// Per-connection ring buffer capturing all RX bytes from open to close.
     ring: Arc<RxRing>,
+    /// Process-wide resource event hub. The pump publishes connection
+    /// detail/raw/log updates AFTER each successful ring append (outside the
+    /// pump gate) so a listener woken by the event observes the new bytes.
+    hub: Arc<ResourceEventHub>,
     /// Shared read cursor for `read`/`flush`. Absolute u64 offset.
     read_cursor: StdMutex<u64>,
     /// Stored ring capacity so close can release the correct byte count.
@@ -70,6 +74,7 @@ impl RxSession {
         connection: Arc<SerialConnection>,
         ring_capacity: usize,
         budget: &Arc<dyn BufferBudget>,
+        hub: Arc<ResourceEventHub>,
     ) -> Result<Self, String> {
         if ring_capacity == 0 {
             return Err(format!(
@@ -87,6 +92,7 @@ impl RxSession {
             pump_token: StdMutex::new(CancellationToken::new()),
             pump_gate: Arc::new(AsyncMutex::new(())),
             ring: Arc::new(RxRing::new(ring_capacity)),
+            hub,
             read_cursor: StdMutex::new(0),
             ring_capacity,
             budget_reservation: StdMutex::new(Some(reservation)),
@@ -162,7 +168,8 @@ impl RxSession {
             .clone();
         let ring = Arc::clone(&self.ring);
         let pump_gate = Arc::clone(&self.pump_gate);
-        let handle = tokio::spawn(pump_loop(connection, token, ring, pump_gate));
+        let hub = Arc::clone(&self.hub);
+        let handle = tokio::spawn(pump_loop(connection, token, ring, pump_gate, hub));
         *task_slot = Some(handle);
         debug!("rx_session: pump started for {}", self.connection_id);
     }
@@ -226,11 +233,19 @@ impl RxSession {
 /// releases it before the disconnect pause/sleep. `capture_boot` acquires
 /// the same gate to establish an atomic live-edge mark: a byte
 /// physically read before the mark can never be appended after it.
+///
+/// After a successful `ring.append`, the gate is released and the pump
+/// synchronously publishes the connection detail/raw/log resource hints —
+/// AFTER the append and OUTSIDE the gate, so a listener woken by the event
+/// immediately observes the advanced ring end offset and the gate invariants
+/// (`capture_boot` atomicity) stay untouched. Publication never awaits:
+/// notifications are availability hints, not a byte ledger.
 async fn pump_loop(
     connection: Arc<SerialConnection>,
     token: CancellationToken,
     ring: Arc<RxRing>,
     pump_gate: Arc<AsyncMutex<()>>,
+    hub: Arc<ResourceEventHub>,
 ) {
     let conn_id = connection.id().to_string();
     let mut buf = vec![0u8; RxSession::PUMP_READ_SIZE];
@@ -260,6 +275,10 @@ async fn pump_loop(
                 // Append to the ring (capture all bytes).
                 ring.append(&chunk);
                 drop(gate);
+                // Publish AFTER the append and OUTSIDE the gate: a listener
+                // woken by these hints must be able to observe the new ring
+                // end offset immediately. Synchronous, never awaited.
+                hub.publish_connection_changed(&conn_id);
             }
             Err(e) => {
                 error!("rx_session: read error on {conn_id}: {e}");
@@ -332,13 +351,15 @@ async fn pump_loop(
 pub struct RxSessionManager {
     sessions: AsyncMutex<HashMap<String, Arc<RxSession>>>,
     budget: Arc<dyn BufferBudget>,
+    hub: Arc<ResourceEventHub>,
 }
 
 impl RxSessionManager {
-    pub fn new(budget: Arc<dyn BufferBudget>) -> Self {
+    pub fn new(budget: Arc<dyn BufferBudget>, hub: Arc<ResourceEventHub>) -> Self {
         Self {
             sessions: AsyncMutex::new(HashMap::new()),
             budget,
+            hub,
         }
     }
 
@@ -360,7 +381,12 @@ impl RxSessionManager {
         if let Some(existing) = sessions.get(&conn_id) {
             return Ok(Arc::clone(existing));
         }
-        let session = Arc::new(RxSession::new(connection, ring_capacity, &self.budget)?);
+        let session = Arc::new(RxSession::new(
+            connection,
+            ring_capacity,
+            &self.budget,
+            Arc::clone(&self.hub),
+        )?);
         session.ensure_pump_running();
         sessions.insert(conn_id, Arc::clone(&session));
         debug!(
@@ -416,15 +442,20 @@ mod tests {
         Arc::new(AtomicBudget::new(1024 * 1024 * 1024, 1024 * 1024 * 1024))
     }
 
+    /// Convenience: a process-local hub for tests.
+    fn test_hub() -> Arc<ResourceEventHub> {
+        Arc::new(ResourceEventHub::new(64))
+    }
+
     /// Convenience: create an RxSession directly with a 1024-byte ring.
     fn test_session(conn: Arc<SerialConnection>) -> RxSession {
         let budget = test_budget();
-        RxSession::new(conn, 1024, &budget).expect("test session creation")
+        RxSession::new(conn, 1024, &budget, test_hub()).expect("test session creation")
     }
 
     /// Convenience: create an RxSessionManager with a test budget.
     fn test_manager() -> RxSessionManager {
-        RxSessionManager::new(test_budget())
+        RxSessionManager::new(test_budget(), test_hub())
     }
 
     // ── Manager idempotency ────────────────────────────────────────────────
@@ -695,7 +726,7 @@ mod tests {
 
         let (conn, _peer) = loopback_connection("test-budget-lifecycle");
         let conn = Arc::new(conn);
-        let session = RxSession::new(conn, 1024, &budget).expect("session create");
+        let session = RxSession::new(conn, 1024, &budget, test_hub()).expect("session create");
 
         let avail_after_open = budget.available();
         assert_eq!(avail_after_open, 4096 - 1024);
@@ -721,6 +752,7 @@ mod tests {
             Arc::new(loopback_connection("test-budget-fail").0),
             200,
             &budget,
+            test_hub(),
         );
         match result {
             Err(e) => assert!(
@@ -738,6 +770,7 @@ mod tests {
             Arc::new(loopback_connection("test-zero-capacity").0),
             0,
             &budget,
+            test_hub(),
         );
         match result {
             Err(e) => assert!(
@@ -1034,6 +1067,121 @@ mod tests {
         assert_eq!(slice.from_offset, 0);
         assert_eq!(slice.next_offset, PAYLOAD.len() as u64);
         drop(guard);
+
+        // Cleanup: cancel and join the pump task.
+        session.shutdown_and_join().await;
+    }
+
+    // ── NEW: Pump publishes resource hints only after ring append ─────────
+
+    /// The pump publishes connection detail/raw/log resource hints AFTER the
+    /// ring append and OUTSIDE the pump gate (Phase 3).
+    ///
+    /// All synchronization is event-driven with the same [`PumpGateIo`]
+    /// backend as the gate test: while the pump's read is in flight (payload
+    /// held back) no event can arrive and the ring stays empty; after the
+    /// payload is released, the first event arrives only once the ring
+    /// contains the bytes, and receiving it sees the advanced end offset.
+    /// The gate is demonstrably released (a bounded acquisition succeeds),
+    /// so publication never extends the `capture_boot` atomic unit.
+    #[tokio::test]
+    async fn pump_publishes_resource_hints_only_after_ring_append() {
+        const PAYLOAD: &[u8] = b"INFLIGHT";
+
+        let hub = Arc::new(crate::resource_events::ResourceEventHub::new(64));
+        let mut rx = hub.subscribe();
+
+        let state = Arc::new(PumpGateState::new(PAYLOAD));
+        let conn = Arc::new(SerialConnection::from_io(
+            "test-pump-publish".to_string(),
+            Box::new(PumpGateIo {
+                state: Arc::clone(&state),
+            }),
+        ));
+        let conn_id = conn.id().to_string();
+        let budget = test_budget();
+        let session =
+            RxSession::new(Arc::clone(&conn), 1024, &budget, hub).expect("session creation");
+
+        // Wait for the pump's read to be in flight (gate held, ring empty).
+        let read_started = state.read_started.notified();
+        session.ensure_pump_running();
+        tokio::time::timeout(Duration::from_secs(5), read_started)
+            .await
+            .expect("pump read must start within the hang guard");
+
+        // A subscriber must NOT receive an update before the bytes are in
+        // the ring.
+        assert_eq!(
+            session.ring().end_offset(),
+            0,
+            "ring must be empty while the pump's read is in flight"
+        );
+        assert!(
+            matches!(
+                rx.try_recv(),
+                Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+            ),
+            "no resource hint may arrive before the ring append"
+        );
+
+        // Release the payload; the pump appends and then publishes.
+        let consumed = state.consumed.notified();
+        state.release();
+        tokio::time::timeout(Duration::from_secs(5), consumed)
+            .await
+            .expect("pump must consume the released payload within the hang guard");
+
+        // The first hint is the detail URI; receipt sees the advanced end
+        // offset and the exact bytes in the ring.
+        let event = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("detail hint within the hang guard")
+            .expect("hub not closed");
+        assert_eq!(
+            event,
+            crate::resource_events::ResourceEvent::Updated(
+                crate::resource_events::detail_uri(&conn_id).expect("detail uri")
+            ),
+            "first published hint must be the connection detail URI"
+        );
+        assert_eq!(
+            session.ring().end_offset(),
+            PAYLOAD.len() as u64,
+            "bytes must be appended before the hint is delivered"
+        );
+        let slice = session.ring().read_from(0, PAYLOAD.len());
+        assert_eq!(slice.bytes, PAYLOAD);
+        assert_eq!(slice.bytes_lost, 0);
+
+        // The raw and log hints follow.
+        let raw_event = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("raw hint within the hang guard")
+            .expect("hub not closed");
+        assert_eq!(
+            raw_event,
+            crate::resource_events::ResourceEvent::Updated(
+                crate::resource_events::raw_uri(&conn_id).expect("raw uri")
+            )
+        );
+        let log_event = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("log hint within the hang guard")
+            .expect("hub not closed");
+        assert_eq!(
+            log_event,
+            crate::resource_events::ResourceEvent::Updated(
+                crate::resource_events::log_uri(&conn_id).expect("log uri")
+            )
+        );
+
+        // The gate was released before publication: a bounded acquisition
+        // succeeds (the pump only re-acquires it for its next parked read).
+        let gate_guard = tokio::time::timeout(Duration::from_secs(1), session.pump_gate_guard())
+            .await
+            .expect("pump gate must be acquirable after publication");
+        drop(gate_guard);
 
         // Cleanup: cancel and join the pump task.
         session.shutdown_and_join().await;

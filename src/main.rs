@@ -8,11 +8,11 @@ use serial_mcp::limits::{
     DEFAULT_CAPTURE_MAX_FILES, DEFAULT_CAPTURE_MAX_FILE_BYTES, DEFAULT_CAPTURE_MAX_TOTAL_BYTES,
     DEFAULT_MAX_PROGRAM_BUFFERED_BYTES, DEFAULT_MAX_TOOL_BUFFERED_BYTES,
 };
+use serial_mcp::resource_events::{PortWatcher, ResourceEventHub, PORT_WATCHER_INTERVAL};
+use serial_mcp::rx_session::RxSessionManager;
 use serial_mcp::security::SecurityManager;
-use serial_mcp::serial::ConnectionManager;
-use serial_mcp::server::StreamRegistry;
+use serial_mcp::serial::{ConnectionManager, PortProvider, SystemPortProvider};
 use serial_mcp::SerialHandler;
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::{error, info};
@@ -305,24 +305,40 @@ async fn run_stdio(
     budget: Arc<dyn serial_mcp::buffer_budget::BufferBudget>,
     profile_store: Arc<serial_mcp::profile_store::ProfileStore>,
     capture_store: Arc<CaptureStore>,
+    port_provider: Arc<dyn PortProvider>,
+    hub: Arc<ResourceEventHub>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     info!("Starting Serial MCP Server v{}", env!("CARGO_PKG_VERSION"));
     let connections = Arc::new(ConnectionManager::new());
-    let streams: StreamRegistry = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+    // ONE process-wide RX session registry per server (ring + pump + shared
+    // cursor): stateless HTTP creates a fresh handler per request, so every
+    // handler must share the same manager.
+    let rx_sessions = Arc::new(RxSessionManager::new(Arc::clone(&budget), Arc::clone(&hub)));
     let handler = SerialHandler::builder()
         .connections(connections)
-        .streams(streams)
         .security(security)
         .budget(budget)
         .profile_store(profile_store)
         .capture_store(capture_store)
+        .port_provider(Arc::clone(&port_provider))
+        .resource_events(Arc::clone(&hub))
+        .rx_sessions(rx_sessions)
         .build();
+    // One proactive port hotplug watcher per process, cancelled and joined
+    // on server shutdown.
+    let watcher = PortWatcher::start(
+        port_provider,
+        hub,
+        tokio_util::sync::CancellationToken::new(),
+        PORT_WATCHER_INTERVAL,
+    );
     let service = handler.serve(stdio()).await.map_err(|e| {
         error!("Failed to start server: {:?}", e);
         e
     })?;
     info!("Serial MCP Server started");
     service.waiting().await?;
+    watcher.shutdown_and_join().await;
     info!("Serial MCP Server stopped");
     Ok(())
 }
@@ -333,6 +349,8 @@ async fn run_http(
     budget: Arc<dyn serial_mcp::buffer_budget::BufferBudget>,
     profile_store: Arc<serial_mcp::profile_store::ProfileStore>,
     capture_store: Arc<CaptureStore>,
+    port_provider: Arc<dyn PortProvider>,
+    hub: Arc<ResourceEventHub>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     info!(
         "Starting Serial MCP Server (HTTP) v{} on http://{}{}",
@@ -343,26 +361,42 @@ async fn run_http(
 
     let shutdown = tokio_util::sync::CancellationToken::new();
     let manager = Arc::new(ConnectionManager::new());
-    let streams: StreamRegistry = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+    // ONE process-wide RX session registry per server (ring + pump + shared
+    // cursor): cloned into every stateless HTTP handler factory so
+    // sequential reads share ring/cursor state across requests.
+    let rx_sessions = Arc::new(RxSessionManager::new(Arc::clone(&budget), Arc::clone(&hub)));
     let manager_for_service = Arc::clone(&manager);
-    let streams_for_service = Arc::clone(&streams);
     let budget_for_service = Arc::clone(&budget);
     let profile_store_for_service = Arc::clone(&profile_store);
     let capture_store_for_service = Arc::clone(&capture_store);
+    let port_provider_for_service = Arc::clone(&port_provider);
+    let hub_for_service = Arc::clone(&hub);
+    let rx_sessions_for_service = Arc::clone(&rx_sessions);
 
     let service = StreamableHttpService::new(
         move || {
             Ok(SerialHandler::builder()
                 .connections(Arc::clone(&manager_for_service))
-                .streams(Arc::clone(&streams_for_service))
                 .security(security.clone())
                 .budget(Arc::clone(&budget_for_service))
                 .profile_store(Arc::clone(&profile_store_for_service))
                 .capture_store(Arc::clone(&capture_store_for_service))
+                .port_provider(Arc::clone(&port_provider_for_service))
+                .resource_events(Arc::clone(&hub_for_service))
+                .rx_sessions(Arc::clone(&rx_sessions_for_service))
                 .build())
         },
         LocalSessionManager::default().into(),
         StreamableHttpServerConfig::default().with_cancellation_token(shutdown.child_token()),
+    );
+
+    // One proactive port hotplug watcher per process, sharing the SAME
+    // SystemPortProvider and hub as every handler instance.
+    let watcher = PortWatcher::start(
+        port_provider,
+        hub,
+        shutdown.child_token(),
+        PORT_WATCHER_INTERVAL,
     );
 
     let router = axum::Router::new().nest_service(MOUNT_PATH, service);
@@ -380,6 +414,9 @@ async fn run_http(
             server_shutdown.cancel();
         })
         .await?;
+
+    // Cancel and deterministically join the watcher on server shutdown.
+    watcher.shutdown_and_join().await;
 
     info!("Serial MCP Server (HTTP) stopped");
     Ok(())
@@ -457,10 +494,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
+    // ONE shared port provider + ONE process-wide resource event hub per
+    // server process: cloned into every handler factory and the port
+    // watcher in both transports.
+    let port_provider: Arc<dyn PortProvider> = Arc::new(SystemPortProvider);
+    let hub = Arc::new(ResourceEventHub::default());
+
     match args.transport {
         Transport::Http => {
-            run_http(security, args.bind, budget, profile_store, capture_store).await
+            run_http(
+                security,
+                args.bind,
+                budget,
+                profile_store,
+                capture_store,
+                port_provider,
+                hub,
+            )
+            .await
         }
-        Transport::Stdio => run_stdio(security, budget, profile_store, capture_store).await,
+        Transport::Stdio => {
+            run_stdio(
+                security,
+                budget,
+                profile_store,
+                capture_store,
+                port_provider,
+                hub,
+            )
+            .await
+        }
     }
 }

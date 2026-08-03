@@ -6,7 +6,6 @@ pub mod read_loop;
 pub mod result_builders;
 pub mod rx_consume;
 pub mod rx_validate;
-pub mod stream_ops;
 pub mod types;
 pub mod utility_ops;
 
@@ -19,23 +18,23 @@ mod tests {
     use crate::server::tool_catalog;
     use crate::tools::types::OpenArgs;
 
-    /// The exhaustive 27-tool catalog served by MCP (shared with the xtask
+    /// The exhaustive 25-tool catalog served by MCP (shared with the xtask
     /// `agent-eval` catalog metrics via `crate::server::tool_catalog`). A
     /// missing tool would skip its
     /// `outputSchema`/`title` check and any uint-format scan, so the count
     /// is guarded explicitly.
     #[test]
-    fn tool_catalog_has_exactly_twenty_seven_tools() {
+    fn tool_catalog_has_exactly_twenty_five_tools() {
         let catalog = tool_catalog();
         assert_eq!(
             catalog.len(),
-            27,
-            "tool catalog must contain exactly 27 tools: {catalog:?}"
+            25,
+            "tool catalog must contain exactly 25 tools: {catalog:?}"
         );
         let mut names: Vec<String> = catalog.iter().map(|t| t.name.to_string()).collect();
         names.sort();
         names.dedup();
-        assert_eq!(names.len(), 27, "tool names must be unique");
+        assert_eq!(names.len(), 25, "tool names must be unique");
     }
 
     /// Regression guard: every MCP tool must carry `outputSchema` and `title`,
@@ -67,6 +66,37 @@ mod tests {
         }
     }
 
+    /// Regression guard: the tool catalog (names, descriptions, and generated
+    /// input/output schemas) must not carry any removed streaming/logging
+    /// surface — `subscribe`/`Subscribe` wording, `poll_interval_ms`,
+    /// `notification_drop_count`, `peer_disconnected`, `budget_exhausted`,
+    /// `channel_closed`, or `read_error`. The `subscribe`/`unsubscribe`
+    /// tools and their schema helpers were removed with MCP logging in the
+    /// rmcp 3 server-surface migration; this test keeps generated tool
+    /// schemas from regressing into stale wording.
+    #[test]
+    fn tool_catalog_omits_removed_streaming_surface() {
+        let removed = [
+            "subscribe",
+            "Subscribe",
+            "poll_interval_ms",
+            "notification_drop_count",
+            "peer_disconnected",
+            "budget_exhausted",
+            "channel_closed",
+            "read_error",
+        ];
+        for (name, tool) in all_tool_attrs() {
+            let schema_str = serde_json::to_string(&tool).unwrap();
+            for needle in removed {
+                assert!(
+                    !schema_str.contains(needle),
+                    "tool {name} mentions removed surface {needle:?}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn tool_schemas_have_no_nonstandard_uint_formats() {
         for (name, tool) in all_tool_attrs() {
@@ -87,10 +117,10 @@ mod tests {
     #[test]
     fn tool_catalog_names_match_served_route_names() {
         // Every catalog entry must carry a non-empty name and the exact
-        // served count (27); duplicate names would make tools/list ambiguous.
+        // served count (25); duplicate names would make tools/list ambiguous.
         let catalog = tool_catalog();
         let names: Vec<&str> = catalog.iter().map(|t| t.name.as_ref()).collect();
-        assert_eq!(names.len(), 27);
+        assert_eq!(names.len(), 25);
         for n in &names {
             assert!(!n.is_empty());
         }
@@ -139,7 +169,6 @@ mod tests {
             "reconnect_policy",
             "rx_buffer_size",
             "max_buffered_bytes",
-            "poll_interval_ms",
         ] {
             assert!(
                 !required.contains(&serde_json::json!(field)),
@@ -194,7 +223,6 @@ mod tests {
                 "reconnect_policy": null,
                 "rx_buffer_size": null,
                 "max_buffered_bytes": null,
-                "poll_interval_ms": null,
                 "profile_mode": null,
             }),
         ];
@@ -250,7 +278,7 @@ mod tests {
     }
 
     /// Regression guard: after renaming `framing` → `rx_framing` and
-    /// adding `tx_framing`, the write/read/subscribe input schemas must expose
+    /// adding `tx_framing`, the write/read input schemas must expose
     /// `rx_framing` / `tx_framing` and NOT expose the old `framing` field.
     #[test]
     fn framing_fields_renamed_in_tool_schemas() {
@@ -275,22 +303,10 @@ mod tests {
             !json.contains("\"framing\""),
             "ReadArgs schema must NOT contain bare 'framing'"
         );
-
-        let schema = schema_for!(crate::tools::types::SubscribeArgs);
-        let json = serde_json::to_string(&schema).unwrap();
-        assert!(
-            json.contains("\"rx_framing\""),
-            "SubscribeArgs schema must contain rx_framing"
-        );
-        assert!(
-            !json.contains("\"framing\""),
-            "SubscribeArgs schema must NOT contain bare 'framing'"
-        );
     }
 
     /// After relocating `parser` from `rx_framing` to sibling
-    /// `rx_parser`, verify `rx_parser` appears in ReadArgs and SubscribeArgs
-    /// schemas.
+    /// `rx_parser`, verify `rx_parser` appears in ReadArgs schema.
     #[test]
     fn rx_parser_present_in_schemas() {
         let schema = schema_for!(crate::tools::types::ReadArgs);
@@ -298,13 +314,6 @@ mod tests {
         assert!(
             json.contains("\"rx_parser\""),
             "ReadArgs must contain rx_parser"
-        );
-
-        let schema = schema_for!(crate::tools::types::SubscribeArgs);
-        let json = serde_json::to_string(&schema).unwrap();
-        assert!(
-            json.contains("\"rx_parser\""),
-            "SubscribeArgs must contain rx_parser"
         );
 
         // Verify rx_framing sub-schema no longer exposes a "parser" property.
@@ -319,7 +328,7 @@ mod tests {
     }
 
     /// After adding the `protocol` field, verify it appears in
-    /// WriteArgs, ReadArgs, and SubscribeArgs schemas.
+    /// WriteArgs and ReadArgs schemas.
     #[test]
     fn protocol_field_present_in_schemas() {
         let schema = schema_for!(crate::tools::types::WriteArgs);
@@ -334,13 +343,6 @@ mod tests {
         assert!(
             json.contains("\"protocol\""),
             "ReadArgs must contain protocol"
-        );
-
-        let schema = schema_for!(crate::tools::types::SubscribeArgs);
-        let json = serde_json::to_string(&schema).unwrap();
-        assert!(
-            json.contains("\"protocol\""),
-            "SubscribeArgs must contain protocol"
         );
     }
 }

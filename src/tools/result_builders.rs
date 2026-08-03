@@ -116,8 +116,8 @@ pub fn build_read_result(
     }))
 }
 
-/// Shared post-read accounting for `read`, `transact`, and `capture_boot`
-/// (NOT `subscribe`, whose lifecycle differs). Runs the exact four-step
+/// Shared post-read accounting for `read`, `transact`, and `capture_boot`.
+/// Runs the exact four-step
 /// order every caller used: record the read operation, log RX bytes, then
 /// optionally record/log truncation, then optionally log the match.
 /// Builds no results, returns no errors, and owns no tool-specific logging.

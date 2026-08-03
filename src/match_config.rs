@@ -1,6 +1,6 @@
 //! Shared match configuration and byte-substring matching for RX tools.
 //!
-//! The `match` option on `read` and `subscribe` specifies a byte pattern to
+//! The `match` option on `read` (and the `transact` read half / `capture_boot` read pipeline) specifies a byte pattern to
 //! detect in the incoming RX stream. Matching always happens on raw bytes;
 //! `pattern_encoding` controls how the `pattern` string is decoded into the
 //! byte needle.
@@ -13,15 +13,16 @@
 //!
 //! # Bounded-window policy
 //!
-//! Raw `read` and raw `subscribe` share one matcher-owned retention policy so
-//! their windows cannot drift apart. [`Matcher::push_bounded`] appends and
+//! Raw `read` uses one matcher-owned bounded-window policy.
+//! [`Matcher::push_bounded`] appends and
 //! checks a chunk, then enforces the retention cap before returning:
 //!
 //! - retained limit = `max_buffered_bytes + overlap_allowance`, where the
 //!   literal allowance is `needle.len().saturating_sub(1)` (so a match
 //!   straddling the cap boundary is still detected) and the regex/glob
 //!   allowance is the conservative constant [`REGEX_GLOB_OVERLAP_ALLOWANCE`]
-//!   (256 bytes; preserves the old subscribe heuristic).
+//!   (256 bytes; a conservative fixed cross-chunk allowance for
+//!   variable-length regex matches and arbitrarily long glob lines).
 //! - The retained window after every `push_bounded` call never exceeds the
 //!   computed limit, including after `NoMatch`.
 //! - [`Matcher::check`], [`Matcher::push`], and [`Matcher::push_bounded`]
@@ -50,7 +51,8 @@ use crate::util::find_subsequence;
 
 // ---- Request shape --------------------------------------------------------
 
-/// Match configuration supplied alongside a `read` or `subscribe` request.
+/// Match configuration supplied alongside a `read` request (also used by the
+/// `transact` read half and `capture_boot`).
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct MatchRequest {
     /// Pattern string, interpreted according to `config.pattern_encoding`.
@@ -160,8 +162,7 @@ impl From<PatternEncoding> for codec::Encoding {
 /// Conservative overlap allowance (bytes) retained beyond
 /// `max_buffered_bytes` for regex and glob windows. Regex patterns have no
 /// fixed match length and glob lines are arbitrarily long, so a fixed 256
-/// byte allowance keeps a match straddling the previous chunk boundary
-/// visible, mirroring the subscribe heuristic.
+/// byte allowance keeps a match straddling a chunk boundary visible.
 pub(crate) const REGEX_GLOB_OVERLAP_ALLOWANCE: usize = 256;
 
 /// Saved matcher-owned literal context for the most recent push.
@@ -187,7 +188,7 @@ pub struct SavedMatchContext {
 /// bytes contain a match, returns [`MatchResult::Found`] with the byte offset
 /// relative to the total bytes fed since the last [`Matcher::reset_window`].
 ///
-/// Bounded callers (raw `read` / raw `subscribe`) use [`Matcher::push_bounded`]
+/// The bounded caller (raw `read`) uses [`Matcher::push_bounded`]
 /// so the retained window never exceeds `max_buffered_bytes` plus the mode's
 /// overlap allowance; [`Matcher::truncate_front`] remains the raw primitive
 /// and advances the global base offset by the bytes removed.

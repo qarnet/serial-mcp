@@ -135,15 +135,14 @@ pub struct SerialConnection {
     rx_bytes: AtomicU64,
     /// Wall-clock time of the last rx or tx byte operation.
     last_activity: StdMutex<Option<std::time::SystemTime>>,
-    /// Number of successful `read` or `subscribe` operations.
+    /// Number of successful read-pipeline operations (`read`, `transact` read
+    /// half, `capture_boot`).
     read_ops: AtomicU64,
     /// Number of successful `write` operations.
     write_ops: AtomicU64,
     /// Number of RX operations where data was truncated
     /// (bytes_returned < bytes_observed).
     truncation_count: AtomicU64,
-    /// Number of notification drops (encoding errors or disconnected peers).
-    notification_drop_count: AtomicU64,
     /// OS-level port identity captured at open time.
     port_info: Option<PortInfo>,
     /// Per-connection event log buffer.
@@ -166,8 +165,6 @@ pub struct SerialConnection {
     protocol_default: StdMutex<Option<crate::framing::ProtocolPreset>>,
     /// Default max buffered bytes for `read` (from profile/open, mutable live).
     max_buffered_bytes_default: AtomicUsize,
-    /// Default poll interval for `subscribe` in ms (from profile/open, mutable live).
-    poll_interval_ms_default: AtomicU64,
     /// Active profile-session binding. `None` for connections
     /// inserted directly by low-level tests.
     active_profile: StdMutex<Option<ActiveProfileBinding>>,
@@ -226,7 +223,6 @@ impl SerialConnection {
                 protocol: None,
                 rx_buffer_size: crate::limits::DEFAULT_RX_BUFFER_SIZE,
                 max_buffered_bytes: 32768,
-                poll_interval_ms: 200,
             },
             io,
         )
@@ -253,7 +249,6 @@ impl SerialConnection {
             read_ops: AtomicU64::new(0),
             write_ops: AtomicU64::new(0),
             truncation_count: AtomicU64::new(0),
-            notification_drop_count: AtomicU64::new(0),
             port_info: config.port_info,
             log,
             state: StdMutex::new(ConnectionState::Open),
@@ -265,7 +260,6 @@ impl SerialConnection {
             rx_parser_default: StdMutex::new(config.rx_parser),
             protocol_default: StdMutex::new(config.protocol),
             max_buffered_bytes_default: AtomicUsize::new(config.max_buffered_bytes),
-            poll_interval_ms_default: AtomicU64::new(config.poll_interval_ms),
             active_profile: StdMutex::new(None),
             learning_lock: tokio::sync::Mutex::new(()),
             control_lock: tokio::sync::Mutex::new(()),
@@ -349,12 +343,6 @@ impl SerialConnection {
             .load(std::sync::atomic::Ordering::SeqCst)
     }
 
-    /// Default poll interval for `subscribe` in milliseconds. Mutable live.
-    pub fn poll_interval_ms_default(&self) -> u64 {
-        self.poll_interval_ms_default
-            .load(std::sync::atomic::Ordering::SeqCst)
-    }
-
     /// The active profile-session binding, if this connection was opened
     /// through a public open path.
     pub fn active_profile_binding(&self) -> Option<ActiveProfileBinding> {
@@ -396,7 +384,7 @@ impl SerialConnection {
 
     /// Snapshot the connection's full effective `ProfileDefaults`: current
     /// serial parameters, framing/parser/protocol defaults, the stored RX
-    /// buffer size, read/subscribe defaults, reconnect policy, log
+    /// buffer size, read defaults, reconnect policy, log
     /// configuration, and the connection name. Used by write-through
     /// learning, close retry, and explicit `save_profile` — never consults
     /// a handler-local `RxSessionManager`.
@@ -414,7 +402,6 @@ impl SerialConnection {
             protocol: self.protocol_default(),
             rx_buffer_size: self.rx_buffer_size(),
             max_buffered_bytes: self.max_buffered_bytes_default(),
-            poll_interval_ms: self.poll_interval_ms_default(),
             reconnect_policy: self.reconnect_policy.lock().expect("poisoned").clone(),
             log_capacity: self.log.capacity(),
             log_enabled: self.log.is_enabled(),
@@ -451,12 +438,6 @@ impl SerialConnection {
     /// Set the default max buffered bytes on a live connection.
     pub(crate) fn set_max_buffered_bytes_default(&self, v: usize) {
         self.max_buffered_bytes_default
-            .store(v, std::sync::atomic::Ordering::SeqCst);
-    }
-
-    /// Set the default poll interval on a live connection.
-    pub(crate) fn set_poll_interval_ms_default(&self, v: u64) {
-        self.poll_interval_ms_default
             .store(v, std::sync::atomic::Ordering::SeqCst);
     }
 
@@ -577,7 +558,6 @@ impl SerialConnection {
             protocol: self.protocol_default(),
             rx_buffer_size: self.rx_buffer_size(),
             max_buffered_bytes: self.max_buffered_bytes_default(),
-            poll_interval_ms: self.poll_interval_ms_default(),
         }
     }
 
@@ -602,7 +582,8 @@ impl SerialConnection {
         })
     }
 
-    /// Record one successful read or subscribe operation.
+    /// Record one successful read-pipeline operation (`read`, `transact` read
+    /// half, or `capture_boot`).
     pub fn record_read_op(&self) {
         self.read_ops.fetch_add(1, Ordering::SeqCst);
     }
@@ -615,11 +596,6 @@ impl SerialConnection {
     /// Record one RX truncation (bytes_returned < bytes_observed).
     pub fn record_truncation(&self) {
         self.truncation_count.fetch_add(1, Ordering::SeqCst);
-    }
-
-    /// Record one notification drop (encoding error or disconnected peer).
-    pub fn record_notification_drop(&self) {
-        self.notification_drop_count.fetch_add(1, Ordering::SeqCst);
     }
 
     /// Build a snapshot of the current status of this connection.
@@ -640,7 +616,6 @@ impl SerialConnection {
             read_ops: self.read_ops.load(Ordering::SeqCst),
             write_ops: self.write_ops.load(Ordering::SeqCst),
             truncation_count: self.truncation_count.load(Ordering::SeqCst),
-            notification_drop_count: self.notification_drop_count.load(Ordering::SeqCst),
             port_info: self.port_info.clone(),
             state: self.state(),
             reconnect_attempts: self.reconnect_attempts.load(Ordering::SeqCst),

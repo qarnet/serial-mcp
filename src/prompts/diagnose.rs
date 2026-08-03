@@ -42,12 +42,16 @@ revision history; restore a prior snapshot with `rollback_profile` (pass the cur
 as `expected_revision`).\n\
 8. Close the connection cleanly with `close(connection_id)` before reporting.\n\
 \n\
+Optional for modern clients: `subscriptions/listen` on `serial://ports` or the \
+connection's `serial://connections/{{id}}` URI wakes the session when ports change \
+or new bytes arrive — a hint only; always read data with `read`/`transact`.\n\
+\n\
 Report: device identification (vendor, role, protocol), the working serial parameters \
 (baud rate + framing), the bound profile name and persistence state, the prompt string \
 (if any), and any anomalies.",
         port = args.port,
         starting = starting
     );
-    GetPromptResult::new(vec![PromptMessage::new_text(PromptMessageRole::User, user)])
+    GetPromptResult::new(vec![PromptMessage::new_text(Role::User, user)])
         .with_description(format!("Diagnosis plan for port {}", args.port))
 }

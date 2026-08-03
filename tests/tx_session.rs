@@ -49,6 +49,7 @@ async fn flush_tool_handler_sequences_through_tx_session() {
             1024 * 1024,
             1024 * 1024,
         )),
+        std::sync::Arc::new(serial_mcp::resource_events::ResourceEventHub::new(64)),
     ));
     let result = serial_mcp::tools::io_ops::flush(
         &connections,
