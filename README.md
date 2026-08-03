@@ -19,7 +19,7 @@ client flash, reset, and talk to a board on their own.
 discovery/stateless, SEP-2549 cache fields) compliant**, with a port allowlist,
 stdio plus HTTP transports, and pinned official conformance + Inspector
 interoperability gates in CI. Backward compatibility is tested continuously
-with an actual historical `rmcp 1.7` client over both HTTP and stdio — not
+with an actual historical `rmcp 1.7.0` client over both HTTP and stdio — not
 only current-SDK compatibility mode.
 
 ## Capabilities
@@ -316,7 +316,7 @@ cargo test --test native_sim_connection_lifecycle -- --ignored --test-threads=1
 
 # The one complete MCP version gate: builds the locked binary, runs the
 # focused Rust protocol/stdio/subscription tests, exercises the real
-# historical rmcp 1.7 client over stdio + HTTP, and runs the pinned official
+# historical rmcp 1.7.0 client over stdio + HTTP, and runs the pinned official
 # conformance scenario sets for both protocol versions plus the Inspector
 # interoperability smoke. Reports land under target/conformance-results/.
 bash scripts/test-mcp-compat.sh

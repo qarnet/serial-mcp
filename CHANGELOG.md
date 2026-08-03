@@ -178,7 +178,7 @@
   against the same `prompt_router`;
 - pinned official `@modelcontextprotocol/conformance@0.2.0-alpha.10` gate
   in CI (`mcp-conformance` Ubuntu job, Node 22.19.0, 15-minute bound):
-  planned scenario sets at exact protocol versions only — legacy
+  exact scenario sets at exact protocol versions only — legacy
   `server-initialize`, `ping`, `completion-complete`, `tools-list`,
   `resources-list`, `prompts-list` (2025-11-25) and modern
   `server-stateless`, `completion-complete`, `tools-list`,

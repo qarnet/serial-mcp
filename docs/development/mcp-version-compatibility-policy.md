@@ -46,8 +46,11 @@ capability view, and no version-specific response fields.
 
 ## Required proof layers
 
-Every advertised version must be covered by every layer; no layer substitutes
-for another:
+The proof layers are independent — no layer substitutes for another. Policy
+unit tests, typed current-SDK cases, raw wire, stdio, and official
+conformance apply to EVERY advertised version. The actual historical client
+applies to retained older lifecycle/version rows (permanent `2025-11-25`),
+and the Inspector smoke applies to the preferred version (`2026-07-28`):
 
 1. **Policy unit tests** (`src/mcp_protocol.rs`) — exact rows, preferred
    order, no policy for unknown/future versions.

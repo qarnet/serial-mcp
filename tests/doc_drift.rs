@@ -766,8 +766,8 @@ fn parse_scenario_assignment(script: &str, var: &str) -> Vec<String> {
 
 /// The runner's exact per-version scenario contract: ordered scenario sets,
 /// exact `--spec-version` values, and exact `-2025-11-25` / `-2026-07-28`
-/// report suffixes. Every rule is collected so an earlier failure cannot
-/// mask a later one.
+/// report suffixes. Returns on the first descriptive violation; each check
+/// names the exact expected value so the drift stays diagnosable.
 fn runner_scenario_contract(script: &str) -> Result<(), String> {
     let legacy = parse_scenario_assignment(script, "SCENARIOS_2025_11_25");
     if legacy != SCENARIOS_2025_11_25 {
@@ -1080,7 +1080,7 @@ fn policy_doc_states_support_table_and_permanent_legacy_contract() {
     );
     assert!(
         policy.contains("compat/rmcp-1-client"),
-        "policy doc must name the historical rmcp 1.7 fixture"
+        "policy doc must name the historical rmcp 1.7.0 fixture"
     );
     assert!(
         policy.contains("KNOWN_VERSIONS"),

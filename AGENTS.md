@@ -38,7 +38,7 @@ cargo test --test native_sim_connection_lifecycle -- --ignored --test-threads=1
 
 # The one complete MCP version compatibility gate (local and CI share this
 # exact path): locked binary build, focused Rust protocol/stdio/subscription
-# tests, real historical rmcp 1.7 client over stdio + HTTP, official
+# tests, real historical rmcp 1.7.0 client over stdio + HTTP, official
 # conformance scenario sets for both versions, and the pinned Inspector
 # smoke. Exact pins/scenarios live in the script, not in this file.
 bash scripts/test-mcp-compat.sh
@@ -49,7 +49,7 @@ cargo clippy --locked --manifest-path compat/rmcp-1-client/Cargo.toml \
   --all-targets --target-dir target/mcp-compat-rmcp-1 -- -D warnings
 ```
 
-- CI runs exactly: fmt -> build -> test -> clippy, plus named Ubuntu gates for config-schema validation (`cargo test --locked --test config_schema_validation`), release/documentation consistency (`cargo test --locked --test doc_drift`), and the pinned `mcp-conformance` gate, which delegates ALL compatibility execution to `scripts/test-mcp-compat.sh` (current typed/raw/stdio/subscription tests, actual rmcp 1.7 HTTP + stdio, both official conformance sets, and the Inspector 2.0.0 smoke — see the Phase 4 section).
+- CI runs exactly: fmt -> build -> test -> clippy, plus named Ubuntu gates for config-schema validation (`cargo test --locked --test config_schema_validation`), release/documentation consistency (`cargo test --locked --test doc_drift`), and the pinned `mcp-conformance` gate, which delegates ALL compatibility execution to `scripts/test-mcp-compat.sh` (current typed/raw/stdio/subscription tests, actual rmcp 1.7.0 HTTP + stdio, both official conformance sets, and the Inspector 2.0.0 smoke — see the Phase 4 section).
 - CI and schema workflows set `RUSTFLAGS="-D warnings"`. Treat warnings as errors locally too.
 - `nix flake check` is part of CI. The source filter admits the complete `schemas/` tree (all four vendored schemas validate hermetically offline — missing fixtures fail). On Nix, prefer `nix develop` before changing firmware or release workflow bits.
 
@@ -385,7 +385,7 @@ cargo run --manifest-path xtask/Cargo.toml -- print-paths
   temp profiles path, loopback HTTP server with a bounded `server/discover`
   readiness probe (the only session-less 200 request), and the exact pinned
   runner `@modelcontextprotocol/conformance@0.2.0-alpha.10` (no floating
-  tags). Planned scenario sets at exact protocol versions ONLY:
+  tags). Exact scenario sets at exact protocol versions ONLY:
   legacy `2025-11-25` → `server-initialize`, `ping`, `completion-complete`,
   `tools-list`, `resources-list`, `prompts-list`; modern `2026-07-28` →
   `server-stateless`, `completion-complete`, `tools-list`,
@@ -404,8 +404,10 @@ cargo run --manifest-path xtask/Cargo.toml -- print-paths
   `<scenario>-2026-07-28` directory per scenario holding timestamped
   `checks.json`) and upload via `actions/upload-artifact@v7`
   (`if-no-files-found: warn`, 7-day retention) on success AND failure.
-  Runner exit status is never suppressed (`set -e` in the scenario loops).
-- **Historical rmcp 1.7 client fixture** (`compat/rmcp-1-client/`, exact
+  Runner exit status is never suppressed: the runner runs under a global
+  `set -euo pipefail`, and every fixture/conformance invocation is wrapped in
+  a GNU `timeout` whose nonzero exit fails the run.
+- **Historical rmcp 1.7.0 client fixture** (`compat/rmcp-1-client/`, exact
   `rmcp = "=1.7.0"` with `default-features = false` and only
   `client`/`transport-child-process`/`transport-streamable-http-client-reqwest`
   features, own committed lockfile, `publish = false`): a standalone package
