@@ -716,6 +716,88 @@ const EXPECTED_FAILURE_IDS: &[&str] = &[
     "server-stateless:sep-2575-server-no-log-without-loglevel",
 ];
 
+/// The exact pinned historical rmcp 1.7.0 checksum (pre-migration resolution
+/// of the current SDK's predecessor). A dependency bump that changes the
+/// historical client implementation must fail here, not silently.
+const RMCP_1_7_0_CHECKSUM: &str =
+    "0810a9f717d9828f475fe1f629f4c305c8464b7f496c3a854b58d29e65f4058e";
+
+/// The exact ordered `2025-11-25` official conformance scenario set. A new
+/// legacy scenario must be added here and in the runner together.
+const SCENARIOS_2025_11_25: &[&str] = &[
+    "server-initialize",
+    "ping",
+    "completion-complete",
+    "tools-list",
+    "resources-list",
+    "prompts-list",
+];
+
+/// The exact ordered `2026-07-28` official conformance scenario set. A new
+/// modern scenario must be added here and in the runner together.
+const SCENARIOS_2026_07_28: &[&str] = &[
+    "server-stateless",
+    "completion-complete",
+    "tools-list",
+    "resources-list",
+    "prompts-list",
+    "caching",
+    "sep-2164-resource-not-found",
+];
+
+/// Extract the ordered word list from a quoted shell assignment
+/// `VAR="word1 word2 ..."` in the compatibility runner. This is the exact
+/// scenario parser: loose `contains` checks let a scenario drop or reorder
+/// silently, the parsed array cannot.
+fn parse_scenario_assignment(script: &str, var: &str) -> Vec<String> {
+    let prefix = format!("{var}=\"");
+    let line = script
+        .lines()
+        .find(|l| l.trim_start().starts_with(&prefix))
+        .unwrap_or_else(|| panic!("runner script must define {var}=\"...\""));
+    let open = line.find('"').expect("assignment has an opening quote");
+    let rest = &line[open + 1..];
+    let close = rest.find('"').expect("assignment has a closing quote");
+    rest[..close]
+        .split_whitespace()
+        .map(str::to_string)
+        .collect()
+}
+
+/// The runner's exact per-version scenario contract: ordered scenario sets,
+/// exact `--spec-version` values, and exact `-2025-11-25` / `-2026-07-28`
+/// report suffixes. Every rule is collected so an earlier failure cannot
+/// mask a later one.
+fn runner_scenario_contract(script: &str) -> Result<(), String> {
+    let legacy = parse_scenario_assignment(script, "SCENARIOS_2025_11_25");
+    if legacy != SCENARIOS_2025_11_25 {
+        return Err(format!(
+            "2025-11-25 scenario set must be exactly {SCENARIOS_2025_11_25:?}, \
+             parsed {legacy:?}"
+        ));
+    }
+    let modern = parse_scenario_assignment(script, "SCENARIOS_2026_07_28");
+    if modern != SCENARIOS_2026_07_28 {
+        return Err(format!(
+            "2026-07-28 scenario set must be exactly {SCENARIOS_2026_07_28:?}, \
+             parsed {modern:?}"
+        ));
+    }
+    for (version, suffix) in [("2025-11-25", "-2025-11-25"), ("2026-07-28", "-2026-07-28")] {
+        if !script.contains(&format!("--spec-version {version}")) {
+            return Err(format!(
+                "runner must run conformance at the exact --spec-version {version}"
+            ));
+        }
+        if !script.contains(&format!("\"$REPORT_DIR/$sc{suffix}\"")) {
+            return Err(format!(
+                "runner must write report dir \"$REPORT_DIR/$sc{suffix}\""
+            ));
+        }
+    }
+    Ok(())
+}
+
 #[test]
 fn conformance_expected_failures_are_exactly_the_four_documented_checks() {
     let file = repo_file("conformance/expected-failures.yaml");
@@ -760,6 +842,18 @@ fn ci_conformance_job_pins_packages_and_never_runs_suite_all() {
         job.contains("bash scripts/test-mcp-compat.sh"),
         "mcp-conformance job must invoke the shared runner"
     );
+    // The job delegates ALL compatibility execution to the runner: it must
+    // not duplicate scenario loops (no --scenario/--spec-version invocations
+    // may appear in CI YAML).
+    let scenario_loops: Vec<&str> = job
+        .lines()
+        .filter(|l| l.contains("--scenario") && !l.trim_start().starts_with('#'))
+        .collect();
+    assert!(
+        scenario_loops.is_empty(),
+        "mcp-conformance job must not duplicate scenario loops (they live in \
+         scripts/test-mcp-compat.sh): {scenario_loops:?}"
+    );
     assert!(
         job.contains(PINNED_NODE_VERSION),
         "mcp-conformance job must pin Node {PINNED_NODE_VERSION}"
@@ -796,7 +890,8 @@ fn ci_conformance_job_pins_packages_and_never_runs_suite_all() {
 fn compat_runner_pins_packages_and_never_runs_suite_all() {
     // The shared runner is the executable compatibility gate: it must pin the
     // exact conformance package, wire the Inspector smoke script, apply the
-    // expected-failure baseline, run under `set -euo pipefail`, and never run
+    // exact expected-failure baseline path, exercise the historical fixture
+    // over BOTH transports, run under `set -euo pipefail`, and never run
     // `--suite all` (comments may explain why it is forbidden).
     let script = repo_file("scripts/test-mcp-compat.sh");
     assert!(
@@ -804,12 +899,24 @@ fn compat_runner_pins_packages_and_never_runs_suite_all() {
         "test-mcp-compat.sh must invoke the pinned {PINNED_CONFORMANCE_PACKAGE}"
     );
     assert!(
-        script.contains("node ") && script.contains("inspector-smoke.mjs"),
-        "test-mcp-compat.sh must run the Inspector smoke script via node"
+        script.contains("EXPECTED_FAILURES=\"$ROOT/conformance/expected-failures.yaml\""),
+        "test-mcp-compat.sh must point EXPECTED_FAILURES at the exact baseline path"
     );
     assert!(
-        script.contains("--expected-failures"),
-        "test-mcp-compat.sh must apply the expected-failures baseline"
+        script.contains("--expected-failures \"$EXPECTED_FAILURES\""),
+        "test-mcp-compat.sh must apply the exact expected-failures baseline"
+    );
+    assert!(
+        script.contains("\"$FIXTURE_BIN\" stdio \"$BIN\""),
+        "test-mcp-compat.sh must exercise the historical fixture over stdio"
+    );
+    assert!(
+        script.contains("\"$FIXTURE_BIN\" http \"$MCP_URL\""),
+        "test-mcp-compat.sh must exercise the historical fixture over HTTP"
+    );
+    assert!(
+        script.contains("node ") && script.contains("inspector-smoke.mjs"),
+        "test-mcp-compat.sh must run the Inspector smoke script via node"
     );
     assert!(
         script.contains("set -euo pipefail"),
@@ -826,12 +933,197 @@ fn compat_runner_pins_packages_and_never_runs_suite_all() {
 }
 
 #[test]
+fn compat_runner_scenario_contract_is_exact_per_version() {
+    // The exact version-indexed scenario contract: ordered quoted
+    // assignments, exact --spec-version values, and exact report suffixes.
+    runner_scenario_contract(&repo_file("scripts/test-mcp-compat.sh"))
+        .unwrap_or_else(|e| panic!("runner scenario contract violated: {e}"));
+}
+
+#[test]
+fn scenario_contract_rejects_a_dropped_scenario_word() {
+    // Negative proof for the exact-scenario parser/check: removing one word
+    // from the real 2025-11-25 assignment must fail the contract naming the
+    // scenario set (the loose `contains` checks it replaces could not catch
+    // this).
+    let script = repo_file("scripts/test-mcp-compat.sh");
+    let assignment = script
+        .lines()
+        .find(|l| l.starts_with("SCENARIOS_2025_11_25="))
+        .expect("runner defines the 2025-11-25 assignment");
+    let mutated = script.replace(assignment, &assignment.replace(" ping", ""));
+    let err = runner_scenario_contract(&mutated).unwrap_err();
+    assert!(
+        err.contains("2025-11-25 scenario set"),
+        "failure must name the scenario set: {err}"
+    );
+}
+
+#[test]
+fn scenario_contract_rejects_a_drifted_report_suffix() {
+    // Negative proof: drifting the modern report suffix must fail the
+    // contract naming the report dir.
+    let script = repo_file("scripts/test-mcp-compat.sh");
+    let mutated = script.replace(
+        "\"$REPORT_DIR/$sc-2026-07-28\"",
+        "\"$REPORT_DIR/$sc-2026-07-29\"",
+    );
+    let err = runner_scenario_contract(&mutated).unwrap_err();
+    assert!(
+        err.contains("report dir"),
+        "failure must name the report dir rule: {err}"
+    );
+}
+
+#[test]
+fn historical_fixture_pins_exact_rmcp_1_7_0() {
+    // The fixture is the real historical-client proof: its manifest must pin
+    // rmcp exactly =1.7.0 with default-features = false and only the required
+    // client/transport features, and its committed lockfile must resolve
+    // exactly one rmcp package at 1.7.0 with the historical checksum. A
+    // bumped or loosened dependency silently changes the client
+    // implementation under test.
+    let manifest: toml::Value = toml::from_str(&repo_file("compat/rmcp-1-client/Cargo.toml"))
+        .expect("compat/rmcp-1-client/Cargo.toml must be valid TOML");
+    let rmcp = manifest
+        .get("dependencies")
+        .and_then(|d| d.get("rmcp"))
+        .expect("fixture manifest must depend on rmcp");
+    let table = rmcp.as_table().expect("rmcp dependency must be a table");
+    assert_eq!(
+        table.get("version").and_then(toml::Value::as_str),
+        Some("=1.7.0"),
+        "fixture must pin rmcp exactly =1.7.0"
+    );
+    assert_eq!(
+        table.get("default-features").and_then(toml::Value::as_bool),
+        Some(false),
+        "fixture must use default-features = false"
+    );
+    let features: Vec<&str> = table
+        .get("features")
+        .and_then(toml::Value::as_array)
+        .expect("rmcp dependency must declare features")
+        .iter()
+        .filter_map(|f| f.as_str())
+        .collect();
+    for feature in [
+        "client",
+        "transport-child-process",
+        "transport-streamable-http-client-reqwest",
+    ] {
+        assert!(
+            features.contains(&feature),
+            "fixture must keep the rmcp {feature:?} feature, got {features:?}"
+        );
+    }
+    assert_eq!(
+        features.len(),
+        3,
+        "fixture must declare exactly the three required rmcp features: {features:?}"
+    );
+
+    let lock: toml::Value = toml::from_str(&repo_file("compat/rmcp-1-client/Cargo.lock"))
+        .expect("compat/rmcp-1-client/Cargo.lock must be valid TOML");
+    let packages = lock
+        .get("package")
+        .and_then(toml::Value::as_array)
+        .expect("Cargo.lock must carry a [[package]] array");
+    let rmcp_entries: Vec<&toml::Value> = packages
+        .iter()
+        .filter(|p| p.get("name").and_then(toml::Value::as_str) == Some("rmcp"))
+        .collect();
+    assert_eq!(
+        rmcp_entries.len(),
+        1,
+        "fixture lockfile must contain exactly one rmcp package entry, got {}",
+        rmcp_entries.len()
+    );
+    let entry = rmcp_entries[0];
+    assert_eq!(
+        entry.get("version").and_then(toml::Value::as_str),
+        Some("1.7.0"),
+        "fixture lockfile must resolve rmcp at exactly 1.7.0"
+    );
+    assert_eq!(
+        entry.get("checksum").and_then(toml::Value::as_str),
+        Some(RMCP_1_7_0_CHECKSUM),
+        "fixture lockfile must resolve the historical rmcp checksum"
+    );
+}
+
+#[test]
+fn policy_doc_states_support_table_and_permanent_legacy_contract() {
+    // The durable compatibility policy must name both versions in preferred
+    // order (2026-07-28 first), the permanent 2025-11-25 retention rule, the
+    // exact shared runner command, the historical fixture, and the
+    // no-implicit-known-version-support rule. Anchor checks only — no brittle
+    // whole-prose snapshot.
+    let policy = repo_file("docs/development/mcp-version-compatibility-policy.md");
+    let modern = policy
+        .find("2026-07-28")
+        .expect("policy doc must name 2026-07-28");
+    let legacy = policy
+        .find("2025-11-25")
+        .expect("policy doc must name 2025-11-25");
+    assert!(
+        modern < legacy,
+        "policy doc must list 2026-07-28 before 2025-11-25 (preferred first)"
+    );
+    assert!(
+        policy.contains("permanent") && policy.contains("2025-11-25"),
+        "policy doc must state the permanent 2025-11-25 retention rule"
+    );
+    assert!(
+        policy.contains("bash scripts/test-mcp-compat.sh"),
+        "policy doc must document the exact shared runner command"
+    );
+    assert!(
+        policy.contains("compat/rmcp-1-client"),
+        "policy doc must name the historical rmcp 1.7 fixture"
+    );
+    assert!(
+        policy.contains("KNOWN_VERSIONS"),
+        "policy doc must state that rmcp known versions do not imply support"
+    );
+    assert!(
+        policy.contains("never inferred"),
+        "policy doc must state support is never inferred (date ordering etc.)"
+    );
+}
+
+#[test]
+fn features_md_tracks_pre_2025_11_25_as_demand_driven_feature_idea() {
+    // Older protocol revisions are a potential feature, not current support:
+    // FEATURES.md must carry the item under Wish, label it non-current and
+    // demand-driven, and keep the supported set at exactly the two versions.
+    let features = repo_file("docs/development/FEATURES.md");
+    assert!(
+        features.contains("Earlier MCP protocol revisions (pre-2025-11-25)"),
+        "FEATURES.md must track the pre-2025-11-25 item under Wish"
+    );
+    assert!(
+        features.contains("NOT current support"),
+        "FEATURES.md must state the item is not current support"
+    );
+    assert!(
+        features.contains("demand"),
+        "FEATURES.md must label the item as demand-driven"
+    );
+    assert!(
+        features.contains("2026-07-28") && features.contains("2025-11-25"),
+        "FEATURES.md must state the supported set remains exactly the two versions"
+    );
+}
+
+#[test]
 fn ci_scenario_lists_match_pinned_runner_scenarios() {
     // The pinned conformance package provides no `server-session-lifecycle`
     // scenario; the legacy initialize/session lifecycle is covered by
-    // `server-initialize`. The shared runner owns the scenario lists, so
-    // guard the runner script against re-adding a scenario the pinned runner
-    // does not ship, and against dropping any planned one.
+    // `server-initialize`. Exact per-version ordered scenario sets,
+    // `--spec-version` values, and report suffixes are asserted by
+    // `compat_runner_scenario_contract_is_exact_per_version` (parser-based);
+    // this test guards the two rules that live outside that contract.
     let script = repo_file("scripts/test-mcp-compat.sh");
     assert!(
         script.contains("server-initialize"),
@@ -848,21 +1140,6 @@ fn ci_scenario_lists_match_pinned_runner_scenarios() {
          (absent from the pinned runner; server-initialize covers the legacy \
          session lifecycle)"
     );
-    for sc in [
-        "server-stateless",
-        "ping",
-        "completion-complete",
-        "tools-list",
-        "resources-list",
-        "prompts-list",
-        "caching",
-        "sep-2164-resource-not-found",
-    ] {
-        assert!(
-            script.contains(sc),
-            "test-mcp-compat.sh must run the {sc} scenario"
-        );
-    }
     // Runner exit status must never be suppressed in the scenario loops.
     assert!(
         script.contains("set -e"),
@@ -918,10 +1195,15 @@ fn inspector_smoke_script_pins_inspector_and_covers_expected_surface() {
 #[test]
 fn readme_states_dual_protocol_compliance() {
     // The user-facing compliance claim must name both supported protocol
-    // versions (2025-11-25 legacy sessions + 2026-07-28 modern discovery).
+    // versions (2025-11-25 legacy sessions + 2026-07-28 modern discovery)
+    // and the one complete local/CI MCP version gate command.
     let readme = repo_file("README.md");
     assert!(
         readme.contains("2025-11-25") && readme.contains("2026-07-28"),
         "README must state compliance with both supported MCP protocol versions"
+    );
+    assert!(
+        readme.contains("scripts/test-mcp-compat.sh"),
+        "README must document the one complete MCP version gate command"
     );
 }

@@ -234,6 +234,17 @@
 
 ## Wish
 
+### Earlier MCP protocol revisions (pre-2025-11-25)
+- potential future feature only — NOT current support and not a near-term
+  commitment: the supported set remains exactly `2026-07-28` (preferred) and
+  permanent `2025-11-25`;
+- possible older candidates are `2025-06-18`, `2025-03-26`, and `2024-11-05`;
+- implement only with concrete user/client demand — never merely because
+  rmcp lists the version in `KNOWN_VERSIONS`;
+- each version would require: an explicit product policy row,
+  lifecycle/capability/cache review, raw-wire tests, official conformance
+  support where available, and a real historical client fixture.
+
 ### User-facing loopback / virtual port backend
 - expose a virtual echo/scripted device as an openable backend (the
   native_sim harness exists but is test-only)

@@ -57,9 +57,10 @@
             # CHANGELOG.md, docs/ (agent-config.md,
             # development/FEATURES.md, future evaluations), the CI workflow
             # (.github/workflows/ci.yml), conformance/expected-failures.yaml,
-            # and scripts/inspector-smoke.mjs (Phase 4 gate guards);
-            # config_schema_validation reads schemas/ and
-            # example-configs/ and REQUIRES them — a pruned fixture fails
+            # scripts/inspector-smoke.mjs, and the historical rmcp 1.7
+            # fixture (compat/rmcp-1-client/Cargo.toml + Cargo.lock — Phase 4
+            # policy drift guards); config_schema_validation reads schemas/
+            # and example-configs/ and REQUIRES them — a pruned fixture fails
             # the build. relPath keeps a leading "/", hence the explicit
             # "/" in every prefix below; a directory must itself match the
             # filter or cleanSource prunes its whole subtree, so dirs are
@@ -76,6 +77,7 @@
             || pkgs.lib.hasPrefix "/docs" relPath
             || pkgs.lib.hasPrefix "/.github" relPath
             || pkgs.lib.hasPrefix "/conformance" relPath
+            || pkgs.lib.hasPrefix "/compat" relPath
             || pkgs.lib.hasPrefix "/scripts" relPath;
         };
 

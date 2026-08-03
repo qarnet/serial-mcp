@@ -8,6 +8,7 @@ focused documents below.
 | Doc | What it is |
 |---|---|
 | [FEATURES.md](FEATURES.md) | Active roadmap + tech debt. Shipped items live in [CHANGELOG.md](../../CHANGELOG.md) and [AGENTS.md](../../AGENTS.md), not here. |
+| [mcp-version-compatibility-policy.md](mcp-version-compatibility-policy.md) | Durable MCP protocol compatibility contract: supported versions, permanent `2025-11-25` retention, admission checklist, proof layers, and the one-command compatibility gate. |
 | [protocol-matrix.md](protocol-matrix.md) | Support/status matrix for every protocol with a cited spec in `resources/`. |
 | [agent-interface-baseline.json](agent-interface-baseline.json) | Committed Phase 4 evaluator baseline (26 tools, 258964 bytes) — **historical**, kept so `xtask agent-eval --baseline` can diff the live catalog against it. |
 | [agent-interface-evaluation.md](agent-interface-evaluation.md) | Consolidated, current evaluator report: 25-tool catalog, accepted/rejected interface decisions with thresholds, limitations. |

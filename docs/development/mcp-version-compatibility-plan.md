@@ -1,5 +1,19 @@
 # MCP Version Compatibility Plan
 
+> **Status: implemented.**
+>
+> - Phase 1 `refactor: centralize MCP version policy` — `1fc2056a`.
+> - Phase 2 `test: index compatibility matrix by MCP version` — `035027d8`;
+>   Phase 2 review-fix `docs: correct compatibility test scope` — `ae466564`.
+> - Phase 3 `test: add historical MCP client compatibility gate` — `4af2d5ae`;
+>   Phase 3 review-fix `test: tighten historical client compatibility checks`
+>   — `51602016`.
+> - Phase 4 (`docs: define MCP version compatibility policy`) completes the
+>   durable policy document, the cross-file drift guards, the historical
+>   fixture pin, and full repository/Nix verification. It does not predict
+>   its own commit hash; the commit that carries this status line is the
+>   Phase 4 commit.
+
 ## Status and Goal
 
 This plan follows the rmcp 3 migration. The current server already supports
@@ -8,9 +22,9 @@ through initialize/session requests. Existing typed, raw-wire, stdio,
 conformance, and Inspector tests pass locally.
 
 Goal: turn that two-version implementation into an explicit, repeatable
-compatibility system. Any future additional MCP version must be added through one reviewed
-policy entry and one complete test row; adding a new version must not silently
-change behavior for any older advertised version.
+compatibility system. Any future additional MCP version must be added through
+one reviewed policy entry and one complete test row; adding a new version
+must not silently change behavior for any older advertised version.
 
 User-observable behavior to preserve:
 

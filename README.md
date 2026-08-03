@@ -18,7 +18,9 @@ client flash, reset, and talk to a board on their own.
 **MCP `2025-11-25` (legacy session lifecycle) and `2026-07-28` (modern
 discovery/stateless, SEP-2549 cache fields) compliant**, with a port allowlist,
 stdio plus HTTP transports, and pinned official conformance + Inspector
-interoperability gates in CI.
+interoperability gates in CI. Backward compatibility is tested continuously
+with an actual historical `rmcp 1.7` client over both HTTP and stdio — not
+only current-SDK compatibility mode.
 
 ## Capabilities
 
@@ -304,13 +306,20 @@ path.
 ## Development
 
 ```bash
-cargo test
-cargo clippy --all-targets -- -D warnings
+cargo test --locked
+cargo clippy --all-targets --locked -- -D warnings
 cargo fmt --all -- --check
 
 # Firmware-based tests (require native_sim firmware, see firmware/AGENTS.md)
 cargo test --test native_sim_validation -- --ignored
 cargo test --test native_sim_connection_lifecycle -- --ignored --test-threads=1
+
+# The one complete MCP version gate: builds the locked binary, runs the
+# focused Rust protocol/stdio/subscription tests, exercises the real
+# historical rmcp 1.7 client over stdio + HTTP, and runs the pinned official
+# conformance scenario sets for both protocol versions plus the Inspector
+# interoperability smoke. Reports land under target/conformance-results/.
+bash scripts/test-mcp-compat.sh
 ```
 
 ## Status and feedback
@@ -321,6 +330,7 @@ serial-mcp is actively developed, and the [roadmap](docs/development/FEATURES.md
 
 - [Protocol Guide](docs/protocols.md) — framing, parsers, presets, precedence, checksum behavior
 - [Protocol References](docs/protocols/references.md) — normative spec citations for implemented protocols
+- [MCP Version Compatibility Policy](docs/development/mcp-version-compatibility-policy.md) — supported protocol versions, permanent legacy retention, admission checklist, proof layers
 - [Agent Configuration](docs/agent-config.md)
 - [Development Notes](docs/development/README.md) — roadmap, protocol support matrix, agent-interface evaluation, capture design
 - [CHANGELOG.md](CHANGELOG.md)

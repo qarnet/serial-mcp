@@ -165,10 +165,11 @@
   `ttlMs: 0` / `cacheScope: "private"` on every cacheable family
   (`tools/list`, `resources/list`, `resources/templates/list`,
   `resources/read` complete results for every URI kind, `prompts/list`)
-  via a single pure `modern_cache_fields` gate on the negotiated protocol
-  version; legacy `2025-11-25` peers continue to see neither field (rmcp
-  strips `resultType` for legacy but not cache fields, so the server omits
-  them itself — no leak to legacy clients);
+  via the exact policy-row gate `cache_fields_for` in
+  `src/mcp_protocol.rs` — only the explicit `2026-07-28` row, never a
+  `2026-07-28+` date/range rule; legacy `2025-11-25` peers continue to see
+  neither field (rmcp strips `resultType` for legacy but not cache fields,
+  so the server omits them itself — no leak to legacy clients);
 - `tools/list` / `prompts/list` are now explicit handlers over the same
   routers (exact deterministic catalog, titles, schemas, prompt
   definitions) with cursor pagination; `#[prompt_handler]` was dropped
@@ -195,6 +196,41 @@
   `diagnose_port` + `interactive_terminal` prompts, and a
   `compute_checksum` call returning raw `111` / hex `6F`; non-interactive,
   per-command timeouts, hard gate (inspector, not conformance).
+
+### MCP version compatibility policy (Phase 4)
+- centralized exact policy table (`src/mcp_protocol.rs`): exactly two rows,
+  preferred `2026-07-28` first and permanent `2025-11-25` second; support is
+  exact-match only — no date/range inference, no inheritance from rmcp
+  `KNOWN_VERSIONS`, unknown/future versions get no policy and no
+  version-specific fields;
+- explicit version-indexed typed/raw/stdio matrix with a coverage lock:
+  `TestProtocol::{V2026_07_28,V2025_11_25}` drives every common-surface
+  case, raw-wire expectations stay fixture-local, and
+  `TestProtocol::ALL` must equal the raw `server/discover`
+  `supportedVersions` on the wire — a third advertised version fails loudly
+  instead of being silently classified;
+- actual historical `rmcp 1.7.0` client fixture (`compat/rmcp-1-client/`,
+  exact `=1.7.0`, `default-features = false`, own committed lockfile,
+  checksum `0810a9f7…f4058e`): proves the current server interoperates with
+  a real pre-migration client over both HTTP and stdio (negotiated
+  `2025-11-25`, server identity, exact 25-tool surface, resources/
+  templates/prompts, `compute_checksum` → `111`/`6F`);
+- shared local/CI compatibility runner `scripts/test-mcp-compat.sh`:
+  one executable gate owning the exact pinned conformance package, the
+  version-indexed scenario sets (never `--suite all`), the expected-failure
+  baseline, the Inspector smoke, and the historical fixture over both
+  transports; CI delegates to it and owns only setup, the 15-minute bound,
+  and report upload;
+- permanent `2025-11-25` contract: the legacy row, fixture, raw-wire tests,
+  conformance set, and drift guards must not be removed or weakened by a
+  future protocol or rmcp update; adding a version is strictly additive and
+  never evicts an older row; pre-`2025-11-25` revisions are tracked only as
+  a demand-driven feature idea in `FEATURES.md`;
+- durable policy document `docs/development/mcp-version-compatibility-policy.md`
+  (support table, single-source rule, compatibility directions, proof
+  layers, admission checklist, exact pins, industry rationale) plus
+  cross-file drift guards (README/AGENTS/CHANGELOG/FEATURES/policy/runner/
+  CI wiring and the historical lock pin).
 
 ## [0.9.1]
 
