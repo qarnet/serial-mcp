@@ -7,28 +7,46 @@
 
 **serial-mcp is an MCP server that gives coding agents direct access to serial ports.** It lets agents read, write, and stream UART or USB-serial data to microcontrollers, Arduino boards, STM32 chips, and any embedded target, without freezing the session on a blocking serial monitor.
 
-Non-blocking reads with timeouts and pattern matching, background RX streaming,
-TX/RX frame decoding (line, delimiter, length-prefixed, start/end, SLIP, COBS)
-with AT, JSON, shell, NMEA-0183, and Modbus ASCII parsers, one-knob protocol
-presets (`at_command`, `slip`, `json_lines`, `cobs`, `ndjson`, `nmea0183`,
-`modbus_ascii`) with checksum validation, auto-reconnect, event logging, and
-full line control (DTR/RTS, BREAK, flow control) let Claude, Codex, or any MCP
-client flash, reset, and talk to a board on their own.
+Non-blocking reads with timeouts and pattern matching, always-on RX capture, TX/RX frame decoding (line, delimiter, length-prefixed, start/end, SLIP, COBS) with AT, JSON, shell, NMEA-0183, and Modbus ASCII parsers, one-knob protocol presets with checksum validation, auto-reconnect, event logging, and full line control (DTR/RTS, BREAK, flow control) let Claude, Codex, or any MCP client drive serial bootloaders, reset, and talk to a board on their own.
 
-**MCP `2025-11-25` (legacy session lifecycle) and `2026-07-28` (modern
-discovery/stateless, SEP-2549 cache fields) compliant**, with a port allowlist,
-stdio plus HTTP transports, and pinned official conformance + Inspector
-interoperability gates in CI. Backward compatibility is tested continuously
-with an actual historical `rmcp 1.7.0` client over both HTTP and stdio — not
-only current-SDK compatibility mode.
+## Quick start
 
-## Capabilities
+1. **Install** — see [Install](#install) (Cargo, Nix, or prebuilt binary).
+2. **Connect an agent** — follow the [agent configuration guide](docs/agent-config.md), or use the collapsed example below.
+3. **Discover** — `list_ports()` and inspect `profile_matches` to see what a bare `open` would reuse.
+4. **Open** — `open(port=...)` with just the port. Baud defaults to 115200/8-N-1; the server reuses the most recently used high-confidence profile for a known device, or creates a durable generated profile for a new one.
+5. **Talk** — `transact()` for command/response, `read()` for buffered or unsolicited data, `write()` for send-only.
 
-**25 tools:** list_ports, list_connections, open, close, read, write, transact, capture_boot, flush, set_dtr_rts, set_flow_control, send_break, get_status, reconfigure, list_profiles, open_profile, save_profile, delete_profile, configure, rollback_profile, get_log, clear_log, export_log, reconnect, compute_checksum
-**5 resources:** `serial://ports`, `serial://connections`, `serial://connections/{id}`, `serial://connections/{id}/raw`, `serial://connections/{id}/log` (3 resource templates plus 2 static)  
-**2 prompt templates:** `diagnose_port`, `interactive_terminal`  
+## What you get
 
-The RX side uses an always-on ring buffer with absolute stream offsets: every byte from `open` to `close` is captured, so `read` behaves like `cat` (returns buffered-but-unread bytes immediately) and can also wait for new data, match patterns, and replay history. `read`'s `from` parameter (`{"type":"cursor"}` default / `{"type":"now"}` / `{"type":"buffer_start"}` / `{"type":"offset","offset":N}`) resolves the start position non-destructively — pass `from: {"type":"now"}` to skip buffered backlog to the live edge, or re-pass the same `from` to re-read the same bytes. Pattern matching checks buffered history first. Data loss from ring wrap is always observable via `bytes_lost`, never silent. **RX payloads are lossless:** when the requested `encoding` cannot represent received bytes (e.g. binary data under `utf8`), `read` and `capture_boot` automatically re-encode the same bytes as exact lowercase spaced hex and report `encoding: "hex"` on the payload — bytes are never dropped, repeated, or lossy-converted, and a successful fallback is never counted as a dropped notification/frame. **Note:** with hardware flow control (RTS/CTS) enabled, the always-on pump drains the kernel RX buffer continuously, so the kernel never deasserts RTS and the device streams freely — a setup that relied on flow control to pause a device until the host reads will behave differently (the device no longer pauses).
+| Area | What you get |
+|---|---|
+| RX model | Always-on ring buffer from open to close; `read` returns buffered bytes immediately and can wait, match, and replay history |
+| Framing + parsing | Line, delimiter, length-prefixed, start/end, SLIP, COBS on both directions; AT, JSON, shell, NMEA-0183, Modbus ASCII parsers |
+| Protocol presets | Seven one-knob presets (`at_command`, `slip`, `json_lines`, `cobs`, `ndjson`, `nmea0183`, `modbus_ascii`) with checksum validation |
+| Device memory | Automatic profile sessions: high-confidence devices get durable generated profiles, learned settings persist across sessions |
+| Boot capture | `capture_boot` — one atomic call for Arduino auto-reset, power-cycle banners, and boot prompts |
+| Reliability | Observable `bytes_lost` on ring wrap, lossless encoding fallback, auto-reconnect, honest partial failures |
+| Ops | Event logging with `export_log` persistent JSONL capture, port allowlist, stdio + HTTP transports |
+
+## Tool catalog (25 tools)
+
+| Group | Tools |
+|---|---|
+| Discovery | `list_ports`, `list_connections` |
+| Connection lifecycle | `open`, `close`, `reconnect`, `get_status`, `reconfigure` |
+| I/O | `read`, `write`, `transact`, `capture_boot`, `flush` |
+| Line control | `set_dtr_rts`, `set_flow_control`, `send_break` |
+| Profiles & config | `list_profiles`, `open_profile`, `save_profile`, `delete_profile`, `configure`, `rollback_profile` |
+| Logs & capture | `get_log`, `clear_log`, `export_log` |
+| Utility | `compute_checksum` |
+
+## Resources and prompts
+
+| Kind | Items |
+|---|---|
+| Resources (5) | `serial://ports`, `serial://connections` (static); `serial://connections/{id}`, `serial://connections/{id}/raw`, `serial://connections/{id}/log` (templates) |
+| Prompts (2) | `diagnose_port`, `interactive_terminal` |
 
 ## Install
 
@@ -46,35 +64,24 @@ nix profile install github:qarnet/serial-mcp
 
 ### Prebuilt binary
 
-No toolchain required. Every release publishes one binary per platform, and the `latest/download` URLs below always resolve to the newest release.
+No toolchain required. Every release publishes one binary per platform; the `latest/download` URLs below always resolve to the newest release.
 
-**Linux (x86_64):**
+| Platform | Command |
+|---|---|
+| Linux x86_64 | `curl -L https://github.com/qarnet/serial-mcp/releases/latest/download/serial-mcp-x86_64-linux -o serial-mcp && sudo install -m 755 serial-mcp /usr/local/bin/` |
+| Linux ARM64 | Same, with the `serial-mcp-aarch64-linux` asset |
+| macOS (Apple Silicon) | Same, with the `serial-mcp-aarch64-macos` asset |
+| Windows (x86_64) | Download [`serial-mcp-x86_64-windows.exe`](https://github.com/qarnet/serial-mcp/releases/latest/download/serial-mcp-x86_64-windows.exe) and place it on your `PATH` |
 
-```bash
-curl -L https://github.com/qarnet/serial-mcp/releases/latest/download/serial-mcp-x86_64-linux -o serial-mcp
-sudo install -m 755 serial-mcp /usr/local/bin/
-```
-
-For ARM64, use the `serial-mcp-aarch64-linux` asset instead. Then add your user to the `dialout` group for port access:
+Then add your user to the `dialout` group for port access on Linux:
 
 ```bash
 sudo usermod -aG dialout $USER
 ```
 
-**macOS (Apple Silicon):**
+## Connect an agent
 
-```bash
-curl -L https://github.com/qarnet/serial-mcp/releases/latest/download/serial-mcp-aarch64-macos -o serial-mcp
-sudo install -m 755 serial-mcp /usr/local/bin/
-```
-
-**Windows (x86_64):**
-
-Download [`serial-mcp-x86_64-windows.exe`](https://github.com/qarnet/serial-mcp/releases/latest/download/serial-mcp-x86_64-windows.exe) and place it on your `PATH`.
-
-## Wire Up Your Agent
-
-**[Agent configuration guide](docs/agent-config.md):** Claude Code CLI, Claude Desktop, Cursor, VS Code, Zed, opencode, HTTP transport
+**[Agent configuration guide](docs/agent-config.md):** Claude Code CLI, Claude Desktop, Cursor, VS Code, Zed, opencode, Codex, Hermes, HTTP transport.
 
 <details>
 <summary>Quick example (Claude Code, Linux/macOS)</summary>
@@ -93,7 +100,72 @@ Download [`serial-mcp-x86_64-windows.exe`](https://github.com/qarnet/serial-mcp/
 
 </details>
 
-## Options
+## Core workflow
+
+The normal workflow is a short decision tree: discover, open, talk, verify the
+learned profile, and escalate to advanced tools only when needed.
+
+1. **Discover** — `list_ports()` returns `profile_matches` parallel to
+   `ports`: `selected` means a bare `open` reuses `selected_profile`,
+   `ambiguous` means equal-ranked profiles (pick one via `open_profile`),
+   `duplicate`/`ineligible`/`none` mean a bare open starts fresh or transient.
+2. **Open** — bare `open(port=...)` only. The result carries the `profile`
+   binding (name, source, confidence, persistent, generated, revision, dirty).
+3. **Talk** — `transact(data=..., match=..., timeout_ms=...)` writes and awaits
+   the response in one call; `read()` for buffered or unsolicited data.
+4. **Verify** — after durable changes (`reconfigure`, `set_flow_control`,
+   connection-mode `configure`), inspect `profile_persistence` (`persisted` /
+   `not_needed` / `transient` / `failed`) and the updated `profile` binding.
+5. **Close** — `close()`; a clean close retries any dirty binding as a safety
+   net.
+
+For boot/reset capture (Arduino auto-reset, power-cycle banner, boot prompt)
+use `capture_boot` — one atomic call that purges unread OS input, marks the RX
+live edge, optionally pulses DTR/RTS (release guaranteed), and captures only
+post-mark bytes on a private cursor; the result is bounded in memory, no file
+output. Details and the `from` cursor model live in
+[RX and Reading](docs/rx-and-reading.md); profile behavior lives in
+[Device Profiles](docs/device-profiles.md).
+
+## Protocols
+
+One `protocol` field expands into framing/parser defaults for both directions,
+with checksum validation on NMEA and Modbus ASCII:
+
+| Preset | Wire name | Framing / parser |
+|---|---|---|
+| AT commands | `at_command` | Line (CR) + AT parser |
+| SLIP | `slip` | RFC 1055 byte stuffing |
+| JSON lines | `json_lines` | Line + JSON-lines parser |
+| COBS | `cobs` | Consistent Overhead Byte Stuffing |
+| NDJSON | `ndjson` | Line + JSON-lines parser, skips blank lines |
+| NMEA-0183 | `nmea0183` | Start/end `$`/`!` + NMEA parser, `*XX` checksum |
+| Modbus ASCII | `modbus_ascii` | Start/end `:` + Modbus ASCII parser, LRC |
+
+Field precedence (explicit call field > call-time preset > connection default >
+connection preset), checksum and error behavior, and the full framing/parser
+reference live in the [Protocol Guide](docs/protocols.md).
+
+## Key concepts and guides
+
+| Guide | What it covers |
+|---|---|
+| [RX and Reading](docs/rx-and-reading.md) | Ring buffer, shared cursor, tagged `from` forms, timeouts/silence/match, `bytes_lost`, lossless hex fallback, flow-control caveat, `capture_boot`, subscriptions |
+| [Device Profiles](docs/device-profiles.md) | `profile_matches` outcomes, identity rules, generated/reused selection, learning, revision CAS, rollback, deletion guard |
+| [Persistent Capture](docs/persistent-capture.md) | The full `export_log` contract: quotas, portable filenames, atomicity, failure semantics |
+| [Agent Configuration](docs/agent-config.md) | Client setup per tool, HTTP transport, troubleshooting |
+| [Protocol Guide](docs/protocols.md) | Framing, parsers, presets, precedence, checksum behavior |
+| [Documentation index](docs/README.md) | All user and development guides in one place |
+
+## Transports and options
+
+| Mode | How to activate | Use case |
+|---|---|---|
+| stdio | default | Desktop agents |
+| HTTP | `--transport=http` | Remote / headless |
+
+<details>
+<summary>CLI options</summary>
 
 ```
 serial-mcp [OPTIONS]
@@ -103,205 +175,35 @@ serial-mcp [OPTIONS]
   --bind <addr>                     HTTP bind address (default: 127.0.0.1:8000)
   --max-program-buffered-bytes <N>  Global budget for all in-flight RX tools
   --max-tool-buffered-bytes <N>     Per-tool ceiling for max_buffered_bytes
-  --profiles-path <path>            Profile store file path (default: OS user
-                                    config dir + serial-mcp/profiles.toml)
-  --capture-dir <absolute-dir>      Enable persistent export_log capture into an
-                                    existing absolute directory (disabled by
-                                    default; no fallback to cwd/config/temp)
-  --capture-max-file-bytes <N>      Per-file quota for a capture JSONL snapshot
-                                    (default: 16777216 / 16 MiB)
-  --capture-max-total-bytes <N>     Total-byte quota across committed capture
-                                    files (default: 268435456 / 256 MiB)
-  --capture-max-files <N>           File-count quota across committed capture
-                                    files (default: 256)
+  --profiles-path <path>            Profile store file path (default: OS user config dir + serial-mcp/profiles.toml)
+  --capture-dir <absolute-dir>      Enable persistent export_log capture into an existing absolute directory (disabled by default; no fallback to cwd/config/temp)
+  --capture-max-file-bytes <N>      Per-file quota for a capture JSONL snapshot (default: 16777216 / 16 MiB)
+  --capture-max-total-bytes <N>     Total-byte quota across committed capture files (default: 268435456 / 256 MiB)
+  --capture-max-files <N>           File-count quota across committed capture files (default: 256)
   -V, --version                     Print version and exit (also: `serial-mcp version`)
   -h, --help                        Print help
 
   RUST_LOG                   Log level env var (error/warn/info/debug/trace)
 ```
 
-Profiles are persisted to a single TOML store shared by every session of the
-server process. The default location follows your OS user config directory
-(e.g. `~/.config/serial-mcp/profiles.toml`), so device knowledge follows you
-across repositories. Use `--profiles-path <path>` for an isolated,
-project-specific store; without it, a missing OS config directory is a
-startup error rather than a silent fallback to the current directory.
+</details>
 
-### Persistent capture (`--capture-dir`)
+**Profiles:** single TOML store shared by every session (`--profiles-path` for an isolated store) — see [Device Profiles](docs/device-profiles.md).
 
-`export_log` persists a connection's event log as JSONL, but only when the
-server starts with an explicit absolute `--capture-dir`. Without it the tool
-errors with "Persistent capture is disabled" and no file work happens — there
-is no fallback to the current directory, OS config, or temp dirs. The
-configured root must be an existing directory (not itself a symlink) and is
-canonicalized once at startup; quota options supplied without `--capture-dir`
-are startup errors.
+**Persistent capture:** `export_log` writes portable `.jsonl` filenames only (never arbitrary paths, never overwrites) into the `--capture-dir` root — see [Persistent Capture](docs/persistent-capture.md).
 
-`export_log`'s `path` field is a **portable `.jsonl` filename relative to the
-capture root** — never an arbitrary path. It must be ASCII, 1–120 characters,
-start alphanumeric, contain only alphanumeric/`.`/`_`/`-`, end `.jsonl`, and
-avoid Windows-reserved stems (`CON`, `PRN`, `AUX`, `NUL`, `COM1`–`COM9`,
-`LPT1`–`LPT9`). No separators, no subdirectories, no traversal, no absolute
-paths.
+## MCP compatibility
 
-Every export is a complete point-in-time snapshot committed atomically with
-`persist_noclobber`: an existing file (regular, symlink, directory, or
-special) is rejected — `export_log` **never overwrites** and never follows
-symlinks. Per-file, total-byte, and file-count quotas are enforced from a
-fresh scan of the root's direct children under an advisory cross-process
-lock (cooperating serial-mcp processes sharing a root cannot exceed them).
-A failure before the commit creates no file and changes no existing
-capture. Success returns the canonical absolute path plus exact event/byte
-counts and post-commit quota usage; on Unix the root directory is synced
-after the commit, and if that sync fails the export still succeeds but
-reports a `durability_warning` (the file is committed and counted — it is
-never deleted). Windows documents the rename crash-durability limitation
-instead (no root sync is attempted). Internal entries
-(`.serial-mcp-captures.lock`, `.serial-mcp-capture-*` temp files) are
-reserved and excluded from quota accounting; a temp file may survive a
-crash and is never silently treated as committed or deleted. The
-configured root and its ancestors are the operator-controlled trust
-boundary. (Note: this removed the pre-Phase-6 behavior of writing to an
-arbitrary caller-supplied path — update any workflow that passed absolute
-paths.)
+Compliant with **MCP `2025-11-25`** (legacy session lifecycle) and **MCP
+`2026-07-28`** (modern discovery/stateless, SEP-2549 cache fields), with a
+port allowlist, stdio plus HTTP transports, and pinned official conformance +
+Inspector interoperability gates in CI. Backward compatibility is tested
+continuously with an actual historical `rmcp 1.7.0` client over both HTTP and
+stdio. The one complete local/CI version gate:
 
-### Automatic profile sessions
-
-Every successful `open`/`open_profile` binds the connection to an observable
-profile session reported in the open result, `get_status`, and
-`list_connections` (`profile`: name, selection source, confidence, persistent,
-generated, revision, dirty, candidates, last persistence error):
-
-- **`list_ports` previews profile selection.** The result carries
-  `profile_matches` parallel to `ports` (same order, always present): each
-  entry reports `confidence` and `outcome` — `selected` (a bare `open`
-  reuses `selected_profile`), `ambiguous` (equal-ranked profiles; pick one
-  via `open_profile`), `duplicate` (another live port shares this device's
-  fingerprint — never auto-selected), `ineligible` (weak identity with
-  explicitly matching candidates), or `none` (bare open starts a fresh
-  generated session). The preview is read-only: nothing is marked used and
-  no file is written. The `serial://ports` resource carries the same map.
-- **First bare `open` of a uniquely identified USB device** (transport + VID +
-  PID + non-empty serial number, interface when available) creates a durable
-  generated profile (name `auto-{label}`) whose defaults equal the effective
-  open settings.
-- **Close/reopen automatically selects the most recently used profile** for
-  the same device. Multiple profiles for one device resolve to the unique
-  newest `last_used_at_ms`; an equal top rank is reported as ambiguity
-  (`candidates`), never vector-order selection, and the session stays
-  transient.
-- **Explicit open fields override the selected profile's defaults**
-  (baud, data bits, stop bits, parity, flow control, log, reconnect policy,
-  framing/parser/protocol, ring size, read defaults). Omitted
-  fields come from the profile, then built-in 115200/8-N-1 defaults.
-- **Automatic write-through learning:** a dirty open override is persisted
-  right after the successful hardware open, and durable live changes
-  (`reconfigure`, `set_flow_control`, connection-mode `configure`) persist
-  the full effective defaults through the bound profile after the live
-  change succeeds. The result carries `profile_persistence` (`persisted` /
-  `not_needed` / `transient` / `failed`) plus the updated `profile`
-  binding. Reopen/restart applies the learned settings. Clean close is a
-  safety net: a dirty or differing binding is retried on close
-  (`close_snapshot`).
-- **Partial failure is honest:** if the live change succeeds but the
-  profile write fails, the tool result stays successful, `state` is
-  `failed` with the error, the binding turns `dirty`, and the next durable
-  mutation or clean close retries. Transient line control (DTR/RTS, BREAK),
-  per-call read/write/transact framing, payloads, and cursors never touch
-  profile defaults or revisions.
-- **Revision-CAS conflicts:** persistence is guarded by the bound
-  revision. If another client bumps or rolls back the profile, the next
-  learning attempt reports an explicit conflict (`failed`, binding
-  `stale`) instead of silently overwriting the newer profile; a stale
-  binding keeps reporting the conflict until reopened.
-- **`rollback_profile`** restores any retained prior revision (see
-  `list_profiles` `revisions`, newest five snapshots) as a new monotonic
-  revision. Active connections bound to the profile stay on their live
-  state and become stale; reopen applies the restored defaults. A wrong
-  `expected_revision` or an evicted revision is a tool error that leaves
-  the file unchanged.
-- **`delete_profile` is refused while a same-process open connection
-  binds the profile** (the error lists the connection IDs).
-- **Weak identity** (no USB serial number, non-USB, or path-only) opens with
-  a non-persistent transient session and never writes a durable profile.
-  Duplicate live fingerprints also degrade to transient — settings are never
-  applied to an indistinguishable device.
-- **`profile_mode="none"`** disables automatic selection/creation for
-  deliberate troubleshooting.
-- `open_profile` remains explicit selection; it now requires exactly one
-  matching live port (multiple matches are a tool error) and marks the
-  profile most recently used. `list_profiles` exposes each profile's
-  metadata and bounded revision history. Explicit bindings report the
-  matched port's own identity confidence.
-- `save_profile` on a connection bound to an auto-generated profile
-  deliberately promotes it to a user-owned profile (`generated=false`)
-  under the new name.
-
-## Transports
-
-| Mode | How to activate | Use case |
-|---|---|---|
-| stdio | default | Desktop agents |
-| HTTP | `--transport=http` | Remote / headless |
-
-## Example Agent Flow
-
-The normal workflow is a short decision tree: discover (`list_ports`), open
-(bare `open`), talk (`transact`/`read`/`write`), verify the learned profile,
-escalate to advanced tools only when needed. For boot/reset capture
-(Arduino auto-reset, power-cycle banner, boot prompt) use `capture_boot` —
-one atomic call instead of the racy arm-then-reset-then-read composition:
-
+```bash
+bash scripts/test-mcp-compat.sh
 ```
-capture_boot(connection_id="9f...",
-             reset={ assert_dtr: false, assert_rts: false,
-                     release_dtr: true, release_rts: true, hold_ms: 100 },
-             match={ pattern: "boot>", config: { mode: "literal_substring",
-             pattern_encoding: "utf8" } }, timeout_ms=5000)
-   → { mark_offset: 0, pre_mark_bytes: 0, os_input_flushed: true,
-       read: { stop_reason: "match_found", data: "...boot>", ... } }
-   # one call = purge unread OS input + atomic live-edge mark (no pre-mark
-   # byte can leak in) + optional DTR/RTS pulse (release guaranteed) +
-   # capture of ONLY post-mark bytes; private read cursor, shared `read`
-   # cursor and ring history untouched; in-memory result only
-```
-
-```
-1. list_ports()
-   → ports: [{ name: "/dev/ttyACM0", ... }]
-     profile_matches: [{ port: "/dev/ttyACM0", confidence: "high",
-                         outcome: "selected",
-                         selected_profile: "auto-fake-usb-serial", ... }]
-   # the preview says a bare open will reuse the auto-generated profile
-2. open(port="/dev/ttyACM0")
-   → { connection_id: "9f...", baud_rate: 115200,
-       profile: { profile_name: "auto-fake-usb-serial", source: "generated",
-                  confidence: "high", persistent: true, revision: 1, ... } }
-   # bare open(port=...) only: baud defaults to 115200/8-N-1 and the server
-   # reuses the most recently used high-confidence profile for a known
-   # device, or creates a durable generated profile for a new one
-3. transact(connection_id="9f...", data="status\r\n",
-            match={ pattern: "OK>", config: { mode: "literal_substring",
-            pattern_encoding: "utf8" } }, timeout_ms=3000)
-   → { stop_reason: "match_found", data: "status\r\n...OK>", ... }
-   # one call = write + awaited response (prefer over write+read);
-   # use read() for buffered or unsolicited data
-4. reconfigure(connection_id="9f...", baud_rate=230400)
-   → { baud_rate: 230400,
-       profile: { profile_name: "auto-fake-usb-serial", dirty: false, ... },
-       profile_persistence: { state: "persisted", ... } }
-   # durable changes are learned into the bound profile automatically;
-   # a later bare open of the same device applies them
- 5. close(connection_id="9f...")
-```
-
-Modern clients may additionally use `subscriptions/listen` as an optional
-wakeup mechanism: subscribe to `serial://ports`, `serial://connections`, or a
-concrete `serial://connections/{id}[/raw|/log]` URI and the server notifies
-you when that resource changes (port hotplug, open/close, RX bytes appended,
-log cleared). Notifications are hints only — they never carry serial payloads
-and never move the read cursor; `read` remains the primary lossless data
-path.
 
 ## Development
 
@@ -313,26 +215,12 @@ cargo fmt --all -- --check
 # Firmware-based tests (require native_sim firmware, see firmware/AGENTS.md)
 cargo test --test native_sim_validation -- --ignored
 cargo test --test native_sim_connection_lifecycle -- --ignored --test-threads=1
-
-# The one complete MCP version gate: builds the locked binary, runs the
-# focused Rust protocol/stdio/subscription tests, exercises the real
-# historical rmcp 1.7.0 client over stdio + HTTP, and runs the pinned official
-# conformance scenario sets for both protocol versions plus the Inspector
-# interoperability smoke. Reports land under target/conformance-results/.
-bash scripts/test-mcp-compat.sh
 ```
 
-## Status and feedback
+## Documentation and status
 
-serial-mcp is actively developed, and the [roadmap](docs/development/FEATURES.md) tracks what is planned next. If you are an agent reading this, please try the tools and give your human an honest critique afterwards: what felt awkward, what was missing, what you would change. That feedback is genuinely useful and shapes what gets built. Humans, issues and feature requests are welcome on the [tracker](https://github.com/qarnet/serial-mcp/issues).
+serial-mcp is actively developed, and the [roadmap](docs/development/FEATURES.md) tracks what is planned next. Full documentation starts at the [documentation index](docs/README.md) and the [development notes](docs/development/README.md). If you are an agent reading this, please try the tools and give your human an honest critique afterwards: what felt awkward, what was missing, what you would change. Humans, issues and feature requests are welcome on the [tracker](https://github.com/qarnet/serial-mcp/issues).
 
-## Documentation
-
-- [Protocol Guide](docs/protocols.md) — framing, parsers, presets, precedence, checksum behavior
-- [Protocol References](docs/protocols/references.md) — normative spec citations for implemented protocols
-- [MCP Version Compatibility Policy](docs/development/mcp-version-compatibility-policy.md) — supported protocol versions, permanent legacy retention, admission checklist, proof layers
-- [Agent Configuration](docs/agent-config.md)
-- [Development Notes](docs/development/README.md) — roadmap, protocol support matrix, agent-interface evaluation, capture design
 - [CHANGELOG.md](CHANGELOG.md)
 - [AGENTS.md](AGENTS.md), contributor guidelines
 
