@@ -751,25 +751,34 @@ fn ci_conformance_job_pins_packages_and_never_runs_suite_all() {
         .split("mcp-conformance:")
         .nth(1)
         .expect("ci.yml must define the mcp-conformance job");
+    // The job delegates compatibility execution to the shared runner: local
+    // and CI must share one executable path. Exact package pins, scenario
+    // lists, and the expected-failure baseline live in the runner script
+    // (guarded by `compat_runner_pins_packages_and_never_runs_suite_all` and
+    // `ci_scenario_lists_match_pinned_runner_scenarios`).
     assert!(
-        job.contains(PINNED_CONFORMANCE_PACKAGE),
-        "mcp-conformance job must invoke the pinned {PINNED_CONFORMANCE_PACKAGE}"
-    );
-    // The Inspector package pin lives in scripts/inspector-smoke.mjs (the
-    // script's npx fallback — guarded by
-    // `inspector_smoke_script_pins_inspector_and_covers_expected_surface`);
-    // the job must wire the smoke script itself.
-    assert!(
-        job.contains("node scripts/inspector-smoke.mjs"),
-        "mcp-conformance job must run the Inspector smoke script"
+        job.contains("bash scripts/test-mcp-compat.sh"),
+        "mcp-conformance job must invoke the shared runner"
     );
     assert!(
         job.contains(PINNED_NODE_VERSION),
         "mcp-conformance job must pin Node {PINNED_NODE_VERSION}"
     );
     assert!(
-        job.contains("--expected-failures conformance/expected-failures.yaml"),
-        "mcp-conformance job must apply the expected-failures baseline"
+        job.contains("actions/upload-artifact@v7"),
+        "mcp-conformance job must upload reports with actions/upload-artifact@v7"
+    );
+    assert!(
+        job.contains("retention-days: 7"),
+        "mcp-conformance job must keep reports for 7 days"
+    );
+    assert!(
+        job.contains("timeout-minutes: 15"),
+        "mcp-conformance job must be bounded to 15 minutes"
+    );
+    assert!(
+        job.contains("permissions:") && job.contains("contents: read"),
+        "mcp-conformance job must run with contents: read permissions"
     );
     // Comments may explain why `--suite all` is forbidden; only an actual
     // (non-comment) usage counts.
@@ -781,13 +790,38 @@ fn ci_conformance_job_pins_packages_and_never_runs_suite_all() {
         suite_all_usage.is_empty(),
         "mcp-conformance job must never run `--suite all`: {suite_all_usage:?}"
     );
+}
+
+#[test]
+fn compat_runner_pins_packages_and_never_runs_suite_all() {
+    // The shared runner is the executable compatibility gate: it must pin the
+    // exact conformance package, wire the Inspector smoke script, apply the
+    // expected-failure baseline, run under `set -euo pipefail`, and never run
+    // `--suite all` (comments may explain why it is forbidden).
+    let script = repo_file("scripts/test-mcp-compat.sh");
     assert!(
-        job.contains("actions/upload-artifact@v7"),
-        "mcp-conformance job must upload reports with actions/upload-artifact@v7"
+        script.contains(PINNED_CONFORMANCE_PACKAGE),
+        "test-mcp-compat.sh must invoke the pinned {PINNED_CONFORMANCE_PACKAGE}"
     );
     assert!(
-        job.contains("timeout-minutes: 15"),
-        "mcp-conformance job must be bounded to 15 minutes"
+        script.contains("node ") && script.contains("inspector-smoke.mjs"),
+        "test-mcp-compat.sh must run the Inspector smoke script via node"
+    );
+    assert!(
+        script.contains("--expected-failures"),
+        "test-mcp-compat.sh must apply the expected-failures baseline"
+    );
+    assert!(
+        script.contains("set -euo pipefail"),
+        "test-mcp-compat.sh must fail hard under set -euo pipefail"
+    );
+    let suite_all_usage: Vec<&str> = script
+        .lines()
+        .filter(|l| l.contains("--suite all") && !l.trim_start().starts_with('#'))
+        .collect();
+    assert!(
+        suite_all_usage.is_empty(),
+        "test-mcp-compat.sh must never run `--suite all`: {suite_all_usage:?}"
     );
 }
 
@@ -795,22 +829,24 @@ fn ci_conformance_job_pins_packages_and_never_runs_suite_all() {
 fn ci_scenario_lists_match_pinned_runner_scenarios() {
     // The pinned conformance package provides no `server-session-lifecycle`
     // scenario; the legacy initialize/session lifecycle is covered by
-    // `server-initialize`. Guard the CI job against re-adding a scenario the
-    // pinned runner does not ship, and against dropping any planned one.
-    let ci = repo_file(".github/workflows/ci.yml");
+    // `server-initialize`. The shared runner owns the scenario lists, so
+    // guard the runner script against re-adding a scenario the pinned runner
+    // does not ship, and against dropping any planned one.
+    let script = repo_file("scripts/test-mcp-compat.sh");
     assert!(
-        ci.contains("server-initialize"),
-        "ci.yml must run the server-initialize legacy session scenario"
+        script.contains("server-initialize"),
+        "test-mcp-compat.sh must run the server-initialize legacy session scenario"
     );
-    // Scoped to actual scenario-loop lines: the ci.yml comment explains the
+    // Scoped to actual scenario-loop lines: the runner comment explains the
     // missing scenario by name, which must not trip this guard.
-    let scenario_loop_references_it = ci
+    let scenario_loop_references_it = script
         .lines()
-        .any(|l| l.contains("sc in ") && l.contains("server-session-lifecycle"));
+        .any(|l| l.contains("for sc in") && l.contains("server-session-lifecycle"));
     assert!(
         !scenario_loop_references_it,
-        "ci.yml must not run a server-session-lifecycle scenario (absent from \
-         the pinned runner; server-initialize covers the legacy session lifecycle)"
+        "test-mcp-compat.sh must not run a server-session-lifecycle scenario \
+         (absent from the pinned runner; server-initialize covers the legacy \
+         session lifecycle)"
     );
     for sc in [
         "server-stateless",
@@ -822,12 +858,15 @@ fn ci_scenario_lists_match_pinned_runner_scenarios() {
         "caching",
         "sep-2164-resource-not-found",
     ] {
-        assert!(ci.contains(sc), "ci.yml must run the {sc} scenario");
+        assert!(
+            script.contains(sc),
+            "test-mcp-compat.sh must run the {sc} scenario"
+        );
     }
     // Runner exit status must never be suppressed in the scenario loops.
     assert!(
-        ci.contains("set -e"),
-        "ci.yml conformance steps must fail on any nonzero runner exit"
+        script.contains("set -e"),
+        "test-mcp-compat.sh must fail on any nonzero runner exit"
     );
 }
 

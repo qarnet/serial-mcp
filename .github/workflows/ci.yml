@@ -100,12 +100,21 @@ jobs:
 
   mcp-conformance:
     # Pinned official MCP conformance suite + Inspector interoperability smoke
-    # against the real HTTP binary. Runs only the planned scenario sets (never
-    # `--suite all`) at their exact protocol versions; the four expected
-    # failures in conformance/expected-failures.yaml are fixture-dependent
-    # checks serial-mcp deliberately cannot satisfy (no fixture endpoints are
-    # ever added to the product). A baseline entry that starts passing fails
-    # the job as stale; any other failure is an unexpected regression.
+    # against the real HTTP binary, plus the historical rmcp 1.7 client gate.
+    # Execution delegates to scripts/test-mcp-compat.sh so local and CI share
+    # ONE executable path: the script owns the exact pinned package
+    # (@modelcontextprotocol/conformance@0.2.0-alpha.10, no floating tags),
+    # the planned scenario sets at their exact protocol versions (never
+    # `--suite all`), the expected-failure baseline, and the pinned Inspector
+    # invocation. The four expected failures in
+    # conformance/expected-failures.yaml are fixture-dependent checks
+    # serial-mcp deliberately cannot satisfy (no fixture endpoints are ever
+    # added to the product). A baseline entry that starts passing fails the
+    # job as stale; any other failure is an unexpected regression.
+    # Inspector is interoperability (NOT conformance): a separate smoke that
+    # drives the exact pinned @modelcontextprotocol/inspector@2.0.0 CLI.
+    # This job only owns environment setup, the 15-minute bound, cleanup, and
+    # report upload.
     name: MCP conformance + Inspector smoke
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -132,78 +141,14 @@ jobs:
         with:
           node-version: "22.19.0"
 
-      - name: Build locked binary
-        run: cargo build --locked --bin serial-mcp
-
-      - name: Start HTTP server on loopback
-        id: start-server
-        run: |
-          PROFILES_DIR="$(mktemp -d)"
-          echo "profiles-dir=$PROFILES_DIR" >> "$GITHUB_OUTPUT"
-          mkdir -p target/conformance-results
-          target/debug/serial-mcp \
-            --transport=http --bind=127.0.0.1:8931 \
-            --profiles-path "$PROFILES_DIR/profiles.toml" \
-            > target/conformance-results/server.log 2>&1 &
-          echo "$!" > target/conformance-results/server.pid
-          # Bounded readiness probe: a modern server/discover (the only
-          # session-less request the server accepts) must return HTTP 200.
-          for i in $(seq 1 60); do
-            code="$(curl -s -o /dev/null -w '%{http_code}' -X POST \
-              http://127.0.0.1:8931/mcp \
-              -H 'Content-Type: application/json' \
-              -H 'Accept: application/json, text/event-stream' \
-              -H 'MCP-Protocol-Version: 2026-07-28' \
-              -H 'Mcp-Method: server/discover' \
-              -d '{"jsonrpc":"2.0","id":1,"method":"server/discover","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientInfo":{"name":"probe","version":"1"},"io.modelcontextprotocol/clientCapabilities":{}}}}' || true)"
-            if [ "$code" = "200" ]; then
-              echo "server ready (probe 200)"
-              exit 0
-            fi
-            sleep 0.5
-          done
-          echo "server failed to become ready; last probe code: $code"
-          cat target/conformance-results/server.log
-          exit 1
-
-      - name: Run MCP conformance (legacy 2025-11-25)
-        env:
-          MCP_SERVER_URL: http://127.0.0.1:8931/mcp
-        run: |
-          set -e
-          # server-initialize covers the legacy initialize/session lifecycle
-          # in the pinned package (the handoff's `server-session-lifecycle`
-          # name does not exist in @modelcontextprotocol/conformance@0.2.0-alpha.10).
-          for sc in server-initialize ping completion-complete tools-list resources-list prompts-list; do
-            npx -y @modelcontextprotocol/conformance@0.2.0-alpha.10 server \
-              --url "$MCP_SERVER_URL" --scenario "$sc" --spec-version 2025-11-25 \
-              --expected-failures conformance/expected-failures.yaml \
-              -o "target/conformance-results/$sc-legacy"
-          done
-
-      - name: Run MCP conformance (modern 2026-07-28)
-        env:
-          MCP_SERVER_URL: http://127.0.0.1:8931/mcp
-        run: |
-          set -e
-          for sc in server-stateless completion-complete tools-list resources-list prompts-list caching sep-2164-resource-not-found; do
-            npx -y @modelcontextprotocol/conformance@0.2.0-alpha.10 server \
-              --url "$MCP_SERVER_URL" --scenario "$sc" --spec-version 2026-07-28 \
-              --expected-failures conformance/expected-failures.yaml \
-              -o "target/conformance-results/$sc-modern"
-          done
-
-      - name: Run Inspector 2.0.0 interoperability smoke
-        env:
-          MCP_SERVER_URL: http://127.0.0.1:8931/mcp
-        run: node scripts/inspector-smoke.mjs "$MCP_SERVER_URL"
-
-      - name: Stop server
-        if: always()
-        run: |
-          if [ -f target/conformance-results/server.pid ]; then
-            kill "$(cat target/conformance-results/server.pid)" 2>/dev/null || true
-          fi
+      # The shared runner builds the locked binary, runs the focused Rust
+      # gates, builds + runs the historical rmcp 1.7 client over stdio and
+      # HTTP, starts the loopback server with a bounded readiness probe, runs
+      # the exact legacy/modern conformance scenario sets, and runs the
+      # Inspector smoke. It stops the server and cleans its own temp dir via
+      # a trap on success, failure, signal, or timeout.
+      - name: Run shared MCP compatibility gate
+        run: bash scripts/test-mcp-compat.sh
 
       - name: Upload conformance reports
         if: always()

@@ -1,0 +1,36 @@
+# Historical MCP client interoperability fixture.
+#
+# Standalone package (NOT a root workspace member) compiled against the exact
+# pre-migration rmcp 1.7.0 so the CURRENT serial-mcp server can be exercised
+# by a real historical client implementation over both HTTP and stdio. Owns a
+# committed Cargo.lock (built with --locked); see the drift guard in
+# tests/doc_drift.rs for the pinned package/checksum contract.
+#
+# This package is never published.
+
+[package]
+name = "rmcp-1-client"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+# Exact pin: compatibility depends on the historical client implementation,
+# not on whatever rmcp resolves today. `client` + the two transports are the
+# complete surface the fixture uses; default-features = false keeps the
+# server/macros features out so the fixture cannot drift into current SDK
+# behavior.
+rmcp = { version = "=1.7.0", default-features = false, features = [
+  "client",
+  "transport-child-process",
+  "transport-streamable-http-client-reqwest",
+] }
+tokio = { version = "1", features = [
+  "macros",
+  "rt-multi-thread",
+  "time",
+  "process",
+] }
+serde_json = "1"
+anyhow = "1"
+tempfile = "3"
