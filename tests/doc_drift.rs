@@ -545,6 +545,743 @@ fn capture_cli_options_synced_between_value_list_and_help() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// GitHub Actions security regression guards (alerts #7–#14)
+//
+// The release pipeline must stay structural: trusted CI (push to main) calls
+// the reusable release + registry workflows; nothing may reintroduce
+// event-driven privileged orchestration (workflow_run / pull_request_target),
+// secret inheritance, or event-derived checkouts.
+// ---------------------------------------------------------------------------
+
+/// Every committed workflow file in .github/workflows/, sorted by name.
+/// Normalize workflow text to LF so parsing is independent of the checkout's
+/// line endings (Windows clones are CRLF).
+fn normalize_lf(text: &str) -> String {
+    text.replace("\r\n", "\n")
+}
+
+fn workflow_files() -> Vec<(String, String)> {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join(".github/workflows");
+    let mut files: Vec<(String, String)> = fs::read_dir(&dir)
+        .unwrap_or_else(|e| panic!("read {}: {e}", dir.display()))
+        .map(|entry| {
+            let entry = entry.expect("readdir entry");
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let text = fs::read_to_string(entry.path())
+                .unwrap_or_else(|e| panic!("read {}: {e}", entry.path().display()));
+            (name, normalize_lf(&text))
+        })
+        .filter(|(name, _)| name.ends_with(".yml") || name.ends_with(".yaml"))
+        .collect();
+    files.sort();
+    files
+}
+
+fn workflow_file(name: &str) -> String {
+    let (_, text) = workflow_files()
+        .into_iter()
+        .find(|(n, _)| n == name)
+        .unwrap_or_else(|| panic!("missing workflow file {name:?}"));
+    text
+}
+
+/// Everything in a workflow before its first column-0 `jobs:` key: the
+/// `name` / `on` / `permissions` / `env` header.
+fn workflow_header(wf: &str) -> &str {
+    let jobs = wf
+        .find("\r\njobs:")
+        .or_else(|| wf.find("\njobs:"))
+        .unwrap_or_else(|| panic!("workflow must declare a `jobs:` block"));
+    &wf[..jobs]
+}
+
+/// The `on:` trigger block of a workflow: everything between the `on:` line
+/// and the next column-0 (non-comment) key.
+fn trigger_block(wf: &str) -> &str {
+    let start = wf
+        .find("\r\non:")
+        .or_else(|| wf.find("\non:"))
+        .unwrap_or_else(|| panic!("workflow must declare an `on:` trigger block"));
+    // Skip past the "on:" line itself; the matched marker covers its line
+    // ending (CRLF is 5 bytes, LF is 4).
+    let skip = if wf[start..].starts_with("\r\n") {
+        5
+    } else {
+        4
+    };
+    let rest = &wf[start + skip..];
+    let mut end = rest.len();
+    let mut pos = 0;
+    for line in rest.split_inclusive('\n') {
+        let content = line.trim_end_matches(['\n', '\r']);
+        if !content.is_empty() && !content.starts_with(' ') && !content.starts_with('#') {
+            end = pos;
+            break;
+        }
+        pos += line.len();
+    }
+    &rest[..end]
+}
+
+/// One job block: from the `  <name>:` header through the line before the next
+/// sibling job (a 2-space-indented `key:` line).
+fn job_section<'a>(wf: &'a str, name: &str) -> &'a str {
+    let marker = format!("\r\n  {name}:\r\n");
+    let marker_lf = format!("\n  {name}:\n");
+    let (start, marker_len) = match (wf.find(&marker), wf.find(&marker_lf)) {
+        (Some(p), _) => (p, marker.len()),
+        (None, Some(p)) => (p, marker_lf.len()),
+        (None, None) => panic!("workflow must define a job named {name:?}"),
+    };
+    let rest = &wf[start + marker_len..];
+    let mut end = rest.len();
+    let mut pos = 0;
+    for line in rest.split_inclusive('\n') {
+        let content = line.trim_end_matches(['\n', '\r']);
+        if content.starts_with("  ")
+            && !content.starts_with("   ")
+            && content.ends_with(':')
+            && !content.starts_with("  #")
+        {
+            end = pos;
+            break;
+        }
+        pos += line.len();
+    }
+    &rest[..end]
+}
+
+fn collapse_ws(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// The trusted-push gate every privileged caller job must carry.
+fn has_trusted_push_gate(job: &str) -> bool {
+    collapse_ws(job).contains("github.event_name == 'push' && github.ref == 'refs/heads/main'")
+}
+
+/// Forbidden privileged-orchestration patterns across a whole workflow file.
+fn privileged_pattern_violations(wf: &str) -> Vec<&'static str> {
+    [
+        "workflow_run:",
+        "pull_request_target:",
+        "secrets: inherit",
+        "github.event.workflow_run.head_sha",
+    ]
+    .into_iter()
+    .filter(|p| wf.contains(p))
+    .collect()
+}
+
+#[test]
+fn workflows_never_use_privileged_triggers_or_event_content() {
+    // No workflow may react to workflow_run / pull_request_target, inherit
+    // secrets, or read workflow_run event content. This is the whole point of
+    // the security remediation: privileged orchestration must not come back.
+    for (name, text) in workflow_files() {
+        let violations = privileged_pattern_violations(&text);
+        assert!(
+            violations.is_empty(),
+            "{name} violates the privileged-orchestration contract: {violations:?}"
+        );
+    }
+}
+
+#[test]
+fn privileged_pattern_guard_rejects_vulnerable_fixtures() {
+    // Negative proof: each forbidden pattern must be detected, so the guard
+    // cannot pass vacuously on a textually weakened workflow.
+    let fixtures = [
+        "on:\n  workflow_run:\n    types: [completed]\n",
+        "on:\n  pull_request_target:\n    branches: [main]\n",
+        "    secrets: inherit\n",
+        "ref: ${{ github.event.workflow_run.head_sha }}\n",
+    ];
+    for fixture in fixtures {
+        assert!(
+            !privileged_pattern_violations(fixture).is_empty(),
+            "privileged-pattern guard must reject fixture {fixture:?}"
+        );
+    }
+}
+
+#[test]
+fn ci_and_schema_drift_are_read_only_at_top_level() {
+    for name in ["ci.yml", "schema-drift.yml"] {
+        let text = workflow_file(name);
+        let header = workflow_header(&text);
+        assert!(
+            header.contains("permissions:") && header.contains("contents: read"),
+            "{name} must declare explicit top-level permissions: contents: read \
+             (header: {header})"
+        );
+        assert!(
+            !header.contains("contents: write"),
+            "{name} top-level permissions must stay read-only"
+        );
+    }
+}
+
+#[test]
+fn ci_release_caller_is_gated_ordered_and_narrow() {
+    let ci = workflow_file("ci.yml");
+    let release = job_section(&ci, "release");
+    assert!(
+        has_trusted_push_gate(release),
+        "CI `release` caller job must be gated on a trusted push to main: {release}"
+    );
+    for required in ["nix-flake", "build-test", "native-sim"] {
+        assert!(
+            collapse_ws(release).contains(required),
+            "CI `release` caller job must depend on every required CI job \
+             ({required}): {release}"
+        );
+    }
+    assert!(
+        release.contains("uses: ./.github/workflows/release.yml"),
+        "CI `release` caller job must call the local reusable release workflow"
+    );
+    assert!(
+        release.contains("contents: write"),
+        "CI `release` caller job must grant contents: write"
+    );
+    assert!(
+        !release.contains("id-token"),
+        "CI `release` caller job must not carry an OIDC token"
+    );
+    assert!(
+        release.contains("ref: ${{ github.sha }}"),
+        "CI `release` caller job must pass the immutable github.sha as ref"
+    );
+    assert!(
+        release.contains("secrets:") && release.contains("CARGO_REGISTRY_TOKEN"),
+        "CI `release` caller job must pass CARGO_REGISTRY_TOKEN explicitly: {release}"
+    );
+    assert!(
+        !release.contains("secrets: inherit"),
+        "CI `release` caller job must not inherit secrets"
+    );
+}
+
+#[test]
+fn ci_registry_caller_follows_release_read_only() {
+    let ci = workflow_file("ci.yml");
+    let registry = job_section(&ci, "publish-mcp-registry");
+    assert!(
+        has_trusted_push_gate(registry),
+        "CI `publish-mcp-registry` caller job must be gated on a trusted push \
+         to main: {registry}"
+    );
+    assert!(
+        collapse_ws(registry).contains("needs: release"),
+        "CI `publish-mcp-registry` caller job must run after the release job"
+    );
+    assert!(
+        registry.contains("uses: ./.github/workflows/publish-mcp-registry.yml"),
+        "CI `publish-mcp-registry` caller job must call the local reusable \
+         registry workflow"
+    );
+    assert!(
+        registry.contains("contents: read") && registry.contains("id-token: write"),
+        "CI `publish-mcp-registry` caller job must grant only contents: read + \
+         id-token: write"
+    );
+    assert!(
+        !registry.contains("contents: write"),
+        "CI `publish-mcp-registry` caller job must not grant contents: write"
+    );
+    assert!(
+        !registry.contains("secrets:"),
+        "CI `publish-mcp-registry` caller job must pass no secrets"
+    );
+    assert!(
+        registry.contains("ref: ${{ github.sha }}"),
+        "CI `publish-mcp-registry` caller job must pass the immutable \
+         github.sha as ref"
+    );
+}
+
+#[test]
+fn trusted_push_gate_guard_rejects_removed_gate() {
+    // Negative proof for the gate helper: a caller job without the exact
+    // push+main condition must not satisfy has_trusted_push_gate.
+    let ci = workflow_file("ci.yml");
+    let release = job_section(&ci, "release");
+    assert!(
+        has_trusted_push_gate(release),
+        "fixture must satisfy the gate"
+    );
+    let weakened = release.replace(
+        "github.event_name == 'push' && github.ref == 'refs/heads/main'",
+        "github.event_name == 'push'",
+    );
+    assert!(
+        !has_trusted_push_gate(&weakened),
+        "gate guard must reject a caller gated on push alone (any ref)"
+    );
+}
+
+#[test]
+fn release_and_registry_workflows_are_reusable_not_event_handlers() {
+    for name in ["release.yml", "publish-mcp-registry.yml"] {
+        let text = workflow_file(name);
+        let triggers = trigger_block(&text);
+        assert!(
+            triggers.contains("workflow_call"),
+            "{name} must be a reusable workflow (workflow_call), not an \
+             independently privileged event handler; triggers: {triggers}"
+        );
+        for forbidden in [
+            "workflow_run",
+            "workflow_dispatch",
+            "pull_request",
+            "push:",
+            "schedule",
+        ] {
+            assert!(
+                !triggers.contains(forbidden),
+                "{name} must not listen for the {forbidden} event — callers \
+                 invoke it explicitly under their own event gates"
+            );
+        }
+    }
+}
+
+#[test]
+fn release_workflow_uses_job_level_least_privilege() {
+    let release = workflow_file("release.yml");
+    let header = workflow_header(&release);
+    assert!(
+        !header.contains("contents: write"),
+        "release.yml must not declare broad workflow-level contents: write — \
+         use job-level permissions"
+    );
+    let publish_crate = job_section(&release, "publish-crate");
+    assert!(
+        publish_crate.contains("contents: read"),
+        "release.yml `publish-crate` job must be read-only (least privilege)"
+    );
+    assert!(
+        !publish_crate.contains("contents: write"),
+        "release.yml `publish-crate` job must not request contents: write"
+    );
+}
+
+#[test]
+fn release_code_executing_jobs_are_read_only() {
+    // prepare, build, and publish-crate check out and execute repository code;
+    // they must never hold repository write permission.
+    let release = workflow_file("release.yml");
+    for name in ["prepare", "build", "publish-crate"] {
+        let job = job_section(&release, name);
+        assert!(
+            job.contains("contents: read"),
+            "release.yml `{name}` job executes repository code and must be \
+             contents: read"
+        );
+        assert!(
+            !job.contains("contents: write"),
+            "release.yml `{name}` job must not request contents: write"
+        );
+    }
+}
+
+#[test]
+fn release_write_jobs_do_not_execute_project_code() {
+    // The only write-permission jobs are the GitHub release mutators. They
+    // must not check out or execute repository/project code.
+    let release = workflow_file("release.yml");
+    for name in ["create-draft", "publish-release"] {
+        let job = job_section(&release, name);
+        assert!(
+            job.contains("contents: write"),
+            "release.yml `{name}` job must hold the release write permission"
+        );
+        for forbidden in ["actions/checkout", "cargo ", "nix "] {
+            assert!(
+                !job.contains(forbidden),
+                "release.yml `{name}` write job must not execute project code \
+                 ({forbidden}): {job}"
+            );
+        }
+    }
+}
+
+#[test]
+fn release_later_checkouts_use_resolved_sha() {
+    // inputs.ref is resolved once in prepare; every later checkout must pin
+    // the immutable resolved SHA so a moving branch cannot swap content
+    // between jobs.
+    let release = workflow_file("release.yml");
+    let prepare = job_section(&release, "prepare");
+    assert!(
+        prepare.contains("ref: ${{ inputs.ref }}"),
+        "prepare must be the only job checking out inputs.ref"
+    );
+    for name in ["build", "publish-crate"] {
+        let job = job_section(&release, name);
+        assert!(
+            job.contains("ref: ${{ needs.prepare.outputs.sha }}"),
+            "release.yml `{name}` job must check out the resolved immutable SHA"
+        );
+        assert!(
+            !job.contains("ref: ${{ inputs.ref }}"),
+            "release.yml `{name}` job must not check out mutable inputs.ref"
+        );
+    }
+}
+
+#[test]
+fn release_artifacts_flow_through_named_uploads_and_downloads() {
+    // Build jobs upload deterministic per-platform artifacts; the publish job
+    // downloads exactly those four and uploads them to the draft.
+    let release = workflow_file("release.yml");
+    let build = job_section(&release, "build");
+    assert!(
+        build.contains("actions/upload-artifact@v7")
+            && build.contains("name: serial-mcp-${{ matrix.artifact_name_suffix }}"),
+        "build job must upload deterministic named artifacts per platform"
+    );
+    let publish = job_section(&release, "publish-release");
+    assert!(
+        publish.contains("actions/download-artifact@v8"),
+        "publish-release job must download the built artifacts"
+    );
+    for platform in [
+        "x86_64-linux",
+        "aarch64-linux",
+        "aarch64-macos",
+        "x86_64-windows",
+    ] {
+        assert!(
+            publish.contains(&format!("name: serial-mcp-{platform}")),
+            "publish-release job must download the {platform} artifact"
+        );
+    }
+}
+
+#[test]
+fn release_dry_run_is_dispatch_only_read_only_and_never_publishes() {
+    let dry = workflow_file("release-dry-run.yml");
+    let triggers = trigger_block(&dry);
+    assert!(
+        triggers.contains("workflow_dispatch"),
+        "release-dry-run.yml must be workflow_dispatch-only: {triggers}"
+    );
+    for forbidden in ["workflow_run", "pull_request", "push:", "schedule"] {
+        assert!(
+            !triggers.contains(forbidden),
+            "release-dry-run.yml must not listen for the {forbidden} event"
+        );
+    }
+    let header = workflow_header(&dry);
+    assert!(
+        header.contains("permissions:") && header.contains("contents: read"),
+        "release-dry-run.yml must declare explicit read-only permissions"
+    );
+    assert!(
+        !header.contains("contents: write"),
+        "release-dry-run.yml must grant no write permission"
+    );
+    let job = job_section(&dry, "dry-run");
+    assert!(
+        job.contains("uses: ./.github/workflows/release.yml"),
+        "release-dry-run.yml must call the local reusable release workflow"
+    );
+    assert!(
+        collapse_ws(job).contains("mode: dry-run"),
+        "release-dry-run.yml must hardcode mode: dry-run"
+    );
+    assert!(
+        job.contains("ref: ${{ inputs.ref }}"),
+        "release-dry-run.yml must forward the operator-selected ref"
+    );
+    assert!(
+        !job.contains("secrets:") && !job.contains("CARGO_REGISTRY_TOKEN"),
+        "release-dry-run.yml must pass no secrets"
+    );
+}
+
+#[test]
+fn workflow_parsers_accept_crlf_checkouts() {
+    // Windows checkouts normalize line endings to CRLF; every parser must
+    // yield identical results for CRLF and LF text (proven here, so a
+    // future edit cannot silently break Windows CI).
+    let release = workflow_file("release.yml");
+    let crlf = release.replace('\n', "\r\n");
+    assert_eq!(
+        collapse_ws(workflow_header(&release)),
+        collapse_ws(workflow_header(&crlf)),
+        "workflow_header must parse CRLF text identically"
+    );
+    assert_eq!(
+        collapse_ws(trigger_block(&release)),
+        collapse_ws(trigger_block(&crlf)),
+        "trigger_block must parse CRLF text identically"
+    );
+    for name in [
+        "prepare",
+        "build",
+        "create-draft",
+        "publish-release",
+        "publish-crate",
+    ] {
+        assert_eq!(
+            collapse_ws(job_section(&release, name)),
+            collapse_ws(job_section(&crlf, name)),
+            "job_section must parse the {name} job identically from CRLF text"
+        );
+    }
+}
+
+#[test]
+fn flake_source_filter_ships_workflow_fixtures_and_scripts() {
+    // The flake source filter must admit .github/workflows (doc_drift reads
+    // them at runtime) and scripts/ (builder + unittest suite). A regression
+    // here fails doc_drift under `nix flake check`; the flake's own
+    // workflow-fixtures-present check is the executable proof.
+    let flake = repo_file("flake.nix");
+    let filter_start = flake
+        .find("filter =")
+        .expect("flake.nix must define a source filter");
+    let filter = &flake[filter_start..filter_start + 3000];
+    assert!(
+        filter.contains("\"/.github\""),
+        "flake source filter must include the .github directory tree (doc_drift reads it)"
+    );
+    assert!(
+        filter.contains("\"/scripts\""),
+        "flake source filter must include scripts/ (builder + unittest suite)"
+    );
+}
+
+#[test]
+fn publisher_workflow_uses_builder_and_no_nix_develop() {
+    // The registry manifest must be built by the offline builder from
+    // gh-downloaded assets; schema validation must use the independent
+    // jsonschema-cli package, never `nix develop` (which realizes serial-mcp).
+    let publisher = workflow_file("publish-mcp-registry.yml");
+    let has_nix_develop_run = publisher.lines().any(|line| {
+        // Ignore comment text; detect a "nix develop" invocation anywhere in
+        // the command (not just at the start of the line).
+        let code = line.split('#').next().unwrap_or("");
+        code.split_whitespace()
+            .collect::<Vec<_>>()
+            .windows(2)
+            .any(|pair| pair == ["nix", "develop"])
+    });
+    assert!(
+        !has_nix_develop_run,
+        "publish-mcp-registry.yml must never run `nix develop` (it builds serial-mcp)"
+    );
+    for needle in [
+        "scripts/build_registry_manifest.py",
+        "gh release download",
+        "git show",
+        "nix shell",
+        "jsonschema-cli",
+        "gh api",
+        "staging/server.json",
+        "curl -fsSL",
+        "--retry",
+        "--json isDraft",
+    ] {
+        assert!(
+            publisher.contains(needle),
+            "publish-mcp-registry.yml must contain {needle:?}"
+        );
+    }
+    for forbidden in ["--output server.json", "-i server.json", "curl -sL"] {
+        assert!(
+            !publisher.contains(forbidden),
+            "publish-mcp-registry.yml must never {forbidden:?} (the repo-root \
+             server.json template must stay untouched)"
+        );
+    }
+}
+
+#[test]
+fn publisher_workflow_is_callable_with_ref_and_version() {
+    let publisher = workflow_file("publish-mcp-registry.yml");
+    let triggers = trigger_block(&publisher);
+    assert!(
+        triggers.contains("workflow_call"),
+        "publisher must be a reusable workflow_call"
+    );
+    assert!(
+        triggers.contains("ref:") && triggers.contains("version:"),
+        "publisher must declare required ref and version inputs"
+    );
+    let header = workflow_header(&publisher);
+    assert!(
+        header.contains("contents: read") && header.contains("id-token: write"),
+        "publisher must keep contents: read + id-token: write"
+    );
+    assert!(
+        publisher.contains("ref: ${{ inputs.ref }}"),
+        "publisher must check out the caller-supplied trusted ref"
+    );
+}
+
+#[test]
+fn publisher_consumes_staged_manifest_only() {
+    // The generated manifest must live in staging and be consumed from there
+    // by the builder, the schema validator, and the publisher. The committed
+    // repo-root server.json template is never a write or read target of the
+    // generated manifest.
+    let publisher = workflow_file("publish-mcp-registry.yml");
+    assert!(
+        publisher.contains("--output staging/server.json"),
+        "builder must write the generated manifest to staging/server.json"
+    );
+    assert!(
+        publisher.contains("-i staging/server.json"),
+        "schema validator must consume staging/server.json"
+    );
+    assert!(
+        publisher.contains("publish staging/server.json"),
+        "mcp-publisher must consume staging/server.json (pinned CLI 1.7.9 takes a positional path)"
+    );
+    assert!(
+        !publisher.contains("--output server.json"),
+        "builder must never write the repo-root server.json"
+    );
+    assert!(
+        !publisher.contains("publish server.json"),
+        "publisher must never consume the repo-root server.json"
+    );
+}
+
+#[test]
+fn publisher_rejects_unpublished_or_draft_releases() {
+    // gh release view alone accepts drafts; the publisher must verify the
+    // release is published (isDraft == false) via structured output.
+    let publisher = workflow_file("publish-mcp-registry.yml");
+    assert!(
+        publisher.contains("--json isDraft") && publisher.contains(".isDraft"),
+        "publisher must check isDraft via structured output"
+    );
+    assert!(
+        !publisher.contains("gh release view \"$TAG\" >/dev/null"),
+        "publisher must not rely on a bare gh release view success check"
+    );
+}
+
+#[test]
+fn publisher_backfill_is_dispatch_only_and_read_only() {
+    let dry = workflow_file("publish-mcp-registry-backfill.yml");
+    let triggers = trigger_block(&dry);
+    assert!(
+        triggers.contains("workflow_dispatch"),
+        "backfill must be workflow_dispatch-only: {triggers}"
+    );
+    for forbidden in ["workflow_run", "pull_request", "push:", "schedule"] {
+        assert!(
+            !triggers.contains(forbidden),
+            "backfill must not listen for the {forbidden} event"
+        );
+    }
+    let header = workflow_header(&dry);
+    assert!(
+        header.contains("contents: read") && header.contains("id-token: write"),
+        "backfill must be contents: read + id-token: write"
+    );
+    assert!(
+        !header.contains("contents: write"),
+        "backfill must grant no write permission"
+    );
+    let job = job_section(&dry, "backfill");
+    assert!(
+        job.contains("uses: ./.github/workflows/publish-mcp-registry.yml"),
+        "backfill must call the local reusable publisher"
+    );
+    assert!(
+        job.contains("ref: ${{ github.sha }}"),
+        "backfill must pass the current trusted ref"
+    );
+    assert!(
+        job.contains("version: ${{ inputs.version }}"),
+        "backfill must forward the operator-supplied version"
+    );
+    assert!(
+        !job.contains("secrets:") && !job.contains("actions/checkout"),
+        "backfill must pass no secrets and never check out"
+    );
+}
+
+#[test]
+fn release_workflow_exposes_version_output() {
+    let release = workflow_file("release.yml");
+    let triggers = trigger_block(&release);
+    assert!(
+        triggers.contains("outputs:") && triggers.contains("jobs.prepare.outputs.version"),
+        "release workflow_call must expose the prepared version as an output"
+    );
+    let prepare = job_section(&release, "prepare");
+    assert!(
+        prepare.contains("version: ${{ steps.version.outputs.value }}"),
+        "prepare job must emit the version output"
+    );
+}
+
+#[test]
+fn ci_registry_caller_passes_release_version() {
+    let ci = workflow_file("ci.yml");
+    let registry = job_section(&ci, "publish-mcp-registry");
+    assert!(
+        registry.contains("version: ${{ needs.release.outputs.version }}"),
+        "CI registry caller must pass the release-prepared version"
+    );
+    assert!(
+        registry.contains("ref: ${{ github.sha }}"),
+        "CI registry caller must pass the immutable github.sha"
+    );
+}
+
+#[test]
+fn ci_failure_notifier_is_push_main_and_narrow() {
+    let ci = workflow_file("ci.yml");
+    let notify = job_section(&ci, "notify-release-failure");
+    assert!(
+        collapse_ws(notify).contains("always()"),
+        "notifier must run with always() so it fires when a dependency fails"
+    );
+    assert!(
+        has_trusted_push_gate(notify),
+        "notifier must be gated on trusted push to main"
+    );
+    assert!(
+        collapse_ws(notify).contains("needs: [release, publish-mcp-registry]"),
+        "notifier must depend on both the release and registry jobs"
+    );
+    assert!(
+        notify.contains("issues: write"),
+        "notifier must carry issues: write"
+    );
+    assert!(
+        notify.contains("GH_REPO: ${{ github.repository }}"),
+        "notifier has no checkout and must pin the repository via GH_REPO"
+    );
+    assert!(
+        !notify.contains("head -n 1"),
+        "notifier must not use a fragile head pipeline under pipefail"
+    );
+    for forbidden in [
+        "contents: write",
+        "id-token",
+        "secrets:",
+        "actions/checkout",
+        "cargo ",
+        "nix ",
+    ] {
+        assert!(
+            !notify.contains(forbidden),
+            "notifier must not carry {forbidden:?}"
+        );
+    }
+}
+
 fn collect_versions(v: &serde_json::Value, out: &mut Vec<String>) {
     if let serde_json::Value::Object(map) = v {
         for (k, val) in map {

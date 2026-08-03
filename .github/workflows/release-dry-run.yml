@@ -1,0 +1,21 @@
+name: Release dry run
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Git ref to build (branch, tag, or SHA)
+        required: false
+        default: main
+
+# Manual testing only: no repository or crates.io write credential, no OIDC.
+permissions:
+  contents: read
+
+jobs:
+  dry-run:
+    name: Build release packaging (no publish)
+    uses: ./.github/workflows/release.yml
+    with:
+      mode: dry-run
+      ref: ${{ inputs.ref }}
