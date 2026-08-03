@@ -4,7 +4,9 @@
 //! - [`PortInfo::list_available`] enumerates serial ports on the host.
 //! - [`SerialConnection::open`] opens a single configured port.
 //! - [`ConnectionManager`] holds a set of open connections indexed by id and
-//!   rejects double-opens of the same port.
+//!   rejects double-opens of the same port. Its connection-opening boundary
+//!   ([`ConnectionOpener`]) is injectable so alternate backends can drive
+//!   the full surface without an OS serial port.
 //!
 //! The implementation is split into focused submodules: configuration types
 //! and defaults (`config`), OS port enumeration (`port_info`), the connection
@@ -26,7 +28,7 @@ pub use config::{
     MAX_BAUD_RATE,
 };
 pub use connection::{SerialConnection, SerialIo};
-pub use manager::ConnectionManager;
+pub use manager::{ConnectionManager, ConnectionOpener};
 pub use port_info::{PortInfo, PortProvider, PortTransport, SystemPortProvider};
 
 // =============================================================================

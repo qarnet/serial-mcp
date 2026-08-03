@@ -705,26 +705,26 @@ async fn stateless_requests_share_session_ring_and_cursor() -> Result<()> {
 // Open/close + state/log operation hints
 // =============================================================================
 
-#[cfg(unix)]
 #[tokio::test]
 async fn open_and_close_emit_expected_uri_hints() -> Result<()> {
-    use common::pty::PtyPair;
-
-    let pair = PtyPair::open().expect("open PTY pair");
-    let slave = pair
-        .slave_path
-        .to_str()
-        .expect("slave path utf8")
-        .to_string();
+    // Cross-platform regression: public `open`/`close` emit the expected
+    // resource hints through the real HTTP MCP surface, with the OS serial
+    // layer replaced by an injected in-memory connection opener. No PTY
+    // dependence (Linux PTYs are Linux-only; opening a macOS tty fails with
+    // ENOTTY). The opener builds its connection from the exact config the
+    // public `open` path resolves, so allowlist, identity, profile-session,
+    // and hint behavior are all exercised unchanged.
+    let opener = common::controlled::ControlledConnectionOpener::new();
+    let manager = Arc::new(serial_mcp::serial::ConnectionManager::with_opener(opener));
+    let port = "/dev/controlled-open-close";
     let provider = common::StaticPortProvider::new(vec![common::StaticPortProvider::usb_port(
-        &slave,
+        port,
         0x1234,
         0x5678,
         "SN-OPEN-CLOSE",
         Some("Test Device"),
         None,
     )]);
-    let manager = Arc::new(serial_mcp::serial::ConnectionManager::new());
     let server = TestServer::builder(manager)
         .port_provider(provider)
         .start()
@@ -743,7 +743,7 @@ async fn open_and_close_emit_expected_uri_hints() -> Result<()> {
 
     let open = client
         .peer()
-        .call_tool(common::tool_request("open", json!({"port": slave})))
+        .call_tool(common::tool_request("open", json!({"port": port})))
         .await
         .expect("open call");
     assert_eq!(open.is_error, Some(false), "{open:?}");

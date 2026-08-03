@@ -143,6 +143,55 @@ pub fn controlled_connection(
     (conn, state)
 }
 
+/// Cross-platform [`serial_mcp::serial::ConnectionOpener`]: builds every
+/// connection from the EXACT config passed by the public `open` path,
+/// backed by a fresh [`ControlledIo`]. This lets the full MCP surface
+/// (allowlist, identity capture, profile session, resource hints) run
+/// without an OS serial port — which also keeps it working on macOS and
+/// Windows where tty/PTY opens are unavailable or fail (macOS tty open
+/// returns ENOTTY).
+pub struct ControlledConnectionOpener {
+    /// Every connection's shared state, in open order.
+    states: StdMutex<Vec<Arc<ControlledState>>>,
+}
+
+impl ControlledConnectionOpener {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self {
+            states: StdMutex::new(Vec::new()),
+        })
+    }
+
+    /// All [`ControlledState`]s created so far, in open order.
+    pub fn states(&self) -> Vec<Arc<ControlledState>> {
+        self.states.lock().expect("states poisoned").clone()
+    }
+}
+
+impl serial_mcp::serial::ConnectionOpener for ControlledConnectionOpener {
+    fn open(
+        &self,
+        config: ConnectionConfig,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = serial_mcp::error::Result<SerialConnection>>
+                + Send
+                + '_,
+        >,
+    > {
+        Box::pin(async move {
+            let state = Arc::new(ControlledState::new());
+            self.states
+                .lock()
+                .expect("states poisoned")
+                .push(Arc::clone(&state));
+            let conn =
+                SerialConnection::from_io_with_config(config, Box::new(ControlledIo { state }));
+            Ok(conn)
+        })
+    }
+}
+
 impl AsyncRead for ControlledIo {
     fn poll_read(
         self: Pin<&mut Self>,

@@ -253,6 +253,11 @@
   cover the trust boundaries.
 
 ### Fixes
+- connection opening now uses an injectable backend boundary while production
+  still delegates to the OS serial opener; opening-port reservations are
+  released on failure and request cancellation, preventing a cancelled open
+  from wedging later attempts. Cross-platform public MCP regression coverage
+  proves `open`/`close` resource hints without relying on Linux-only PTYs;
 - port watcher establishes its baseline on first successful enumeration —
   no false updates before the first scan and no update storm after
   enumeration failure;
