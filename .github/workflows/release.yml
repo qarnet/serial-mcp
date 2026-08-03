@@ -1,31 +1,35 @@
 name: Release
 
 on:
-  workflow_run:
-    workflows: ["CI"]
-    types: [completed]
-  workflow_dispatch:
+  workflow_call:
     inputs:
+      mode:
+        description: 'Release mode: "release" performs a real release (draft, assets, publish, crate publish); "dry-run" builds the four platform binaries and uploads them as Actions artifacts.'
+        required: true
+        type: string
       ref:
-        description: Git ref to build (branch, tag, or SHA)
+        description: Git ref (branch, tag, or SHA) to build and release
+        required: true
+        type: string
+    secrets:
+      CARGO_REGISTRY_TOKEN:
         required: false
-        default: main
+        description: crates.io publish token (used by release mode only)
+    outputs:
+      version:
+        description: Package version prepared by the release (emitted even when the release is skipped as already published)
+        value: ${{ jobs.prepare.outputs.version }}
 
 env:
   CARGO_TERM_COLOR: always
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
-permissions:
-  contents: write
-
 jobs:
   prepare:
-    if: >-
-      github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'workflow_run' &&
-       github.event.workflow_run.conclusion == 'success' &&
-       github.event.workflow_run.head_branch == 'main')
+    name: Prepare release
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     outputs:
       ref: ${{ steps.meta.outputs.ref }}
       sha: ${{ steps.meta.outputs.sha }}
@@ -33,10 +37,18 @@ jobs:
       tag: ${{ steps.version.outputs.tag }}
       mode: ${{ steps.mode.outputs.mode }}
     steps:
+      - name: Validate mode
+        run: |
+          # Defense in depth: reject unknown modes before anything mutates.
+          if [ "${{ inputs.mode }}" != "release" ] && [ "${{ inputs.mode }}" != "dry-run" ]; then
+            echo "Invalid mode '${{ inputs.mode }}' — only 'release' and 'dry-run' are accepted." >&2
+            exit 1
+          fi
+
       - name: Checkout target ref
         uses: actions/checkout@v7
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || github.event.workflow_run.head_sha }}
+          ref: ${{ inputs.ref }}
           fetch-depth: 0
 
       - name: Resolve ref metadata
@@ -68,35 +80,28 @@ jobs:
             echo "published=false" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Validate crates.io token present
+        # Release mode must not begin mutating unless the publish credential is
+        # available. Dry-run callers pass no token and skip this entirely. The
+        # token is only ever read through env, never printed.
+        if: inputs.mode == 'release' && steps.tag.outputs.published != 'true'
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          if [ -z "$CARGO_REGISTRY_TOKEN" ]; then
+            echo "::error::CARGO_REGISTRY_TOKEN is required for release mode but is empty or not configured."
+            exit 1
+          fi
+
       - name: Decide mode
         id: mode
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "mode=dry-run" >> "$GITHUB_OUTPUT"
-          elif [ "${{ steps.tag.outputs.published }}" = "true" ]; then
+          # The caller supplies the mode. A release-mode call whose version is
+          # already published degrades to a no-op skip; dry-run always proceeds.
+          if [ "${{ inputs.mode }}" = "release" ] && [ "${{ steps.tag.outputs.published }}" = "true" ]; then
             echo "mode=skip" >> "$GITHUB_OUTPUT"
           else
-            echo "mode=release" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Create draft release
-        if: steps.mode.outputs.mode == 'release'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ steps.version.outputs.tag }}
-          SHA: ${{ steps.meta.outputs.sha }}
-        run: |
-          # Under immutable releases the tag cannot be created by `git push` (a
-          # ruleset restricts tag creation); GitHub creates it when the release
-          # is published. A draft does not create the tag yet, so we point it at
-          # the release commit, attach assets, then publish-release seals it.
-          # Idempotent: a re-run after a partial failure reuses the existing draft.
-          if ! gh release view "$TAG" >/dev/null 2>&1; then
-            gh release create "$TAG" \
-              --target "$SHA" \
-              --draft \
-              --title "$TAG" \
-              --generate-notes
+            echo "mode=${{ inputs.mode }}" >> "$GITHUB_OUTPUT"
           fi
 
   build:
@@ -104,6 +109,8 @@ jobs:
     needs: prepare
     if: needs.prepare.outputs.mode != 'skip'
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
@@ -139,7 +146,6 @@ jobs:
             pkg_config_allow_cross: ""
             pkg_config_path: ""
 
-
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             artifact: serial-mcp.exe
@@ -150,7 +156,7 @@ jobs:
             pkg_config_allow_cross: ""
             pkg_config_path: ""
     steps:
-      - name: Checkout target ref
+      - name: Checkout resolved ref
         uses: actions/checkout@v7
         with:
           ref: ${{ needs.prepare.outputs.sha }}
@@ -192,38 +198,96 @@ jobs:
           cp "target/${{ matrix.target }}/release/${{ matrix.artifact }}" \
              "serial-mcp-${{ matrix.artifact_name_suffix }}${EXT}"
 
-      - name: Upload dry-run artifacts
-        if: needs.prepare.outputs.mode == 'dry-run'
+      - name: Upload artifact
+        # Named per platform; publish-release downloads exactly these in
+        # release mode, dry-run users see the same artifacts in the UI.
         uses: actions/upload-artifact@v7
         with:
           name: serial-mcp-${{ matrix.artifact_name_suffix }}
           path: serial-mcp-${{ matrix.artifact_name_suffix }}*
 
-      - name: Upload release artifact
-        if: needs.prepare.outputs.mode == 'release'
+  create-draft:
+    name: Create draft release
+    needs: prepare
+    if: needs.prepare.outputs.mode == 'release'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Create or reuse draft release
         env:
           GH_TOKEN: ${{ github.token }}
-        shell: bash
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+          SHA: ${{ needs.prepare.outputs.sha }}
         run: |
-          EXT="${{ matrix.artifact == 'serial-mcp.exe' && '.exe' || '' }}"
-          gh release upload "${{ needs.prepare.outputs.tag }}" \
-            "serial-mcp-${{ matrix.artifact_name_suffix }}${EXT}" \
-            --clobber
+          # Under immutable releases the tag cannot be created by `git push` (a
+          # ruleset restricts tag creation); GitHub creates it when the release
+          # is published. A draft does not create the tag yet, so we point it at
+          # the release commit; publish-release uploads assets, then seals it.
+          # Idempotent: a re-run after a partial failure reuses the existing draft.
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" \
+              --target "$SHA" \
+              --draft \
+              --title "$TAG" \
+              --generate-notes
+          fi
 
   publish-release:
     name: Publish GitHub release
-    needs: [prepare, build]
+    needs: [prepare, create-draft, build]
     if: needs.prepare.outputs.mode == 'release'
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
+      - name: Download x86_64-linux artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: serial-mcp-x86_64-linux
+          path: artifacts/x86_64-linux
+
+      - name: Download aarch64-linux artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: serial-mcp-aarch64-linux
+          path: artifacts/aarch64-linux
+
+      - name: Download aarch64-macos artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: serial-mcp-aarch64-macos
+          path: artifacts/aarch64-macos
+
+      - name: Download x86_64-windows artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: serial-mcp-x86_64-windows
+          path: artifacts/x86_64-windows
+
+      - name: Upload artifacts to draft
+        # Upload the exact matrix artifacts without executing them — the
+        # binaries are only ever passed to `gh release upload` by path.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+        shell: bash
+        run: |
+          for f in artifacts/*/*; do
+            gh release upload "$TAG" "$f" --clobber
+          done
+
       - name: Mark draft as published
         # Flipping the draft to published is what seals the release under
         # immutable releases — by now every platform's binary is attached.
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.prepare.outputs.tag }}
         run: |
-          gh release edit "${{ needs.prepare.outputs.tag }}" \
+          gh release edit "$TAG" \
             --draft=false \
             --latest
 
@@ -232,8 +296,10 @@ jobs:
     needs: [prepare, build]
     if: needs.prepare.outputs.mode == 'release'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
-      - name: Checkout target ref
+      - name: Checkout resolved ref
         uses: actions/checkout@v7
         with:
           ref: ${{ needs.prepare.outputs.sha }}
