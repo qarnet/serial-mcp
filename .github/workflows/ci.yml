@@ -100,11 +100,11 @@ jobs:
 
   mcp-conformance:
     # Pinned official MCP conformance suite + Inspector interoperability smoke
-    # against the real HTTP binary, plus the historical rmcp 1.7 client gate.
+    # against the real HTTP binary, plus the historical rmcp 1.7.0 client gate.
     # Execution delegates to scripts/test-mcp-compat.sh so local and CI share
     # ONE executable path: the script owns the exact pinned package
     # (@modelcontextprotocol/conformance@0.2.0-alpha.10, no floating tags),
-    # the planned scenario sets at their exact protocol versions (never
+    # the exact scenario sets at their exact protocol versions (never
     # `--suite all`), the expected-failure baseline, and the pinned Inspector
     # invocation. The four expected failures in
     # conformance/expected-failures.yaml are fixture-dependent checks
@@ -142,7 +142,7 @@ jobs:
           node-version: "22.19.0"
 
       # The shared runner builds the locked binary, runs the focused Rust
-      # gates, builds + runs the historical rmcp 1.7 client over stdio and
+      # gates, builds + runs the historical rmcp 1.7.0 client over stdio and
       # HTTP, starts the loopback server with a bounded readiness probe, runs
       # the exact legacy/modern conformance scenario sets, and runs the
       # Inspector smoke. It stops the server and cleans its own temp dir via

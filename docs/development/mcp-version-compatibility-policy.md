@@ -63,10 +63,9 @@ and the Inspector smoke applies to the preferred version (`2026-07-28`):
    helpers so implementation and expectation cannot fail together.
 4. **Stdio** (`tests/stdio_integration.rs`) — both lifecycles over the
    spawned binary's stdin/stdout transport.
-5. **Actual historical client** (`compat/rmcp-1-client/`, exact `rmcp
-   1.7.0`) — a real pre-migration client implementation over HTTP and stdio,
-   proving historical interoperability rather than current-SDK compatibility
-   mode.
+5. **Actual historical client** (`compat/rmcp-1-client/`, exact `rmcp 1.7.0`)
+   — a real pre-migration client implementation over HTTP and stdio, proving
+   historical interoperability rather than current-SDK compatibility mode.
 6. **Official conformance** — pinned
    `@modelcontextprotocol/conformance@0.2.0-alpha.10` at the exact
    `--spec-version` for each version.

@@ -1140,7 +1140,9 @@ fn ci_scenario_lists_match_pinned_runner_scenarios() {
          (absent from the pinned runner; server-initialize covers the legacy \
          session lifecycle)"
     );
-    // Runner exit status must never be suppressed in the scenario loops.
+    // Runner exit status must never be suppressed: the runner's global
+    // `set -euo pipefail` fails the whole script on any nonzero exit
+    // (anchored here on the `set -e` substring).
     assert!(
         script.contains("set -e"),
         "test-mcp-compat.sh must fail on any nonzero runner exit"

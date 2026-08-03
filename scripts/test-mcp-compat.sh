@@ -8,7 +8,7 @@
 #   1. locked serial-mcp binary build (unless SERIAL_MCP_BIN names one)
 #   2. focused Rust gates: protocol_compatibility, stdio_integration,
 #      resource_subscriptions
-#   3. locked historical rmcp 1.7 fixture build into a stable compat target
+#   3. locked historical rmcp 1.7.0 fixture build into a stable compat target
 #   4. historical fixture stdio smoke against the current binary
 #   5. isolated loopback HTTP server (temporary profile path) with a bounded
 #      modern server/discover readiness probe
@@ -112,7 +112,7 @@ step "focused Rust gates: resource_subscriptions"
 cargo test --locked --test resource_subscriptions
 
 # --- 3. locked historical fixture build ---------------------------------------
-step "building historical rmcp 1.7 fixture"
+step "building historical rmcp 1.7.0 fixture"
 cargo build --locked --manifest-path compat/rmcp-1-client/Cargo.toml \
   --target-dir "$FIXTURE_TARGET"
 FIXTURE_BIN="$FIXTURE_TARGET/debug/rmcp-1-client"
@@ -122,7 +122,7 @@ if [ ! -x "$FIXTURE_BIN" ]; then
 fi
 
 # --- 4. historical fixture stdio smoke ----------------------------------------
-step "historical rmcp 1.7 fixture over stdio"
+step "historical rmcp 1.7.0 fixture over stdio"
 timeout "$GATE_TIMEOUT" "$FIXTURE_BIN" stdio "$BIN"
 
 # --- 5. loopback HTTP server + readiness probe --------------------------------
@@ -163,7 +163,7 @@ if [ "$probe_code" != "200" ]; then
 fi
 
 # --- 6. historical fixture HTTP smoke -----------------------------------------
-step "historical rmcp 1.7 fixture over HTTP ($MCP_URL)"
+step "historical rmcp 1.7.0 fixture over HTTP ($MCP_URL)"
 timeout "$GATE_TIMEOUT" "$FIXTURE_BIN" http "$MCP_URL"
 
 # --- 7. conformance (2025-11-25) ----------------------------------------------

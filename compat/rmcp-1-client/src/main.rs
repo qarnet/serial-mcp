@@ -130,7 +130,7 @@ async fn run() -> Result<()> {
     Ok(())
 }
 
-/// HTTP mode: rmcp 1.7's reqwest Streamable HTTP client transport against the
+/// HTTP mode: rmcp 1.7.0's reqwest Streamable HTTP client transport against the
 /// passed URL (`/mcp` on the current server).
 async fn http_mode(url: &str) -> Result<()> {
     let transport = StreamableHttpClientTransport::from_uri(url);
@@ -139,7 +139,7 @@ async fn http_mode(url: &str) -> Result<()> {
 }
 
 /// Stdio mode: spawn the current serial-mcp binary with an isolated temporary
-/// profile path and `RUST_LOG=off`, then drive it through rmcp 1.7's
+/// profile path and `RUST_LOG=off`, then drive it through rmcp 1.7.0's
 /// `TokioChildProcess` transport. The temporary directory stays alive through
 /// client shutdown (it is dropped only after the child has been closed).
 async fn stdio_mode(binary: &str) -> Result<()> {
@@ -183,7 +183,7 @@ async fn verify_and_shutdown(client: RunningService<RoleClient, ()>, mode: &str)
 }
 
 /// The shared public-behavior verifier (items 1-8 of the Phase 3 contract).
-/// Uses the all-page rmcp 1.7 helpers (`list_all_*`) so pagination cannot
+/// Uses the all-page rmcp 1.7.0 helpers (`list_all_*`) so pagination cannot
 /// hide items. Returns a descriptive error on the first failed check.
 async fn verify(client: &RunningService<RoleClient, ()>) -> std::result::Result<(), String> {
     // 1. Peer info exists after initialize.
