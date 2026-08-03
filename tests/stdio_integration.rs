@@ -7,8 +7,9 @@
 use rmcp::{
     model::PaginatedRequestParams,
     transport::{child_process::TokioChildProcess, ConfigureCommandExt},
-    ServiceExt,
+    ClientLifecycleMode, ClientServiceExt, ServiceExt,
 };
+use serde_json::json;
 use tempfile::TempDir;
 use tokio::process::Command;
 
@@ -37,6 +38,63 @@ async fn start_stdio_client() -> (
     let transport = TokioChildProcess::new(cmd).expect("spawn stdio server");
 
     let client = ().serve(transport).await.expect("initialize client");
+    (client, profiles_dir)
+}
+
+/// Start a stdio server child and connect an explicit MODERN `2026-07-28`
+/// discover-lifecycle client (self-contained per-request `_meta`).
+async fn start_stdio_modern_client() -> (
+    rmcp::service::RunningService<rmcp::service::RoleClient, ()>,
+    TempDir,
+) {
+    common::binaries::ensure_serial_mcp_built()
+        .expect("serial-mcp binary available for stdio tests");
+
+    let profiles_dir = TempDir::new().expect("temp dir for isolated stdio profile store");
+    let profiles_path = profiles_dir.path().join("profiles.toml");
+
+    let cmd = Command::new(common::binaries::serial_mcp_bin()).configure(|cmd| {
+        cmd.env("RUST_LOG", "off");
+        cmd.arg("--profiles-path").arg(&profiles_path);
+    });
+
+    let transport = TokioChildProcess::new(cmd).expect("spawn stdio server");
+
+    let client = ()
+        .serve_with_lifecycle(
+            transport,
+            ClientLifecycleMode::Discover {
+                preferred_versions: vec![rmcp::model::ProtocolVersion::V_2026_07_28],
+            },
+        )
+        .await
+        .expect("modern discover client");
+    (client, profiles_dir)
+}
+
+/// Start a stdio server child and connect an explicit LEGACY `2025-11-25`
+/// initialize-lifecycle client.
+async fn start_stdio_legacy_client() -> (
+    rmcp::service::RunningService<rmcp::service::RoleClient, common::LegacyClientHandler>,
+    TempDir,
+) {
+    common::binaries::ensure_serial_mcp_built()
+        .expect("serial-mcp binary available for stdio tests");
+
+    let profiles_dir = TempDir::new().expect("temp dir for isolated stdio profile store");
+    let profiles_path = profiles_dir.path().join("profiles.toml");
+
+    let cmd = Command::new(common::binaries::serial_mcp_bin()).configure(|cmd| {
+        cmd.env("RUST_LOG", "off");
+        cmd.arg("--profiles-path").arg(&profiles_path);
+    });
+
+    let transport = TokioChildProcess::new(cmd).expect("spawn stdio server");
+
+    let client = common::LegacyClientHandler
+        .serve_with_lifecycle(transport, ClientLifecycleMode::Initialize)
+        .await
+        .expect("legacy initialize client");
     (client, profiles_dir)
 }
 
@@ -96,6 +154,80 @@ async fn stdio_list_resources_returns_statics_and_templates() {
         "expected 3 resource templates (connection + raw + log)"
     );
 
+    client.cancel().await.ok();
+}
+
+#[tokio::test]
+async fn stdio_modern_discovery_lifecycle_selects_2026_07_28() {
+    let (client, _profiles_dir) = start_stdio_modern_client().await;
+    let info = client.peer_info().expect("modern peer info");
+    assert_eq!(
+        info.protocol_version,
+        rmcp::model::ProtocolVersion::V_2026_07_28,
+        "modern discover lifecycle must negotiate 2026-07-28"
+    );
+
+    let result = client
+        .peer()
+        .list_tools(Some(PaginatedRequestParams::default()))
+        .await
+        .unwrap();
+    let names: Vec<&str> = result.tools.iter().map(|t| t.name.as_ref()).collect();
+    assert_eq!(names.len(), EXPECTED_TOOLS.len(), "got {names:?}");
+    for expected in EXPECTED_TOOLS {
+        assert!(names.contains(expected), "tool {expected} missing");
+    }
+
+    let checksum = client
+        .peer()
+        .call_tool(common::tool_request(
+            "compute_checksum",
+            json!({"data": "$GPGGA,1", "algorithm": "xor"}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(checksum.is_error, Some(false), "{checksum:?}");
+    assert_eq!(
+        checksum.structured_content.expect("structured content")["checksum"],
+        111
+    );
+    client.cancel().await.ok();
+}
+
+#[tokio::test]
+async fn stdio_legacy_initialize_lifecycle_selects_2025_11_25() {
+    let (client, _profiles_dir) = start_stdio_legacy_client().await;
+    let info = client.peer_info().expect("legacy peer info");
+    assert_eq!(
+        info.protocol_version,
+        rmcp::model::ProtocolVersion::V_2025_11_25,
+        "legacy initialize lifecycle must negotiate 2025-11-25"
+    );
+
+    let result = client
+        .peer()
+        .list_tools(Some(PaginatedRequestParams::default()))
+        .await
+        .unwrap();
+    let names: Vec<&str> = result.tools.iter().map(|t| t.name.as_ref()).collect();
+    assert_eq!(names.len(), EXPECTED_TOOLS.len(), "got {names:?}");
+    for expected in EXPECTED_TOOLS {
+        assert!(names.contains(expected), "tool {expected} missing");
+    }
+
+    let checksum = client
+        .peer()
+        .call_tool(common::tool_request(
+            "compute_checksum",
+            json!({"data": "$GPGGA,1", "algorithm": "xor"}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(checksum.is_error, Some(false), "{checksum:?}");
+    assert_eq!(
+        checksum.structured_content.expect("structured content")["checksum"],
+        111
+    );
     client.cancel().await.ok();
 }
 

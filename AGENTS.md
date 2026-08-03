@@ -4,6 +4,7 @@
 
 - Root server: `src/main.rs` selects stdio vs HTTP transport, parses CLI limits (`--profiles-path`, `--capture-dir` + capture quotas included), and mounts HTTP at `/mcp`.
 - MCP surface lives in `src/server.rs`; tool handlers are split under `src/tools/`, prompts under `src/prompts/`, resources under `src/resources/`.
+- Dual MCP lifecycle (`src/server.rs`): preferred modern `2026-07-28` discovery/stateless requests (`server/discover` + self-contained per-request `_meta`) and compatible legacy `2025-11-25` initialize/session requests. `supported_protocol_versions()` returns exactly `[V_2026_07_28, V_2025_11_25]`; `get_info()`/`initialize()` serve the legacy view, `discover()` the modern view — both advertise only tools/resources/prompts/completions (no logging, subscriptions, list-change, or tasks). Phase 2 keeps `accepted_subscription_filter`/`listen` unimplemented and advertises no subscription capability (Phase 3).
 - `SerialHandler` is built via `SerialHandler::builder()...build()` (`src/server.rs`); the old `with_manager*` telescoping constructors are gone and `with_profiles()` is gone. The builder defaults `profile_store` to an ephemeral store and `capture_store` to disabled. `SerialHandler::new()` tries the OS default profile store and falls back to an ephemeral store with a warning. Production `main.rs` injects the resolved `profile_store`, a `CaptureStore` built from `--capture-dir` + quota flags (disabled by default), and `SystemPortProvider` through the builder.
 - Profiles live in a process-wide `Arc<ProfileStore>` (`src/profile_store.rs`), shared by every stdio/HTTP session handler. `main.rs` resolves the path (`--profiles-path` or the OS user-config default, failing startup on an unavailable config dir or invalid file) and injects one store. Persistent mutations take a process-local async mutex, then `spawn_blocking` + an advisory lock on `<file>.lock`, reload-under-lock, `NamedTempFile` + `sync_all` + rename; the cache (shared `Arc<RwLock>`) is published from inside the blocking transaction right after the durable write, before the lock is released — so a cancelled awaiting tool still converges (cache never changes on failed write). `update_defaults_preserving_selector` returns the effective profile atomically (no racy second lookup). File format is schema-versioned TOML (v1 legacy auto-migrates in memory; `schema_version == 0` or `> 2` rejects startup). `Profile` carries `metadata` (revision/timestamps/generated/use_count) and a bounded `revisions` history (max 5 prior snapshots) for the profile-session feature.
 - Shared RX framing lives in `src/tools/rx_consume.rs` (`consume_frames` + `RxFrameSink` trait + `disconnect_state`); `read` routes framing through it, but its raw (no-framing) path stays per-tool by design (see "Invariants easy to break").
@@ -250,6 +251,38 @@ cargo run --manifest-path xtask/Cargo.toml -- print-paths
 - **Result fields:** `OpenResult.profile_persistence`; `ReconfigureResult`/`SetFlowControlResult`/`ConfigureResult`/`CloseResult` carry additive `profile` + `profile_persistence`. Hardware success + persistence failure = `is_error != true` with `state="failed"`; hardware failure keeps the existing tool error and performs no store call.
 - **`delete_profile`** refuses while any same-process open connection binds the profile (error lists connection IDs).
 - **Never persisted:** DTR/RTS, BREAK, read cursor, flush, payloads/encoding/match, per-call read/write/transact framing/parser/protocol overrides, health/reconnect counters/logs.
+
+## Dual MCP lifecycle (Phase 2)
+
+- `src/server.rs` overrides `ServerHandler::supported_protocol_versions()`
+  with the product slice `[V_2026_07_28, V_2025_11_25]` (NOT
+  `ProtocolVersion::KNOWN_VERSIONS`), `discover()` with
+  `DiscoverResult::from_server_info` (ordered versions + the modern
+  discovery info view), and `initialize()` with
+  `context.peer.set_peer_info(request.clone())` + the legacy info view —
+  peer bookkeeping must not be dropped. `get_info()` returns the legacy
+  `2025-11-25` view so default `ServiceExt::serve` clients stay stable.
+  Capability views are small pure helpers (`common_capabilities`,
+  `modern_discovery_info`, `legacy_initialize_info`); they are equal in
+  Phase 2 and diverge in Phase 3 (modern resource subscriptions).
+- Modern stateless HTTP requests additionally require SEP-2243
+  `Mcp-Method`/`Mcp-Name` headers and an `MCP-Protocol-Version` header
+  matching the request `_meta` (rmcp 3.0.1 transport enforcement). rmcp
+  serves a modern `initialize` statelessly via
+  `NegotiatingStatelessHttpService` — HTTP 200 with a negotiated
+  `InitializeResult` and NO `Mcp-Session-Id` header; it is not rejected.
+  Modern `ping`/`logging/setLevel`/`resources/subscribe`/
+  `resources/unsubscribe`/`subscriptions/listen` are `-32601` mapped to
+  HTTP 404; legacy keeps `ping` working and `resources/subscribe`/
+  `resources/unsubscribe`/`subscriptions/listen` at `-32601` inside SSE
+  200 responses. Modern unknown resources are remapped to `-32602`
+  (SEP-2164); legacy keeps `-32002`.
+- Proofs: `tests/protocol_compatibility.rs` (typed discover/initialize
+  matrix + raw-wire status/code/header assertions against the spawned
+  binary), stdio lifecycle tests in `tests/stdio_integration.rs`, and
+  lifecycle helpers (`TestProtocol`, `LegacyClientHandler`,
+  `connect_modern_client`/`connect_legacy_client` + spawned mirrors) in
+  `tests/common/{mod,spawned}.rs`.
 
 ## Discovery & evaluation
 

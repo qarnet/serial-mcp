@@ -68,13 +68,13 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use rmcp::handler::client::ClientHandler;
-use rmcp::model::{CallToolRequestParams, ProgressNotificationParam};
-use rmcp::service::{NotificationContext, RoleClient, RunningService};
+use rmcp::model::{CallToolRequestParams, ProgressNotificationParam, ProtocolVersion};
+use rmcp::service::{ClientLifecycleMode, NotificationContext, RoleClient, RunningService};
 use rmcp::transport::streamable_http_server::{
     session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
 };
 use rmcp::transport::StreamableHttpClientTransport;
-use rmcp::ServiceExt;
+use rmcp::{ClientServiceExt, ServiceExt};
 use serde_json::Map;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -329,6 +329,40 @@ pub struct TestClientHandler;
 
 impl ClientHandler for TestClientHandler {}
 
+/// Client handler that explicitly negotiates the legacy `2025-11-25`
+/// protocol version instead of relying on rmcp's default
+/// (`ProtocolVersion::LATEST`, also `2025-11-25`). Makes the legacy
+/// lifecycle contract self-documenting in tests.
+#[derive(Clone, Default)]
+pub struct LegacyClientHandler;
+
+impl ClientHandler for LegacyClientHandler {
+    fn get_info(&self) -> rmcp::model::ClientInfo {
+        rmcp::model::ClientInfo::default().with_protocol_version(ProtocolVersion::V_2025_11_25)
+    }
+}
+
+/// Which MCP protocol lifecycle a typed test client negotiates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TestProtocol {
+    /// Modern `2026-07-28` discovery / stateless requests.
+    Modern,
+    /// Legacy `2025-11-25` initialize / session requests.
+    Legacy,
+}
+
+impl TestProtocol {
+    /// The rmcp client lifecycle mode for this protocol flavor.
+    pub fn lifecycle(self) -> ClientLifecycleMode {
+        match self {
+            TestProtocol::Modern => ClientLifecycleMode::Discover {
+                preferred_versions: vec![ProtocolVersion::V_2026_07_28],
+            },
+            TestProtocol::Legacy => ClientLifecycleMode::Initialize,
+        }
+    }
+}
+
 /// Connect an `rmcp` HTTP client to the given test server. Returns the
 /// running client service plus a unit receiver (kept for caller symmetry;
 /// there are no logging-message notifications anymore).
@@ -347,6 +381,50 @@ pub async fn connect_to_url(
     let handler = TestClientHandler;
     let transport = StreamableHttpClientTransport::from_uri(url);
     let client = handler.serve(transport).await?;
+    Ok((client, ()))
+}
+
+/// Connect an `rmcp` HTTP client to the given test server using the
+/// modern `2026-07-28` discover lifecycle (`server/discover` +
+/// self-contained per-request `_meta`).
+pub async fn connect_modern_client(
+    server: &TestServer,
+) -> Result<(RunningService<RoleClient, TestClientHandler>, ())> {
+    connect_modern_to_url(server.url.as_str()).await
+}
+
+/// Like [`connect_modern_client`], but for an arbitrary server URL
+/// (in-process or spawned-binary).
+pub async fn connect_modern_to_url(
+    url: &str,
+) -> Result<(RunningService<RoleClient, TestClientHandler>, ())> {
+    let handler = TestClientHandler;
+    let transport = StreamableHttpClientTransport::from_uri(url);
+    let client = handler
+        .serve_with_lifecycle(transport, TestProtocol::Modern.lifecycle())
+        .await?;
+    Ok((client, ()))
+}
+
+/// Connect an `rmcp` HTTP client to the given test server using the
+/// explicit legacy `2025-11-25` initialize lifecycle. The handler's
+/// `ClientInfo.protocol_version` is exactly `2025-11-25`.
+pub async fn connect_legacy_client(
+    server: &TestServer,
+) -> Result<(RunningService<RoleClient, LegacyClientHandler>, ())> {
+    connect_legacy_to_url(server.url.as_str()).await
+}
+
+/// Like [`connect_legacy_client`], but for an arbitrary server URL
+/// (in-process or spawned-binary).
+pub async fn connect_legacy_to_url(
+    url: &str,
+) -> Result<(RunningService<RoleClient, LegacyClientHandler>, ())> {
+    let handler = LegacyClientHandler;
+    let transport = StreamableHttpClientTransport::from_uri(url);
+    let client = handler
+        .serve_with_lifecycle(transport, TestProtocol::Legacy.lifecycle())
+        .await?;
     Ok((client, ()))
 }
 

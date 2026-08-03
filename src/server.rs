@@ -4,6 +4,7 @@
 //! structured JSON via [`Json<T>`] so MCP clients can index fields directly
 //! instead of parsing free-form text.
 
+use std::borrow::Cow;
 use std::sync::Arc;
 
 use base64::Engine as _;
@@ -647,6 +648,83 @@ pub fn tool_catalog() -> Vec<rmcp::model::Tool> {
 
 // ---- ServerHandler boilerplate ----------------------------------------------
 
+/// Product-supported MCP protocol versions, most modern first.
+///
+/// Deliberately narrower than `ProtocolVersion::KNOWN_VERSIONS`: the server
+/// implements exactly two lifecycles — modern `2026-07-28` discovery /
+/// stateless requests and legacy `2025-11-25` initialize / session requests.
+/// The slice is product-owned and ordered; it feeds `server/discover`
+/// (`supportedVersions`) and inline-negotiation version checks.
+const SUPPORTED_PROTOCOL_VERSIONS: [ProtocolVersion; 2] =
+    [ProtocolVersion::V_2026_07_28, ProtocolVersion::V_2025_11_25];
+
+/// Common capability set for both lifecycle views: tools, resources,
+/// prompts, completions. Phase 2 deliberately omits MCP logging, resource
+/// subscriptions, list-change flags, tasks, and unrelated capabilities.
+fn common_capabilities() -> ServerCapabilities {
+    ServerCapabilities::builder()
+        .enable_tools()
+        .enable_resources()
+        .enable_prompts()
+        .enable_completions()
+        .build()
+}
+
+/// Shared server info shape: identity, instructions, and the common
+/// capability set tagged with the given protocol version.
+fn server_info_with(protocol_version: ProtocolVersion) -> ServerInfo {
+    ServerInfo::new(common_capabilities())
+        .with_server_info(Implementation::new(
+            env!("CARGO_PKG_NAME"),
+            env!("CARGO_PKG_VERSION"),
+        ))
+        .with_protocol_version(protocol_version)
+        .with_instructions(
+            "Serial port MCP server. Normal workflow:\n\
+             1. Call `list_ports` and inspect `profile_matches` (parallel to `ports`): \
+             it previews which profile a bare `open(port=...)` would reuse.\n\
+             2. Normally call bare `open` with the port only — baud defaults to \
+             115200/8-N-1 and the server automatically reuses the most recently used \
+             high-confidence profile for a known device or creates a durable generated \
+              profile for a new one (both observable in the result's `profile`).\n\
+              3. Use `transact` for command/response, `read` for buffered or unsolicited \
+              data (with `match` to wait for a pattern), `write` for send-only.\n\
+             4. For boot/reset capture (Arduino auto-reset, power-cycle banner, boot \
+             prompt) use `capture_boot` — one call that atomically marks the live edge, \
+             optionally pulses DTR/RTS, and captures only post-mark bytes (private \
+             cursor; in-memory only). `reset=null` arms capture for externally reset \
+             devices.\n\
+             5. After durable changes inspect `profile` / `profile_persistence` on the \
+             result, or `get_status` for the live binding.\n\
+             6. Use `open_profile` only for explicit choice or weak identity; \
+             `rollback_profile` restores a retained configuration after a bad learned \
+             change.\n\
+             7. Escalate to framing/parser, cursor replay, reconnect, line control, and \
+             log tools only when the common path needs them. `export_log` persists the \
+             event log as JSONL only when the server started with `--capture-dir`; it \
+             takes a portable filename (never a path), never overwrites, and is \
+             quota-bounded.\n\
+             Resources: serial://ports (same preview as list_ports), serial://connections, \
+             serial://connections/{id}. Prompts: diagnose_port, interactive_terminal."
+                .to_string(),
+        )
+}
+
+/// Legacy `initialize` info: protocol version `2025-11-25`. `get_info()`
+/// returns this so default `ServiceExt::serve` clients stay stable.
+fn legacy_initialize_info() -> ServerInfo {
+    server_info_with(ProtocolVersion::V_2025_11_25)
+}
+
+/// Modern discovery info: the same common capability set in Phase 2, tagged
+/// with the modern protocol version. `DiscoverResult::from_server_info`
+/// carries the version list separately (`supportedVersions`), so this view
+/// can diverge from the legacy view in Phase 3 (modern resource
+/// subscriptions) without touching the legacy `initialize` path.
+fn modern_discovery_info() -> ServerInfo {
+    server_info_with(ProtocolVersion::V_2026_07_28)
+}
+
 impl Default for SerialHandler {
     fn default() -> Self {
         Self::new()
@@ -722,57 +800,34 @@ impl SerialHandler {
 #[prompt_handler]
 impl ServerHandler for SerialHandler {
     fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(
-            ServerCapabilities::builder()
-                .enable_tools()
-                .enable_resources()
-                .enable_prompts()
-                .enable_completions()
-                .build(),
-        )
-        .with_server_info(Implementation::new(
-            env!("CARGO_PKG_NAME"),
-            env!("CARGO_PKG_VERSION"),
-        ))
-        .with_protocol_version(ProtocolVersion::V_2025_11_25)
-        .with_instructions(
-            "Serial port MCP server. Normal workflow:\n\
-             1. Call `list_ports` and inspect `profile_matches` (parallel to `ports`): \
-             it previews which profile a bare `open(port=...)` would reuse.\n\
-             2. Normally call bare `open` with the port only — baud defaults to \
-             115200/8-N-1 and the server automatically reuses the most recently used \
-             high-confidence profile for a known device or creates a durable generated \
-              profile for a new one (both observable in the result's `profile`).\n\
-              3. Use `transact` for command/response, `read` for buffered or unsolicited \
-              data (with `match` to wait for a pattern), `write` for send-only.\n\
-             4. For boot/reset capture (Arduino auto-reset, power-cycle banner, boot \
-             prompt) use `capture_boot` — one call that atomically marks the live edge, \
-             optionally pulses DTR/RTS, and captures only post-mark bytes (private \
-             cursor; in-memory only). `reset=null` arms capture for externally reset \
-             devices.\n\
-             5. After durable changes inspect `profile` / `profile_persistence` on the \
-             result, or `get_status` for the live binding.\n\
-             6. Use `open_profile` only for explicit choice or weak identity; \
-             `rollback_profile` restores a retained configuration after a bad learned \
-             change.\n\
-             7. Escalate to framing/parser, cursor replay, reconnect, line control, and \
-             log tools only when the common path needs them. `export_log` persists the \
-             event log as JSONL only when the server started with `--capture-dir`; it \
-             takes a portable filename (never a path), never overwrites, and is \
-             quota-bounded.\n\
-             Resources: serial://ports (same preview as list_ports), serial://connections, \
-             serial://connections/{id}. Prompts: diagnose_port, interactive_terminal."
-                .to_string(),
-        )
+        legacy_initialize_info()
     }
 
     async fn initialize(
         &self,
-        _req: InitializeRequestParams,
-        _ctx: RequestContext<RoleServer>,
+        request: InitializeRequestParams,
+        context: RequestContext<RoleServer>,
     ) -> Result<InitializeResult, McpError> {
+        // Preserve rmcp peer bookkeeping: the session worker's peer_info()
+        // must reflect this client's initialize parameters so subsequent
+        // requests route with the negotiated (legacy) protocol version.
+        context.peer.set_peer_info(request.clone());
         info!("Serial MCP server initialized");
-        Ok(self.get_info())
+        Ok(legacy_initialize_info())
+    }
+
+    fn supported_protocol_versions(&self) -> Cow<'static, [ProtocolVersion]> {
+        Cow::Borrowed(&SUPPORTED_PROTOCOL_VERSIONS)
+    }
+
+    async fn discover(
+        &self,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<DiscoverResult, McpError> {
+        Ok(DiscoverResult::from_server_info(
+            SUPPORTED_PROTOCOL_VERSIONS.to_vec(),
+            modern_discovery_info(),
+        ))
     }
 
     async fn list_resources(
@@ -1122,6 +1177,90 @@ mod tests {
         assert!(
             handler.profile_store.path().is_none(),
             "builder default must be an ephemeral store"
+        );
+    }
+
+    // ---- Dual MCP lifecycle (Phase 2) --------------------------------------
+
+    #[tokio::test]
+    async fn supported_protocol_versions_are_exact_modern_then_legacy() {
+        let handler = SerialHandler::builder()
+            .connections(Arc::new(ConnectionManager::new()))
+            .build();
+        let versions: Vec<ProtocolVersion> = handler.supported_protocol_versions().to_vec();
+        assert_eq!(versions.len(), 2, "exactly two supported versions");
+        assert_eq!(versions[0], ProtocolVersion::V_2026_07_28);
+        assert_eq!(versions[1], ProtocolVersion::V_2025_11_25);
+    }
+
+    #[test]
+    fn modern_capability_view_is_exactly_common_set() {
+        let json = serde_json::to_value(modern_discovery_info().capabilities).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "completions": {},
+                "prompts": {},
+                "resources": {},
+                "tools": {},
+            }),
+            "modern discovery view must advertise exactly the common capabilities"
+        );
+    }
+
+    #[test]
+    fn legacy_capability_view_is_exactly_common_set() {
+        let json = serde_json::to_value(legacy_initialize_info().capabilities).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "completions": {},
+                "prompts": {},
+                "resources": {},
+                "tools": {},
+            }),
+            "legacy initialize view must advertise exactly the common capabilities"
+        );
+    }
+
+    #[test]
+    fn capability_views_omit_logging_subscriptions_list_change_and_tasks() {
+        for capabilities in [
+            modern_discovery_info().capabilities,
+            legacy_initialize_info().capabilities,
+        ] {
+            let json = serde_json::to_value(&capabilities).unwrap();
+            let object = json.as_object().expect("capabilities serialize as object");
+            for forbidden in [
+                "logging",
+                "experimental",
+                "extensions",
+                "roots",
+                "sampling",
+                "elicitation",
+            ] {
+                assert!(
+                    !object.contains_key(forbidden),
+                    "capability view must not advertise `{forbidden}`: {json}"
+                );
+            }
+            // resources/tools/prompts advertise no subscription or
+            // list-change flags (each serializes as an empty object).
+            assert_eq!(object["resources"], serde_json::json!({}));
+            assert_eq!(object["tools"], serde_json::json!({}));
+            assert_eq!(object["prompts"], serde_json::json!({}));
+        }
+    }
+
+    #[test]
+    fn legacy_initialize_info_keeps_legacy_protocol_version() {
+        assert_eq!(
+            legacy_initialize_info().protocol_version,
+            ProtocolVersion::V_2025_11_25
+        );
+        assert_eq!(
+            modern_discovery_info().protocol_version,
+            ProtocolVersion::V_2026_07_28
         );
     }
 }

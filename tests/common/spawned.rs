@@ -211,3 +211,19 @@ pub async fn spawn_client(
 ) -> Result<(RunningService<RoleClient, super::TestClientHandler>, ())> {
     super::connect_to_url(server.url.as_str()).await
 }
+
+/// Connect an `rmcp` HTTP client to a `SpawnedServer` using the modern
+/// `2026-07-28` discover lifecycle.
+pub async fn spawn_modern_client(
+    server: &SpawnedServer,
+) -> Result<(RunningService<RoleClient, super::TestClientHandler>, ())> {
+    super::connect_modern_to_url(server.url.as_str()).await
+}
+
+/// Connect an `rmcp` HTTP client to a `SpawnedServer` using the explicit
+/// legacy `2025-11-25` initialize lifecycle.
+pub async fn spawn_legacy_client(
+    server: &SpawnedServer,
+) -> Result<(RunningService<RoleClient, super::LegacyClientHandler>, ())> {
+    super::connect_legacy_to_url(server.url.as_str()).await
+}

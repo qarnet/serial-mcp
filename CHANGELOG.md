@@ -115,6 +115,22 @@
 - MCP `2026-07-28` discovery and standard `subscriptions/listen` are NOT yet
   implemented (planned: dual-protocol Phase 2, resource events Phase 3).
 
+### Dual MCP lifecycle (Phase 2)
+- Preferred modern `2026-07-28` discovery/stateless lifecycle: exact
+  supported-version slice `[2026-07-28, 2025-11-25]` (`server/discover`
+  with ordered `supportedVersions`, `resultType: "complete"`, no session
+  required), self-contained per-request `_meta` + SEP-2243 headers, and
+  modern `-32602` remap for unknown resources (SEP-2164);
+- compatible legacy `2025-11-25` initialize/session lifecycle unchanged:
+  `Mcp-Session-Id` sessions, `resultType` stripped for legacy peers,
+  `-32002` resource-not-found preserved;
+- subscription advertisement stays disabled in Phase 2:
+  `subscriptions/listen` is `-32601` for both protocols and legacy
+  `resources/subscribe`/`resources/unsubscribe` remain `-32601`;
+- new compatibility proofs: `tests/protocol_compatibility.rs` (typed
+  discover/initialize matrix + raw-wire status/code/header assertions)
+  and stdio modern/legacy lifecycle tests.
+
 ## [0.9.1]
 
 ### Security / maintenance
