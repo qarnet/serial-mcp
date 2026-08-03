@@ -66,6 +66,37 @@ mod tests {
         }
     }
 
+    /// Regression guard: the tool catalog (names, descriptions, and generated
+    /// input/output schemas) must not carry any removed streaming/logging
+    /// surface — `subscribe`/`Subscribe` wording, `poll_interval_ms`,
+    /// `notification_drop_count`, `peer_disconnected`, `budget_exhausted`,
+    /// `channel_closed`, or `read_error`. The `subscribe`/`unsubscribe`
+    /// tools and their schema helpers were removed with MCP logging in the
+    /// rmcp 3 server-surface migration; this test keeps generated tool
+    /// schemas from regressing into stale wording.
+    #[test]
+    fn tool_catalog_omits_removed_streaming_surface() {
+        let removed = [
+            "subscribe",
+            "Subscribe",
+            "poll_interval_ms",
+            "notification_drop_count",
+            "peer_disconnected",
+            "budget_exhausted",
+            "channel_closed",
+            "read_error",
+        ];
+        for (name, tool) in all_tool_attrs() {
+            let schema_str = serde_json::to_string(&tool).unwrap();
+            for needle in removed {
+                assert!(
+                    !schema_str.contains(needle),
+                    "tool {name} mentions removed surface {needle:?}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn tool_schemas_have_no_nonstandard_uint_formats() {
         for (name, tool) in all_tool_attrs() {

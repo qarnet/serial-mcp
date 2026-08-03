@@ -136,10 +136,6 @@ fn valid_stop_reason() -> impl Strategy<Value = String> {
         "max_buffered_bytes".into(),
         "connection_closed".into(),
         "cancelled".into(),
-        "read_error".into(),
-        "channel_closed".into(),
-        "peer_disconnected".into(),
-        "budget_exhausted".into(),
         "no_new_rx_timeout".into(),
     ])
 }

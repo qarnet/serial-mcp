@@ -675,3 +675,22 @@ fn cargo_toml_version() -> String {
     let end = line.rfind('"').expect("version line has closing quote");
     line[start + 1..end].to_string()
 }
+
+#[test]
+fn current_protocol_guide_omits_removed_streaming_tool() {
+    // docs/protocols.md must describe only retained tools: no deleted
+    // subscription notification types may appear in the current guide.
+    // Historical docs (CHANGELOG, migration plans, baselines) are allowed
+    // to mention old behavior; this guide is not.
+    let guide = repo_file("docs/protocols.md");
+    for needle in [
+        "SubscribeStopNotification",
+        "SubscribeEncodingErrorNotification",
+        "subscribe",
+    ] {
+        assert!(
+            !guide.contains(needle),
+            "docs/protocols.md must not mention removed surface {needle:?}"
+        );
+    }
+}

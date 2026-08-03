@@ -135,15 +135,13 @@ pub struct SerialConnection {
     rx_bytes: AtomicU64,
     /// Wall-clock time of the last rx or tx byte operation.
     last_activity: StdMutex<Option<std::time::SystemTime>>,
-    /// Number of successful `read` or `subscribe` operations.
+    /// Number of successful read-pipeline operations (`read`, `transact` read half, `capture_boot`).
     read_ops: AtomicU64,
     /// Number of successful `write` operations.
     write_ops: AtomicU64,
     /// Number of RX operations where data was truncated
     /// (bytes_returned < bytes_observed).
     truncation_count: AtomicU64,
-    /// Number of notification drops (encoding errors or disconnected peers).
-    notification_drop_count: AtomicU64,
     /// OS-level port identity captured at open time.
     port_info: Option<PortInfo>,
     /// Per-connection event log buffer.
@@ -250,7 +248,6 @@ impl SerialConnection {
             read_ops: AtomicU64::new(0),
             write_ops: AtomicU64::new(0),
             truncation_count: AtomicU64::new(0),
-            notification_drop_count: AtomicU64::new(0),
             port_info: config.port_info,
             log,
             state: StdMutex::new(ConnectionState::Open),
@@ -386,7 +383,7 @@ impl SerialConnection {
 
     /// Snapshot the connection's full effective `ProfileDefaults`: current
     /// serial parameters, framing/parser/protocol defaults, the stored RX
-    /// buffer size, read/subscribe defaults, reconnect policy, log
+    /// buffer size, read defaults, reconnect policy, log
     /// configuration, and the connection name. Used by write-through
     /// learning, close retry, and explicit `save_profile` — never consults
     /// a handler-local `RxSessionManager`.
@@ -584,7 +581,7 @@ impl SerialConnection {
         })
     }
 
-    /// Record one successful read or subscribe operation.
+    /// Record one successful read-pipeline operation (`read`, `transact` read half, or `capture_boot`).
     pub fn record_read_op(&self) {
         self.read_ops.fetch_add(1, Ordering::SeqCst);
     }
@@ -597,11 +594,6 @@ impl SerialConnection {
     /// Record one RX truncation (bytes_returned < bytes_observed).
     pub fn record_truncation(&self) {
         self.truncation_count.fetch_add(1, Ordering::SeqCst);
-    }
-
-    /// Record one notification drop (encoding error or disconnected peer).
-    pub fn record_notification_drop(&self) {
-        self.notification_drop_count.fetch_add(1, Ordering::SeqCst);
     }
 
     /// Build a snapshot of the current status of this connection.
@@ -622,7 +614,6 @@ impl SerialConnection {
             read_ops: self.read_ops.load(Ordering::SeqCst),
             write_ops: self.write_ops.load(Ordering::SeqCst),
             truncation_count: self.truncation_count.load(Ordering::SeqCst),
-            notification_drop_count: self.notification_drop_count.load(Ordering::SeqCst),
             port_info: self.port_info.clone(),
             state: self.state(),
             reconnect_attempts: self.reconnect_attempts.load(Ordering::SeqCst),

@@ -341,7 +341,8 @@ async fn pty_read_live_match_applies_context_shaping() {
     let (_server, client, _rx, mut pty, connection_id) = setup().await;
 
     // Read starts BEFORE any device data: the match happens on the live
-    // (wait-loop) path, which must shape context like subscribe does.
+    // (wait-loop) path, which must shape context via the matcher's
+    // live-path shaping.
     let read_handle = {
         let peer = client.peer().clone();
         let id = connection_id.clone();
@@ -1183,7 +1184,7 @@ async fn pty_transact_cancellation_aborts_read() {
             );
             // No assertion on read.stop_reason — transport teardown may
             // produce any of: "cancelled", "connection_closed",
-            // "peer_disconnected", or no read result at all.
+            // or no read result at all.
         }
         Ok(Err(_)) => {
             // Transport error before timeout — acceptable; client teardown

@@ -3,10 +3,12 @@
 //! Provides a [`FrameDecoder`] that splits a byte stream into structured
 //! frames using one of four boundary modes (line, delimiter, length-prefixed,
 //! start/end marker). Optional parsers interpret frame content (AT commands,
-//! JSON lines, shell prompts). Used as an option on `read` and `subscribe`.
+//! JSON lines, shell prompts). Used as an option on `read`, the `transact`
+//! read half, and `capture_boot`.
 //!
 //! Also provides TX framing via [`TxFramingMode`] which encodes payloads
-//! with frame boundaries matching the RX modes. Used on `write`.
+//! with frame boundaries matching the RX modes. Used on `write` and the
+//! `transact` write half.
 //!
 //! The implementation is split into focused submodules: configuration types
 //! and preset expansion (`config`), TX codecs and byte helpers (`codecs`),

@@ -1,7 +1,7 @@
 //! Shared RX stop metadata for all serial data tools.
 //!
 //! Every tool that consumes from the RX session (`read`, `transact`,
-//! `subscribe`) produces the same stop metadata vocabulary so clients can
+//! `capture_boot`) produces the same stop metadata vocabulary so clients can
 //! reason about why an operation ended and whether the result was truncated.
 
 use std::fmt;
@@ -28,14 +28,6 @@ pub enum RxStopReason {
     ConnectionClosed,
     /// The MCP request was cancelled by the client.
     Cancelled,
-    /// A read error occurred on the serial port.
-    ReadError,
-    /// The mpsc channel from the pump was closed (pump exited).
-    ChannelClosed,
-    /// The MCP peer disconnected during streaming.
-    PeerDisconnected,
-    /// The program buffer budget was insufficient to reserve the requested bytes.
-    BudgetExhausted,
     /// The read collected the configured maximum number of frames
     /// (`max_frames` in framing configuration).
     MaxFrames,
@@ -122,42 +114,6 @@ impl RxStopMetadata {
     pub fn cancelled() -> Self {
         Self {
             stop_reason: RxStopReason::Cancelled,
-            truncated: false,
-            bytes_observed: 0,
-            bytes_returned: 0,
-        }
-    }
-
-    pub fn read_error() -> Self {
-        Self {
-            stop_reason: RxStopReason::ReadError,
-            truncated: false,
-            bytes_observed: 0,
-            bytes_returned: 0,
-        }
-    }
-
-    pub fn channel_closed() -> Self {
-        Self {
-            stop_reason: RxStopReason::ChannelClosed,
-            truncated: false,
-            bytes_observed: 0,
-            bytes_returned: 0,
-        }
-    }
-
-    pub fn peer_disconnected(total_bytes: usize) -> Self {
-        Self {
-            stop_reason: RxStopReason::PeerDisconnected,
-            truncated: false,
-            bytes_observed: total_bytes,
-            bytes_returned: total_bytes,
-        }
-    }
-
-    pub fn budget_exhausted() -> Self {
-        Self {
-            stop_reason: RxStopReason::BudgetExhausted,
             truncated: false,
             bytes_observed: 0,
             bytes_returned: 0,

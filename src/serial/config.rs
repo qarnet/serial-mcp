@@ -202,10 +202,10 @@ pub struct ConnectionConfig {
     /// Default TX framing applied when `write` omits `tx_framing`.
     #[serde(default)]
     pub tx_framing: Option<crate::framing::TxFramingConfig>,
-    /// Default RX framing applied when `read`/`subscribe` omit `rx_framing`.
+    /// Default RX framing applied when `read`/`transact`/`capture_boot` omit `rx_framing`.
     #[serde(default)]
     pub rx_framing: Option<crate::framing::RxFramingConfig>,
-    /// Default RX parser applied when `read`/`subscribe` omit `rx_parser`.
+    /// Default RX parser applied when `read`/`transact`/`capture_boot` omit `rx_parser`.
     #[serde(default)]
     pub rx_parser: Option<crate::framing::ParserConfig>,
     /// Default protocol preset. Expands to fill framing/parser gaps.
@@ -427,8 +427,6 @@ pub struct ConnectionStatus {
     pub write_ops: u64,
     #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
     pub truncation_count: u64,
-    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
-    pub notification_drop_count: u64,
     /// OS-level port identity captured at open time (vid, pid, serial,
     /// manufacturer, etc.). `null` for connections opened without
     /// identity data (e.g. loopback tests).

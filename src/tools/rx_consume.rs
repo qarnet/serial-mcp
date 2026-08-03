@@ -169,7 +169,6 @@ pub(crate) fn frame_outcome_to_stop(
                     match_index: match_offset,
                 })
             }
-            crate::rx_metadata::RxStopReason::PeerDisconnected => Some(ctrl.peer_disconnected()),
             other => {
                 tracing::warn!(
                     "unexpected sink stop reason {other:?} on {conn_id}; treating as connection_closed"

@@ -797,7 +797,6 @@ pub async fn get_status(
         read_ops: status.read_ops,
         write_ops: status.write_ops,
         truncation_count: status.truncation_count,
-        notification_drop_count: status.notification_drop_count,
         port_info: status.port_info,
         state: status.state,
         reconnect_attempts: status.reconnect_attempts,
@@ -1002,7 +1001,7 @@ pub async fn save_profile(
     // Snapshot the connection's full effective defaults from the shared
     // helper (never a handler-local session manager); it covers serial
     // parameters, framing/parser/protocol defaults, the stored RX buffer
-    // size, read/subscribe defaults, reconnect policy, log config, and the
+    // size, read defaults, reconnect policy, log config, and the
     // connection name.
     let defaults = conn.effective_defaults();
 

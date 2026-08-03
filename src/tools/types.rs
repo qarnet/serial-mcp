@@ -406,8 +406,8 @@ pub struct ReadResult {
     pub elapsed_ms: u64,
     /// Why the operation stopped. One of: `data_complete`, `timeout`,
     /// `match_found`, `max_buffered_bytes`, `no_new_rx_timeout`,
-    /// `connection_closed`, `cancelled`, `read_error`, `channel_closed`,
-    /// `peer_disconnected`, `budget_exhausted`, `max_frames`, `framing_error`.
+    /// `connection_closed`, `cancelled`, `max_frames`, `framing_error`,
+    /// `drained`.
     pub stop_reason: String,
     /// `true` when `bytes_returned < bytes_observed` because the result
     /// data was capped (e.g. `max_buffered_bytes` limit exceeded observed
@@ -555,8 +555,6 @@ pub struct GetStatusResult {
     pub write_ops: u64,
     #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
     pub truncation_count: u64,
-    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
-    pub notification_drop_count: u64,
     /// OS-level port identity captured at open time. `null` for connections
     /// without identity data (e.g. loopback tests).
     pub port_info: Option<crate::serial::PortInfo>,
