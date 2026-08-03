@@ -853,6 +853,21 @@ fn inspector_smoke_script_pins_inspector_and_covers_expected_surface() {
             "inspector-smoke.mjs must contain {needle:?}"
         );
     }
+    // The standalone `--inspector-cmd` option must consume every following
+    // argv token (at least one required) — regression guard for the parsing
+    // fix; a rewrite that only matches `--inspector-cmd=<path>` or the env
+    // var silently breaks the documented multi-token form.
+    assert!(
+        script.contains("argv.indexOf(\"--inspector-cmd\")"),
+        "inspector-smoke.mjs must parse the standalone --inspector-cmd option"
+    );
+    // The non-interactive description must not claim --stored-auth-only
+    // (it is not used; the actual protections are MCP_AUTO_OPEN_ENABLED,
+    // non-TTY stdio, and the bounded connect timeout).
+    assert!(
+        !script.contains("--stored-auth-only"),
+        "inspector-smoke.mjs must not claim --stored-auth-only"
+    );
     // The smoke must be a hard gate: any assertion failure or nonzero CLI
     // exit leaves the script failing.
     assert!(

@@ -13,17 +13,26 @@
 //                   -> raw 111 / hex "6F" (parsed from the actual JSON envelope)
 //
 // Node standard library only. No jq, no prose snapshots, no web/TUI/Playwright.
-// The CLI is invoked non-interactively (MCP_AUTO_OPEN_ENABLED=false, bounded
-// --connect-timeout, --stored-auth-only which is a no-op without auth). Every
-// command is killed on its own timeout; a nonzero CLI exit or a failed
-// assertion exits the script nonzero.
+// The CLI is invoked non-interactively: MCP_AUTO_OPEN_ENABLED=false, non-TTY
+// stdio, and a bounded --connect-timeout. Every command is killed on its own
+// timeout; a nonzero CLI exit or a failed assertion exits the script nonzero.
 //
 // Usage:
-//   node scripts/inspector-smoke.mjs <server-url> [--inspector-cmd <command...>]
+//   node scripts/inspector-smoke.mjs <server-url>
+//       [--inspector-cmd <command...> | --inspector-cmd=<path>]
 //
-// `--inspector-cmd` (or the INSPECTOR_CMD env var) names the exact installed
-// Inspector CLI binary; when absent the script falls back to the exact pinned
-// `npx` package `@modelcontextprotocol/inspector@2.0.0`. No floating versions.
+// The first positional is the server URL. The exact Inspector CLI invocation
+// resolves with this precedence:
+//   - `--inspector-cmd <command...>` — every argv token AFTER the flag is the
+//     command plus its fixed args (at least one token required; tokens are
+//     never whitespace-split);
+//   - `--inspector-cmd=<path>` — one executable path, kept intact (paths with
+//     spaces stay a single token); mutually exclusive with the standalone form;
+//   - the INSPECTOR_CMD env var — ONE executable path, never whitespace-split
+//     (paths with spaces remain intact); use --inspector-cmd when the command
+//     needs args;
+//   - otherwise the exact pinned `npx` package
+//     `@modelcontextprotocol/inspector@2.0.0`. No floating versions.
 
 import { spawn } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -36,28 +45,47 @@ const MODERN_VERSION = "2026-07-28";
 const EXPECTED_TOOLS = 25;
 const CHECKSUM_ARGUMENTS = '{"algorithm":"xor","data":"$GPGGA,1","encoding":"utf8"}';
 
-const [serverUrl] = process.argv.slice(2);
-if (!serverUrl) {
-  console.error("usage: node scripts/inspector-smoke.mjs <server-url> [--inspector-cmd <command...>]");
+const argv = process.argv.slice(2);
+const serverUrl = argv[0];
+if (!serverUrl || serverUrl.startsWith("--")) {
+  console.error(
+    "usage: node scripts/inspector-smoke.mjs <server-url> [--inspector-cmd <command...> | --inspector-cmd=<path>]",
+  );
   process.exit(2);
 }
 
-// Resolve the exact Inspector CLI invocation: installed binary or pinned npx.
-function inspectorCommand() {
-  const envCmd = process.env.INSPECTOR_CMD;
-  const argCmd = process.argv
-    .slice(2)
-    .find((arg) => arg.startsWith("--inspector-cmd") || arg === "--inspector-cmd");
-  if (argCmd || envCmd) {
-    const raw = argCmd && argCmd !== "--inspector-cmd"
-      ? argCmd.slice("--inspector-cmd".length + 1).trim()
-      : envCmd;
-    const parts = raw ? raw.split(/\s+/).filter(Boolean) : [];
+// Resolve the exact Inspector CLI invocation (see header comment for the
+// precedence). Deterministic: the standalone `--inspector-cmd` consumes every
+// following argv token verbatim; the `=` form and INSPECTOR_CMD env each name
+// ONE path and are never whitespace-split.
+function inspectorCommand(argv) {
+  const standaloneIndex = argv.indexOf("--inspector-cmd");
+  const equalsIndex = argv.findIndex((arg) => arg.startsWith("--inspector-cmd="));
+  if (standaloneIndex !== -1 && equalsIndex !== -1) {
+    console.error(
+      "error: --inspector-cmd and --inspector-cmd=<path> are mutually exclusive",
+    );
+    process.exit(2);
+  }
+  if (standaloneIndex !== -1) {
+    const parts = argv.slice(standaloneIndex + 1);
     if (parts.length === 0) {
-      console.error("error: --inspector-cmd/INSPECTOR_CMD must name a command");
+      console.error("error: --inspector-cmd requires at least one command token");
       process.exit(2);
     }
     return parts;
+  }
+  if (equalsIndex !== -1) {
+    const path = argv[equalsIndex].slice("--inspector-cmd=".length);
+    if (path.length === 0) {
+      console.error("error: --inspector-cmd=<path> requires a non-empty path");
+      process.exit(2);
+    }
+    return [path];
+  }
+  const envCmd = process.env.INSPECTOR_CMD;
+  if (envCmd) {
+    return [envCmd];
   }
   return ["npx", "-y", PINNED_INSPECTOR_PACKAGE];
 }
@@ -140,7 +168,7 @@ writeFileSync(
   }),
 );
 
-const cmd = inspectorCommand();
+const cmd = inspectorCommand(argv);
 const base = ["--config", configPath, "--server", "serial-mcp", "--connect-timeout", "15000"];
 const timeoutMs = 60000;
 
