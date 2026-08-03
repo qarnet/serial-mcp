@@ -19,6 +19,7 @@ use tracing::info;
 
 use crate::buffer_budget::BufferBudget;
 use crate::capture_store::CaptureStore;
+use crate::mcp_protocol::{cache_fields_for, ProtocolLifecycle, ProtocolPolicy};
 use crate::resource_events::{is_subscribable_uri, ResourceEvent, ResourceEventHub};
 use crate::rx_session::RxSessionManager;
 use crate::security::SecurityManager;
@@ -61,27 +62,16 @@ fn paginate<T: Clone>(
     (items, next_cursor)
 }
 
-/// Whether the negotiated protocol version requires the SEP-2549 cache
-/// fields (`ttlMs` / `cacheScope`).
-///
-/// The fields exist only for protocol version `2026-07-28` and newer. rmcp
-/// strips `resultType` for legacy peers but deliberately does NOT strip
-/// cache fields, so the server must omit them itself — legacy peers must
-/// never see `ttlMs`/`cacheScope`. ISO `YYYY-MM-DD` versions compare
-/// lexically the same as chronologically.
-fn modern_cache_fields(protocol_version: Option<ProtocolVersion>) -> bool {
-    protocol_version.is_some_and(|v| v.as_str() >= ProtocolVersion::V_2026_07_28.as_str())
-}
-
-/// Apply the modern SEP-2549 cache fields to a read-resource result when the
-/// peer negotiated `2026-07-28` or newer; legacy peers keep the bare result.
-/// Non-cacheable complete results (`ttlMs: 0`, `cacheScope: "private"`) mark
-/// every `resources/read` response as immediately stale and client-private.
-fn modern_read_result(
+/// Apply the SEP-2549 cache fields to a read-resource result exactly when the
+/// peer's negotiated protocol version carries the `ImmediatePrivate` cache
+/// policy (currently only `2026-07-28`); every other peer keeps the bare
+/// result. `ttlMs: 0`, `cacheScope: "private"` mark every `resources/read`
+/// response as immediately stale and client-private.
+fn read_result_with_cache_fields(
     result: ReadResourceResult,
     protocol_version: Option<ProtocolVersion>,
 ) -> ReadResourceResponse {
-    if modern_cache_fields(protocol_version) {
+    if crate::mcp_protocol::cache_fields_for(protocol_version) {
         result.with_ttl_ms(0).with_cache_scope(CacheScope::Private)
     } else {
         result
@@ -787,53 +777,32 @@ pub fn tool_catalog() -> Vec<rmcp::model::Tool> {
 
 // ---- ServerHandler boilerplate ----------------------------------------------
 
-/// Product-supported MCP protocol versions, most modern first.
-///
-/// Deliberately narrower than `ProtocolVersion::KNOWN_VERSIONS`: the server
-/// implements exactly two lifecycles — modern `2026-07-28` discovery /
-/// stateless requests and legacy `2025-11-25` initialize / session requests.
-/// The slice is product-owned and ordered; it feeds `server/discover`
-/// (`supportedVersions`) and inline-negotiation version checks.
-const SUPPORTED_PROTOCOL_VERSIONS: [ProtocolVersion; 2] =
-    [ProtocolVersion::V_2026_07_28, ProtocolVersion::V_2025_11_25];
-
-/// Common capability set for both lifecycle views: tools, resources,
-/// prompts, completions. Deliberately omits MCP logging, list-change flags,
-/// tasks, and unrelated capabilities in every view.
-fn common_capabilities() -> ServerCapabilities {
-    ServerCapabilities::builder()
+/// Capability set for one policy row: tools/resources/prompts/completions for
+/// every row; resource subscriptions only where the row's policy enables
+/// them. Deliberately omits MCP logging, list-change flags, tasks, and
+/// unrelated capabilities in every view.
+fn capabilities_for(policy: &ProtocolPolicy) -> ServerCapabilities {
+    let mut builder = ServerCapabilities::builder()
         .enable_tools()
         .enable_resources()
         .enable_prompts()
-        .enable_completions()
-        .build()
+        .enable_completions();
+    if policy.resource_subscriptions {
+        builder = builder.enable_resources_subscribe();
+    }
+    builder.build()
 }
 
-/// Modern discovery capabilities: the common set plus `resources.subscribe`
-/// (Phase 3 resource subscriptions). No `listChanged` flag — resource-list
-/// change notifications are not emitted.
-fn modern_capabilities() -> ServerCapabilities {
-    ServerCapabilities::builder()
-        .enable_tools()
-        .enable_resources()
-        .enable_resources_subscribe()
-        .enable_prompts()
-        .enable_completions()
-        .build()
-}
-
-/// Shared server info shape: identity, instructions, and the given
-/// capability set tagged with the given protocol version.
-fn server_info_with(
-    protocol_version: ProtocolVersion,
-    capabilities: ServerCapabilities,
-) -> ServerInfo {
-    ServerInfo::new(capabilities)
+/// Shared server info shape for one policy row: identity, instructions, the
+/// row's capability set, and the row's protocol version. All version/feature
+/// decisions come from the policy table — no hard-coded version helpers.
+fn server_info_for(policy: &ProtocolPolicy) -> ServerInfo {
+    ServerInfo::new(capabilities_for(policy))
         .with_server_info(Implementation::new(
             env!("CARGO_PKG_NAME"),
             env!("CARGO_PKG_VERSION"),
         ))
-        .with_protocol_version(protocol_version)
+        .with_protocol_version(policy.version.clone())
         .with_instructions(
             "Serial port MCP server. Normal workflow:\n\
              1. Call `list_ports` and inspect `profile_matches` (parallel to `ports`): \
@@ -868,21 +837,6 @@ fn server_info_with(
              serial://connections/{id}. Prompts: diagnose_port, interactive_terminal."
                 .to_string(),
         )
-}
-
-/// Legacy `initialize` info: protocol version `2025-11-25`, common
-/// capabilities (resource subscription disabled — legacy clients must not
-/// see capabilities for unavailable methods).
-fn legacy_initialize_info() -> ServerInfo {
-    server_info_with(ProtocolVersion::V_2025_11_25, common_capabilities())
-}
-
-/// Modern discovery info: modern protocol version with the modern
-/// capability set (resource subscriptions enabled). `get_info()` returns
-/// this view because rmcp intersects `subscriptions/listen` filters against
-/// `get_info().capabilities`.
-fn modern_discovery_info() -> ServerInfo {
-    server_info_with(ProtocolVersion::V_2026_07_28, modern_capabilities())
 }
 
 impl Default for SerialHandler {
@@ -965,11 +919,12 @@ impl SerialHandler {
 #[tool_handler]
 impl ServerHandler for SerialHandler {
     fn get_info(&self) -> ServerInfo {
-        // Modern view: rmcp intersects `subscriptions/listen` filters
-        // against `get_info().capabilities`, so this must advertise the
-        // modern resource-subscription capability. `initialize()` still
-        // returns the legacy view explicitly for `2025-11-25` clients.
-        modern_discovery_info()
+        // Preferred-policy view. rmcp intersects `subscriptions/listen`
+        // filters against `get_info().capabilities`, so this must advertise
+        // the preferred (`2026-07-28`) resource-subscription capability;
+        // `initialize()` still returns the legacy row's view explicitly for
+        // `2025-11-25` clients.
+        server_info_for(crate::mcp_protocol::preferred_policy())
     }
 
     async fn initialize(
@@ -977,12 +932,16 @@ impl ServerHandler for SerialHandler {
         request: InitializeRequestParams,
         context: RequestContext<RoleServer>,
     ) -> Result<InitializeResult, McpError> {
-        // Only the legacy `2025-11-25` lifecycle may initialize. Modern
-        // `2026-07-28` clients negotiate via `server/discover`; a modern
-        // `initialize` is rejected BEFORE peer bookkeeping so no session
-        // state is established for it. rmcp maps the handler's
-        // METHOD_NOT_FOUND through the transport routing of the request.
-        if request.protocol_version != ProtocolVersion::V_2025_11_25 {
+        // Exact policy lookup admits only the `InitializeSession` lifecycle.
+        // Modern `2026-07-28` clients negotiate via `server/discover`; a
+        // modern `initialize` (and any unknown/unsupported version) is
+        // rejected BEFORE peer bookkeeping so no session state is
+        // established for it. rmcp maps the handler's METHOD_NOT_FOUND
+        // through the transport routing of the request.
+        let Some(policy) = crate::mcp_protocol::policy_for(&request.protocol_version) else {
+            return Err(McpError::method_not_found::<InitializeResultMethod>());
+        };
+        if policy.lifecycle != ProtocolLifecycle::InitializeSession {
             return Err(McpError::method_not_found::<InitializeResultMethod>());
         }
         // Preserve rmcp peer bookkeeping: the session worker's peer_info()
@@ -990,11 +949,11 @@ impl ServerHandler for SerialHandler {
         // requests route with the negotiated (legacy) protocol version.
         context.peer.set_peer_info(request.clone());
         info!("Serial MCP server initialized");
-        Ok(legacy_initialize_info())
+        Ok(server_info_for(policy))
     }
 
     fn supported_protocol_versions(&self) -> Cow<'static, [ProtocolVersion]> {
-        Cow::Borrowed(&SUPPORTED_PROTOCOL_VERSIONS)
+        Cow::Owned(crate::mcp_protocol::supported_protocol_versions())
     }
 
     async fn discover(
@@ -1002,8 +961,8 @@ impl ServerHandler for SerialHandler {
         _context: RequestContext<RoleServer>,
     ) -> Result<DiscoverResult, McpError> {
         Ok(DiscoverResult::from_server_info(
-            SUPPORTED_PROTOCOL_VERSIONS.to_vec(),
-            modern_discovery_info(),
+            crate::mcp_protocol::supported_protocol_versions(),
+            server_info_for(crate::mcp_protocol::preferred_policy()),
         ))
     }
 
@@ -1143,7 +1102,7 @@ impl ServerHandler for SerialHandler {
         let (resources, next_cursor) = paginate(&all, request.and_then(|r| r.cursor), PAGE_SIZE);
         let mut result = ListResourcesResult::with_all_items(resources);
         result.next_cursor = next_cursor;
-        if modern_cache_fields(ctx.protocol_version()) {
+        if cache_fields_for(ctx.protocol_version()) {
             result = result.with_ttl_ms(0).with_cache_scope(CacheScope::Private);
         }
         Ok(result)
@@ -1203,7 +1162,7 @@ impl ServerHandler for SerialHandler {
             paginate(&all, request.and_then(|r| r.cursor), PAGE_SIZE);
         let mut result = ListResourceTemplatesResult::with_all_items(resource_templates);
         result.next_cursor = next_cursor;
-        if modern_cache_fields(ctx.protocol_version()) {
+        if cache_fields_for(ctx.protocol_version()) {
             result = result.with_ttl_ms(0).with_cache_scope(CacheScope::Private);
         }
         Ok(result)
@@ -1233,7 +1192,7 @@ impl ServerHandler for SerialHandler {
                     profile_matches,
                 })
                 .map_err(|e| McpError::internal_error(format!("serialize: {e}"), None))?;
-                Ok(modern_read_result(
+                Ok(read_result_with_cache_fields(
                     ReadResourceResult::new(vec![
                         ResourceContents::text(body, uri).with_mime_type("application/json")
                     ]),
@@ -1247,7 +1206,7 @@ impl ServerHandler for SerialHandler {
                     connections: summaries,
                 })
                 .map_err(|e| McpError::internal_error(format!("serialize: {e}"), None))?;
-                Ok(modern_read_result(
+                Ok(read_result_with_cache_fields(
                     ReadResourceResult::new(vec![
                         ResourceContents::text(body, uri).with_mime_type("application/json")
                     ]),
@@ -1264,7 +1223,7 @@ impl ServerHandler for SerialHandler {
 
                 let body = serde_json::to_string_pretty(&conn.summary())
                     .map_err(|e| McpError::internal_error(format!("serialize: {e}"), None))?;
-                Ok(modern_read_result(
+                Ok(read_result_with_cache_fields(
                     ReadResourceResult::new(vec![
                         ResourceContents::text(body, uri).with_mime_type("application/json")
                     ]),
@@ -1283,7 +1242,7 @@ impl ServerHandler for SerialHandler {
                     .await
                     .map_err(|e| McpError::internal_error(format!("Failed to read: {e}"), None))?;
                 let b64 = base64::engine::general_purpose::STANDARD.encode(&raw_bytes);
-                Ok(modern_read_result(
+                Ok(read_result_with_cache_fields(
                     ReadResourceResult::new(vec![
                         ResourceContents::blob(b64, uri).with_mime_type("application/octet-stream")
                     ]),
@@ -1305,7 +1264,7 @@ impl ServerHandler for SerialHandler {
                     body.push_str(&line);
                     body.push('\n');
                 }
-                Ok(modern_read_result(
+                Ok(read_result_with_cache_fields(
                     ReadResourceResult::new(vec![
                         ResourceContents::text(body, uri).with_mime_type("application/x-ndjson")
                     ]),
@@ -1349,7 +1308,7 @@ impl ServerHandler for SerialHandler {
         let (tools, next_cursor) = paginate(&all, request.and_then(|r| r.cursor), PAGE_SIZE);
         let mut result = ListToolsResult::with_all_items(tools);
         result.next_cursor = next_cursor;
-        if modern_cache_fields(ctx.protocol_version()) {
+        if cache_fields_for(ctx.protocol_version()) {
             result = result.with_ttl_ms(0).with_cache_scope(CacheScope::Private);
         }
         Ok(result)
@@ -1382,7 +1341,7 @@ impl ServerHandler for SerialHandler {
         let (prompts, next_cursor) = paginate(&all, request.and_then(|r| r.cursor), PAGE_SIZE);
         let mut result = ListPromptsResult::with_all_items(prompts);
         result.next_cursor = next_cursor;
-        if modern_cache_fields(ctx.protocol_version()) {
+        if cache_fields_for(ctx.protocol_version()) {
             result = result.with_ttl_ms(0).with_cache_scope(CacheScope::Private);
         }
         Ok(result)
@@ -1401,28 +1360,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn modern_cache_fields_boundary() {
-        // No negotiated version: no cache fields (defensive; never occurs
-        // on the wire because every request negotiates a version).
-        assert!(!modern_cache_fields(None));
-        // Every legacy version stays field-free.
-        assert!(!modern_cache_fields(Some(ProtocolVersion::V_2025_11_25)));
-        assert!(!modern_cache_fields(Some(ProtocolVersion::V_2025_06_18)));
-        assert!(!modern_cache_fields(Some(ProtocolVersion::V_2024_11_05)));
-        // Modern 2026-07-28 requires the fields.
-        assert!(modern_cache_fields(Some(ProtocolVersion::V_2026_07_28)));
-        // Any newer version (constructed via Deserialize — the only public
-        // constructor for unknown versions) requires them too.
-        let future: ProtocolVersion =
-            serde_json::from_value(serde_json::json!("2027-01-01")).unwrap();
-        assert!(modern_cache_fields(Some(future)));
-    }
-
-    #[test]
-    fn modern_read_result_sets_cache_fields_only_for_modern() {
+    fn read_result_with_cache_fields_sets_fields_only_for_modern() {
         use rmcp::model::ReadResourceResponse;
 
-        let modern = modern_read_result(
+        let modern = read_result_with_cache_fields(
             ReadResourceResult::new(vec![]),
             Some(ProtocolVersion::V_2026_07_28),
         );
@@ -1436,7 +1377,7 @@ mod tests {
             "modern cacheScope must be private"
         );
 
-        let legacy = modern_read_result(
+        let legacy = read_result_with_cache_fields(
             ReadResourceResult::new(vec![]),
             Some(ProtocolVersion::V_2025_11_25),
         );
@@ -1445,6 +1386,25 @@ mod tests {
         };
         assert_eq!(legacy.ttl_ms, None, "legacy must omit ttlMs");
         assert_eq!(legacy.cache_scope, None, "legacy must omit cacheScope");
+    }
+
+    #[test]
+    fn read_result_with_cache_fields_gives_future_version_no_fields() {
+        // A custom future version has no policy row, so it must not inherit
+        // modern cache fields merely because its date sorts after 2026-07-28.
+        use rmcp::model::ReadResourceResponse;
+
+        let future: ProtocolVersion =
+            serde_json::from_value(serde_json::json!("2099-01-01")).unwrap();
+        let result = read_result_with_cache_fields(ReadResourceResult::new(vec![]), Some(future));
+        let ReadResourceResponse::Complete(result) = result else {
+            panic!("expected complete read result");
+        };
+        assert_eq!(result.ttl_ms, None, "future version must omit ttlMs");
+        assert_eq!(
+            result.cache_scope, None,
+            "future version must omit cacheScope"
+        );
     }
 
     #[test]
@@ -1587,7 +1547,10 @@ mod tests {
 
     #[test]
     fn modern_capability_view_advertises_resource_subscriptions() {
-        let json = serde_json::to_value(modern_discovery_info().capabilities).unwrap();
+        let json = serde_json::to_value(
+            server_info_for(crate::mcp_protocol::preferred_policy()).capabilities,
+        )
+        .unwrap();
         assert_eq!(
             json,
             serde_json::json!({
@@ -1596,13 +1559,15 @@ mod tests {
                 "resources": {"subscribe": true},
                 "tools": {},
             }),
-            "modern discovery view must advertise resource subscriptions"
+            "preferred discovery view must advertise resource subscriptions"
         );
     }
 
     #[test]
     fn legacy_capability_view_keeps_subscription_disabled() {
-        let json = serde_json::to_value(legacy_initialize_info().capabilities).unwrap();
+        let legacy_policy = crate::mcp_protocol::policy_for(&ProtocolVersion::V_2025_11_25)
+            .expect("legacy policy row must exist");
+        let json = serde_json::to_value(server_info_for(legacy_policy).capabilities).unwrap();
         assert_eq!(
             json,
             serde_json::json!({
@@ -1617,9 +1582,11 @@ mod tests {
 
     #[test]
     fn capability_views_omit_logging_list_change_and_tasks() {
+        let legacy_policy = crate::mcp_protocol::policy_for(&ProtocolVersion::V_2025_11_25)
+            .expect("legacy policy row must exist");
         for capabilities in [
-            modern_discovery_info().capabilities,
-            legacy_initialize_info().capabilities,
+            server_info_for(crate::mcp_protocol::preferred_policy()).capabilities,
+            server_info_for(legacy_policy).capabilities,
         ] {
             let json = serde_json::to_value(&capabilities).unwrap();
             let object = json.as_object().expect("capabilities serialize as object");
@@ -1640,22 +1607,27 @@ mod tests {
             assert_eq!(object["tools"], serde_json::json!({}));
             assert_eq!(object["prompts"], serde_json::json!({}));
         }
-        // resources: modern carries only `subscribe`, legacy only nothing —
+        // resources: preferred carries only `subscribe`, legacy only nothing —
         // neither advertises `listChanged`.
-        let modern = serde_json::to_value(modern_discovery_info().capabilities).unwrap();
+        let modern = serde_json::to_value(
+            server_info_for(crate::mcp_protocol::preferred_policy()).capabilities,
+        )
+        .unwrap();
         assert_eq!(modern["resources"], serde_json::json!({"subscribe": true}));
-        let legacy = serde_json::to_value(legacy_initialize_info().capabilities).unwrap();
+        let legacy = serde_json::to_value(server_info_for(legacy_policy).capabilities).unwrap();
         assert_eq!(legacy["resources"], serde_json::json!({}));
     }
 
     #[test]
-    fn legacy_initialize_info_keeps_legacy_protocol_version() {
+    fn policy_infos_carry_their_own_protocol_version() {
+        let legacy_policy = crate::mcp_protocol::policy_for(&ProtocolVersion::V_2025_11_25)
+            .expect("legacy policy row must exist");
         assert_eq!(
-            legacy_initialize_info().protocol_version,
+            server_info_for(legacy_policy).protocol_version,
             ProtocolVersion::V_2025_11_25
         );
         assert_eq!(
-            modern_discovery_info().protocol_version,
+            server_info_for(crate::mcp_protocol::preferred_policy()).protocol_version,
             ProtocolVersion::V_2026_07_28
         );
     }
