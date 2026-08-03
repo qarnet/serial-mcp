@@ -259,7 +259,7 @@ async fn typed_2025_11_25_capabilities_keep_subscription_disabled() {
 }
 
 // =============================================================================
-// SEP-2549 cache fields (Phase 4)
+// SEP-2549 cache fields (version-correct `ttlMs` / `cacheScope`)
 //
 // Modern `2026-07-28` peers get `ttlMs: 0` + `cacheScope: "private"` on
 // every cacheable family (tools/list, resources/list,
@@ -630,8 +630,11 @@ async fn raw_discover_succeeds_without_session_and_lists_2026_07_28_first() {
         "supportedVersions exactly 2026-07-28 then 2025-11-25"
     );
     assert_eq!(result["capabilities"], capabilities_2026_07_28_json());
-    // Cache policy (`ttlMs` / `cacheScope`) is Phase 4 scope; no cache
-    // assertion belongs in the Phase 2 discovery acceptance.
+    // Discovery is not a cacheable list/read family: `server/discover`
+    // carries only rmcp's own required zero/private cache fields, never
+    // server-added ones. Detailed cacheable list/read family assertions
+    // (`ttlMs` / `cacheScope` presence and absence per exact version) live
+    // in the dedicated version-indexed cache tests below.
 }
 
 #[tokio::test]
