@@ -21,7 +21,8 @@
 //!   literal allowance is `needle.len().saturating_sub(1)` (so a match
 //!   straddling the cap boundary is still detected) and the regex/glob
 //!   allowance is the conservative constant [`REGEX_GLOB_OVERLAP_ALLOWANCE`]
-//!   (256 bytes; preserves the old subscribe heuristic).
+//!   (256 bytes; a conservative fixed cross-chunk allowance for
+//!   variable-length regex matches and arbitrarily long glob lines).
 //! - The retained window after every `push_bounded` call never exceeds the
 //!   computed limit, including after `NoMatch`.
 //! - [`Matcher::check`], [`Matcher::push`], and [`Matcher::push_bounded`]
@@ -161,8 +162,7 @@ impl From<PatternEncoding> for codec::Encoding {
 /// Conservative overlap allowance (bytes) retained beyond
 /// `max_buffered_bytes` for regex and glob windows. Regex patterns have no
 /// fixed match length and glob lines are arbitrarily long, so a fixed 256
-/// byte allowance keeps a match straddling the previous chunk boundary
-/// visible, mirroring the subscribe heuristic.
+/// byte allowance keeps a match straddling a chunk boundary visible.
 pub(crate) const REGEX_GLOB_OVERLAP_ALLOWANCE: usize = 256;
 
 /// Saved matcher-owned literal context for the most recent push.

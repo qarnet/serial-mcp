@@ -12,7 +12,10 @@ reading this before talking to a device, read at least the
 
 ## Framing and parsers at a glance
 
-Every `read`, `transact`, `capture_boot`, and `write` call can carry sibling framing/parser fields:
+RX fields `rx_framing`, `rx_parser`, and `protocol` apply on `read`, the
+`transact` read half, and `capture_boot`; TX fields `tx_framing` and
+`protocol` apply on `write` and the `transact` write half. The sibling
+fields are:
 
 - **`rx_framing` / `tx_framing`** — how the byte stream is split into
   frames. RX modes: `line`, `delimiter`, `length_prefixed`, `start_end`,

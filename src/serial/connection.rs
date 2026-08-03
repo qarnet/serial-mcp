@@ -135,7 +135,8 @@ pub struct SerialConnection {
     rx_bytes: AtomicU64,
     /// Wall-clock time of the last rx or tx byte operation.
     last_activity: StdMutex<Option<std::time::SystemTime>>,
-    /// Number of successful read-pipeline operations (`read`, `transact` read half, `capture_boot`).
+    /// Number of successful read-pipeline operations (`read`, `transact` read
+    /// half, `capture_boot`).
     read_ops: AtomicU64,
     /// Number of successful `write` operations.
     write_ops: AtomicU64,
@@ -581,7 +582,8 @@ impl SerialConnection {
         })
     }
 
-    /// Record one successful read-pipeline operation (`read`, `transact` read half, or `capture_boot`).
+    /// Record one successful read-pipeline operation (`read`, `transact` read
+    /// half, or `capture_boot`).
     pub fn record_read_op(&self) {
         self.read_ops.fetch_add(1, Ordering::SeqCst);
     }

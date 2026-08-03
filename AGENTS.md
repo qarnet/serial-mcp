@@ -112,8 +112,9 @@ cargo test --test native_sim_connection_lifecycle -- --ignored --test-threads=1
   bytes as exact lowercase spaced hex and report the payload's effective
   `encoding` as `"hex"` (`EncodedPayload.fallback_reason` carries the original
   error text). A successful fallback warns (`tracing::warn!`) but is NEVER a
-  drop: no drop log event, no drop counter, no `frames_dropped` increment. Applies to `read`, `transact`, and
-  `capture_boot` raw bytes and each decoded frame (encoded independently from
+  drop: no drop log event, no drop counter, no `frames_dropped` increment.
+  Applies to `read`, `transact`, and `capture_boot` raw bytes and each
+  decoded frame (encoded independently from
   the REQUESTED encoding — a valid UTF-8 frame before malformed binary SLIP
   stays UTF-8 while the raw tail is hex). Never lossy UTF-8. Only a TRUE
   encode+hex failure counts as a drop: read-style paths become a tool-result

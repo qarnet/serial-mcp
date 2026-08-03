@@ -202,10 +202,12 @@ pub struct ConnectionConfig {
     /// Default TX framing applied when `write` omits `tx_framing`.
     #[serde(default)]
     pub tx_framing: Option<crate::framing::TxFramingConfig>,
-    /// Default RX framing applied when `read`/`transact`/`capture_boot` omit `rx_framing`.
+    /// Default RX framing applied when `read`/`transact`/`capture_boot` omit
+    /// `rx_framing`.
     #[serde(default)]
     pub rx_framing: Option<crate::framing::RxFramingConfig>,
-    /// Default RX parser applied when `read`/`transact`/`capture_boot` omit `rx_parser`.
+    /// Default RX parser applied when `read`/`transact`/`capture_boot` omit
+    /// `rx_parser`.
     #[serde(default)]
     pub rx_parser: Option<crate::framing::ParserConfig>,
     /// Default protocol preset. Expands to fill framing/parser gaps.
