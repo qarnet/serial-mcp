@@ -1034,6 +1034,96 @@ fn privileged_pattern_guard_rejects_vulnerable_fixtures() {
     }
 }
 
+/// Validate one workflow `uses:` line for immutable action pinning.
+///
+/// Local reusable-workflow references (`uses: ./.github/...`) are exempt.
+/// Every external ref must be `owner/repo@<40-lowercase-hex-sha>` with a
+/// trailing readable version comment (e.g. ` # v7`, ` # master`). Returns the
+/// reason an offending line fails, or `None` when the line is compliant (or
+/// not a `uses:` line). Extracted as a pure function so the full-file scan and
+/// the synthetic negative proofs exercise the same code path.
+fn external_action_pin_violation(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    let value = trimmed.strip_prefix("uses:")?.trim();
+    // Local reusable workflow references are exempt by design.
+    if value.starts_with("./") {
+        return None;
+    }
+    // Split off the trailing readable version comment, e.g. " # v7".
+    let (ref_part, comment) = match value.split_once('#') {
+        Some((r, c)) => (r.trim(), Some(c.trim())),
+        None => (value, None),
+    };
+    let (action, revision) = ref_part.rsplit_once('@')?;
+    let is_sha =
+        revision.len() == 40 && revision.chars().all(|c| matches!(c, '0'..='9' | 'a'..='f'));
+    if !is_sha {
+        return Some(format!(
+            "external action {action} must be pinned to a 40-lowercase-hex SHA, \
+             got {revision:?}: {raw:?}"
+        ));
+    }
+    if comment.is_none() {
+        return Some(format!(
+            "external action {action} must carry a readable version comment \
+             (e.g. ` # v7`): {raw:?}"
+        ));
+    }
+    // The comment identifies the semantic version (`v7`) or the generic
+    // rust-toolchain action (`master`); anything else is not a version label.
+    let comment = comment.unwrap();
+    let comment_ok = comment == "master"
+        || comment
+            .strip_prefix('v')
+            .is_some_and(|rest| rest.chars().next().is_some_and(|c| c.is_ascii_digit()));
+    if !comment_ok {
+        return Some(format!(
+            "external action {action} comment {comment:?} is not a readable \
+             version label (expected `# v<N>` or `# master`): {raw:?}"
+        ));
+    }
+    None
+}
+
+#[test]
+fn workflow_external_actions_pinned_to_immutable_sha() {
+    // Every external action ref in every workflow file must be an immutable
+    // 40-lowercase-hex SHA (with a readable version comment) — never a mutable
+    // `@vN` tag. Local `./` reusable workflow references are untouched.
+    for (name, text) in workflow_files() {
+        for (line_no, raw) in text.lines().enumerate() {
+            if let Some(violation) = external_action_pin_violation(raw) {
+                panic!("{name}:{line_no} {violation}");
+            }
+        }
+    }
+}
+
+#[test]
+fn workflow_action_pin_guard_rejects_mutable_tags() {
+    // Negative proof: the guard must reject a synthetic mutable tag — the
+    // exact regression this pinning pass removes — and accept pinned forms.
+    let pinned = "uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7";
+    assert_eq!(external_action_pin_violation(pinned), None);
+    assert_eq!(
+        external_action_pin_violation("uses: ./.github/workflows/release.yml"),
+        None,
+        "local reusable workflow references stay exempt"
+    );
+    for mutable in [
+        "uses: actions/checkout@v7",
+        "uses: actions/checkout@main",
+        "uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1", // missing comment
+        "uses: actions/checkout@3D3C42E5AAC5BA805825DA76410C181273BA90B1 # v7", // uppercase
+        "uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # tag", // non-semver comment
+    ] {
+        assert!(
+            external_action_pin_violation(mutable).is_some(),
+            "pin guard must reject fixture {mutable:?}"
+        );
+    }
+}
+
 #[test]
 fn ci_and_schema_drift_are_read_only_at_top_level() {
     for name in ["ci.yml", "schema-drift.yml"] {
@@ -1267,13 +1357,13 @@ fn release_artifacts_flow_through_named_uploads_and_downloads() {
     let release = workflow_file("release.yml");
     let build = job_section(&release, "build");
     assert!(
-        build.contains("actions/upload-artifact@v7")
+        build.contains("actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a")
             && build.contains("name: serial-mcp-${{ matrix.artifact_name_suffix }}"),
         "build job must upload deterministic named artifacts per platform"
     );
     let publish = job_section(&release, "publish-release");
     assert!(
-        publish.contains("actions/download-artifact@v8"),
+        publish.contains("actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c"),
         "publish-release job must download the built artifacts"
     );
     for platform in [
@@ -1924,8 +2014,8 @@ fn ci_conformance_job_pins_packages_and_never_runs_suite_all() {
         "mcp-conformance job must pin Node {PINNED_NODE_VERSION}"
     );
     assert!(
-        job.contains("actions/upload-artifact@v7"),
-        "mcp-conformance job must upload reports with actions/upload-artifact@v7"
+        job.contains("actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"),
+        "mcp-conformance job must upload reports with pinned actions/upload-artifact"
     );
     assert!(
         job.contains("retention-days: 7"),
