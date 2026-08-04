@@ -168,27 +168,16 @@ impl ControlledConnectionOpener {
     }
 }
 
+#[async_trait::async_trait]
 impl serial_mcp::serial::ConnectionOpener for ControlledConnectionOpener {
-    fn open(
-        &self,
-        config: ConnectionConfig,
-    ) -> std::pin::Pin<
-        Box<
-            dyn std::future::Future<Output = serial_mcp::error::Result<SerialConnection>>
-                + Send
-                + '_,
-        >,
-    > {
-        Box::pin(async move {
-            let state = Arc::new(ControlledState::new());
-            self.states
-                .lock()
-                .expect("states poisoned")
-                .push(Arc::clone(&state));
-            let conn =
-                SerialConnection::from_io_with_config(config, Box::new(ControlledIo { state }));
-            Ok(conn)
-        })
+    async fn open(&self, config: ConnectionConfig) -> serial_mcp::error::Result<SerialConnection> {
+        let state = Arc::new(ControlledState::new());
+        self.states
+            .lock()
+            .expect("states poisoned")
+            .push(Arc::clone(&state));
+        let conn = SerialConnection::from_io_with_config(config, Box::new(ControlledIo { state }));
+        Ok(conn)
     }
 }
 
