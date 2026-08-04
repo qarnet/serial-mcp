@@ -2,10 +2,15 @@
 //!
 //! The number of MCP tools is hardcoded in three prose surfaces (README.md,
 //! Cargo.toml `description`, server.json `description`) and enumerated in the
-//! README capabilities line. The registry listing shipped "12 tools" while the
+//! README tool catalog table. The registry listing shipped "12 tools" while the
 //! server had 22 because nothing tied these together — this test does.
 //!
-//! Source of truth: the number of `#[tool(` attributes in `src/server.rs`.
+//! Source of truth: `serial_mcp::server::tool_catalog()`, the exact catalog the
+//! MCP router serves (the README table, Cargo.toml, and server.json must all
+//! agree with it). Detailed canonical contracts live in `docs/` guides
+//! (`docs/rx-and-reading.md`, `docs/device-profiles.md`,
+//! `docs/persistent-capture.md`); the README links them instead of
+//! re-owning the prose.
 
 use std::fs;
 use std::path::Path;
@@ -20,6 +25,37 @@ fn tool_count() -> usize {
     repo_file("src/server.rs").matches("#[tool(").count()
 }
 
+/// The exact tool-name set served by MCP, straight from the router's catalog.
+fn served_tool_names() -> Vec<String> {
+    serial_mcp::server::tool_catalog()
+        .into_iter()
+        .map(|t| t.name.to_string())
+        .collect()
+}
+
+/// Extract every backtick-delimited inline-code span in `text`.
+fn inline_code_spans(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut in_code = false;
+    let mut current = String::new();
+    for c in text.chars() {
+        if c == '`' {
+            if in_code {
+                if !current.is_empty() {
+                    out.push(std::mem::take(&mut current));
+                }
+                in_code = false;
+            } else {
+                current.clear();
+                in_code = true;
+            }
+        } else if in_code {
+            current.push(c);
+        }
+    }
+    out
+}
+
 #[test]
 fn tool_count_is_sane() {
     // Guard the guard: if the attribute spelling ever changes, this fails
@@ -30,36 +66,82 @@ fn tool_count_is_sane() {
          did the tool attribute syntax change?",
         tool_count()
     );
-}
-
-#[test]
-fn readme_tool_count_matches_code() {
-    let n = tool_count();
-    let readme = repo_file("README.md");
-    let marker = format!("**{n} tools:**");
-    assert!(
-        readme.contains(&marker),
-        "README.md must contain {marker:?} — the server defines {n} tools"
+    assert_eq!(
+        tool_count(),
+        served_tool_names().len(),
+        "the #[tool( attribute count must match the served catalog"
     );
 }
 
 #[test]
-fn readme_tool_list_matches_count() {
-    let n = tool_count();
+fn readme_tool_catalog_matches_served_catalog() {
+    let expected = served_tool_names();
     let readme = repo_file("README.md");
-    let line = readme
-        .lines()
-        .find(|l| l.contains("tools:**"))
-        .expect("README.md must have a '**N tools:**' capabilities line");
-    let list = line
-        .split("tools:**")
+    check_readme_tool_catalog(&readme, &expected)
+        .unwrap_or_else(|e| panic!("README tool catalog drifted: {e}"));
+}
+
+/// The README tool catalog table is the human view of the exact served
+/// catalog. Parse the "Tool catalog" section's inline-code identifiers and
+/// compare as sets: no missing, no extra, no duplicates — and the section
+/// heading must carry the visible count marker.
+fn check_readme_tool_catalog(readme: &str, expected: &[String]) -> Result<(), String> {
+    let n = expected.len();
+    let marker = format!("({n} tools)");
+    if !readme.contains(&marker) {
+        return Err(format!(
+            "README.md must show the '{marker}' count marker near its tool \
+             catalog — the server serves {n} tools"
+        ));
+    }
+    let start = readme
+        .find("## Tool catalog")
+        .ok_or_else(|| "README.md must have a '## Tool catalog' section".to_string())?;
+    let rest = &readme[start..];
+    let end = rest.find("\n## ").unwrap_or(rest.len());
+    let section = &rest[..end];
+    let mut actual = inline_code_spans(section);
+    actual.sort();
+    let mut expected_sorted = expected.to_vec();
+    expected_sorted.sort();
+    if actual != expected_sorted {
+        return Err(format!(
+            "README tool catalog table must list exactly the served tools (no \
+             missing, extra, or duplicate inline-code identifiers in that \
+             section); expected {expected_sorted:?}, got {actual:?}"
+        ));
+    }
+    Ok(())
+}
+
+#[test]
+fn readme_tool_catalog_guard_rejects_dropped_tool() {
+    // Negative proof: drop one tool's inline-code span from the catalog
+    // section; the guard must name the set mismatch, not pass vacuously.
+    let expected = served_tool_names();
+    let readme = repo_file("README.md");
+    let start = readme.find("## Tool catalog").expect("catalog section");
+    let section_start = start + readme[start..].find('\n').unwrap_or(0) + 1;
+    let end = readme[section_start..]
+        .find("\n## ")
+        .map(|i| section_start + i)
+        .unwrap_or(readme.len());
+    let section = &readme[section_start..end];
+    let dropped = section
+        .split("`")
         .nth(1)
-        .expect("capabilities line must have content after 'tools:**'");
-    let listed = list.split(',').count();
-    assert_eq!(
-        listed, n,
-        "README capabilities line enumerates {listed} tools but the server \
-         defines {n}"
+        .expect("catalog section has an inline-code span")
+        .to_string();
+    let mutated = format!(
+        "{}{}{}",
+        &readme[..start],
+        &readme[start..section_start],
+        section.replacen(&format!("`{dropped}`"), "", 1)
+    );
+    let err = check_readme_tool_catalog(&mutated, &expected).unwrap_err();
+    assert!(
+        err.contains("exactly the served tools"),
+        "guard failure must name the set mismatch: {err}"
     );
 }
 
@@ -143,15 +225,12 @@ fn readme_mentions_every_protocol_preset() {
 }
 
 #[test]
-fn readme_readfrom_examples_use_tagged_wire_form() {
+fn rx_guide_readfrom_examples_use_tagged_wire_form() {
     // The `ReadFrom` wire format is a tagged object (`{"type":"now"}`), not a
-    // bare string. README prose that teaches the `from` parameter must not
-    // regress to string shorthand — agents copy these examples verbatim.
-    let readme = repo_file("README.md");
-    let line = readme
-        .lines()
-        .find(|l| l.contains("`from` parameter"))
-        .expect("README.md must describe the `from` parameter");
+    // bare string. The canonical contract lives in docs/rx-and-reading.md; the
+    // README links that guide. Prose that teaches the `from` parameter must
+    // not regress to string shorthand — agents copy these examples verbatim.
+    let guide = repo_file("docs/rx-and-reading.md");
     for tagged in [
         r#"{"type":"cursor"}"#,
         r#"{"type":"now"}"#,
@@ -159,8 +238,8 @@ fn readme_readfrom_examples_use_tagged_wire_form() {
         r#"{"type":"offset","offset":N}"#,
     ] {
         assert!(
-            line.contains(tagged),
-            "README `from` line must contain {tagged}: {line}"
+            guide.contains(tagged),
+            "docs/rx-and-reading.md must contain the tagged `from` form {tagged}"
         );
     }
     for shorthand in [
@@ -169,10 +248,15 @@ fn readme_readfrom_examples_use_tagged_wire_form() {
         "from: \"buffer_start\"",
     ] {
         assert!(
-            !line.contains(shorthand),
-            "README `from` line must not advertise {shorthand}: {line}"
+            !guide.contains(shorthand),
+            "docs/rx-and-reading.md must not advertise {shorthand}"
         );
     }
+    let readme = repo_file("README.md");
+    assert!(
+        readme.contains("docs/rx-and-reading.md"),
+        "README.md must link the RX/reading guide that owns the `from` contract"
+    );
 }
 
 #[test]
@@ -456,16 +540,23 @@ fn server_instructions_teach_decision_tree() {
 }
 
 #[test]
-fn agent_config_readme_anchor_is_valid() {
-    // docs/agent-config.md referenced the removed `#how-rx-works` anchor.
+fn agent_config_rx_troubleshooting_links_rx_guide() {
+    // docs/agent-config.md referenced the removed `#how-rx-works` anchor; the
+    // RX model contract now lives in docs/rx-and-reading.md and the
+    // troubleshooting entry must point there, with the target file existing.
     let config = repo_file("docs/agent-config.md");
     assert!(
         !config.contains("#how-rx-works"),
         "agent-config.md must not reference the removed README anchor"
     );
     assert!(
-        config.contains("../README.md#capabilities"),
-        "agent-config.md must link a valid README anchor"
+        config.contains("rx-and-reading.md"),
+        "agent-config.md must link the RX/reading guide"
+    );
+    let target = Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/rx-and-reading.md");
+    assert!(
+        target.is_file(),
+        "agent-config.md must link an existing docs/rx-and-reading.md"
     );
 }
 
@@ -487,32 +578,156 @@ fn features_md_does_not_relist_shipped_items() {
 }
 
 #[test]
-fn readme_teaches_capture_export_contract() {
-    // README must teach the disabled-by-default capture store,
-    // the filename-only export_log contract, and the no-overwrite rule.
+fn readme_links_capture_guide_with_short_summary() {
+    // The README owns a one-sentence summary of the capture contract and links
+    // the canonical guide; the detailed contract lives in
+    // docs/persistent-capture.md.
     let readme = repo_file("README.md");
     assert!(
         readme.contains("--capture-dir"),
-        "README must document --capture-dir"
+        "README must mention --capture-dir"
     );
     assert!(
-        readme.contains("--capture-max-file-bytes")
-            && readme.contains("--capture-max-total-bytes")
-            && readme.contains("--capture-max-files"),
-        "README must document all three capture quotas"
+        readme.contains("persistent-capture.md"),
+        "README must link the persistent-capture guide"
     );
-    let export_section = readme
-        .find("`export_log`")
-        .map(|i| &readme[i..i + 3000])
+    let summary = readme
+        .find("**Persistent capture:**")
+        .map(|i| &readme[i..i + 600])
         .unwrap_or_default();
     assert!(
-        export_section.contains("filename"),
-        "README export_log teaching must say path is a filename: {export_section}"
+        summary.contains(".jsonl"),
+        "README capture summary must say the export path is a portable filename: {summary}"
     );
     assert!(
-        export_section.contains("never overwrites") || export_section.contains("no overwrite"),
-        "README export_log teaching must state the no-overwrite rule"
+        summary.contains("never overwrites") || summary.contains("no overwrite"),
+        "README capture summary must state the no-overwrite rule: {summary}"
     );
+}
+
+#[test]
+fn capture_guide_documents_full_export_contract() {
+    // docs/persistent-capture.md is the canonical owner of the detailed
+    // contract: disabled by default, the exact quota options, filename-only
+    // portable paths, no-overwrite atomic snapshots, the advisory lock, and
+    // failure/durability semantics.
+    let guide = repo_file("docs/persistent-capture.md");
+    for needle in [
+        "--capture-dir",
+        "--capture-max-file-bytes",
+        "--capture-max-total-bytes",
+        "--capture-max-files",
+        "filename",
+        "never overwrites",
+        "point-in-time",
+        "advisory",
+        "durability_warning",
+        "Trust boundary",
+    ] {
+        assert!(
+            guide.contains(needle),
+            "docs/persistent-capture.md must document {needle:?}"
+        );
+    }
+}
+
+#[test]
+fn rx_guide_states_ring_capacity_and_rejects_removed_subscribe() {
+    // docs/rx-and-reading.md is the canonical RX contract. The ring's
+    // retention capacity is rx_buffer_size (fixed at open); max_buffered_bytes
+    // is the per-read/in-memory result cap, not the ring bound. The removed
+    // `subscribe` tool must not be suggested or code-formatted.
+    let guide = repo_file("docs/rx-and-reading.md");
+    let paragraphs: Vec<&str> = guide.split("\n\n").collect();
+    let rx_para = paragraphs
+        .iter()
+        .find(|p| p.contains("`rx_buffer_size`"))
+        .expect("docs/rx-and-reading.md must name rx_buffer_size");
+    assert!(
+        rx_para.contains("fixed at open") || rx_para.contains("retention"),
+        "guide must tie rx_buffer_size to ring retention/capacity: {rx_para}"
+    );
+    let max_para = paragraphs
+        .iter()
+        .find(|p| p.contains("max_buffered_bytes"))
+        .expect("docs/rx-and-reading.md must name max_buffered_bytes");
+    assert!(
+        max_para.contains("read-result cap"),
+        "guide must call max_buffered_bytes the read/result cap, not the ring \
+         bound: {max_para}"
+    );
+    assert!(
+        !guide.contains("subscribe-style"),
+        "docs/rx-and-reading.md must not suggest subscribe-style monitoring \
+         (the subscribe tool was removed)"
+    );
+    assert!(
+        !guide.contains("`subscribe`"),
+        "docs/rx-and-reading.md must not reference a code-formatted removed \
+         `subscribe` tool"
+    );
+}
+
+#[test]
+fn device_profiles_guide_states_none_outcomes_and_explicit_weak() {
+    // docs/device-profiles.md must distinguish the two `none` outcomes (high
+    // unique bare open generates a profile; weak/path-only starts transient)
+    // and keep explicit open_profile available for weak identity.
+    let guide = repo_file("docs/device-profiles.md");
+    let none_line = guide
+        .lines()
+        .find(|l| l.contains("| `none` |"))
+        .expect("device-profiles.md must document the `none` outcome");
+    assert!(
+        none_line.contains("generated") && none_line.contains("transient"),
+        "the `none` outcome must cover high-generated AND weak-transient \
+         behavior: {none_line}"
+    );
+    // One paragraph must tie explicit open_profile to weak identity — an
+    // independent document-wide mention of both would not prove the
+    // qualification is stated together.
+    let weak_para = guide
+        .split("\n\n")
+        .find(|p| p.contains("open_profile") && p.contains("weak"))
+        .expect(
+            "device-profiles.md must qualify explicit open_profile for \
+             weak identity in the same passage",
+        );
+    assert!(
+        weak_para.contains("explicit"),
+        "the weak-identity passage must frame open_profile as the explicit \
+         path (as opposed to the automatic one): {weak_para}"
+    );
+}
+
+#[test]
+fn docs_index_links_new_guides_and_targets_exist() {
+    // docs/README.md is the user-documentation index: it must link the three
+    // new user guides, agent config, the protocol guide, the development
+    // index, and the roadmap, and every relative target must exist on disk.
+    let index = repo_file("docs/README.md");
+    let targets = [
+        "agent-config.md",
+        "rx-and-reading.md",
+        "device-profiles.md",
+        "persistent-capture.md",
+        "protocols.md",
+        "development/README.md",
+        "development/FEATURES.md",
+    ];
+    for target in targets {
+        assert!(
+            index.contains(&format!("]({target})")),
+            "docs/README.md must link {target:?}"
+        );
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("docs")
+            .join(target);
+        assert!(
+            path.is_file(),
+            "docs/README.md links docs/{target} but that file does not exist"
+        );
+    }
 }
 
 #[test]
