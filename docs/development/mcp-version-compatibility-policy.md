@@ -68,10 +68,13 @@ and the Inspector smoke applies to the preferred version (`2026-07-28`):
    historical interoperability rather than current-SDK compatibility mode.
 6. **Official conformance** — pinned
    `@modelcontextprotocol/conformance@0.2.0-alpha.10` at the exact
-   `--spec-version` for each version.
+   `--spec-version` for each version, installed from the committed
+   `compat/mcp-validation/` lockfile and invoked as the local
+   `node_modules/.bin/conformance` binary (never npx).
 7. **Inspector interoperability** — pinned
    `@modelcontextprotocol/inspector@2.0.0` smoke against the preferred
-   version (interoperability, not conformance).
+   version (interoperability, not conformance), via the local
+   `node_modules/.bin/mcp-inspector` binary.
 
 ## Permanent `2025-11-25` retention
 
@@ -111,19 +114,32 @@ The one complete local/CI MCP version gate:
 bash scripts/test-mcp-compat.sh
 ```
 
-It runs, in order: the locked serial-mcp build; the focused Rust protocol,
-stdio, and subscription tests; the locked historical `rmcp 1.7.0` fixture
-build; the fixture over stdio; an isolated loopback HTTP server with a bounded
-`server/discover` readiness probe; the fixture over HTTP; the exact legacy
-(`2025-11-25`) and modern (`2026-07-28`) official conformance scenario sets;
-and the pinned Inspector smoke. Environment overrides select paths/port only;
-protocol versions, package pins, and scenario sets are fixed in the script.
+It runs, in order: the locked serial-mcp build; the lockfile-pinned MCP
+validation tooling install (`npm ci --ignore-scripts` in
+`compat/mcp-validation/` — lifecycle scripts disabled, no npx, no dynamic
+package resolution); the focused Rust protocol, stdio, and subscription
+tests; the locked historical `rmcp 1.7.0` fixture build; the fixture over
+stdio; an isolated loopback HTTP server with a bounded `server/discover`
+readiness probe; the fixture over HTTP; the exact legacy (`2025-11-25`) and
+modern (`2026-07-28`) official conformance scenario sets via the local
+`node_modules/.bin/conformance` binary; and the pinned Inspector smoke via
+the local `node_modules/.bin/mcp-inspector` binary. Environment overrides
+select paths/port only; protocol versions, package pins, and scenario sets
+are fixed in the script and the committed npm lockfile.
 
 ### Exact pins and report location
 
 - Conformance package: `@modelcontextprotocol/conformance@0.2.0-alpha.10`
-  (exact, no floating tags).
+  (exact direct version, no `^`/`~`/tags/ranges).
 - Inspector package: `@modelcontextprotocol/inspector@2.0.0`.
+- Both live in the committed npm project `compat/mcp-validation/` (private
+  `package.json`, committed `package-lock.json` with exact versions plus
+  `sha512-` integrity for every locked package, including transitives). The
+  tree is installed ONLY from that lockfile with
+  `npm ci --ignore-scripts` and the local `node_modules/.bin` binaries are
+  invoked directly — validation never uses `npx` and never runs package
+  lifecycle scripts (preinstall supply-chain hardening). `node_modules/` is
+  gitignored; only lockfile semantics are committed.
 - Node `22.19.0` and Rust `1.97.1` in CI.
 - Historical client: `rmcp = "=1.7.0"` with `default-features = false` and
   only the required client/transport features, resolved in the fixture's

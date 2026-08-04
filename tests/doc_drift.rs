@@ -1904,6 +1904,12 @@ fn current_protocol_guide_omits_removed_streaming_tool() {
 const PINNED_CONFORMANCE_PACKAGE: &str = "@modelcontextprotocol/conformance@0.2.0-alpha.10";
 /// The exact pinned official Inspector package (no floating tags).
 const PINNED_INSPECTOR_PACKAGE: &str = "@modelcontextprotocol/inspector@2.0.0";
+/// The exact direct version of the pinned conformance package in the
+/// lockfile-pinned MCP validation npm project (compat/mcp-validation).
+const PINNED_CONFORMANCE_VERSION: &str = "0.2.0-alpha.10";
+/// The exact direct version of the pinned Inspector package in the
+/// lockfile-pinned MCP validation npm project (compat/mcp-validation).
+const PINNED_INSPECTOR_VERSION: &str = "2.0.0";
 /// The exact pinned Node version for the conformance job.
 const PINNED_NODE_VERSION: &str = "22.19.0";
 
@@ -2085,19 +2091,48 @@ fn ci_conformance_job_pins_packages_and_never_runs_suite_all() {
         suite_all_usage.is_empty(),
         "mcp-conformance job must never run `--suite all`: {suite_all_usage:?}"
     );
+    // Validation is fully lockfile-pinned: the CI job must never resolve
+    // packages dynamically with npx (the runner installs from the committed
+    // lockfile with lifecycle scripts disabled). Comments may explain the
+    // rule; only actual usage counts.
+    let npx_usage: Vec<&str> = job
+        .lines()
+        .filter(|l| l.contains("npx") && !l.trim_start().starts_with('#'))
+        .collect();
+    assert!(
+        npx_usage.is_empty(),
+        "mcp-conformance job must never use npx (validation is lockfile-pinned): {npx_usage:?}"
+    );
 }
 
 #[test]
 fn compat_runner_pins_packages_and_never_runs_suite_all() {
-    // The shared runner is the executable compatibility gate: it must pin the
-    // exact conformance package, wire the Inspector smoke script, apply the
-    // exact expected-failure baseline path, exercise the historical fixture
-    // over BOTH transports, run under `set -euo pipefail`, and never run
-    // `--suite all` (comments may explain why it is forbidden).
+    // The shared runner is the executable compatibility gate: it must install
+    // the lockfile-pinned validation tree with `npm ci --ignore-scripts`
+    // (lifecycle scripts disabled, no npx), invoke the local conformance /
+    // mcp-inspector binaries directly, wire the Inspector smoke script, apply
+    // the exact expected-failure baseline path, exercise the historical
+    // fixture over BOTH transports, run under `set -euo pipefail`, and never
+    // run `--suite all` (comments may explain why it is forbidden).
     let script = repo_file("scripts/test-mcp-compat.sh");
     assert!(
         script.contains(PINNED_CONFORMANCE_PACKAGE),
-        "test-mcp-compat.sh must invoke the pinned {PINNED_CONFORMANCE_PACKAGE}"
+        "test-mcp-compat.sh must document the pinned {PINNED_CONFORMANCE_PACKAGE}"
+    );
+    assert!(
+        script.contains("npm ci --ignore-scripts"),
+        "test-mcp-compat.sh must install the lockfile-pinned validation tree \
+         with npm ci --ignore-scripts (lifecycle scripts disabled)"
+    );
+    assert!(
+        script.contains("node_modules/.bin/conformance"),
+        "test-mcp-compat.sh must invoke the local locked conformance binary \
+         (compat/mcp-validation/node_modules/.bin/conformance)"
+    );
+    assert!(
+        script.contains("node_modules/.bin/mcp-inspector"),
+        "test-mcp-compat.sh must invoke the local locked mcp-inspector binary \
+         (compat/mcp-validation/node_modules/.bin/mcp-inspector)"
     );
     assert!(
         script.contains("EXPECTED_FAILURES=\"$ROOT/conformance/expected-failures.yaml\""),
@@ -2131,6 +2166,14 @@ fn compat_runner_pins_packages_and_never_runs_suite_all() {
         suite_all_usage.is_empty(),
         "test-mcp-compat.sh must never run `--suite all`: {suite_all_usage:?}"
     );
+    let npx_usage: Vec<&str> = script
+        .lines()
+        .filter(|l| l.contains("npx") && !l.trim_start().starts_with('#'))
+        .collect();
+    assert!(
+        npx_usage.is_empty(),
+        "test-mcp-compat.sh must never resolve packages via npx: {npx_usage:?}"
+    );
 }
 
 #[test]
@@ -2139,6 +2182,203 @@ fn compat_runner_scenario_contract_is_exact_per_version() {
     // assignments, exact --spec-version values, and exact report suffixes.
     runner_scenario_contract(&repo_file("scripts/test-mcp-compat.sh"))
         .unwrap_or_else(|e| panic!("runner scenario contract violated: {e}"));
+}
+
+/// The committed MCP validation npm project contract: a private package.json
+/// with EXACT direct dependency versions (no `^`/`~`/tags/ranges), and a
+/// committed package-lock.json whose lockfile-root dependencies are the exact
+/// same versions and whose locked conformance + Inspector package entries
+/// carry exact versions plus `sha512-` integrity hashes. The validation flow
+/// installs ONLY from this lockfile (`npm ci --ignore-scripts`) — a lockfile
+/// that no longer resolves the pinned versions or loses integrity breaks the
+/// supply-chain pin.
+///
+/// The `overrides` block is a peer-range fix, not a product dependency: the
+/// Inspector's transitive `ink-form@2.0.1` pulls `ink-select-input@5.0.0`
+/// (peer `ink ^4`) alongside `ink-text-input@6.0.0` (peer `ink >=5`), which
+/// no single ink instance can satisfy — npm auto-overrides that peer conflict
+/// into an INVALID tree (`npm ls` exits nonzero). Pinning `ink` to `6.8.0`
+/// and `ink-form`'s `ink-select-input` to `6.2.0` (peer `ink >=5.0.0`) makes
+/// every ink peer edge satisfiable by one instance, so `npm ls --all` is
+/// clean. Both pins are exact versions, so they stay fully lockfile-pinned.
+fn mcp_validation_npm_contract(manifest: &str, lock: &str) -> Result<(), String> {
+    let manifest: serde_json::Value = serde_json::from_str(manifest)
+        .map_err(|e| format!("package.json must be valid JSON: {e}"))?;
+    let manifest = manifest
+        .as_object()
+        .ok_or("package.json must be a JSON object")?;
+    if manifest.get("private").and_then(serde_json::Value::as_bool) != Some(true) {
+        return Err("package.json must be private".to_string());
+    }
+    let deps = manifest
+        .get("dependencies")
+        .and_then(serde_json::Value::as_object)
+        .ok_or("package.json must carry a dependencies object")?;
+    let expected = [
+        (
+            "@modelcontextprotocol/conformance",
+            PINNED_CONFORMANCE_VERSION,
+        ),
+        ("@modelcontextprotocol/inspector", PINNED_INSPECTOR_VERSION),
+    ];
+    if deps.len() != expected.len() {
+        return Err(format!(
+            "package.json must pin exactly {} direct dependencies, got {}",
+            expected.len(),
+            deps.len()
+        ));
+    }
+    for (name, version) in expected {
+        match deps.get(name).and_then(serde_json::Value::as_str) {
+            Some(v) if v == version => {}
+            other => {
+                return Err(format!(
+                    "package.json must pin {name} at exactly {version}, got {other:?}"
+                ));
+            }
+        }
+    }
+
+    // Peer-range fix guard: without these exact overrides npm resolves the
+    // ink-form peer conflict into an invalid tree (`npm ls` fails). If the
+    // upstream graph is ever fixed so the overrides become removable, update
+    // this guard together with the overrides and re-run `npm ls --all` in
+    // compat/mcp-validation.
+    let overrides = manifest
+        .get("overrides")
+        .and_then(serde_json::Value::as_object)
+        .ok_or("package.json must carry the ink peer-range overrides")?;
+    match overrides.get("ink").and_then(serde_json::Value::as_str) {
+        Some("6.8.0") => {}
+        other => {
+            return Err(format!(
+                "package.json must override ink to exactly 6.8.0, got {other:?}"
+            ));
+        }
+    }
+    let ink_form = overrides
+        .get("ink-form")
+        .and_then(serde_json::Value::as_object)
+        .ok_or("package.json must override ink-form's ink-select-input")?;
+    match ink_form
+        .get("ink-select-input")
+        .and_then(serde_json::Value::as_str)
+    {
+        Some("6.2.0") => {}
+        other => {
+            return Err(format!(
+                "package.json must override ink-form's ink-select-input to \
+                 exactly 6.2.0, got {other:?}"
+            ));
+        }
+    }
+
+    let lock: serde_json::Value = serde_json::from_str(lock)
+        .map_err(|e| format!("package-lock.json must be valid JSON: {e}"))?;
+    let lock = lock
+        .as_object()
+        .ok_or("package-lock.json must be a JSON object")?;
+    let packages = lock
+        .get("packages")
+        .and_then(serde_json::Value::as_object)
+        .ok_or("package-lock.json must carry a packages map (lockfileVersion 3)")?;
+    let root = packages
+        .get("")
+        .and_then(serde_json::Value::as_object)
+        .ok_or("package-lock.json must carry a root packages entry")?;
+    let root_deps = root
+        .get("dependencies")
+        .and_then(serde_json::Value::as_object)
+        .ok_or("lockfile root must carry exact dependencies")?;
+    if root_deps.len() != expected.len() {
+        return Err(format!(
+            "lockfile root must pin exactly {} direct dependencies, got {}",
+            expected.len(),
+            root_deps.len()
+        ));
+    }
+    for (name, version) in expected {
+        match root_deps.get(name).and_then(serde_json::Value::as_str) {
+            Some(v) if v == version => {}
+            other => {
+                return Err(format!(
+                    "lockfile root must resolve {name} at exactly {version}, got {other:?}"
+                ));
+            }
+        }
+        let entry = packages
+            .get(&format!("node_modules/{name}"))
+            .and_then(serde_json::Value::as_object)
+            .ok_or_else(|| format!("lockfile must carry a locked node_modules/{name} entry"))?;
+        if entry.get("version").and_then(serde_json::Value::as_str) != Some(version) {
+            return Err(format!(
+                "locked {name} entry must resolve exactly {version}, got {:?}",
+                entry.get("version").and_then(serde_json::Value::as_str)
+            ));
+        }
+        let integrity = entry.get("integrity").and_then(serde_json::Value::as_str);
+        match integrity {
+            Some(i) if i.starts_with("sha512-") && !i.is_empty() => {}
+            other => {
+                return Err(format!(
+                    "locked {name} entry must carry a sha512- integrity hash, got {other:?}"
+                ));
+            }
+        }
+    }
+
+    // The overridden ink peer range must resolve to the exact overridden
+    // versions in the lockfile too (locked `ink` 6.8.0 + `ink-select-input`
+    // 6.2.0), so a lockfile regenerated without the overrides fails here.
+    for (locked_name, version) in [("ink", "6.8.0"), ("ink-select-input", "6.2.0")] {
+        let entry = packages
+            .get(&format!("node_modules/{locked_name}"))
+            .and_then(serde_json::Value::as_object)
+            .ok_or_else(|| {
+                format!("lockfile must carry a locked node_modules/{locked_name} entry")
+            })?;
+        if entry.get("version").and_then(serde_json::Value::as_str) != Some(version) {
+            return Err(format!(
+                "locked {locked_name} entry must resolve exactly {version}, got {:?}",
+                entry.get("version").and_then(serde_json::Value::as_str)
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn mcp_validation_npm_tree_is_lockfile_pinned() {
+    // Observable supply-chain contract: exact direct versions, exact
+    // lockfile-root deps, and locked per-package versions + integrity for the
+    // conformance and Inspector packages. The runner installs from this
+    // lockfile with lifecycle scripts disabled and never via npx.
+    mcp_validation_npm_contract(
+        &repo_file("compat/mcp-validation/package.json"),
+        &repo_file("compat/mcp-validation/package-lock.json"),
+    )
+    .unwrap_or_else(|e| panic!("MCP validation npm contract violated: {e}"));
+}
+
+#[test]
+fn mcp_validation_contract_rejects_a_drifted_direct_version() {
+    // Negative proof: drifting the manifest's conformance direct version away
+    // from the lockfile must fail the contract naming the package.
+    let manifest = repo_file("compat/mcp-validation/package.json");
+    let mutated = manifest.replace(
+        &format!("\"@modelcontextprotocol/conformance\": \"{PINNED_CONFORMANCE_VERSION}\""),
+        "\"@modelcontextprotocol/conformance\": \"0.2.0-alpha.9\"",
+    );
+    assert_ne!(mutated, manifest, "mutation must change the manifest");
+    let err = mcp_validation_npm_contract(
+        &mutated,
+        &repo_file("compat/mcp-validation/package-lock.json"),
+    )
+    .unwrap_err();
+    assert!(
+        err.contains("conformance"),
+        "failure must name the drifted package: {err}"
+    );
 }
 
 #[test]
@@ -2355,7 +2595,7 @@ fn inspector_smoke_script_pins_inspector_and_covers_expected_surface() {
     let script = repo_file("scripts/inspector-smoke.mjs");
     assert!(
         script.contains(PINNED_INSPECTOR_PACKAGE),
-        "inspector-smoke.mjs must pin {PINNED_INSPECTOR_PACKAGE} as its npx fallback"
+        "inspector-smoke.mjs must document the pinned {PINNED_INSPECTOR_PACKAGE}"
     );
     for needle in [
         "serverUrl",
@@ -2372,6 +2612,30 @@ fn inspector_smoke_script_pins_inspector_and_covers_expected_surface() {
             "inspector-smoke.mjs must contain {needle:?}"
         );
     }
+    // The default Inspector command must be the lockfile-pinned LOCAL binary
+    // (compat/mcp-validation/node_modules/.bin/mcp-inspector) — never npx,
+    // never a dynamic package resolution.
+    assert!(
+        script.contains("LOCKED_INSPECTOR_BIN")
+            && script.contains("mcp-validation")
+            && script.contains("node_modules"),
+        "inspector-smoke.mjs must default to the local locked Inspector \
+         binary from compat/mcp-validation"
+    );
+    // Same rule scoped to non-comment lines: comments may explain the rule
+    // ("never npx"), only actual usage counts.
+    let npx_usage: Vec<&str> = script
+        .lines()
+        .filter(|l| {
+            l.contains("npx")
+                && !l.trim_start().starts_with("//")
+                && !l.trim_start().starts_with("/*")
+        })
+        .collect();
+    assert!(
+        npx_usage.is_empty(),
+        "inspector-smoke.mjs must never use npx in code: {npx_usage:?}"
+    );
     // The standalone `--inspector-cmd` option must consume every following
     // argv token (at least one required) — regression guard for the parsing
     // fix; a rewrite that only matches `--inspector-cmd=<path>` or the env
