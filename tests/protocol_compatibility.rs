@@ -1067,6 +1067,55 @@ async fn raw_2026_07_28_header_meta_version_mismatch_returns_400() {
 }
 
 #[tokio::test]
+async fn raw_strict_metadata_option_rejects_modern_request_missing_header() {
+    // Strict policy regression for the opt-in
+    // `stateless_protocol_metadata_required` seam on the shipped HTTP
+    // binary (see `common::spawned`): a modern `2026-07-28` request that
+    // carries complete per-request `_meta` — which routes it statelessly —
+    // but omits the `MCP-Protocol-Version` header must be rejected with
+    // HTTP 400 / JSON-RPC `-32020` (HEADER_MISMATCH) before tool dispatch.
+    // The response carries no `result`, so no tool ever ran.
+    //
+    // This isolates the strict option's reachable behavior under mixed
+    // routing. Requests missing BOTH signals are classified legacy by rmcp
+    // and rejected earlier with HTTP 422 (no JSON-RPC body) — that path is
+    // rmcp's own and is not asserted here.
+    let server = common::spawned::SpawnedServer::start().await;
+    let mut params = json!({});
+    params["_meta"] = meta_2026_07_28();
+    let raw = raw_post(
+        &server.url,
+        Some(26),
+        "tools/list",
+        params,
+        None, // no MCP-Protocol-Version header
+        None,
+        Some("tools/list"), // correct Mcp-Method for a modern request
+        None,
+    )
+    .await;
+    assert_eq!(
+        raw.status, 400,
+        "modern stateless request without protocol header -> HTTP 400"
+    );
+    assert!(
+        raw.content_type.starts_with("application/json"),
+        "rejection is direct JSON: {}",
+        raw.content_type
+    );
+    let json = raw.json.expect("JSON-RPC error body");
+    assert_eq!(json["id"], 26, "request id echoed");
+    assert_eq!(
+        json["error"]["code"], -32020,
+        "missing MCP-Protocol-Version header -> HEADER_MISMATCH before dispatch"
+    );
+    assert!(
+        json.get("result").is_none(),
+        "no result: rejected before tool dispatch"
+    );
+}
+
+#[tokio::test]
 async fn raw_2026_07_28_unsupported_version_returns_400_with_supported_list() {
     let server = common::spawned::SpawnedServer::start().await;
     let mut params = json!({});
