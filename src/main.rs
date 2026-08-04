@@ -387,7 +387,19 @@ async fn run_http(
                 .build())
         },
         LocalSessionManager::default().into(),
-        StreamableHttpServerConfig::default().with_cancellation_token(shutdown.child_token()),
+        // Exact protocol policy: `2026-07-28` modern stateless lifecycle
+        // plus `2025-11-25` initialized sessions. Strict validation
+        // (`stateless_protocol_metadata_required`) rejects statelessly
+        // routed modern requests missing required protocol signals — a
+        // request carrying modern per-request `_meta` but no
+        // `MCP-Protocol-Version` header gets HTTP 400 / JSON-RPC -32020
+        // before tool dispatch — while valid initialized `2025-11-25`
+        // sessions remain supported. Requests missing both signals are
+        // classified legacy by rmcp and rejected earlier (HTTP 422),
+        // never reaching this validator.
+        StreamableHttpServerConfig::default()
+            .with_cancellation_token(shutdown.child_token())
+            .with_stateless_protocol_metadata_required(true),
     );
 
     // One proactive port hotplug watcher per process, sharing the SAME

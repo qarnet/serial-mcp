@@ -110,6 +110,74 @@ after the firmware build. Rules for anyone editing this job:
   always more reclaim, not a cache-key bump (bumping the key forces a
   full 4.6 GB NCS re-download and makes the pressure worse on miss runs).
 
+## CI nrfutil provisioning (native-sim job)
+
+The native-sim job needs `nrfutil` core + the `nrfutil-sdk-manager` command
+to install the NCS SDK/toolchain. Provisioning is owned by
+`scripts/install-nrfutil-ci.sh`, invoked by the `Provision pinned nrfutil +
+sdk-manager` step. The job env in `.github/workflows/ci.yml` holds the only
+version pins (`NRFUTIL_VERSION`, `NRFUTIL_SDK_MANAGER_VERSION`) and their
+SHA-256 hashes (`NRFUTIL_SHA256`, `NRFUTIL_SDK_MANAGER_SHA256`).
+
+Why the old flow was broken and must not return:
+
+- It curl'd an **unversioned** launcher
+  (`.../nrfutil/executables/x86_64-unknown-linux-gnu/nrfutil`) with plain
+  `curl -L`. When Nordic's CDN returned HTTP 504, curl treated the 160-byte
+  HTML error page as success; `chmod`/`sudo mv` installed that HTML as
+  `/usr/local/bin/nrfutil`, and the next `nrfutil self-upgrade` tried to
+  shell-parse it and failed the whole job.
+- It floated core and sdk-manager through `nrfutil self-upgrade` and
+  `nrfutil install sdk-manager` **on every run**, so command versions were
+  chosen by whatever nrfutil fetched at that moment, not by the repo.
+
+The installer instead downloads the exact versioned Nordic package tarballs
+from the `packages` tree
+(`nrfutil/nrfutil-x86_64-unknown-linux-gnu-<v>.tar.gz` and
+`nrfutil-sdk-manager/nrfutil-sdk-manager-x86_64-unknown-linux-gnu-<v>.tar.gz`),
+with `curl --fail-with-body` + bounded retries (transient errors, connect
+timeout, per-transfer max time), verifies SHA-256 **before** extraction,
+stages both archives (`tar --strip-components=2` → `bin/`), verifies
+`bin/nrfutil` and `bin/nrfutil-sdk-manager` are executable, then publishes
+the destination atomically. It never uses sudo and never executes
+downloaded content. `scripts/tests/test_install_nrfutil_ci.sh` proves the
+pipeline offline (file:// fixtures, no Nordic network).
+
+Rules for anyone editing this job:
+
+- **Do not reintroduce the unversioned launcher URL, `nrfutil
+  self-upgrade`, or `nrfutil install sdk-manager`.** Version and hash must
+  come from the job env and be verified before use.
+- **Do not remove the `NRFUTIL_HOME` isolation.** The step sets
+  `NRFUTIL_HOME=$RUNNER_TEMP/nrfutil-home` via `$GITHUB_ENV` and prepends
+  `$RUNNER_TEMP/nrfutil/bin` to `$GITHUB_PATH`. The actions/cache entry
+  still restores `/home/runner/.nrfutil`, but cached host state must never
+  choose command versions; the isolated home guarantees the pinned binaries
+  are what `nrfutil`, `nrfutil-sdk-manager`, and `nrfutil sdk-manager ...`
+  dispatch to. Cached `.nrfutil` may stay restored — it is ignored.
+- **Do not bump the NCS cache key to "fix" provisioning.** The cache holds
+  ~4.6 GB of SDK + toolchain; a key bump forces a full re-download and
+  makes ENOSPC pressure worse on miss runs (see "CI disk pressure" above).
+- The `Verify pinned nrfutil + sdk-manager versions` step asserts the pinned
+  version token on the first line of `nrfutil --version` /
+  `nrfutil-sdk-manager --version` (`nrfutil 8.2.0`,
+  `nrfutil-sdk-manager 1.16.1`, prefix-matched before the per-build hash
+  suffix) — the later sdk-manager config/install/env steps must keep using
+  these pinned binaries.
+
+### Updating nrfutil / sdk-manager
+
+1. Change `NRFUTIL_VERSION` / `NRFUTIL_SDK_MANAGER_VERSION` (and, when the
+   package layout changes, the URLs in `scripts/install-nrfutil-ci.sh`).
+2. Download the new tarballs from the `packages` URLs above, run
+   `sha256sum`, and put the results in `NRFUTIL_SHA256` /
+   `NRFUTIL_SDK_MANAGER_SHA256`. Cross-check against the pinned
+   `nrfutil`/`nrfutil-sdk-manager` package hashes in the `nix-nrf-dev`
+   flake (nixpkgs fixed-output downloads) if the artifact moves.
+3. Update the expected first-line versions in the verify step.
+4. Run `scripts/tests/test_install_nrfutil_ci.sh` and a local provisioning
+   run before pushing.
+
 ## Config Files That Matter
 
 ### `prj.conf`

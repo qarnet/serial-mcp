@@ -174,6 +174,16 @@ jobs:
     env:
       NCS_VERSION: v3.3.0
       NCS_INSTALL_DIR: /home/runner/ncs
+      # Pinned nrfutil core + sdk-manager packages, visible update points for
+      # the provisioning step. The installer downloads these exact versioned
+      # tarballs only and verifies their SHA-256 before extraction — never
+      # the unversioned launcher URL that returned an HTTP 504 HTML page and
+      # broke every later nrfutil step. See firmware/AGENTS.md "CI nrfutil
+      # provisioning" for the update procedure.
+      NRFUTIL_VERSION: "8.2.0"
+      NRFUTIL_SHA256: "fabe84198efe045a7cdcc9d5132669c1bc2cb168f61db93f2261ae4fd980e73f"
+      NRFUTIL_SDK_MANAGER_VERSION: "1.16.1"
+      NRFUTIL_SDK_MANAGER_SHA256: "d2fe97f143f888a679223d9c6e0b51d730eb60b4a5f4a5dafc970acd2020fe38"
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -220,17 +230,50 @@ jobs:
             /home/runner/.nrfutil
           key: ncs-${{ env.NCS_VERSION }}-v3
 
-      - name: Download nrfutil
+      # Fail-closed, checksum-verified, version-pinned provisioning. The old
+      # flow curl'd an unversioned launcher into /usr/local/bin (which
+      # silently installed a 160-byte HTTP 504 HTML page when Nordic's CDN
+      # timed out) and then floated the core module and sdk-manager through
+      # `nrfutil self-upgrade` / `nrfutil install sdk-manager` on every run.
+      # scripts/install-nrfutil-ci.sh downloads the exact versioned tarballs
+      # pinned in the job env, verifies SHA-256 before extraction, stages and
+      # verifies both binaries, and only then publishes the destination — no
+      # sudo, nothing executed before verification, temp cleaned on failure.
+      # The offline tests in scripts/tests/test_install_nrfutil_ci.sh exercise
+      # this pipeline deterministically (file:// fixtures, no network).
+      - name: Run installer offline tests
+        run: bash scripts/tests/test_install_nrfutil_ci.sh
+
+      - name: Provision pinned nrfutil + sdk-manager
         run: |
-          curl -L -o nrfutil https://files.nordicsemi.com/artifactory/swtools/external/nrfutil/executables/x86_64-unknown-linux-gnu/nrfutil
-          chmod +x nrfutil
-          sudo mv nrfutil /usr/local/bin/
+          bash scripts/install-nrfutil-ci.sh "$RUNNER_TEMP/nrfutil"
+          # Isolated NRFUTIL_HOME: stale command registrations restored from
+          # the actions/cache entry (path /home/runner/.nrfutil) can never
+          # override the pinned binaries. GITHUB_PATH/GITHUB_ENV only affect
+          # later steps, which is exactly what the next steps need.
+          mkdir -p "$RUNNER_TEMP/nrfutil-home"
+          echo "$RUNNER_TEMP/nrfutil/bin" >> "$GITHUB_PATH"
+          echo "NRFUTIL_HOME=$RUNNER_TEMP/nrfutil-home" >> "$GITHUB_ENV"
 
-      - name: Bootstrap nrfutil core module
-        run: nrfutil self-upgrade
-
-      - name: Install sdk-manager command
-        run: nrfutil install sdk-manager
+      # Version token on the first line proves the binaries every later step
+      # will use. The first line carries a per-build hash suffix
+      # ("nrfutil 8.2.0 (c910332 2026-04-21)"), so the check is a prefix match
+      # on the pinned version, not a full-line equality. NRFUTIL_HOME
+      # isolation (set above) keeps cached ~/.nrfutil registrations from
+      # shadowing these.
+      - name: Verify pinned nrfutil + sdk-manager versions
+        run: |
+          set -euo pipefail
+          case "$(nrfutil --version | head -n1)" in
+            "nrfutil $NRFUTIL_VERSION "*) ;;
+            "nrfutil $NRFUTIL_VERSION") ;;
+            *) echo "unexpected nrfutil version: $(nrfutil --version | head -n1)" >&2; exit 1 ;;
+          esac
+          case "$(nrfutil-sdk-manager --version | head -n1)" in
+            "nrfutil-sdk-manager $NRFUTIL_SDK_MANAGER_VERSION "*) ;;
+            "nrfutil-sdk-manager $NRFUTIL_SDK_MANAGER_VERSION") ;;
+            *) echo "unexpected nrfutil-sdk-manager version: $(nrfutil-sdk-manager --version | head -n1)" >&2; exit 1 ;;
+          esac
 
       - name: Configure sdk-manager install directory
         run: nrfutil sdk-manager config install-dir set "$NCS_INSTALL_DIR"
