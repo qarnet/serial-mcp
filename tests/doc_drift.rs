@@ -1077,7 +1077,15 @@ fn external_action_pin_violation(raw: &str) -> Option<String> {
         Some((r, c)) => (r.trim(), Some(c.trim())),
         None => (value, None),
     };
-    let (action, revision) = ref_part.rsplit_once('@')?;
+    let Some((action, revision)) = ref_part.rsplit_once('@') else {
+        // A non-local ref without a valid `action@revision` shape (a bare
+        // `actions/checkout`, a `docker://...` reference, ...) must fail —
+        // it can never satisfy the immutable-SHA policy.
+        return Some(format!(
+            "external ref {ref_part:?} must be owner/repo@revision \
+             (40-lowercase-hex SHA): {raw:?}"
+        ));
+    };
     let is_sha =
         revision.len() == 40 && revision.chars().all(|c| matches!(c, '0'..='9' | 'a'..='f'));
     if !is_sha {
@@ -1092,17 +1100,22 @@ fn external_action_pin_violation(raw: &str) -> Option<String> {
              (e.g. ` # v7`): {raw:?}"
         ));
     }
-    // The comment identifies the semantic version (`v7`) or the generic
-    // rust-toolchain action (`master`); anything else is not a version label.
+    // The comment identifies the semantic version (`v7`, `v4.2.1`) or the
+    // generic rust-toolchain action (`master`); anything else — including a
+    // numeric prefix with trailing junk like `v7junk` — is not a version label.
     let comment = comment.unwrap();
     let comment_ok = comment == "master"
-        || comment
-            .strip_prefix('v')
-            .is_some_and(|rest| rest.chars().next().is_some_and(|c| c.is_ascii_digit()));
+        || comment.strip_prefix('v').is_some_and(|rest| {
+            !rest.is_empty()
+                && rest.split('.').all(|component| {
+                    !component.is_empty() && component.chars().all(|c| c.is_ascii_digit())
+                })
+        });
     if !comment_ok {
         return Some(format!(
             "external action {action} comment {comment:?} is not a readable \
-             version label (expected `# v<N>` or `# master`): {raw:?}"
+             version label (expected `# v<N>` with numeric dot-separated \
+             components, or `# master`): {raw:?}"
         ));
     }
     None
@@ -1116,7 +1129,7 @@ fn workflow_external_actions_pinned_to_immutable_sha() {
     for (name, text) in workflow_files() {
         for (line_no, raw) in text.lines().enumerate() {
             if let Some(violation) = external_action_pin_violation(raw) {
-                panic!("{name}:{line_no} {violation}");
+                panic!("{name}:{} {violation}", line_no + 1);
             }
         }
     }
@@ -1129,6 +1142,13 @@ fn workflow_action_pin_guard_rejects_mutable_tags() {
     let pinned = "uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7";
     assert_eq!(external_action_pin_violation(pinned), None);
     assert_eq!(
+        external_action_pin_violation(
+            "uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4.2.1"
+        ),
+        None,
+        "numeric dot-separated version comments are readable version labels"
+    );
+    assert_eq!(
         external_action_pin_violation("uses: ./.github/workflows/release.yml"),
         None,
         "local reusable workflow references stay exempt"
@@ -1136,9 +1156,12 @@ fn workflow_action_pin_guard_rejects_mutable_tags() {
     for mutable in [
         "uses: actions/checkout@v7",
         "uses: actions/checkout@main",
+        "uses: actions/checkout",       // missing @revision entirely
+        "uses: docker://alpine:latest", // docker ref without pinned digest policy
         "uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1", // missing comment
         "uses: actions/checkout@3D3C42E5AAC5BA805825DA76410C181273BA90B1 # v7", // uppercase
         "uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # tag", // non-semver comment
+        "uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7junk", // junk after semver
     ] {
         assert!(
             external_action_pin_violation(mutable).is_some(),
