@@ -153,11 +153,25 @@
   multi-agent access becomes real, is named cursor groups (one cursor per
   client) — overlaps with "Socket sharing / tee" below
 
-### Baud-rate auto-detection
-- try candidate rates, score the RX per rate (ASCII ratio, framing-error
-  rate, parser validity), return ranked guesses
+### Baud-rate auto-detection *(deferred)*
 - classic serial-tool feature and a strong agent diagnosis step for
-  "unknown device on /dev/ttyUSB0"
+  "unknown device on /dev/ttyUSB0": try candidate rates, score the RX per
+  rate, return ranked guesses
+- deferred: generic host-side detection over an ordinary USB-serial adapter
+  is heuristic, not waveform measurement — the adapter's UART already
+  re-clocked the bits at the configured rate, so the host sees decoded
+  garbage that can score deceptively well at the wrong rate; a built-in
+  tool should return **inconclusive** rather than guess
+- existing solution/reference worth studying before building anything:
+  EXPLIoT's `uart.generic.baudscan`
+  ([repo](https://gitlab.com/expliot_framework/expliot),
+  [baudscan.py](https://gitlab.com/expliot_framework/expliot/-/blob/master/expliot/plugins/serial/baudscan.py))
+  cycles candidate rates, reads a bounded sample per rate, and ranks each
+  by printable-ASCII percentage (default rates
+  1200/2400/4800/9600/19200/38400/57600/115200; accepts 100% or the best
+  rate above 90%) — useful for continuously emitting ASCII devices, weak
+  for silent or binary devices
+- reference only: no dependency, integration, or adoption implied
 
 ### Modem input lines + UART error counters in `get_status`
 - read CTS/DSR/CD/RI (the serialport crate exposes them) — today the server
@@ -276,14 +290,6 @@
 ## Infrastructure / tech debt
 
 Non-feature work, roughly in suggested order. From the 2026-07-05 repo review.
-
-### Decompose the longest read/stream functions
-- Read now runs through `ReadAccumulator` + centralized result finalization
-  (`src/tools/read_loop.rs`); subscription delivery runs through named
-  raw/partial/context helpers (`src/tools/stream_ops.rs`).
-- Remaining debt, only if a concrete maintenance need justifies extra
-  control-flow boundaries: further async wait-loop decomposition inside the
-  read loop.
 
 ### `UInt` newtype to kill schemars `uint_schema` boilerplate
 - per-field `#[schemars(schema_with = "crate::schema_helpers::uint_schema")]`

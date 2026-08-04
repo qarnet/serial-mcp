@@ -4,8 +4,6 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
-use std::future::Future;
-use std::pin::Pin;
 use std::sync::Arc;
 
 use tokio::sync::Mutex;
@@ -23,18 +21,16 @@ use super::connection::SerialConnection;
 /// backends (in-memory duplex streams, hardware simulators) can drive the
 /// entire public MCP surface without an OS serial port — which is also what
 /// keeps such tests cross-platform.
+#[async_trait::async_trait]
 pub trait ConnectionOpener: Send + Sync {
     /// Open a connection for `config` and return it. The returned
     /// connection must honor the requested config fields (the manager
     /// assumes nothing about the backend beyond this trait).
     ///
-    /// Returns a boxed future so the trait stays dyn-compatible across the
-    /// supported toolchains (plain `async fn` in traits is not yet
-    /// object-safe).
-    fn open(
-        &self,
-        config: ConnectionConfig,
-    ) -> Pin<Box<dyn Future<Output = Result<SerialConnection>> + Send + '_>>;
+    /// The `async_trait` macro supplies the dyn-compatible boxed future
+    /// internally, keeping the trait object-safe across the supported
+    /// toolchains.
+    async fn open(&self, config: ConnectionConfig) -> Result<SerialConnection>;
 }
 
 /// Production opener: delegates to [`SerialConnection::open`], which builds
@@ -42,12 +38,10 @@ pub trait ConnectionOpener: Send + Sync {
 #[derive(Debug)]
 struct SystemConnectionOpener;
 
+#[async_trait::async_trait]
 impl ConnectionOpener for SystemConnectionOpener {
-    fn open(
-        &self,
-        config: ConnectionConfig,
-    ) -> Pin<Box<dyn Future<Output = Result<SerialConnection>> + Send + '_>> {
-        Box::pin(async move { SerialConnection::open(config).await })
+    async fn open(&self, config: ConnectionConfig) -> Result<SerialConnection> {
+        SerialConnection::open(config).await
     }
 }
 
@@ -505,19 +499,15 @@ mod tests {
         struct RecordingOpener {
             configs: std::sync::Mutex<Vec<ConnectionConfig>>,
         }
+        #[async_trait::async_trait]
         impl ConnectionOpener for RecordingOpener {
-            fn open(
-                &self,
-                config: ConnectionConfig,
-            ) -> Pin<Box<dyn Future<Output = Result<SerialConnection>> + Send + '_>> {
-                Box::pin(async move {
-                    self.configs
-                        .lock()
-                        .expect("opener configs poisoned")
-                        .push(config.clone());
-                    let (conn, _peer) = loopback_connection_with_config(config);
-                    Ok(conn)
-                })
+            async fn open(&self, config: ConnectionConfig) -> Result<SerialConnection> {
+                self.configs
+                    .lock()
+                    .expect("opener configs poisoned")
+                    .push(config.clone());
+                let (conn, _peer) = loopback_connection_with_config(config);
+                Ok(conn)
             }
         }
 
@@ -557,22 +547,18 @@ mod tests {
         struct FailFirstOpener {
             failures: AtomicUsize,
         }
+        #[async_trait::async_trait]
         impl ConnectionOpener for FailFirstOpener {
-            fn open(
-                &self,
-                config: ConnectionConfig,
-            ) -> Pin<Box<dyn Future<Output = Result<SerialConnection>> + Send + '_>> {
-                Box::pin(async move {
-                    // One-shot: `swap(0)` never wraps (unlike `fetch_sub`,
-                    // which would wrap to usize::MAX at zero).
-                    if self.failures.swap(0, Ordering::SeqCst) > 0 {
-                        return Err(SerialError::IoError(std::io::Error::other(
-                            "injected opener failure",
-                        )));
-                    }
-                    let (conn, _peer) = loopback_connection_with_config(config);
-                    Ok(conn)
-                })
+            async fn open(&self, config: ConnectionConfig) -> Result<SerialConnection> {
+                // One-shot: `swap(0)` never wraps (unlike `fetch_sub`,
+                // which would wrap to usize::MAX at zero).
+                if self.failures.swap(0, Ordering::SeqCst) > 0 {
+                    return Err(SerialError::IoError(std::io::Error::other(
+                        "injected opener failure",
+                    )));
+                }
+                let (conn, _peer) = loopback_connection_with_config(config);
+                Ok(conn)
             }
         }
 
@@ -609,20 +595,16 @@ mod tests {
             release: Arc<Notify>,
             invocations: AtomicUsize,
         }
+        #[async_trait::async_trait]
         impl ConnectionOpener for GatedOpener {
-            fn open(
-                &self,
-                config: ConnectionConfig,
-            ) -> Pin<Box<dyn Future<Output = Result<SerialConnection>> + Send + '_>> {
-                Box::pin(async move {
-                    self.invocations.fetch_add(1, Ordering::SeqCst);
-                    let _ = self.entered.send(true);
-                    // Hold the reservation until the test proves the second
-                    // open is rejected without invoking the opener again.
-                    self.release.notified().await;
-                    let (conn, _peer) = loopback_connection_with_config(config);
-                    Ok(conn)
-                })
+            async fn open(&self, config: ConnectionConfig) -> Result<SerialConnection> {
+                self.invocations.fetch_add(1, Ordering::SeqCst);
+                let _ = self.entered.send(true);
+                // Hold the reservation until the test proves the second
+                // open is rejected without invoking the opener again.
+                self.release.notified().await;
+                let (conn, _peer) = loopback_connection_with_config(config);
+                Ok(conn)
             }
         }
 
@@ -688,25 +670,21 @@ mod tests {
             entered: watch::Sender<bool>,
             invocations: AtomicUsize,
         }
+        #[async_trait::async_trait]
         impl ConnectionOpener for CancelGatedOpener {
-            fn open(
-                &self,
-                config: ConnectionConfig,
-            ) -> Pin<Box<dyn Future<Output = Result<SerialConnection>> + Send + '_>> {
-                Box::pin(async move {
-                    if self.invocations.fetch_add(1, Ordering::SeqCst) == 0 {
-                        // First call: signal entry and wait forever. The
-                        // test aborts this task; the guard's `Drop` then
-                        // releases the reservation.
-                        let _ = self.entered.send(true);
-                        std::future::pending::<()>().await;
-                        unreachable!("aborted before pending resolves");
-                    }
-                    // Second (and later) calls: succeed immediately — the
-                    // opener must never wait on a cancelled predecessor.
-                    let (conn, _peer) = loopback_connection_with_config(config);
-                    Ok(conn)
-                })
+            async fn open(&self, config: ConnectionConfig) -> Result<SerialConnection> {
+                if self.invocations.fetch_add(1, Ordering::SeqCst) == 0 {
+                    // First call: signal entry and wait forever. The
+                    // test aborts this task; the guard's `Drop` then
+                    // releases the reservation.
+                    let _ = self.entered.send(true);
+                    std::future::pending::<()>().await;
+                    unreachable!("aborted before pending resolves");
+                }
+                // Second (and later) calls: succeed immediately — the
+                // opener must never wait on a cancelled predecessor.
+                let (conn, _peer) = loopback_connection_with_config(config);
+                Ok(conn)
             }
         }
 
