@@ -612,6 +612,85 @@ fn features_md_does_not_relist_shipped_items() {
 }
 
 #[test]
+fn consumed_implementation_handoffs_are_removed() {
+    // docs/development/github-actions-security-handoff.md documented GitHub
+    // Actions security hardening that has since shipped. Development policy
+    // says consumed implementation handoffs are removed from the tree (git
+    // history preserves them) — a surviving handoff reads as pending work.
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("docs/development/github-actions-security-handoff.md");
+    assert!(
+        !path.is_file(),
+        "consumed implementation handoffs must be removed from the tree; \
+         delete docs/development/github-actions-security-handoff.md (git \
+         history preserves the content)"
+    );
+}
+
+#[test]
+fn features_md_removed_roadmap_headings_stay_removed() {
+    // The old "Positive MCP cache hints" heading described the shipped
+    // ttlMs=0/private baseline as if it were an unbuilt feature, and
+    // "Multiple public subscriptions per connection" predated removal of the
+    // serial subscribe/unsubscribe tools. Neither may reappear, and the
+    // Per-client RX cursors item must not resurrect the removed cross-link.
+    let features = repo_file("docs/development/FEATURES.md");
+    for heading in [
+        "### Positive MCP cache hints",
+        "### Multiple public subscriptions per connection",
+    ] {
+        assert!(
+            !features.contains(heading),
+            "FEATURES.md must not contain the removed roadmap heading {heading:?}"
+        );
+    }
+    let cursors = features
+        .split("### Per-client RX cursors")
+        .nth(1)
+        .and_then(|s| s.split("\n### ").next())
+        .unwrap_or_default();
+    assert!(
+        !cursors.contains("Multiple public subscriptions"),
+        "Per-client RX cursors must not cross-reference the removed \
+         subscription heading"
+    );
+}
+
+#[test]
+fn features_md_cache_item_distinguishes_shipped_baseline_from_future_policy() {
+    // The roadmap item is ONLY the future positive-TTL policy: the shipped
+    // 2026-07-28 cache baseline (ttlMs=0, private) must be named as shipped,
+    // never as the unbuilt feature. Checked semantically so paragraph layout
+    // can change.
+    let features = repo_file("docs/development/FEATURES.md");
+    let item = features
+        .split("### Positive MCP cache TTL policy")
+        .nth(1)
+        .and_then(|s| s.split("\n### ").next())
+        .unwrap_or_default();
+    assert!(
+        item.contains("ttlMs=0") && item.contains("private"),
+        "the future cache-TTL item must name the shipped non-cacheable \
+         baseline (ttlMs=0, private)"
+    );
+    assert!(
+        item.contains("future") || item.contains("NOT shipped") || item.contains("if pursued"),
+        "the cache-TTL item must frame positive TTL as future, not shipped: {item}"
+    );
+    for prereq in [
+        "invalidation",
+        "authorization partitioning",
+        "pagination keys",
+        "stale-on-error",
+    ] {
+        assert!(
+            item.contains(prereq),
+            "the future cache-TTL item must keep prerequisite {prereq:?}"
+        );
+    }
+}
+
+#[test]
 fn readme_links_capture_guide_with_short_summary() {
     // The README owns a one-sentence summary of the capture contract and links
     // the canonical guide; the detailed contract lives in

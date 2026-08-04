@@ -103,12 +103,13 @@
 - needs ownership/lifecycle design for connection close, client disconnect,
   server restart, task expiry, profile learning, and partial serial results
 
-### Positive MCP cache hints
-- MCP 2026-07-28 list/read results carry `ttlMs` + `cacheScope`; migration uses
-  non-cacheable `ttlMs=0`, `private` values for valid modern wire shapes
-- possible later policy: long/public for static tool, prompt, and resource-
-  template catalogs; short/private for live port lists; zero/private for open
-  connections, logs, status, and RX data
+### Positive MCP cache TTL policy
+- future feature only: the 2026-07-28 cache fields already ship, but as the
+  non-cacheable baseline (`ttlMs=0`, `cacheScope: private`) on every cacheable
+  family — enabling positive TTL is NOT shipped and is what this item proposes
+- possible policy if pursued: long/public for static tool, prompt, and
+  resource-template catalogs; short/private for live port lists; zero/private
+  for open connections, logs, status, and RX data
 - only enable positive TTL after resource/list notification invalidation,
   authorization partitioning, pagination keys, and rmcp's stale-on-error client
   behavior have public-boundary tests
@@ -150,8 +151,7 @@
   interleave their drains
 - offsets in every result already make this diagnosable; the fix, if shared
   multi-agent access becomes real, is named cursor groups (one cursor per
-  client) — overlaps with "Multiple public subscriptions per connection"
-  and "Socket sharing / tee" below
+  client) — overlaps with "Socket sharing / tee" below
 
 ### Baud-rate auto-detection
 - try candidate rates, score the RX per rate (ASCII ratio, framing-error
@@ -175,10 +175,6 @@
   3D-printer controllers)
 - becomes nearly free once TX pacing lands — the `transact` tool already
   ships; implement after pacing
-
-### Multiple public subscriptions per connection
-- useful if explicit session model grows later
-- requires subscription IDs and fanout semantics
 
 ### Safety policies for dangerous commands
 - optional dangerous-command confirmation patterns
