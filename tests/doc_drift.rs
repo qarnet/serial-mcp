@@ -158,6 +158,40 @@ fn cargo_toml_description_tool_count_matches_code() {
 }
 
 #[test]
+fn package_discovery_metadata_is_exact() {
+    // crates.io/GitHub listings surface three discovery surfaces first: the
+    // README H1 (line 1) and the Cargo [package] homepage/documentation
+    // fields. They must stay exact — a drifted H1 or a wrong link reads
+    // directly in registry and search-result listings.
+    let readme = repo_file("README.md");
+    let h1 = readme
+        .lines()
+        .next()
+        .expect("README.md must have a first line");
+    assert_eq!(
+        h1, "# Serial MCP — UART and USB-Serial Access for AI Agents",
+        "README line 1 is the package-discovery H1 and must stay exact"
+    );
+
+    let manifest = repo_file("Cargo.toml");
+    let package_field = |field: &str| -> Option<&str> {
+        manifest
+            .lines()
+            .find(|l| l.starts_with(&format!("{field} = ")))
+    };
+    assert_eq!(
+        package_field("homepage"),
+        Some("homepage = \"https://github.com/qarnet/serial-mcp\""),
+        "Cargo.toml [package] homepage is package-discovery metadata and must stay exact"
+    );
+    assert_eq!(
+        package_field("documentation"),
+        Some("documentation = \"https://docs.rs/serial-mcp\""),
+        "Cargo.toml [package] documentation is package-discovery metadata and must stay exact"
+    );
+}
+
+#[test]
 fn server_json_description_tool_count_matches_code() {
     let n = tool_count();
     let server_json = repo_file("server.json");
