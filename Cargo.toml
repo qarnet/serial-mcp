@@ -9,6 +9,8 @@ description = "MCP server for serial port communication. 25 tools (list/open/rea
 license = "MIT"
 readme = "README.md"
 repository = "https://github.com/qarnet/serial-mcp"
+homepage = "https://github.com/qarnet/serial-mcp"
+documentation = "https://docs.rs/serial-mcp"
 keywords = ["mcp", "serial", "communication", "embedded", "protocol"]
 categories = ["development-tools", "embedded"]
 

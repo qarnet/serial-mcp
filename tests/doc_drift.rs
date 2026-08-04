@@ -158,6 +158,40 @@ fn cargo_toml_description_tool_count_matches_code() {
 }
 
 #[test]
+fn package_discovery_metadata_is_exact() {
+    // crates.io/GitHub listings surface three discovery surfaces first: the
+    // README H1 (line 1) and the Cargo [package] homepage/documentation
+    // fields. They must stay exact — a drifted H1 or a wrong link reads
+    // directly in registry and search-result listings.
+    let readme = repo_file("README.md");
+    let h1 = readme
+        .lines()
+        .next()
+        .expect("README.md must have a first line");
+    assert_eq!(
+        h1, "# Serial MCP — UART and USB-Serial Access for AI Agents",
+        "README line 1 is the package-discovery H1 and must stay exact"
+    );
+
+    let manifest = repo_file("Cargo.toml");
+    let package_field = |field: &str| -> Option<&str> {
+        manifest
+            .lines()
+            .find(|l| l.starts_with(&format!("{field} = ")))
+    };
+    assert_eq!(
+        package_field("homepage"),
+        Some("homepage = \"https://github.com/qarnet/serial-mcp\""),
+        "Cargo.toml [package] homepage is package-discovery metadata and must stay exact"
+    );
+    assert_eq!(
+        package_field("documentation"),
+        Some("documentation = \"https://docs.rs/serial-mcp\""),
+        "Cargo.toml [package] documentation is package-discovery metadata and must stay exact"
+    );
+}
+
+#[test]
 fn server_json_description_tool_count_matches_code() {
     let n = tool_count();
     let server_json = repo_file("server.json");
@@ -575,6 +609,85 @@ fn features_md_does_not_relist_shipped_items() {
         !features.contains("pure wiring: profile field"),
         "FEATURES.md must not still describe the reconnect-policy item as unwired"
     );
+}
+
+#[test]
+fn consumed_implementation_handoffs_are_removed() {
+    // docs/development/github-actions-security-handoff.md documented GitHub
+    // Actions security hardening that has since shipped. Development policy
+    // says consumed implementation handoffs are removed from the tree (git
+    // history preserves them) — a surviving handoff reads as pending work.
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("docs/development/github-actions-security-handoff.md");
+    assert!(
+        !path.is_file(),
+        "consumed implementation handoffs must be removed from the tree; \
+         delete docs/development/github-actions-security-handoff.md (git \
+         history preserves the content)"
+    );
+}
+
+#[test]
+fn features_md_removed_roadmap_headings_stay_removed() {
+    // The old "Positive MCP cache hints" heading described the shipped
+    // ttlMs=0/private baseline as if it were an unbuilt feature, and
+    // "Multiple public subscriptions per connection" predated removal of the
+    // serial subscribe/unsubscribe tools. Neither may reappear, and the
+    // Per-client RX cursors item must not resurrect the removed cross-link.
+    let features = repo_file("docs/development/FEATURES.md");
+    for heading in [
+        "### Positive MCP cache hints",
+        "### Multiple public subscriptions per connection",
+    ] {
+        assert!(
+            !features.contains(heading),
+            "FEATURES.md must not contain the removed roadmap heading {heading:?}"
+        );
+    }
+    let cursors = features
+        .split("### Per-client RX cursors")
+        .nth(1)
+        .and_then(|s| s.split("\n### ").next())
+        .unwrap_or_default();
+    assert!(
+        !cursors.contains("Multiple public subscriptions"),
+        "Per-client RX cursors must not cross-reference the removed \
+         subscription heading"
+    );
+}
+
+#[test]
+fn features_md_cache_item_distinguishes_shipped_baseline_from_future_policy() {
+    // The roadmap item is ONLY the future positive-TTL policy: the shipped
+    // 2026-07-28 cache baseline (ttlMs=0, private) must be named as shipped,
+    // never as the unbuilt feature. Checked semantically so paragraph layout
+    // can change.
+    let features = repo_file("docs/development/FEATURES.md");
+    let item = features
+        .split("### Positive MCP cache TTL policy")
+        .nth(1)
+        .and_then(|s| s.split("\n### ").next())
+        .unwrap_or_default();
+    assert!(
+        item.contains("ttlMs=0") && item.contains("private"),
+        "the future cache-TTL item must name the shipped non-cacheable \
+         baseline (ttlMs=0, private)"
+    );
+    assert!(
+        item.contains("future") || item.contains("NOT shipped") || item.contains("if pursued"),
+        "the cache-TTL item must frame positive TTL as future, not shipped: {item}"
+    );
+    for prereq in [
+        "invalidation",
+        "authorization partitioning",
+        "pagination keys",
+        "stale-on-error",
+    ] {
+        assert!(
+            item.contains(prereq),
+            "the future cache-TTL item must keep prerequisite {prereq:?}"
+        );
+    }
 }
 
 #[test]

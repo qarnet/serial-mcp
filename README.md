@@ -1,4 +1,4 @@
-# Serial MCP Server
+# Serial MCP — UART and USB-Serial Access for AI Agents
 
 [![GitHub Release](https://img.shields.io/github/v/release/qarnet/serial-mcp)](https://github.com/qarnet/serial-mcp/releases)
 [![crates.io](https://img.shields.io/crates/v/serial-mcp)](https://crates.io/crates/serial-mcp)
