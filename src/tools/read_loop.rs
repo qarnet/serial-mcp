@@ -14,7 +14,7 @@ use crate::match_config::{shape_match_context, MatchResult, Matcher};
 use crate::rx_metadata::RxStopMetadata;
 use crate::rx_session::RxSession;
 use crate::serial::SerialConnection;
-use crate::stop_controller::{RxStopController, RxStopDecision};
+use crate::stop_controller::{RxStopController, RxStopDecision, RxStopOutcome};
 use crate::tools::helpers::DEFAULT_READ_TIMEOUT_MS;
 use crate::tools::rx_consume::{
     consume_frames, disconnect_state, frame_outcome_to_stop, DisconnectState, RxFrameSink, SinkFlow,
@@ -194,6 +194,155 @@ impl ReadAccumulator {
     }
 }
 
+/// Central completion descriptor for a private read. Every ordinary return
+/// path builds one and funnels it through [`complete_read`]. The payload
+/// override changes only the returned bytes (framed match data, shaped
+/// live-match context) — never the consumed offsets.
+struct ReadCompletion {
+    meta: RxStopMetadata,
+    matched: bool,
+    match_index: Option<usize>,
+    match_frame_index: Option<usize>,
+    payload_override: Option<Vec<u8>>,
+    final_cursor: u64,
+}
+
+/// Consume the accumulator into the final outcome via
+/// [`ReadAccumulator::into_outcome`], computing elapsed time here so every
+/// ordinary return path shares one call site.
+fn complete_read(
+    acc: ReadAccumulator,
+    ring: &crate::rx_ring::RxRing,
+    original_cursor: u64,
+    max_bytes: usize,
+    read_start: Instant,
+    completion: ReadCompletion,
+) -> (ReadOutcome, u64) {
+    acc.into_outcome(
+        ring,
+        original_cursor,
+        max_bytes,
+        read_start.elapsed().as_millis() as u64,
+        completion.meta,
+        completion.matched,
+        completion.match_index,
+        completion.match_frame_index,
+        completion.payload_override,
+        completion.final_cursor,
+    )
+}
+
+/// What processing one framed chunk produced. `Match` carries the first
+/// framed match's payload and indexes; `Stop` carries the translated stop
+/// outcome (max_frames, runtime decode error, sink stop) plus the sink's
+/// match frame index (always `None` there — a match would have returned
+/// earlier).
+enum FramedChunkDecision {
+    /// No stop condition; keep the outer loop running.
+    Continue,
+    /// The first framed match: payload plus match byte/frame indexes.
+    Match {
+        data: Vec<u8>,
+        match_index: Option<usize>,
+        match_frame_index: Option<usize>,
+    },
+    /// A stop outcome from `frame_outcome_to_stop`, with the sink's match
+    /// frame index preserved.
+    Stop {
+        outcome: RxStopOutcome,
+        match_frame_index: Option<usize>,
+    },
+}
+
+/// Decode one chunk through the shared `consume_frames` pipeline, preserving
+/// decoded frames before a fatal error, the first framed match, and the
+/// `frame_outcome_to_stop` translation with its `frame_error` text. Shared by
+/// the initial buffered-bytes path and the live wait loop.
+async fn process_framed_chunk(
+    chunk: &[u8],
+    decoder: &mut crate::framing::FrameDecoder,
+    matcher: &mut Option<Matcher>,
+    max_frames: Option<usize>,
+    acc: &mut ReadAccumulator,
+    ctrl: &RxStopController,
+    conn_id: &str,
+) -> FramedChunkDecision {
+    let mut sink = ReadFrameSink::new(&mut acc.frames);
+    let outcome = consume_frames(
+        chunk,
+        decoder,
+        matcher,
+        max_frames,
+        &mut acc.frames_seen,
+        &mut sink,
+        &mut acc.frames_dropped,
+    )
+    .await;
+    let ReadFrameSink {
+        match_data,
+        match_index,
+        match_frame_index,
+        ..
+    } = sink;
+    if let Some(data) = match_data {
+        return FramedChunkDecision::Match {
+            data,
+            match_index,
+            match_frame_index,
+        };
+    }
+    if let Some(stop) = frame_outcome_to_stop(
+        outcome,
+        ctrl,
+        acc.returned_bytes.len(),
+        match_index,
+        &mut acc.frame_error,
+        conn_id,
+    ) {
+        return FramedChunkDecision::Stop {
+            outcome: stop,
+            match_frame_index,
+        };
+    }
+    FramedChunkDecision::Continue
+}
+
+/// What woke the read loop from its ring wait.
+enum WaitWake {
+    /// The request cancellation token fired.
+    Cancelled,
+    /// New data arrived on the ring at/after the clocked cursor.
+    Data,
+    /// Adaptive poll fired so the loop can re-check timeouts/stop conditions.
+    Poll,
+}
+
+/// Wait for ring data, cancellation, or a short adaptive poll. Preserves the
+/// deadline source (`ctrl.deadline()`, falling back to `effective_timeout_ms`
+/// from the read start), the 1–250 ms adaptive poll, and cancellation
+/// precedence through the `tokio::select!` branch order.
+async fn wait_for_ring_data(
+    ct: &tokio_util::sync::CancellationToken,
+    ring: &crate::rx_ring::RxRing,
+    clocked_cursor: u64,
+    ctrl: &RxStopController,
+    read_start: Instant,
+    effective_timeout_ms: u64,
+) -> WaitWake {
+    let deadline = ctrl
+        .deadline()
+        .unwrap_or_else(|| read_start + Duration::from_millis(effective_timeout_ms));
+    let remaining = deadline
+        .saturating_duration_since(Instant::now())
+        .as_millis() as u64;
+    let poll_ms = remaining.saturating_sub(1).clamp(1, 250); // adaptive: 1-250ms
+    tokio::select! {
+        _ = ct.cancelled() => WaitWake::Cancelled,
+        _ = ring.wait_for_data(clocked_cursor) => WaitWake::Data,
+        _ = tokio::time::sleep(std::time::Duration::from_millis(poll_ms)) => WaitWake::Poll,
+    }
+}
+
 /// Drive a `read` from the ring buffer using a PRIVATE cursor, with cat
 /// semantics: buffered-but-unread bytes are returned immediately. Pattern
 /// matching checks history first, then waits for new bytes.
@@ -240,7 +389,7 @@ pub(crate) async fn read_from_private_cursor(
     // Owns all mutable read state; consumed only on return paths.
     let mut acc = ReadAccumulator::new(max_bytes);
 
-    // Check if we have immediate cat-path data (no match, bytes available).
+    // Phase 2: immediate raw cat path — no match, bytes available, no framing.
     let has_immediate_data = !initial_slice.bytes.is_empty() && matcher.is_none();
 
     if has_immediate_data && decoder.is_none() {
@@ -251,21 +400,24 @@ pub(crate) async fn read_from_private_cursor(
         acc.consumed_offset = consumed;
         let meta = RxStopMetadata::drained(cursor + consumed, consumed as usize, consumed as usize);
         let final_cursor = advance_private_cursor(initial_slice.from_offset, consumed, ring);
-        return Ok(acc.into_outcome(
+        return Ok(complete_read(
+            acc,
             ring,
             cursor,
             max_bytes,
-            read_start.elapsed().as_millis() as u64,
-            meta,
-            false,
-            None,
-            None,
-            None,
-            final_cursor,
+            read_start,
+            ReadCompletion {
+                meta,
+                matched: false,
+                match_index: None,
+                match_frame_index: None,
+                payload_override: None,
+                final_cursor,
+            },
         ));
     }
 
-    // Match-check history first if a matcher is present.
+    // Phase 3: match-check history first if a matcher is present.
     if matcher.is_some() && !initial_slice.bytes.is_empty() {
         let take = initial_slice.bytes.len().min(max_bytes);
         let hist = &initial_slice.bytes[..take];
@@ -312,17 +464,20 @@ pub(crate) async fn read_from_private_cursor(
                 ));
             }
             let final_cursor = advance_private_cursor(initial_slice.from_offset, consumed, ring);
-            return Ok(acc.into_outcome(
+            return Ok(complete_read(
+                acc,
                 ring,
                 cursor,
                 max_bytes,
-                read_start.elapsed().as_millis() as u64,
-                meta,
-                true,
-                Some(idx),
-                None,
-                None,
-                final_cursor,
+                read_start,
+                ReadCompletion {
+                    meta,
+                    matched: true,
+                    match_index: Some(idx),
+                    match_frame_index: None,
+                    payload_override: None,
+                    final_cursor,
+                },
             ));
         }
         // Not found in history — consume what we read from the ring for the result so far.
@@ -332,7 +487,7 @@ pub(crate) async fn read_from_private_cursor(
         ctrl.push_data(take, take, Some(MatchResult::NoMatch));
     }
 
-    // Process initial bytes through frame decoder if active.
+    // Phase 4: initial framed bytes.
     if decoder.is_some() && !initial_slice.bytes.is_empty() {
         let take = initial_slice.bytes.len().min(max_bytes);
         let chunk = &initial_slice.bytes[..take];
@@ -340,72 +495,76 @@ pub(crate) async fn read_from_private_cursor(
         acc.returned_bytes.extend_from_slice(chunk);
 
         if let Some(ref mut dec) = decoder {
-            let mut sink = ReadFrameSink::new(&mut acc.frames);
-            let outcome = consume_frames(
+            match process_framed_chunk(
                 chunk,
                 dec,
                 &mut matcher,
                 max_frames,
-                &mut acc.frames_seen,
-                &mut sink,
-                &mut acc.frames_dropped,
+                &mut acc,
+                &ctrl,
+                &conn_id,
             )
-            .await;
-            let ReadFrameSink {
-                match_data,
-                match_index,
-                match_frame_index,
-                ..
-            } = sink;
-            if let Some(data) = match_data {
-                let meta =
-                    RxStopMetadata::match_found(ctrl.bytes_observed(), acc.returned_bytes.len());
-                let final_cursor = initial_slice
-                    .from_offset
-                    .wrapping_add(acc.consumed_offset)
-                    .min(ring.end_offset());
-                return Ok(acc.into_outcome(
-                    ring,
-                    cursor,
-                    max_bytes,
-                    read_start.elapsed().as_millis() as u64,
-                    meta,
-                    true,
+            .await
+            {
+                FramedChunkDecision::Continue => {}
+                FramedChunkDecision::Match {
+                    data,
                     match_index,
                     match_frame_index,
-                    Some(data),
-                    final_cursor,
-                ));
-            }
-            if let Some(stop) = frame_outcome_to_stop(
-                outcome,
-                &ctrl,
-                acc.returned_bytes.len(),
-                match_index,
-                &mut acc.frame_error,
-                &conn_id,
-            ) {
-                let final_cursor = initial_slice
-                    .from_offset
-                    .wrapping_add(acc.consumed_offset)
-                    .min(ring.end_offset());
-                return Ok(acc.into_outcome(
-                    ring,
-                    cursor,
-                    max_bytes,
-                    read_start.elapsed().as_millis() as u64,
-                    stop.meta,
-                    stop.matched,
-                    stop.match_index,
+                } => {
+                    let meta = RxStopMetadata::match_found(
+                        ctrl.bytes_observed(),
+                        acc.returned_bytes.len(),
+                    );
+                    let final_cursor = initial_slice
+                        .from_offset
+                        .wrapping_add(acc.consumed_offset)
+                        .min(ring.end_offset());
+                    return Ok(complete_read(
+                        acc,
+                        ring,
+                        cursor,
+                        max_bytes,
+                        read_start,
+                        ReadCompletion {
+                            meta,
+                            matched: true,
+                            match_index,
+                            match_frame_index,
+                            payload_override: Some(data),
+                            final_cursor,
+                        },
+                    ));
+                }
+                FramedChunkDecision::Stop {
+                    outcome,
                     match_frame_index,
-                    None,
-                    final_cursor,
-                ));
+                } => {
+                    let final_cursor = initial_slice
+                        .from_offset
+                        .wrapping_add(acc.consumed_offset)
+                        .min(ring.end_offset());
+                    return Ok(complete_read(
+                        acc,
+                        ring,
+                        cursor,
+                        max_bytes,
+                        read_start,
+                        ReadCompletion {
+                            meta: outcome.meta,
+                            matched: outcome.matched,
+                            match_index: outcome.match_index,
+                            match_frame_index,
+                            payload_override: None,
+                            final_cursor,
+                        },
+                    ));
+                }
             }
         }
     }
 
-    // Wait loop: wait for new data, then process.
+    // Phase 5: wait/process loop.
     let mut clocked_cursor = initial_slice.next_offset;
     loop {
         // Pause timeouts while connection is disconnected/reconnecting.
@@ -416,17 +575,20 @@ pub(crate) async fn read_from_private_cursor(
                     let final_cursor = cursor
                         .wrapping_add(acc.consumed_offset)
                         .min(ring.end_offset());
-                    return Ok(acc.into_outcome(
+                    return Ok(complete_read(
+                        acc,
                         ring,
                         cursor,
                         max_bytes,
-                        read_start.elapsed().as_millis() as u64,
-                        outcome.meta,
-                        outcome.matched,
-                        outcome.match_index,
-                        None,
-                        None,
-                        final_cursor,
+                        read_start,
+                        ReadCompletion {
+                            meta: outcome.meta,
+                            matched: outcome.matched,
+                            match_index: outcome.match_index,
+                            match_frame_index: None,
+                            payload_override: None,
+                            final_cursor,
+                        },
                     ));
                 }
                 DisconnectState::Reconnecting => {
@@ -439,64 +601,75 @@ pub(crate) async fn read_from_private_cursor(
 
         if let RxStopDecision::Stop(outcome) = ctrl.check_timeout() {
             let final_cursor = advance_private_cursor(cursor, acc.consumed_offset, ring);
-            return Ok(acc.into_outcome(
+            return Ok(complete_read(
+                acc,
                 ring,
                 cursor,
                 max_bytes,
-                read_start.elapsed().as_millis() as u64,
-                outcome.meta,
-                outcome.matched,
-                outcome.match_index,
-                None,
-                None,
-                final_cursor,
+                read_start,
+                ReadCompletion {
+                    meta: outcome.meta,
+                    matched: outcome.matched,
+                    match_index: outcome.match_index,
+                    match_frame_index: None,
+                    payload_override: None,
+                    final_cursor,
+                },
             ));
         }
         if let RxStopDecision::Stop(outcome) = ctrl.check_silence_timeout() {
             let final_cursor = advance_private_cursor(cursor, acc.consumed_offset, ring);
-            return Ok(acc.into_outcome(
+            return Ok(complete_read(
+                acc,
                 ring,
                 cursor,
                 max_bytes,
-                read_start.elapsed().as_millis() as u64,
-                outcome.meta,
-                outcome.matched,
-                outcome.match_index,
-                None,
-                None,
-                final_cursor,
+                read_start,
+                ReadCompletion {
+                    meta: outcome.meta,
+                    matched: outcome.matched,
+                    match_index: outcome.match_index,
+                    match_frame_index: None,
+                    payload_override: None,
+                    final_cursor,
+                },
             ));
         }
 
         // Wait for more data on the ring, or a short poll to check timeouts.
-        let deadline = ctrl
-            .deadline()
-            .unwrap_or_else(|| read_start + Duration::from_millis(effective_timeout_ms));
-        let remaining = deadline
-            .saturating_duration_since(Instant::now())
-            .as_millis() as u64;
-        let poll_ms = remaining.saturating_sub(1).clamp(1, 250); // adaptive: 1-250ms
-        tokio::select! {
-            _ = ct.cancelled() => {
+        match wait_for_ring_data(
+            ct,
+            ring,
+            clocked_cursor,
+            &ctrl,
+            read_start,
+            effective_timeout_ms,
+        )
+        .await
+        {
+            WaitWake::Cancelled => {
                 let outcome = ctrl.cancelled();
                 let final_cursor = cursor
                     .wrapping_add(acc.consumed_offset)
                     .min(ring.end_offset());
-                return Ok(acc.into_outcome(
+                return Ok(complete_read(
+                    acc,
                     ring,
                     cursor,
                     max_bytes,
-                    read_start.elapsed().as_millis() as u64,
-                    outcome.meta,
-                    outcome.matched,
-                    outcome.match_index,
-                    None,
-                    None,
-                    final_cursor,
+                    read_start,
+                    ReadCompletion {
+                        meta: outcome.meta,
+                        matched: outcome.matched,
+                        match_index: outcome.match_index,
+                        match_frame_index: None,
+                        payload_override: None,
+                        final_cursor,
+                    },
                 ));
             }
-            _ = ring.wait_for_data(clocked_cursor) => {}
-            _ = tokio::time::sleep(std::time::Duration::from_millis(poll_ms)) => {
+            WaitWake::Data => {}
+            WaitWake::Poll => {
                 // Poll wakeup: loop back to check timeouts and stop conditions.
                 continue;
             }
@@ -525,67 +698,71 @@ pub(crate) async fn read_from_private_cursor(
 
         // Feed to frame decoder if active.
         if let Some(ref mut dec) = decoder {
-            let mut sink = ReadFrameSink::new(&mut acc.frames);
-            let outcome = consume_frames(
+            match process_framed_chunk(
                 chunk,
                 dec,
                 &mut matcher,
                 max_frames,
-                &mut acc.frames_seen,
-                &mut sink,
-                &mut acc.frames_dropped,
+                &mut acc,
+                &ctrl,
+                &conn_id,
             )
-            .await;
-            let ReadFrameSink {
-                match_data,
-                match_index,
-                match_frame_index,
-                ..
-            } = sink;
-            if let Some(data) = match_data {
-                let meta =
-                    RxStopMetadata::match_found(ctrl.bytes_observed(), acc.returned_bytes.len());
-                let final_cursor = slice
-                    .from_offset
-                    .wrapping_add(take as u64)
-                    .min(ring.end_offset());
-                return Ok(acc.into_outcome(
-                    ring,
-                    cursor,
-                    max_bytes,
-                    read_start.elapsed().as_millis() as u64,
-                    meta,
-                    true,
+            .await
+            {
+                FramedChunkDecision::Continue => {}
+                FramedChunkDecision::Match {
+                    data,
                     match_index,
                     match_frame_index,
-                    Some(data),
-                    final_cursor,
-                ));
-            }
-            if let Some(stop) = frame_outcome_to_stop(
-                outcome,
-                &ctrl,
-                acc.returned_bytes.len(),
-                match_index,
-                &mut acc.frame_error,
-                &conn_id,
-            ) {
-                let final_cursor = slice
-                    .from_offset
-                    .wrapping_add(take as u64)
-                    .min(ring.end_offset());
-                return Ok(acc.into_outcome(
-                    ring,
-                    cursor,
-                    max_bytes,
-                    read_start.elapsed().as_millis() as u64,
-                    stop.meta,
-                    stop.matched,
-                    stop.match_index,
+                } => {
+                    let meta = RxStopMetadata::match_found(
+                        ctrl.bytes_observed(),
+                        acc.returned_bytes.len(),
+                    );
+                    let final_cursor = slice
+                        .from_offset
+                        .wrapping_add(take as u64)
+                        .min(ring.end_offset());
+                    return Ok(complete_read(
+                        acc,
+                        ring,
+                        cursor,
+                        max_bytes,
+                        read_start,
+                        ReadCompletion {
+                            meta,
+                            matched: true,
+                            match_index,
+                            match_frame_index,
+                            payload_override: Some(data),
+                            final_cursor,
+                        },
+                    ));
+                }
+                FramedChunkDecision::Stop {
+                    outcome,
                     match_frame_index,
-                    None,
-                    final_cursor,
-                ));
+                } => {
+                    let final_cursor = slice
+                        .from_offset
+                        .wrapping_add(take as u64)
+                        .min(ring.end_offset());
+                    return Ok(complete_read(
+                        acc,
+                        ring,
+                        cursor,
+                        max_bytes,
+                        read_start,
+                        ReadCompletion {
+                            meta: outcome.meta,
+                            matched: outcome.matched,
+                            match_index: outcome.match_index,
+                            match_frame_index,
+                            payload_override: None,
+                            final_cursor,
+                        },
+                    ));
+                }
             }
         }
 
@@ -617,17 +794,20 @@ pub(crate) async fn read_from_private_cursor(
                     .from_offset
                     .wrapping_add(take as u64)
                     .min(ring.end_offset());
-                return Ok(acc.into_outcome(
+                return Ok(complete_read(
+                    acc,
                     ring,
                     cursor,
                     max_bytes,
-                    read_start.elapsed().as_millis() as u64,
-                    outcome.meta,
-                    outcome.matched,
-                    match_index,
-                    None,
-                    Some(match_bytes),
-                    final_cursor,
+                    read_start,
+                    ReadCompletion {
+                        meta: outcome.meta,
+                        matched: outcome.matched,
+                        match_index,
+                        match_frame_index: None,
+                        payload_override: Some(match_bytes),
+                        final_cursor,
+                    },
                 ));
             }
         }
@@ -643,17 +823,20 @@ pub(crate) async fn read_from_private_cursor(
                 acc.returned_bytes.len(),
             );
             let final_cursor = advance_private_cursor(cursor, acc.consumed_offset, ring);
-            return Ok(acc.into_outcome(
+            return Ok(complete_read(
+                acc,
                 ring,
                 cursor,
                 max_bytes,
-                read_start.elapsed().as_millis() as u64,
-                meta,
-                false,
-                None,
-                None,
-                None,
-                final_cursor,
+                read_start,
+                ReadCompletion {
+                    meta,
+                    matched: false,
+                    match_index: None,
+                    match_frame_index: None,
+                    payload_override: None,
+                    final_cursor,
+                },
             ));
         }
     }
@@ -871,10 +1054,11 @@ mod tests {
         session.shutdown_and_join().await;
     }
 
-    /// `into_outcome` advances `next_offset` by raw `consumed_offset` even
-    /// when the returned payload is overridden with a different length
-    /// (framed match data, shaped live-match context). Offsets are
-    /// consumption-based, not payload-length-based.
+    /// `complete_read` (and the `into_outcome` it drives) advances
+    /// `next_offset` by raw `consumed_offset` even when the returned payload
+    /// is overridden with a different length (framed match data, shaped
+    /// live-match context). Offsets are consumption-based, not
+    /// payload-length-based.
     #[test]
     fn into_outcome_offsets_follow_consumed_bytes_not_payload_length() {
         let ring = crate::rx_ring::RxRing::new(64);
@@ -884,17 +1068,20 @@ mod tests {
         acc.consumed_offset = 10;
         acc.returned_bytes = vec![0u8; 40];
 
-        let (outcome, final_cursor) = acc.into_outcome(
+        let (outcome, final_cursor) = complete_read(
+            acc,
             &ring,
             0,
             4096,
-            1,
-            RxStopMetadata::match_found(40, 5),
-            true,
-            Some(0),
-            None,
-            Some(vec![0u8; 5]),
-            10,
+            Instant::now(),
+            ReadCompletion {
+                meta: RxStopMetadata::match_found(40, 5),
+                matched: true,
+                match_index: Some(0),
+                match_frame_index: None,
+                payload_override: Some(vec![0u8; 5]),
+                final_cursor: 10,
+            },
         );
 
         assert_eq!(outcome.bytes.len(), 5, "override replaces the payload");
