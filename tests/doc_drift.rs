@@ -691,6 +691,29 @@ fn features_md_cache_item_distinguishes_shipped_baseline_from_future_policy() {
 }
 
 #[test]
+fn features_md_baud_detection_stays_deferred_and_keeps_expliot_reference() {
+    // Baud-rate auto-detection is explicitly deferred: generic host-side
+    // detection over a USB-serial adapter is heuristic, not waveform
+    // measurement, so the roadmap item must stay marked deferred. The
+    // EXPLIoT reference is a pointer to an existing solution — guard the
+    // deferred marker and the exact repository URL so neither drifts.
+    let features = repo_file("docs/development/FEATURES.md");
+    let item = features
+        .split("### Baud-rate auto-detection")
+        .nth(1)
+        .and_then(|s| s.split("\n### ").next())
+        .unwrap_or_default();
+    assert!(
+        item.starts_with(" *(deferred)*"),
+        "the baud-rate auto-detection heading must be marked explicitly deferred"
+    );
+    assert!(
+        item.contains("https://gitlab.com/expliot_framework/expliot"),
+        "the baud-rate item must retain the exact EXPLIoT repository URL"
+    );
+}
+
+#[test]
 fn readme_links_capture_guide_with_short_summary() {
     // The README owns a one-sentence summary of the capture contract and links
     // the canonical guide; the detailed contract lives in
