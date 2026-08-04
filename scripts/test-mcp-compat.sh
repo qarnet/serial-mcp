@@ -6,17 +6,26 @@
 #
 # Runs, in order:
 #   1. locked serial-mcp binary build (unless SERIAL_MCP_BIN names one)
-#   2. focused Rust gates: protocol_compatibility, stdio_integration,
+#   2. install of the lockfile-pinned MCP validation tooling
+#      (`npm ci --ignore-scripts` in compat/mcp-validation; lifecycle scripts
+#      are never executed and packages are never resolved via npx)
+#   3. focused Rust gates: protocol_compatibility, stdio_integration,
 #      resource_subscriptions
-#   3. locked historical rmcp 1.7.0 fixture build into a stable compat target
-#   4. historical fixture stdio smoke against the current binary
-#   5. isolated loopback HTTP server (temporary profile path) with a bounded
+#   4. locked historical rmcp 1.7.0 fixture build into a stable compat target
+#   5. historical fixture stdio smoke against the current binary
+#   6. isolated loopback HTTP server (temporary profile path) with a bounded
 #      modern server/discover readiness probe
-#   6. historical fixture HTTP smoke against /mcp
-#   7. official legacy conformance scenarios at --spec-version 2025-11-25
-#   8. official modern conformance scenarios at --spec-version 2026-07-28
-#   9. pinned Inspector 2.0.0 interoperability smoke against the preferred
+#   7. historical fixture HTTP smoke against /mcp
+#   8. official legacy conformance scenarios at --spec-version 2025-11-25
+#   9. official modern conformance scenarios at --spec-version 2026-07-28
+#  10. pinned Inspector 2.0.0 interoperability smoke against the preferred
 #      (modern) version
+#
+# The conformance and Inspector packages are installed from the committed
+# lockfile compat/mcp-validation/package-lock.json only (exact versions
+# 0.2.0-alpha.10 / 2.0.0 with integrity hashes, private package.json) and are
+# invoked through that project's local node_modules/.bin — never via npx and
+# never from a dynamic package resolution.
 #
 # Protocol versions, package pins, scenario lists, the expected-failure path,
 # and all assertions are FIXED in this file. Environment overrides may select
@@ -41,8 +50,19 @@ ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
 cd "$ROOT"
 
 # --- Fixed contract (not overridable) -----------------------------------------
-# The exact pinned official conformance package (no floating tags).
+# The exact pinned official conformance package (no floating tags). It is
+# installed from the committed lockfile and invoked via the local binary below;
+# this constant only documents the pinned package name.
 CONFORMANCE_PACKAGE="@modelcontextprotocol/conformance@0.2.0-alpha.10"
+# Lockfile-pinned MCP validation project: exact direct versions and integrity
+# hashes live in compat/mcp-validation/package-lock.json (private
+# package.json). Installed with `npm ci --ignore-scripts` — lifecycle scripts
+# are disabled by policy (preinstall supply-chain hardening). The local
+# binaries are the ONLY conformance/Inspector entry points in this script;
+# npx and dynamic package resolution are never used.
+VALIDATION_DIR="$ROOT/compat/mcp-validation"
+CONFORMANCE_BIN="$VALIDATION_DIR/node_modules/.bin/conformance"
+INSPECTOR_BIN="$VALIDATION_DIR/node_modules/.bin/mcp-inspector"
 # Expected-failure baseline: exactly the four documented fixture-dependent
 # checks (see conformance/expected-failures.yaml). A baseline entry that
 # starts passing fails the run as stale; any other failure is unexpected.
@@ -103,7 +123,19 @@ fi
 BIN="$(realpath "$BIN")"
 step "serial-mcp binary: $BIN"
 
-# --- 2. focused Rust gates ----------------------------------------------------
+# --- 2. lockfile-pinned MCP validation tooling install ------------------------
+step "installing MCP validation tooling (npm ci --ignore-scripts)"
+npm ci --ignore-scripts --prefix "$VALIDATION_DIR"
+if [ ! -x "$CONFORMANCE_BIN" ]; then
+  echo "error: conformance binary not produced by npm ci: $CONFORMANCE_BIN" >&2
+  exit 1
+fi
+if [ ! -x "$INSPECTOR_BIN" ]; then
+  echo "error: mcp-inspector binary not produced by npm ci: $INSPECTOR_BIN" >&2
+  exit 1
+fi
+
+# --- 3. focused Rust gates ----------------------------------------------------
 step "focused Rust gates: protocol_compatibility"
 cargo test --locked --test protocol_compatibility
 step "focused Rust gates: stdio_integration"
@@ -111,7 +143,7 @@ cargo test --locked --test stdio_integration
 step "focused Rust gates: resource_subscriptions"
 cargo test --locked --test resource_subscriptions
 
-# --- 3. locked historical fixture build ---------------------------------------
+# --- 4. locked historical fixture build ---------------------------------------
 step "building historical rmcp 1.7.0 fixture"
 cargo build --locked --manifest-path compat/rmcp-1-client/Cargo.toml \
   --target-dir "$FIXTURE_TARGET"
@@ -121,11 +153,11 @@ if [ ! -x "$FIXTURE_BIN" ]; then
   exit 1
 fi
 
-# --- 4. historical fixture stdio smoke ----------------------------------------
+# --- 5. historical fixture stdio smoke ----------------------------------------
 step "historical rmcp 1.7.0 fixture over stdio"
 timeout "$GATE_TIMEOUT" "$FIXTURE_BIN" stdio "$BIN"
 
-# --- 5. loopback HTTP server + readiness probe --------------------------------
+# --- 6. loopback HTTP server + readiness probe --------------------------------
 mkdir -p "$REPORT_DIR"
 PROFILES_DIR="$(mktemp -d)"
 step "starting HTTP server on 127.0.0.1:$PORT (logs: $REPORT_DIR/server.log)"
@@ -162,34 +194,35 @@ if [ "$probe_code" != "200" ]; then
   exit 1
 fi
 
-# --- 6. historical fixture HTTP smoke -----------------------------------------
+# --- 7. historical fixture HTTP smoke -----------------------------------------
 step "historical rmcp 1.7.0 fixture over HTTP ($MCP_URL)"
 timeout "$GATE_TIMEOUT" "$FIXTURE_BIN" http "$MCP_URL"
 
-# --- 7. conformance (2025-11-25) ----------------------------------------------
+# --- 8. conformance (2025-11-25) ----------------------------------------------
 for sc in $SCENARIOS_2025_11_25; do
   step "conformance $sc (2025-11-25)"
-  timeout "$GATE_TIMEOUT" npx -y "$CONFORMANCE_PACKAGE" server \
+  timeout "$GATE_TIMEOUT" "$CONFORMANCE_BIN" server \
     --url "$MCP_URL" --scenario "$sc" --spec-version 2025-11-25 \
     --expected-failures "$EXPECTED_FAILURES" \
     -o "$REPORT_DIR/$sc-2025-11-25"
 done
 
-# --- 8. conformance (2026-07-28) ----------------------------------------------
+# --- 9. conformance (2026-07-28) ----------------------------------------------
 for sc in $SCENARIOS_2026_07_28; do
   step "conformance $sc (2026-07-28)"
-  timeout "$GATE_TIMEOUT" npx -y "$CONFORMANCE_PACKAGE" server \
+  timeout "$GATE_TIMEOUT" "$CONFORMANCE_BIN" server \
     --url "$MCP_URL" --scenario "$sc" --spec-version 2026-07-28 \
     --expected-failures "$EXPECTED_FAILURES" \
     -o "$REPORT_DIR/$sc-2026-07-28"
 done
 
-# --- 9. Inspector 2.0.0 interoperability smoke --------------------------------
+# --- 10. Inspector 2.0.0 interoperability smoke --------------------------------
 step "Inspector 2.0.0 interoperability smoke (2026-07-28)"
-node "$ROOT/scripts/inspector-smoke.mjs" "$MCP_URL"
+node "$ROOT/scripts/inspector-smoke.mjs" "$MCP_URL" --inspector-cmd "$INSPECTOR_BIN"
 
 # --- success summary ----------------------------------------------------------
 printf '\n==== mcp-compat: all gates passed ====\n'
+echo "  validation tooling install:       ok (npm ci --ignore-scripts, locked)"
 echo "  rmcp-1 stdio smoke:               ok"
 echo "  rmcp-1 http smoke:                ok"
 echo "  conformance 2025-11-25:           ok ($(echo "$SCENARIOS_2025_11_25" | wc -w) scenarios)"

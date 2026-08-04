@@ -1,0 +1,16 @@
+{
+  "name": "mcp-validation",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Lockfile-pinned MCP validation tooling (official conformance + Inspector). Installed with `npm ci --ignore-scripts`; lifecycle scripts are never executed and packages are never resolved dynamically via npx.",
+  "dependencies": {
+    "@modelcontextprotocol/conformance": "0.2.0-alpha.10",
+    "@modelcontextprotocol/inspector": "2.0.0"
+  },
+  "overrides": {
+    "ink": "6.8.0",
+    "ink-form": {
+      "ink-select-input": "6.2.0"
+    }
+  }
+}

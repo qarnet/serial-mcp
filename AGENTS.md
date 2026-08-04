@@ -37,10 +37,13 @@ cargo test --test native_sim_validation -- --ignored
 cargo test --test native_sim_connection_lifecycle -- --ignored --test-threads=1
 
 # The one complete MCP version compatibility gate (local and CI share this
-# exact path): locked binary build, focused Rust protocol/stdio/subscription
-# tests, real historical rmcp 1.7.0 client over stdio + HTTP, official
-# conformance scenario sets for both versions, and the pinned Inspector
-# smoke. Exact pins/scenarios live in the script, not in this file.
+# exact path): locked binary build, lockfile-pinned MCP validation tooling
+# install (`npm ci --ignore-scripts` in compat/mcp-validation — lifecycle
+# scripts disabled, local binaries only, never npx), focused Rust
+# protocol/stdio/subscription tests, real historical rmcp 1.7.0 client over
+# stdio + HTTP, official conformance scenario sets for both versions, and the
+# pinned Inspector smoke. Exact pins/scenarios live in the script and the
+# committed npm lockfile, not in this file.
 bash scripts/test-mcp-compat.sh
 
 # standalone historical fixture fmt/clippy (exact rmcp =1.7.0, own lockfile)
@@ -52,7 +55,7 @@ cargo clippy --locked --manifest-path compat/rmcp-1-client/Cargo.toml \
 python3 -m unittest discover -s scripts/tests -v
 ```
 
-- CI runs exactly: fmt -> build -> test -> clippy, plus named Ubuntu gates for config-schema validation (`cargo test --locked --test config_schema_validation`), release/documentation consistency (`cargo test --locked --test doc_drift`), and the pinned `mcp-conformance` gate, which delegates ALL compatibility execution to `scripts/test-mcp-compat.sh` (current typed/raw/stdio/subscription tests, actual rmcp 1.7.0 HTTP + stdio, both official conformance sets, and the Inspector 2.0.0 smoke — see the Phase 4 section).
+- CI runs exactly: fmt -> build -> test -> clippy, plus named Ubuntu gates for config-schema validation (`cargo test --locked --test config_schema_validation`), release/documentation consistency (`cargo test --locked --test doc_drift`), and the pinned `mcp-conformance` gate, which delegates ALL compatibility execution to `scripts/test-mcp-compat.sh` (lockfile-pinned conformance + Inspector tooling installed with `npm ci --ignore-scripts` and invoked as local binaries — no npx, no lifecycle scripts, no dynamic resolution — plus current typed/raw/stdio/subscription tests, actual rmcp 1.7.0 HTTP + stdio, both official conformance sets, and the Inspector 2.0.0 smoke — see the Phase 4 section).
 - CI and schema workflows set `RUSTFLAGS="-D warnings"`. Treat warnings as errors locally too.
 - `nix flake check` is part of CI. The source filter admits the complete `schemas/` tree (all four vendored schemas validate hermetically offline — missing fixtures fail) plus the `.github/workflows/` and `scripts/` trees (doc_drift and the registry-manifest builder tests read them at runtime — missing fixtures fail). The flake `checks` prove the filtered source ships every workflow fixture (`workflow-fixtures-present`) and that the builder unittest suite passes (`registry-manifest-builder-tests`). On Nix, prefer `nix develop` before changing firmware or release workflow bits.
 
@@ -163,7 +166,7 @@ python3 -m unittest discover -s scripts/tests -v
 - `tests/blob_resources.rs` — blob resources and resource templates.
 - `tests/tx_session.rs` — cross-module TxSession wiring.
 - `tests/proptest.rs` — property-based and boundary-value tests.
-- `tests/doc_drift.rs` — prose-vs-code drift guards: tool count across README/Cargo.toml/server.json, protocol-preset mentions, tagged `from` wire forms, capture CLI option sync, FEATURES.md shipped-items absence, `server.json` package/version rules, a CHANGELOG release contract (release-table row + body heading for the Cargo package version, `## [Unreleased]` before the current release) with synthetic negative proofs for each rule, and the Phase 4 gate guards: exactly the four documented expected-failure IDs in `conformance/expected-failures.yaml`, the pinned conformance/Inspector/Node versions in the `mcp-conformance` job (delegation to the shared runner only — no duplicated scenario loops, no `--suite all`, no `server-session-lifecycle`), the exact version-indexed scenario sets parsed from the runner's quoted shell assignments (`SCENARIOS_2025_11_25` / `SCENARIOS_2026_07_28` with exact `--spec-version` values and `-2025-11-25` / `-2026-07-28` report suffixes), the historical fixture pin (exact `=1.7.0`, `default-features = false`, required client/transport features, single lock entry, checksum `0810a9f7…f4058e`), the contract/docs wiring (policy doc, README, FEATURES, runner, expected-failure count), the Inspector smoke script wiring, and the README dual-protocol compliance claim.
+- `tests/doc_drift.rs` — prose-vs-code drift guards: tool count across README/Cargo.toml/server.json, protocol-preset mentions, tagged `from` wire forms, capture CLI option sync, FEATURES.md shipped-items absence, `server.json` package/version rules, a CHANGELOG release contract (release-table row + body heading for the Cargo package version, `## [Unreleased]` before the current release) with synthetic negative proofs for each rule, and the Phase 4 gate guards: exactly the four documented expected-failure IDs in `conformance/expected-failures.yaml`, the lockfile-pinned MCP validation npm tree (`compat/mcp-validation/` — private `package.json` with exact direct versions `@modelcontextprotocol/conformance@0.2.0-alpha.10` / `@modelcontextprotocol/inspector@2.0.0`, committed `package-lock.json` with exact lockfile-root deps plus per-package versions and `sha512-` integrity for both locked packages), the runner's `npm ci --ignore-scripts` install and direct `node_modules/.bin` invocations with no `npx` anywhere in the validation flow (delegation to the shared runner only — no duplicated scenario loops, no `--suite all`, no `server-session-lifecycle`), the exact version-indexed scenario sets parsed from the runner's quoted shell assignments (`SCENARIOS_2025_11_25` / `SCENARIOS_2026_07_28` with exact `--spec-version` values and `-2025-11-25` / `-2026-07-28` report suffixes), the historical fixture pin (exact `=1.7.0`, `default-features = false`, required client/transport features, single lock entry, checksum `0810a9f7…f4058e`), the contract/docs wiring (policy doc, README, FEATURES, runner, expected-failure count), the Inspector smoke script wiring (local locked binary default, no npx fallback), and the README dual-protocol compliance claim.
 - `tests/protocol_compatibility.rs` — version-indexed compatibility matrix indexed by exact `TestProtocol::{V2026_07_28,V2025_11_25}` (a table-driven coverage lock compares `TestProtocol::ALL` against the raw `server/discover` `supportedVersions` wire output) plus the Phase 4 cache wire proofs: typed modern `ttlMs: Some(0)` / `cacheScope: Private` on every cacheable family and typed legacy absence; raw modern `ttlMs: 0` / `cacheScope: "private"` presence and raw legacy absence; `resultType` modern-present/legacy-absent; cursor-page behavior of the manual `tools/list`/`prompts/list` handlers. Raw expectations are fixture-local, never derived from production `src/mcp_protocol.rs`.
 - `tests/config_schema_validation.rs` validates all three vendored example configs (Claude Code, Codex, opencode) hermetically and offline — the vendored `models.dev` document is registered in memory under its original URI, a no-network retriever fails on anything else, and missing/malformed schema or instance fixtures fail the run (no skip path). Only the ignored case fetches latest upstream schemas.
 - `tests/native_sim_validation.rs` — native_sim firmware over PTY. 43 tests, pure software, fast (no hardware). Env: `SERIAL_MCP_NATIVE_SIM_BIN` (default `build/native_sim/firmware/zephyr/zephyr.exe`). Thin wrapper; all tests + helpers live in `tests/native_sim_validation/unix.rs` (Unix-only via `#[cfg(unix)]` module gate), with an empty `windows.rs` stub for future Windows-specific tests.
@@ -389,7 +392,10 @@ only the implementation invariants an agent must not break.
   manual list handlers).
 - **Single shared runner + expected-failure hard gate.** ALL compatibility
   execution — local and CI — delegates to `scripts/test-mcp-compat.sh`
-  (`set -euo pipefail`, GNU `timeout` per fixture/conformance invocation);
+  (`set -euo pipefail`, GNU `timeout` per fixture/conformance invocation),
+  which first installs the lockfile-pinned validation tooling with
+  `npm ci --ignore-scripts` and then invokes the local `node_modules/.bin`
+  binaries directly (no npx);
   the CI `mcp-conformance` job owns only environment setup, the time bound,
   and report upload — no duplicated scenario loops, no `--suite all`.
   `conformance/expected-failures.yaml` baselines exactly the four documented
@@ -408,11 +414,23 @@ only the implementation invariants an agent must not break.
   single rmcp entry resolves `1.7.0` with checksum
   `0810a9f717d9828f475fe1f629f4c305c8464b7f496c3a854b58d29e65f4058e`
   (drift-guarded). It never depends on serial-mcp internals.
+- **Lockfile-pinned MCP validation tooling** (`compat/mcp-validation/`):
+  conformance and Inspector are installed ONLY from the committed
+  `package-lock.json` (private `package.json`, exact direct versions
+  `@modelcontextprotocol/conformance@0.2.0-alpha.10` and
+  `@modelcontextprotocol/inspector@2.0.0` — no `^`/`~`/tags/ranges, every
+  transitive version + `sha512-` integrity hash locked) via
+  `npm ci --ignore-scripts` — lifecycle scripts are NEVER permitted to run
+  (preinstall supply-chain hardening), and validation never resolves packages
+  dynamically with `npx`. The runner invokes the project's local
+  `node_modules/.bin/conformance` / `.bin/mcp-inspector` binaries directly.
+  `node_modules/` stays gitignored; only lockfile semantics are committed.
 - **Pinned Inspector 2.0.0 interoperability smoke** — interoperability, NOT
   conformance (named separately in the same CI job):
   `node scripts/inspector-smoke.mjs <server-url>` — Node-stdlib-only, exact
-  installed binary (`INSPECTOR_CMD`/`--inspector-cmd`) or exact pinned `npx`
-  package `@modelcontextprotocol/inspector@2.0.0` fallback, per-command hard
+  installed binary (`INSPECTOR_CMD`/`--inspector-cmd`) with the lockfile-pinned
+  `compat/mcp-validation/node_modules/.bin/mcp-inspector` as the default (no
+  npx fallback, no dynamic resolution), per-command hard
   timeout, parses `--format json`, noninteractive
   (`MCP_AUTO_OPEN_ENABLED=false`, bounded `--connect-timeout`, non-TTY — no
   `--stored-auth-only`). It writes a temp session config with

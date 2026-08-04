@@ -33,18 +33,6 @@
       ],
       "enabled": true
     },
-    "searxng": {
-      "type": "local",
-      "command": [
-        "npx",
-        "-y",
-        "mcp-searxng@v1.0.5"
-      ],
-      "environment": {
-        "SEARXNG_URL": "https://search.lan.karnetvr.com/"
-      },
-      "enabled": true
-    },
     "nordic-semiconductor-docs": {
       "enabled": true
     },

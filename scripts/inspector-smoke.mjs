@@ -31,15 +31,30 @@
 //   - the INSPECTOR_CMD env var — ONE executable path, never whitespace-split
 //     (paths with spaces remain intact); use --inspector-cmd when the command
 //     needs args;
-//   - otherwise the exact pinned `npx` package
-//     `@modelcontextprotocol/inspector@2.0.0`. No floating versions.
+//   - otherwise the local locked binary
+//     `compat/mcp-validation/node_modules/.bin/mcp-inspector` (resolved
+//     relative to this script; installed from the committed package-lock.json
+//     via `npm ci --ignore-scripts`). NEVER npx and never a dynamic package
+//     resolution — the validation tree is lockfile-pinned with lifecycle
+//     scripts disabled.
 
 import { spawn } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 const PINNED_INSPECTOR_PACKAGE = "@modelcontextprotocol/inspector@2.0.0";
+const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
+const LOCKED_INSPECTOR_BIN = join(
+  SCRIPT_DIR,
+  "..",
+  "compat",
+  "mcp-validation",
+  "node_modules",
+  ".bin",
+  "mcp-inspector",
+);
 const SERVER_NAME = "serial-mcp";
 const MODERN_VERSION = "2026-07-28";
 const EXPECTED_TOOLS = 25;
@@ -87,7 +102,16 @@ function inspectorCommand(argv) {
   if (envCmd) {
     return [envCmd];
   }
-  return ["npx", "-y", PINNED_INSPECTOR_PACKAGE];
+  if (!existsSync(LOCKED_INSPECTOR_BIN)) {
+    console.error(
+      `error: locked Inspector binary not found at ${LOCKED_INSPECTOR_BIN};\n` +
+        "  install the lockfile-pinned validation tree first:\n" +
+        "    npm ci --ignore-scripts --prefix compat/mcp-validation\n" +
+        `  (exact package: ${PINNED_INSPECTOR_PACKAGE}; never resolved dynamically)`,
+    );
+    process.exit(2);
+  }
+  return [LOCKED_INSPECTOR_BIN];
 }
 
 // One CLI invocation with a hard per-command timeout. Resolves with parsed

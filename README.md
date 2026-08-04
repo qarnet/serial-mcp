@@ -197,9 +197,11 @@ serial-mcp [OPTIONS]
 Compliant with **MCP `2025-11-25`** (legacy session lifecycle) and **MCP
 `2026-07-28`** (modern discovery/stateless, SEP-2549 cache fields), with a
 port allowlist, stdio plus HTTP transports, and pinned official conformance +
-Inspector interoperability gates in CI. Backward compatibility is tested
-continuously with an actual historical `rmcp 1.7.0` client over both HTTP and
-stdio. The one complete local/CI version gate:
+Inspector interoperability gates in CI — validation tooling is installed from
+a committed npm lockfile (`npm ci --ignore-scripts`, lifecycle scripts
+disabled) and run as local binaries, never via npx. Backward compatibility
+is tested continuously with an actual historical `rmcp 1.7.0` client over
+both HTTP and stdio. The one complete local/CI version gate:
 
 ```bash
 bash scripts/test-mcp-compat.sh
