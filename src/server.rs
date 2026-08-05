@@ -742,8 +742,8 @@ impl SerialHandler {
 /// Every `#[tool]` method's generated attribute is collected here so schema
 /// tests (`src/tools/mod.rs`) and the xtask `agent-eval` catalog metrics
 /// consume the SAME tool attributes the MCP router serves — no duplicated
-/// 27-tool enumeration can drift from the router. Keep this list in sync
-/// with the `#[tool]` methods above; `tool_catalog_has_exactly_twenty_seven_tools`
+/// 25-tool enumeration can drift from the router. Keep this list in sync
+/// with the `#[tool]` methods above; `tool_catalog_has_exactly_twenty_five_tools`
 /// guards the count.
 pub fn tool_catalog() -> Vec<rmcp::model::Tool> {
     vec![

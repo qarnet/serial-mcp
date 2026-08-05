@@ -627,15 +627,10 @@ impl FrameDecoder {
         })
     }
 
-    /// Feed a chunk of bytes. Returns any complete frames found, or a
-    /// [`FrameDecodeError`] for protocol violations (SLIP malformed escape).
-    /// The caller is responsible for draining consumed bytes from their
-    /// accumulation buffer.
-    /// Feed a chunk of bytes. Returns any complete frames found in a
-    /// [`PushOutcome`] that carries both the decoded frames and any
-    /// stream-fatal error (SLIP malformed escape, COBS invalid code).
-    /// Per-frame checksum mismatches are counted in `frames_dropped`
-    /// and do NOT set `error`.
+    /// Feed a chunk of bytes and return the decoded frames in a
+    /// [`PushOutcome`] that carries both the frames and any stream-fatal
+    /// error (SLIP malformed escape, COBS invalid code). Per-frame checksum
+    /// mismatches are counted in `frames_dropped` and do NOT set `error`.
     /// The caller is responsible for draining consumed bytes from their
     /// accumulation buffer.
     pub fn push(&mut self, chunk: &[u8]) -> PushOutcome {
