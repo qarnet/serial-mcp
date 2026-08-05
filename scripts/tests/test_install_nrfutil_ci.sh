@@ -10,7 +10,7 @@
 #
 # Covered cases:
 #   1. missing required env vars           -> fail, no destination
-#   2. SHA-256 mismatch                    -> fail, no destination, staging kept
+#   2. SHA-256 mismatch                    -> fail, no destination, staging cleaned
 #   3. archive missing bin/nrfutil         -> fail, no destination
 #   4. non-executable bin/nrfutil          -> fail, no destination
 #   5. happy path                          -> destination published with both

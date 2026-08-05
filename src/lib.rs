@@ -1,3 +1,17 @@
+//! MCP server for serial port communication.
+//!
+//! The primary interface is [`SerialHandler`], built via
+//! [`SerialHandler::builder`] (or [`SerialHandler::new`] for defaults): an MCP
+//! server surface exposing the 25 serial tools, resources, and prompts over
+//! stdio or streamable HTTP. The `serial-mcp` binary wires the full
+//! configuration surface (`--allowlist`, `--profiles-path`, `--capture-dir`,
+//! buffer budgets). For agent-facing contracts — tool semantics, the RX
+//! cursor model, framing/parser presets, device profiles, and persistent
+//! capture — see the README and the guides under `docs/`.
+//!
+//! The library is published for programmatic server embedding; it is not a
+//! client API.
+
 pub mod buffer_budget;
 pub mod capture_store;
 pub(crate) mod checksums;
