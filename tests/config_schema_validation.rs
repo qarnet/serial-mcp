@@ -273,6 +273,11 @@ fn opencode_with_vendored_models_resource_compiles_and_validates() {
 #[test]
 #[ignore = "requires network; checks latest upstream schemas"]
 fn example_configs_match_latest_upstream_schemas() {
+    // This ignored test deliberately relies on jsonschema's default HTTP
+    // resolver via `validator_for`: upstream schemas (e.g. opencode ->
+    // models.dev) may `$ref` arbitrary transitive URLs that must resolve over
+    // the network. Local helpers stay hermetic because they inject the
+    // `NoNetworkRetriever`; there is no behavior special-case for models.dev.
     for case in remote_cases() {
         let schema = fetch_json(case.schema_url);
         // The local instance file is mandatory here too; only the schema is
