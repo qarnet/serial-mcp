@@ -1,6 +1,6 @@
 use jsonschema::{Resource, Retrieve, Uri};
 use serde_json::Value;
-use std::{fmt, fs, path::Path, path::PathBuf};
+use std::{fmt, fs, path::Path, path::PathBuf, time::Duration};
 
 /// Crate root, so fixture paths never depend on the process current
 /// directory.
@@ -105,14 +105,95 @@ fn compile_local_without_models_resource(schema: &Value) -> Result<jsonschema::V
         .map_err(|err| err.to_string())
 }
 
-fn fetch_json(url: &str) -> Value {
-    reqwest::blocking::get(url)
-        .unwrap_or_else(|err| panic!("failed to fetch schema {url}: {err}"))
-        .error_for_status()
-        .unwrap_or_else(|err| panic!("schema URL returned HTTP error {url}: {err}"))
-        .json()
-        .unwrap_or_else(|err| panic!("failed to parse schema JSON from {url}: {err}"))
+/// Bounded HTTPS-only schema fetcher for the ignored latest-upstream test.
+///
+/// Root schema fetches and transitive `$ref` retrieval share one configured
+/// blocking client (30 s timeout, descriptive user agent). The retriever is
+/// explicit rather than jsonschema's built-in HTTP resolver so jsonschema's
+/// transport features stay off: enabling them would unify reqwest 0.13 TLS
+/// features process-wide and break unrelated runtime clients (reqwest 0.13's
+/// `rustls-no-provider` requires a crypto provider installed before building
+/// a client). This path uses the project's own reqwest 0.12 blocking client,
+/// which configures its own provider, so only this test touches the network.
+const SCHEMA_FETCH_TIMEOUT: Duration = Duration::from_secs(30);
+const SCHEMA_FETCH_USER_AGENT: &str = "serial-mcp-schema-drift-check";
+
+#[derive(Debug, Clone)]
+struct SchemaFetchClient {
+    client: reqwest::blocking::Client,
 }
+
+impl SchemaFetchClient {
+    fn new() -> Result<Self, String> {
+        let client = reqwest::blocking::Client::builder()
+            .user_agent(SCHEMA_FETCH_USER_AGENT)
+            .timeout(SCHEMA_FETCH_TIMEOUT)
+            .build()
+            .map_err(|err| format!("failed to build schema fetch client: {err}"))?;
+        Ok(Self { client })
+    }
+
+    /// Enforce the HTTPS-only boundary before any network I/O: external
+    /// schema documents are fetched over HTTPS or not at all.
+    fn https_only(url: &str) -> Result<(), String> {
+        if url.starts_with("https://") {
+            Ok(())
+        } else {
+            Err(format!(
+                "schema reference {url} is not HTTPS; external schema retrieval is HTTPS-only"
+            ))
+        }
+    }
+
+    /// Fetch and parse a schema document. Every failure keeps the URL plus
+    /// transport, HTTP-status, or JSON context.
+    fn fetch_value(&self, url: &str) -> Result<Value, String> {
+        Self::https_only(url)?;
+        let response = self
+            .client
+            .get(url)
+            .send()
+            .map_err(|err| format!("failed to fetch schema {url}: {err}"))?;
+        let status = response.status();
+        let response = response
+            .error_for_status()
+            .map_err(|err| format!("schema URL returned HTTP error {url}: {err}"))?;
+        let text = response
+            .text()
+            .map_err(|err| format!("failed to read schema body {url}: {err}"))?;
+        serde_json::from_str(&text)
+            .map_err(|err| format!("failed to parse schema JSON from {url} (HTTP {status}): {err}"))
+    }
+}
+
+impl Retrieve for SchemaFetchClient {
+    fn retrieve(
+        &self,
+        uri: &Uri<String>,
+    ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+        // The URI is resolved to an absolute reference by jsonschema before
+        // retrieval; the HTTPS-only check still runs here so a non-HTTPS
+        // external `$ref` fails before any request is attempted.
+        let url = uri.as_str();
+        Self::https_only(url).map_err(|err| Box::new(SchemaRetrievalError(err)))?;
+        self.fetch_value(url).map_err(|err| {
+            let boxed: Box<dyn std::error::Error + Send + Sync> =
+                Box::new(SchemaRetrievalError(err));
+            boxed
+        })
+    }
+}
+
+#[derive(Debug)]
+struct SchemaRetrievalError(String);
+
+impl fmt::Display for SchemaRetrievalError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for SchemaRetrievalError {}
 
 fn validate_instance(
     name: &str,
@@ -273,18 +354,55 @@ fn opencode_with_vendored_models_resource_compiles_and_validates() {
 #[test]
 #[ignore = "requires network; checks latest upstream schemas"]
 fn example_configs_match_latest_upstream_schemas() {
+    // Generic HTTPS transitive resolution: upstream schemas (e.g. opencode ->
+    // models.dev) may `$ref` arbitrary remote documents, so the retriever
+    // must fetch any transitive HTTPS URL. This uses an explicit bounded
+    // retriever instead of enabling jsonschema's built-in transport features,
+    // which would globally change reqwest's TLS setup and break runtime
+    // clients; the local path stays fail-closed via `NoNetworkRetriever`.
+    let client = SchemaFetchClient::new().unwrap_or_else(|err| panic!("{err}"));
     for case in remote_cases() {
-        let schema = fetch_json(case.schema_url);
+        let schema = client
+            .fetch_value(case.schema_url)
+            .unwrap_or_else(|err| panic!("{err}"));
         // The local instance file is mandatory here too; only the schema is
         // allowed to come from the network.
         let instance =
             load_json_file(&fixture_path(case.instance_path)).unwrap_or_else(|err| panic!("{err}"));
-        let compiled = jsonschema::validator_for(&schema).unwrap_or_else(|err| {
-            panic!(
-                "invalid schema for {} ({}): {err}",
-                case.name, case.schema_url
-            )
-        });
+        let compiled = jsonschema::options()
+            .with_retriever(client.clone())
+            .build(&schema)
+            .unwrap_or_else(|err| {
+                panic!(
+                    "invalid schema for {} ({}): {err}",
+                    case.name, case.schema_url
+                )
+            });
         validate_instance(case.name, case.schema_url, &compiled, &instance);
     }
+}
+
+#[test]
+fn remote_retriever_rejects_non_https_references() {
+    // Deterministic and network-free: the retriever must reject a plain-HTTP
+    // external `$ref` before any request is attempted, proving the HTTPS-only
+    // boundary of the network path.
+    let client = SchemaFetchClient::new().unwrap_or_else(|err| panic!("{err}"));
+    let schema = serde_json::json!({ "$ref": "http://example.invalid/transitive-schema.json" });
+    let err = format!(
+        "{}",
+        jsonschema::options()
+            .with_retriever(client)
+            .build(&schema)
+            .map(|_| ())
+            .expect_err("non-HTTPS external $ref must fail schema compilation")
+    );
+    assert!(
+        err.contains("http://example.invalid/transitive-schema.json"),
+        "error must name the rejected URI: {err}"
+    );
+    assert!(
+        err.contains("HTTPS-only"),
+        "error must state the HTTPS-only policy: {err}"
+    );
 }
