@@ -1,4 +1,4 @@
-//! Layer 2 — HTTP transport integration tests.
+//! HTTP transport integration tests.
 //!
 //! These tests run an in-process `SerialHandler` behind `axum`, connect a
 //! real `rmcp` HTTP client, and assert the MCP surface (tools, resources,

@@ -107,7 +107,7 @@ async fn release_reset_lines(
 /// The shared `read` cursor is never moved and ring history stays readable.
 /// The result stays in memory (`max_buffered_bytes` bounds it); there is no
 /// file output. Line release is guaranteed on every path via
-/// [`ResetReleaseGuard`].
+/// `ResetReleaseGuard`.
 #[allow(clippy::too_many_arguments)]
 pub async fn capture_boot(
     connections: &Arc<ConnectionManager>,

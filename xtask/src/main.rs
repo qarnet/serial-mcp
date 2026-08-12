@@ -16,11 +16,9 @@
 //!   before the first test run.
 //!
 //! - `xtask test`
-//!   Run the same test set CI runs: unit tests + the four
-//!   process-level integration suites (stdio, blob resources,
-//!   native_sim validation, native_sim lifecycle). Firmware-required
-//!   suites are skipped with a clear message if the firmware build
-//!   helpers are not on PATH.
+//!   Run unit tests plus four process-level integration suites (stdio, blob
+//!   resources, native_sim validation, native_sim lifecycle). Missing test
+//!   assets are built through the shared test helpers.
 //!
 //! - `xtask test-all`
 //!   Like `test`, plus the HTTP integration suite. The HTTP suite
@@ -33,11 +31,11 @@
 //!   Useful for debugging test wiring and for AGENTS.md cross-checks.
 //!
 //! - `xtask agent-eval [--output-dir PATH] [--baseline PATH] [--write-baseline PATH]`
-//!   Run the deterministic agent-interface evaluation (Phase 4): catalog
-//!   bytes from the live `tools/list` catalog plus fixed call-shape
-//!   scenarios, then fixed decision thresholds. Writes `report.json` and
-//!   `report.md` under `target/agent-interface-eval/` by default. No
-//!   network, user config, or timestamps.
+//!   Run the deterministic agent-interface evaluation: catalog bytes from the
+//!   live `tools/list` catalog plus fixed call-shape scenarios and decision
+//!   thresholds. Writes `report.json` and `report.md` under
+//!   `target/agent-interface-eval/` by default. No network, user config, or
+//!   timestamps.
 
 use std::path::PathBuf;
 use std::process::{Command, Stdio};

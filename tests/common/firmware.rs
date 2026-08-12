@@ -12,13 +12,9 @@
 //!
 //! 3. Auto-build: if the expected binary is missing, the test process
 //!    invokes the repo's `fw-build-native` helper, which produces a
-//!    pristine build with `compile_commands.json` for the LSP. Build is
-//!    guarded by a process-global `OnceLock` so concurrent test threads
-//!    share a single `west` invocation.
+//!    pristine build with `compile_commands.json` for the LSP.
 //!
-//! These helpers are intentionally synchronous: they are called from
-//! preludes and from `Once`-guarded setup blocks, not from inside
-//! async test bodies. Spawning the firmware itself is owned by
+//! These helpers are synchronous. Spawning the firmware itself is owned by
 //! [`NativeSimFirmware::spawn`] (async, cross-platform Tokio process
 //! I/O), which builds the binary on demand, discovers the PTY path from
 //! stdout, drains the remaining output in a background task, and kills
@@ -74,16 +70,16 @@ fn firmware_bin_for_variant(variant: &str, env_var: &str) -> PathBuf {
 /// Build the `native_sim` firmware if it is not already on disk.
 ///
 /// Returns the resolved path (identical to [`plain_firmware_bin`]).
-/// The build runs at most once per test process; subsequent calls just
-/// re-check the artifact and return the path.
+/// Existing artifacts are reused; otherwise the repository helper builds the
+/// firmware.
 pub fn ensure_plain_firmware_built() -> Result<PathBuf> {
     ensure_firmware_built(PLAIN_VARIANT, PLAIN_BIN_ENV, "fw-build-native")
 }
 
 fn ensure_firmware_built(variant: &str, env_var: &str, helper: &str) -> Result<PathBuf> {
-    // A process-global flag is enough — concurrent callers race on the
-    // same `west build`; the artifact check after the build absorbs
-    // that race.
+    // Record entry into the auto-build path. This does not serialize `west`;
+    // native_sim suites run with `--test-threads=1`, and callers reuse an
+    // artifact that already exists.
     static BUILT: OnceLock<()> = OnceLock::new();
     let bin = firmware_bin_for_variant(variant, env_var);
     if bin.is_file() {

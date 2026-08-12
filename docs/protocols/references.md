@@ -86,7 +86,7 @@ behavior), see [../protocols.md](../protocols.md).
 - **Modbus RTU** — Modbus over Serial Line, RTU mode (binary frames with
   CRC-16). Tracked in FEATURES.md; the `checksums.rs` module will gain a
   CRC-16 function and the `Checksum` trait abstraction will return when
-  there is a second checksum width to abstract over (see Phase 2F note).
+  there is a second checksum width to abstract over.
 
 ## Attribution
 

@@ -617,7 +617,7 @@ pub fn tool_request(name: &'static str, args: serde_json::Value) -> CallToolRequ
     CallToolRequestParams::new(name).with_arguments(args_object(args))
 }
 
-// ---- Unix PTY pair (Layer 3) ------------------------------------------------
+// ---- Unix PTY pair ----------------------------------------------------------
 //
 // `openpty` on Linux/macOS gives back a master fd and a slave fd whose
 // device path (`/dev/pts/N`) can be opened by `tokio_serial::SerialStream`

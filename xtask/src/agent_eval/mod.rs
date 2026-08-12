@@ -1,9 +1,9 @@
-//! Deterministic agent-interface evaluation (Phase 4).
+//! Deterministic agent-interface evaluation.
 //!
 //! `xtask agent-eval` measures the real `tools/list` catalog (via
 //! `serial_mcp::server::tool_catalog`) plus representative fixed call
-//! scenarios, applies the fixed decision thresholds from the Phase 4
-//! handoff, and writes `report.json` + `report.md` under
+//! scenarios, applies fixed decision thresholds, and writes `report.json` +
+//! `report.md` under
 //! `target/agent-interface-eval/` (or `--output-dir`).
 //!
 //! Determinism contract: no timestamps, hostnames, absolute temp paths,

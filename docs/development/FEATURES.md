@@ -97,8 +97,8 @@
 - candidates: long `read`, `transact`, `capture_boot`, `send_break`, and any
   future firmware/file-transfer operation; keep normal synchronous execution
   for clients that do not declare Tasks support
-- not a replacement for open-ended RX availability notifications: rmcp 3.0.1
-  clients must poll task state and task-status delivery through
+- not a replacement for open-ended RX availability notifications: current
+  rmcp clients must poll task state and task-status delivery through
   `subscriptions/listen` is not available yet
 - needs ownership/lifecycle design for connection close, client disconnect,
   server restart, task expiry, profile learning, and partial serial results

@@ -14,10 +14,6 @@
 //!   JSON-RPC error codes, `resultType` presence, and response-ID echo
 //!   without typed rmcp result deserialization.
 //!
-//! Wire facts are pinned to rmcp 3.0.1 behavior (see
-//! `crates/rmcp/src/transport/streamable_http_server/tower.rs` and
-//! `crates/rmcp/src/handler/server.rs` in the pinned SDK source).
-//!
 //! Raw expected values never derive from production `src/mcp_protocol.rs`:
 //! the two layers stay independent so implementation and expectation cannot
 //! fail together. The coverage lock test at the bottom compares the
@@ -57,8 +53,7 @@ fn capabilities_2025_11_25_json() -> Value {
 }
 
 /// Expected `2026-07-28` capability wire shape: common set plus
-/// `resources.subscribe` (Phase 3 resource subscriptions; no list-change
-/// flags).
+/// `resources.subscribe` with no list-change flags.
 fn capabilities_2026_07_28_json() -> Value {
     json!({
         "completions": {},
@@ -1268,11 +1263,10 @@ async fn raw_2025_11_25_ping_succeeds_and_subscription_methods_are_method_not_fo
 
 #[tokio::test]
 async fn raw_2025_11_25_listen_stays_method_not_found() {
-    // Phase 3: modern `subscriptions/listen` is implemented (typed coverage
-    // lives in tests/resource_subscriptions.rs — a raw modern listen is a
-    // long-lived SSE stream that only completes on cancellation, so it is
-    // exercised through typed clients). The legacy `2025-11-25` lifecycle
-    // must NOT see the modern subscription surface: rmcp gates the method
+    // Modern `subscriptions/listen` coverage lives in
+    // tests/resource_subscriptions.rs. A raw modern listen is a long-lived
+    // SSE stream that only completes on cancellation, so typed clients drive
+    // it. Legacy `2025-11-25` must not see that surface: rmcp gates the method
     // and the server returns `-32601` inside an SSE 200.
     let server = common::spawned::SpawnedServer::start().await;
     let (session, _init) = raw_2025_11_25_session(&server.url).await;

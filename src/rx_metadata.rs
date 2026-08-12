@@ -18,7 +18,7 @@ pub enum RxStopReason {
     DataComplete,
     /// The requested timeout elapsed before the operation could finish normally.
     Timeout,
-    /// The literal byte-substring pattern was found in the accumulated buffer.
+    /// The configured match pattern was found in the accumulated buffer.
     MatchFound,
     /// The max_bytes limit was reached before the operation could finish otherwise.
     MaxBufferedBytes,

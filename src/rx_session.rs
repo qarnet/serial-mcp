@@ -2,7 +2,7 @@
 //!
 //! Each open serial connection has at most one [`RxSession`], which owns
 //! a single background pump task that reads from the serial port. The pump
-//! appends every received byte to a per-connection [`RxRing`].
+//! appends every received byte to a per-connection `RxRing`.
 //!
 //! The pump runs from `open` to `close` — bytes are captured regardless of
 //! active tool calls. The ring is a budgeted allocation charged at open and
@@ -33,9 +33,9 @@ use crate::serial::SerialConnection;
 
 // ---- Per-connection session ------------------------------------------------
 
-/// Manages one pump task and its registered consumers for a single connection.
+/// Manages one pump task, RX ring, and shared read cursor for one connection.
 ///
-/// The [`RxRing`] captures all RX bytes from open to close. The pump appends
+/// The `RxRing` captures all RX bytes from open to close. The pump appends
 /// to the ring. `read` reads from the ring via cursors.
 pub struct RxSession {
     connection_id: String,
@@ -1072,10 +1072,10 @@ mod tests {
         session.shutdown_and_join().await;
     }
 
-    // ── NEW: Pump publishes resource hints only after ring append ─────────
+    // ── Pump publishes resource hints only after ring append ──────────────
 
     /// The pump publishes connection detail/raw/log resource hints AFTER the
-    /// ring append and OUTSIDE the pump gate (Phase 3).
+    /// ring append and OUTSIDE the pump gate.
     ///
     /// All synchronization is event-driven with the same [`PumpGateIo`]
     /// backend as the gate test: while the pump's read is in flight (payload

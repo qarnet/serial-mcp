@@ -117,7 +117,7 @@ pub enum RxFramingMode {
     /// COBS (Consistent Overhead Byte Stuffing) framing. Byte-stuffed payloads
     /// delimited by 0x00 (plain COBS, Cheshire/Baker). The delimiter never
     /// appears inside an encoded block. The PPP-COBS draft variant (0x7E) is
-    /// not supported; it is tracked for a future PR.
+    /// not supported.
     #[serde(rename_all = "snake_case")]
     Cobs,
 }
@@ -329,7 +329,7 @@ pub enum TxFramingMode {
     /// COBS (Consistent Overhead Byte Stuffing) framing. Byte-stuffed payload
     /// followed by 0x00 delimiter (plain COBS). The delimiter never appears
     /// inside an encoded block. The PPP-COBS draft variant (0x7E) is not
-    /// supported; it is tracked for a future PR.
+    /// supported.
     #[serde(rename_all = "snake_case")]
     Cobs,
     /// NMEA-0183 sentence framing: `$<payload>*XX\r\n` with the `*XX` XOR

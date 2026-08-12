@@ -246,7 +246,7 @@ pub struct OpenProfileArgs {
 
 // ---- Response structs ------------------------------------------------------
 
-/// Preview outcome of automatic profile selection for one port (Phase 4).
+/// Preview outcome of automatic profile selection for one port.
 ///
 /// Mirrors what a bare `open(port=...)` would do, WITHOUT marking any
 /// profile used or mutating the store:
@@ -261,8 +261,8 @@ pub struct OpenProfileArgs {
 /// - `duplicate`: another live port shares this port's high fingerprint, so
 ///   settings are never applied automatically to an indistinguishable
 ///   device.
-/// - `none`: no matching profile; a bare open starts a fresh generated
-///   session for a high-confidence device.
+/// - `none`: no matching profile; a bare open starts a generated session for
+///   a high-confidence device or a transient session for weaker identity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ProfileMatchOutcome {
@@ -277,7 +277,7 @@ pub enum ProfileMatchOutcome {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ProfileMatchCandidate {
     pub profile_name: String,
-    /// Whether the profile was auto-generated (Phase 3A).
+    /// Whether the profile was created by automatic session handling.
     pub generated: bool,
     /// Profile revision at preview time.
     #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
@@ -719,7 +719,7 @@ pub struct DeleteProfileResult {
     pub profile_name: String,
 }
 
-/// Roll a profile back to a prior retained revision (Phase 3B).
+/// Roll a profile back to a prior retained revision.
 ///
 /// Restores the snapshot's selector/defaults as a NEW monotonic revision;
 /// active connections bound to the profile remain unchanged and become

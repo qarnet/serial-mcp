@@ -40,7 +40,7 @@ pub enum IdentityConfidence {
     None,
 }
 
-/// Outcome of a write-through profile persistence attempt (Phase 3B).
+/// Outcome of a write-through profile persistence attempt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ProfilePersistenceState {
@@ -124,14 +124,14 @@ pub struct ProfileSessionResult {
     pub confidence: IdentityConfidence,
     /// Whether the session is backed by a durable profile.
     pub persistent: bool,
-    /// Whether the bound profile was auto-generated (Phase 3A).
+    /// Whether the bound profile was created by automatic session handling.
     pub generated: bool,
     /// Bound profile's revision at selection time. `null` for
     /// transient/disabled sessions.
     #[schemars(schema_with = "crate::schema_helpers::option_uint_schema")]
     pub revision: Option<u64>,
-    /// `true` when explicit open fields override the selected profile's
-    /// defaults (3B persists the effective settings on durable operations).
+    /// `true` when the connection's effective defaults still need to be
+    /// persisted to the selected profile.
     pub dirty: bool,
     /// `true` when the durable profile revision changed externally (CAS
     /// conflict or rollback) and this connection must not overwrite it.
@@ -316,8 +316,8 @@ pub struct Profile {
     pub selector: ProfileSelector,
     #[serde(default)]
     pub defaults: ProfileDefaults,
-    /// Bookkeeping metadata (revision, timestamps, generated flag).
-    /// Phase 3 uses `last_used_at_ms`/`use_count` for selection ranking.
+    /// Bookkeeping metadata (revision, timestamps, generated flag). Automatic
+    /// selection ranks candidates by `last_used_at_ms`.
     #[serde(default)]
     pub metadata: ProfileMetadata,
     /// Bounded history of prior selector/defaults snapshots. Empty for
@@ -329,8 +329,8 @@ pub struct Profile {
 /// Per-profile bookkeeping metadata.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 pub struct ProfileMetadata {
-    /// True when the profile was created by automatic session machinery
-    /// (Phase 3), false for profiles created by explicit tools.
+    /// True when automatic session handling created the profile; false for
+    /// profiles created by explicit tools.
     pub generated: bool,
     /// Monotonic revision number. Legacy/unversioned profiles default to 0
     /// and become 1 on their first update.
@@ -342,10 +342,10 @@ pub struct ProfileMetadata {
     /// Last mutation timestamp (ms since Unix epoch).
     #[schemars(schema_with = "crate::schema_helpers::option_uint_schema")]
     pub updated_at_ms: Option<u64>,
-    /// Last open/selection timestamp (ms since Unix epoch). Phase 3 only.
+    /// Last open/selection timestamp (ms since Unix epoch).
     #[schemars(schema_with = "crate::schema_helpers::option_uint_schema")]
     pub last_used_at_ms: Option<u64>,
-    /// Number of times the profile was used/selected. Phase 3 only.
+    /// Number of times the profile was used or selected.
     #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
     pub use_count: u64,
 }

@@ -21,13 +21,6 @@
 //! `#[schemars(schema_with = "crate::schema_helpers::uint_schema")]`
 //! (or `option_uint_schema` for `Option<uN>`).
 //!
-//! Regression history:
-//! - `b12b09fd` — initial fix for u32/u64/usize fields in tools/resources/prompts.
-//! - `bc37a0b0` — follow-up for two new u64 fields.
-//! - This commit — `PortInfo` (u16 vid/pid, u8 interface) added without
-//!   overrides because the existing test only scanned `uint`/`uint32`/`uint64`
-//!   and missed `uint8`/`uint16`.
-//!
 //! **Guards:** `serial::schema` (per-type schema scan, covers all known public
 //! `JsonSchema` types) and `tools::tests::tool_schemas_have_no_nonstandard_uint_formats`
 //! (tool `outputSchema` string scan, now covers uint8/uint16/uint32/uint64).

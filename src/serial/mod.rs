@@ -11,9 +11,8 @@
 //! The implementation is split into focused submodules: configuration types
 //! and defaults (`config`), OS port enumeration (`port_info`), the connection
 //! and its I/O backend (`connection`), the multi-connection registry
-//! (`manager`), and in-memory test backends (`test_support`). Everything
-//! formerly public at `crate::serial::*` is re-exported here at the flat
-//! original path.
+//! (`manager`), and in-memory test backends (`test_support`). Public types are
+//! re-exported at `crate::serial::*`.
 
 mod config;
 mod connection;
@@ -32,14 +31,8 @@ pub use manager::{ConnectionManager, ConnectionOpener};
 pub use port_info::{PortInfo, PortProvider, PortTransport, SystemPortProvider};
 
 // =============================================================================
-// JSON Schema regression tests — DO NOT DELETE.
+// JSON Schema unsigned-integer regression guards.
 //
-// These tests guard against the schemars "non-standard uint format" regression
-// that has bitten this crate repeatedly (commits b12b09fd, bc37a0b0, and the
-// regression fixed in this commit on `PortInfo`).
-//
-// Background
-// ----------
 // schemars (1.x) emits a `"format": "uintN"` keyword for unsigned integer
 // types: `uint8`, `uint16`, `uint32`, `uint64`, `uint`. None of these are part
 // of the JSON Schema spec. Validators (jsonschema, AJV, …) log a warning like
@@ -51,9 +44,6 @@ pub use port_info::{PortInfo, PortProvider, PortTransport, SystemPortProvider};
 // Every time a new struct with a `uN`/`Option<uN>` field is added and derives
 // `JsonSchema`, it MUST annotate that field with `crate::schema_helpers::uint_schema`
 // (for `uN`) or `crate::schema_helpers::option_uint_schema` (for `Option<uN>`).
-//
-// Why this keeps coming back
-// --------------------------
 // The previous guard (`tool_schemas_have_no_nonstandard_uint_formats` in
 // `src/tools/mod.rs`) only checked the tool `outputSchema` strings and only
 // asserted on `uint`/`uint32`/`uint64`. It missed:
@@ -61,13 +51,11 @@ pub use port_info::{PortInfo, PortProvider, PortTransport, SystemPortProvider};
 //   2. Types that appear in resource/prompt schemas but are also reachable via
 //      tool outputs (e.g. `PortInfo` is in `ListPortsResult` AND
 //      `ConnectionStatus.port_info`).
-//
-// The tests below close both gaps:
+// These tests close both gaps:
 //   - They enumerate every known public `JsonSchema`-deriving struct and
 //     reject *any* `uint*` format keyword.
 //   - They also keep the tool-level string scan, now covering uint8/uint16
 //     (see `src/tools/mod.rs`).
-//
 // If you add a new public type that derives `JsonSchema` and has unsigned
 // integer fields, ADD IT to the `check_schema!` list below. The compile-time
 // cost is tiny; the cost of shipping noisy schemas to every MCP client is not.

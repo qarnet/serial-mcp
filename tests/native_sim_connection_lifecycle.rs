@@ -4,8 +4,9 @@
 //! `native_sim` firmware PTY, using only software emulators — no
 //! physical hardware, USB-serial adapters, or board bring-up required.
 //!
-//! Each test spawns its own `zephyr.exe` instance, parses the PTY
-//! path from stdout, and is fully isolated. `--test-threads=N` is safe.
+//! Each test spawns its own `zephyr.exe` instance and parses the PTY path from
+//! stdout. Run this suite with `--test-threads=1`; process teardown and PTY
+//! close can race at the OS layer when tests run in parallel.
 //!
 //! Coverage focus:
 //!   - Named connection bookkeeping in `list_connections`
@@ -16,10 +17,10 @@
 //!
 //! Run:
 //! ```sh
-//! cargo test --test native_sim_connection_lifecycle -- --ignored
+//! cargo test --test native_sim_connection_lifecycle -- --ignored --test-threads=1
 //! # or override firmware binary path:
 //! SERIAL_MCP_NATIVE_SIM_BIN=/path/to/zephyr.exe \
-//!     cargo test --test native_sim_connection_lifecycle -- --ignored
+//!     cargo test --test native_sim_connection_lifecycle -- --ignored --test-threads=1
 //! ```
 
 use std::time::Duration;
@@ -163,9 +164,7 @@ async fn sync_boot(
 
 // ── Test A: named connection appears in list_connections ─────────────────────
 
-/// Replacing the first half of the old `e83_live_validation`: a named
-/// connection should appear in `list_connections` with all summary
-/// fields populated correctly.
+/// A named connection appears in `list_connections` with its summary fields.
 #[tokio::test]
 #[ignore = "requires native_sim firmware binary"]
 async fn native_named_connection_appears_in_list_connections() {
@@ -200,9 +199,8 @@ async fn native_named_connection_appears_in_list_connections() {
 
 // ── Test B: set_flow_control tool round-trip ────────────────────────────────
 
-/// Replaces the `set_flow_control` part of the old `e83_live_validation`:
-/// the tool must return the requested mode, and `list_connections` must
-/// reflect the updated summary. Uses `none` which is the only mode
+/// `set_flow_control` returns the requested mode, and `list_connections`
+/// reflects the updated summary. Uses `none`, the only mode
 /// guaranteed to be supported by every backend (including the PTY that
 /// backs the native_sim firmware).
 #[tokio::test]
@@ -246,14 +244,13 @@ async fn native_set_flow_control_updates_summary_and_result() {
     drop(fw);
 }
 
-// ── Test C: close while read is pending returns close error ─────────────────
+// ── Test C: close while read is pending returns a normal result ─────────────
 
-/// Replaces the most important part of the old `e83_live_validation`:
-/// a `read` that is still in-flight when the connection is closed must
-/// surface a close-related error to the MCP caller.
+/// Closing while a read is in flight still yields a normal structured read
+/// result. Timing determines whether it drained, timed out, or observed close.
 #[tokio::test]
 #[ignore = "requires native_sim firmware binary"]
-async fn native_close_while_read_active_returns_close_error() {
+async fn native_close_while_read_active_returns_normal_result() {
     let fw = NativeSimFirmware::spawn().await.expect("spawn zephyr.exe");
     let pty_path = fw.pty_path().to_string();
 
@@ -262,10 +259,8 @@ async fn native_close_while_read_active_returns_close_error() {
     let id = open_pty(&client, &pty_path, CONNECTION_NAME).await;
     sync_boot(&client, &id).await;
 
-    // Under the ring model, a plain read (without match or no_new_rx_timeout)
-    // drains buffered bytes and returns immediately with stop_reason "drained".
-    // The close succeeds because the read has already returned. Rewrite the
-    // test to verify: close succeeds when an active read completes gracefully.
+    // A plain read drains buffered bytes immediately when available; otherwise
+    // it can still be waiting when close interrupts it.
     let reader = {
         let peer = client.peer().clone();
         let id2 = id.clone();
@@ -285,15 +280,12 @@ async fn native_close_while_read_active_returns_close_error() {
     // Give the read a moment to start and drain the ring.
     tokio::time::sleep(Duration::from_millis(150)).await;
 
-    // Close should succeed — the read has already returned or will return
-    // with "drained".
+    // Close succeeds whether the read already drained or is still waiting.
     close_connection(&client, &id).await;
 
     let read_result = reader.await.unwrap().expect("read task join");
-    // Under the ring, the read returns a normal structured result (never a
-    // tool error). The stop reason depends on timing: buffered bytes ->
-    // "drained", a late timeout -> "timeout", or the close interrupting the
-    // wait loop -> "connection_closed" (the test's own docstring above).
+    // Stop reason depends on timing: buffered bytes -> "drained", a late
+    // timeout -> "timeout", or close during the wait -> "connection_closed".
     assert_eq!(
         read_result.is_error,
         Some(false),
@@ -313,9 +305,8 @@ async fn native_close_while_read_active_returns_close_error() {
 
 // ── Test D: reopen same port after close works ──────────────────────────────
 
-/// Replaces the reopen part of the old `e83_live_validation`: the same
-/// native_sim PTY can be opened again after a clean close, and a fresh
-/// `ping` round-trip succeeds.
+/// The same native_sim PTY can be opened again after a clean close, and a
+/// fresh `ping` round-trip succeeds.
 #[tokio::test]
 #[ignore = "requires native_sim firmware binary"]
 async fn native_reopen_same_port_after_close_works() {
@@ -366,11 +357,8 @@ async fn native_reopen_same_port_after_close_works() {
 
 // ── Test E: reopen + match finds only fresh post-reopen output ─────────────
 
-/// Replaces the post-reopen read part of the old `e83_live_validation`:
-/// after reopening, a fresh `read(match=...)` must see the response to a
-/// new command issued on the new connection. This proves the new
-/// connection is functional and the read path is not stuck on stale
-/// session data.
+/// After reopening, a fresh `read(match=...)` sees the response to a new
+/// command on the new connection rather than stale session data.
 #[tokio::test]
 #[ignore = "requires native_sim firmware binary"]
 async fn native_reopen_then_match_finds_fresh_output() {

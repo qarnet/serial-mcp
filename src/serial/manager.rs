@@ -17,10 +17,10 @@ use super::connection::SerialConnection;
 ///
 /// This injects the *connection backend* only: reservation, registry, and
 /// lifecycle semantics live in the manager and are identical for every
-/// implementation. Production uses [`SystemConnectionOpener`]; alternate
-/// backends (in-memory duplex streams, hardware simulators) can drive the
-/// entire public MCP surface without an OS serial port — which is also what
-/// keeps such tests cross-platform.
+/// implementation. Production uses the internal `SystemConnectionOpener`;
+/// alternate backends (in-memory duplex streams, hardware simulators) can
+/// drive the entire public MCP surface without an OS serial port. This keeps
+/// such tests cross-platform.
 #[async_trait::async_trait]
 pub trait ConnectionOpener: Send + Sync {
     /// Open a connection for `config` and return it. The returned

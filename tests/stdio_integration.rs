@@ -1,4 +1,4 @@
-//! Layer 5 — STDIO transport integration tests.
+//! STDIO transport integration tests.
 //!
 //! These tests spawn the `serial-mcp` binary as a child process,
 //! connect via stdin/stdout pipes using rmcp's `TokioChildProcess` transport,

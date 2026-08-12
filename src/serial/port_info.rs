@@ -56,8 +56,7 @@ pub struct PortInfo {
     /// part of the JSON Schema spec and is silently dropped by most
     /// validators (logging a warning per call). Every `Option<uN>`/`uN`
     /// field that derives `JsonSchema` MUST carry this override — see
-    /// `src/schema_helpers.rs` and the regression test
-    /// `serial::schema::no_nonstandard_uint_formats_in_all_public_schemas`.
+    /// `src/schema_helpers.rs` and the `serial::schema` regression tests.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schemars(schema_with = "crate::schema_helpers::option_uint_schema")]
     pub vid: Option<u16>,

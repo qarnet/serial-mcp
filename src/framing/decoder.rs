@@ -48,7 +48,7 @@ pub enum ParsedFrame {
         /// Command name (e.g. "+CGREG").
         #[serde(skip_serializing_if = "Option::is_none")]
         command: Option<String>,
-        /// Status: "OK", "ERROR", "CME ERROR: <code>", etc.
+        /// Status: `OK`, `ERROR`, `CME ERROR: <code>`, etc.
         #[serde(skip_serializing_if = "Option::is_none")]
         status: Option<String>,
         /// Response data fields (lines between echo and status).
@@ -2863,7 +2863,7 @@ mod tests {
         }
     }
 
-    // ── Medium-risk gap tests (P3d) ───────────────────────────────────────
+    // ── Cross-mode edge-case coverage ────────────────────────────────────
 
     #[test]
     fn skip_empty_applies_to_delimiter() {

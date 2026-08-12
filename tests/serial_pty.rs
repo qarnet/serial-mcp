@@ -1,5 +1,4 @@
-//! Layer 3 — end-to-end tests with a real PTY pair standing in for a
-//! serial device.
+//! End-to-end tests with a real PTY pair standing in for a serial device.
 //!
 //! These tests open a Linux/macOS pseudo-terminal pair via `openpty(3)`,
 //! point the server at the slave path (`/dev/pts/N`) via the regular
