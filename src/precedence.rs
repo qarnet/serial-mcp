@@ -349,7 +349,7 @@ mod tests {
         assert_ne!(result, Some(preset_rx_framing(ProtocolPreset::ModbusAscii)));
     }
 
-    // ── Medium-risk gap tests (P3d) ───────────────────────────────────────
+    // ── Four-layer and parser-precedence coverage ────────────────────────
 
     #[test]
     fn nmea0183_full_four_layer_precedence() {

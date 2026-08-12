@@ -61,7 +61,8 @@ pub struct ReadOutcome {
 
 /// `read`'s frame sink: collects every frame and records the first match so the
 /// caller can return it. Always returns `Continue` — read includes frames
-/// decoded after the matching one (legacy behavior).
+/// decoded after the matching one so every frame already decoded from the
+/// same chunk is preserved.
 struct ReadFrameSink<'a> {
     collected: &'a mut Vec<crate::framing::Frame>,
     match_data: Option<Vec<u8>>,
@@ -866,7 +867,7 @@ pub(crate) async fn read_from_private_cursor(
     framing: Option<crate::framing::RxFramingConfig>,
     parser: Option<crate::framing::ParserConfig>,
 ) -> Result<(ReadOutcome, u64), String> {
-    // Phase 1: resolve timing, ring, initial slice, and driver state.
+    // Resolve timing, ring, initial slice, and driver state.
     let effective_timeout_ms = timeout_ms.unwrap_or(DEFAULT_READ_TIMEOUT_MS);
     let read_start = Instant::now();
     let ring = session.ring();
@@ -892,7 +893,7 @@ pub(crate) async fn read_from_private_cursor(
         acc: ReadAccumulator::new(max_bytes),
     };
 
-    // Phases 2–4: raw cat path, historical match path, initial framed bytes.
+    // Process raw reads, historical matches, or initial framed bytes.
     match driver.process_initial(&initial_slice).await? {
         InitialDecision::Continue => {}
         InitialDecision::Completion(completion) => return Ok(driver.complete(completion)),
@@ -901,12 +902,12 @@ pub(crate) async fn read_from_private_cursor(
         }
     }
 
-    // Phase 5: wait/process loop.
+    // Wait for and process live bytes when initial history did not complete.
     driver.run_wait(initial_slice.next_offset).await
 }
 
 /// Drive a `read` from the ring buffer with the SHARED read cursor: reads
-/// the current cursor, delegates to [`read_from_private_cursor`], and
+/// the current cursor, delegates to `read_from_private_cursor`, and
 /// applies the returned final cursor. `read`/`transact` call this wrapper.
 #[allow(clippy::too_many_arguments)]
 pub async fn read_bytes_from_ring(

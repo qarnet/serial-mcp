@@ -1,12 +1,12 @@
 # Future Design — Continuous Raw Capture Lifecycle
 
 **Status: design only. NOT implemented. No `start_capture`/`stop_capture`
-tool exists; Phase 6 ships only the safe persistent capture *foundation*
+tool exists; current code ships only the safe persistent capture *foundation*
 (`--capture-dir` + `CaptureStore` + hardened `export_log`).**
 
 This document specifies the lifecycle a future continuous raw-capture
 feature would need so that when (or if) it is built, it composes with the
-Phase 6 containment, symlink, quota, atomicity, and lock policy instead of
+existing containment, symlink, quota, atomicity, and lock policy instead of
 reintroducing unrestricted writes. It is deliberately NOT a plan to
 implement now — see the conclusion.
 
@@ -38,7 +38,7 @@ same final result.
 
 - `start_capture(connection_id, ...)`: registers the capture and atomically
   marks the live edge (same private-cursor + pump-gate semantics as
-  `capture_boot`, Phase 5). Returns the capture id. Cancellation before the
+  `capture_boot`). Returns the capture id. Cancellation before the
   start response leaves NO orphan task.
 - `stop_capture(capture_id)`: idempotent bounded stop + finalize.
 - `capture_status(capture_id)` / `list_captures()`: offsets, bytes
@@ -47,8 +47,8 @@ same final result.
 ## Data path
 
 - Private RX cursor: the shared `read` cursor and ring history are never
-  moved by capture. The live-edge mark is atomic under the pump gate (Phase
-  5 `pump_gate`) so no pre-start byte can be captured.
+  moved by capture. The live-edge mark is atomic under the `pump_gate`, so no
+  pre-start byte can be captured.
 - Raw bytes exactly as received; framing/parser/protocol are excluded
   initially (no per-frame transformation, no parser errors in the pipeline).
 - Bounded queue with explicit backpressure: a bounded channel between the
@@ -71,7 +71,7 @@ same final result.
 ## Rotation, finalization, and orphans
 
 - Segment rotation before hitting the per-file quota, using the SAME
-  advisory lock, quotas, and `persist_noclobber` finalization as Phase 6
+  advisory lock, quotas, and `persist_noclobber` finalization as `CaptureStore`
   `write_new` — one lock scope for scan → quota → temp → rename of the
   closed segment.
 - Internal partial-file names (in-progress segments) carry the reserved
@@ -83,11 +83,11 @@ same final result.
 
 ## Trust, durability, and cleanup
 
-- Same trust boundary as Phase 6: configured root and ancestors are
+- Same trust boundary as `CaptureStore`: configured root and ancestors are
   operator-controlled; advisory locks protect cooperating serial-mcp
   processes only.
 - No automatic deletion of completed captures until a deterministic
-  retention policy exists (Phase 6 deliberately never deletes).
+  retention policy exists (`CaptureStore` deliberately never deletes).
 
 ## Testing a future implementation would require
 
@@ -102,10 +102,10 @@ same final result.
 
 ## Conclusion
 
-Phase 4/5 evidence supports **bounded in-memory boot capture**
-(`capture_boot`), not yet continuous disk capture. The safe persistent
-capture foundation shipped in Phase 6 removes the last unrestricted
-filesystem write and supplies every primitive the lifecycle above needs
+Current evidence supports **bounded in-memory boot capture** (`capture_boot`),
+not yet continuous disk capture. The safe persistent capture foundation
+removes the last unrestricted filesystem write and supplies every primitive
+the lifecycle above needs
 (containment, symlink policy, portable names, quotas, advisory locks,
 atomic no-clobber finalization), but there is still no concrete task
 evidence for an always-on disk capture stream.

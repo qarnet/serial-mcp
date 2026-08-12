@@ -562,7 +562,7 @@ pub fn scenarios() -> Vec<Scenario> {
         },
         Scenario {
             id: "boot_reset_manual_composition",
-            label: "Boot-reset prompt capture (manual multi-call composition, pre-Phase 5)",
+            label: "Boot-reset prompt capture (manual multi-call composition)",
             calls: vec![
                 call("open", serde_json::json!({ "port": FIXED_PORT })),
                 call(

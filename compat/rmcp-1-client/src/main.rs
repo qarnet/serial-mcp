@@ -182,7 +182,7 @@ async fn verify_and_shutdown(client: RunningService<RoleClient, ()>, mode: &str)
     Ok(())
 }
 
-/// The shared public-behavior verifier (items 1-8 of the Phase 3 contract).
+/// The shared public-behavior verifier for the compatibility contract.
 /// Uses the all-page rmcp 1.7.0 helpers (`list_all_*`) so pagination cannot
 /// hide items. Returns a descriptive error on the first failed check.
 async fn verify(client: &RunningService<RoleClient, ()>) -> std::result::Result<(), String> {

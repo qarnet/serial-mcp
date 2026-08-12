@@ -3,8 +3,8 @@
 //! Each open connection can have at most one [`TxSession`], which owns a
 //! background task that is the sole caller of `SerialConnection::write()` and
 //! `SerialConnection::flush_buffers(Output)`. MCP write and flush tools
-//! enqueue requests via an mpsc channel and await a oneshot acknowledgment,
-//! returning in microseconds regardless of any active RX pump.
+//! enqueue requests via an mpsc channel and await a oneshot acknowledgment.
+//! TX serialization does not contend with the active RX pump.
 
 use std::collections::HashMap;
 use std::sync::Arc;

@@ -1,9 +1,7 @@
-//! Shared RX frame-consumption logic for `read`.
+//! Framed RX consumption for the ring-based read pipeline.
 //!
-//! The tools share frame decoding + per-frame matching + `max_frames`, but
-//! differ in the per-frame ACTION (read collects and notifies frames). [`RxFrameSink`]
-//! captures that action; [`consume_frames`] drives it. The raw (no-framing) path
-//! is intentionally NOT shared — read differs there semantically (scan extent).
+//! [`consume_frames`] drives decoding, per-frame matching, sink dispatch, and
+//! `max_frames` handling. The raw (no-framing) path remains in `read_loop`.
 
 use crate::framing::{Frame, FrameDecodeError, FrameDecoder};
 use crate::match_config::{MatchResult, Matcher};
@@ -16,8 +14,7 @@ use tracing;
 pub enum SinkFlow {
     /// Keep processing frames.
     Continue,
-    /// Stop processing with this reason (e.g. read stops at its match, or a
-    /// peer disconnected while emitting).
+    /// Stop processing with this reason.
     Stop(RxStopReason),
 }
 
@@ -33,12 +30,12 @@ pub enum FrameOutcome {
     DecodeError(FrameDecodeError),
 }
 
-/// Per-frame output action. `read` collects and notifies frames.
+/// Per-frame output action used by the read pipeline.
 #[async_trait::async_trait]
 pub trait RxFrameSink {
     /// Handle one decoded frame. `matched` / `match_index` come from the
     /// driver's per-frame matcher run. Return [`SinkFlow::Stop`] to halt
-    /// processing (read stops at its match; read returns `Continue` when continuing).
+    /// processing.
     async fn on_frame(
         &mut self,
         frame: Frame,
@@ -65,7 +62,7 @@ pub async fn consume_frames<S: RxFrameSink>(
     let frames = outcome.frames;
     // Dispatch frames decoded before the error FIRST, then return the
     // decode error if one occurred. This preserves frames-before-error
-    // for read (collects and notifies them).
+    // for the read result.
     for frame in frames {
         *frames_seen += 1;
         let match_index = match matcher.as_mut() {

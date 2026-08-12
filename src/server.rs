@@ -996,7 +996,7 @@ impl ServerHandler for SerialHandler {
     async fn listen(&self, context: SubscriptionContext) -> Result<(), McpError> {
         // 1. Snapshot the accepted URI set (first-occurrence order).
         //
-        // rmcp 3.0.1 computes the accepted filter as
+        // rmcp computes the accepted filter as
         // `requested.intersection(&candidate).intersection(&advertised)`,
         // both left-biased over the REQUESTED list, so a duplicate requested
         // URI may be echoed into `context.accepted()`. Deduplicate again
@@ -1297,7 +1297,8 @@ impl ServerHandler for SerialHandler {
     // `list_prompts` outright; the explicit versions serve the SAME routers
     // (exact deterministic catalog, titles, schemas, prompt definitions)
     // with cursor pagination and set `ttlMs: 0` / `cacheScope: "private"`
-    // only for `2026-07-28`+ peers.
+    // only for the exact protocol policy that enables immediate-private
+    // caching (currently `2026-07-28`).
     async fn list_tools(
         &self,
         request: Option<PaginatedRequestParams>,
@@ -1532,7 +1533,7 @@ mod tests {
         );
     }
 
-    // ---- Dual MCP lifecycle (Phase 2) --------------------------------------
+    // ---- Dual MCP lifecycle -----------------------------------------------
 
     #[tokio::test]
     async fn supported_protocol_versions_are_exact_modern_then_legacy() {
@@ -1635,8 +1636,8 @@ mod tests {
     #[tokio::test]
     async fn get_info_returns_modern_view_for_listen_intersection() {
         // rmcp intersects `subscriptions/listen` filters against
-        // `get_info().capabilities`; Phase 3 requires the modern view there
-        // while `initialize()` keeps returning the legacy view.
+        // `get_info().capabilities`; the modern listen lifecycle requires the
+        // modern view there while `initialize()` returns the legacy view.
         let handler = SerialHandler::builder()
             .connections(Arc::new(ConnectionManager::new()))
             .build();

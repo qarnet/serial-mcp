@@ -20,7 +20,7 @@ TAG = f"v{VERSION}"
 
 TEMPLATE = {
     "name": "serial-mcp",
-    "description": "MCP server for serial ports (27 tools).",
+    "description": "MCP server for serial ports.",
     "version": VERSION,
 }
 

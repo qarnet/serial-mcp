@@ -14,7 +14,7 @@
 //!   `PortProvider` that publishes `Updated(serial://ports)` when the
 //!   canonicalized port snapshot changes.
 //!
-//! Ownership rules (Phase 3):
+//! Ownership rules:
 //!
 //! - one hub per server process, cloned into every handler factory and the
 //!   watcher (modern HTTP is stateless — a handler-local channel would split
@@ -38,9 +38,9 @@ use crate::resources::{
 };
 use crate::serial::{PortInfo, PortProvider};
 
-/// Fixed hub capacity from the Phase 3 design: 256 buffered events before a
-/// slow listener lags (lag is recoverable — the listener re-notifies every
-/// accepted URI once instead of terminating or blocking publishers).
+/// Fixed hub capacity: 256 buffered events before a slow listener lags. Lag
+/// is recoverable: the listener re-notifies every accepted URI once instead
+/// of terminating or blocking publishers.
 pub const DEFAULT_HUB_CAPACITY: usize = 256;
 
 /// Production port-watcher poll interval (fixed decision).

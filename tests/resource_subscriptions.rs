@@ -1,4 +1,4 @@
-//! Phase 3 — modern `subscriptions/listen` resource subscriptions.
+//! Modern `subscriptions/listen` resource subscriptions.
 //!
 //! Real in-process HTTP MCP transport with typed modern `2026-07-28`
 //! clients (stateless — every request may hit a fresh handler instance, so
@@ -198,7 +198,7 @@ async fn acknowledgement_contains_only_accepted_valid_resource_uris_in_first_occ
         );
     }
 
-    // rmcp 3.0.1 computes the final accepted filter via
+    // rmcp computes the final accepted filter via
     // `requested.intersection(&candidate).intersection(&advertised)`, both
     // left-biased over the REQUESTED list — so a repeated requested VALID
     // URI may legitimately appear more than once in the raw acknowledged
@@ -548,7 +548,7 @@ async fn forced_hub_lag_yields_conservative_per_uri_recovery_without_blocking_pu
 #[tokio::test]
 async fn repeated_requested_uri_does_not_cause_duplicate_lag_recovery_notifications() -> Result<()>
 {
-    // rmcp 3.0.1 echoes a repeated requested URI into the acknowledged
+    // rmcp echoes a repeated requested URI into the acknowledged
     // filter (left-biased requested.intersection(candidate)); the listen
     // loop deduplicates again, so lag recovery must notify each accepted
     // URI exactly once even when the request repeated it.

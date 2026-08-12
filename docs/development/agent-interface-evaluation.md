@@ -17,26 +17,24 @@ placeholders (`/dev/ttyACM0`, fixed UUID).
 
 ## Baseline (historical)
 
-`docs/development/agent-interface-baseline.json` is the committed **Phase 4
-baseline and stays historical**: it measures the 26-tool catalog (aggregate
+`docs/development/agent-interface-baseline.json` is the committed **historical
+baseline**: it measures the 26-tool catalog (aggregate
 compact `tools/list` payload **258964 bytes**) and the then-modeled,
 hypothetical `capture_boot`. It is NOT the current catalog — the evaluator
 compares the live catalog against it.
 
-## Current catalog (25 tools, 269740 bytes)
+## Current catalog (25 tools, 268802 bytes)
 
 - tool count: **25** — the `subscribe`/`unsubscribe` tools were removed with
   MCP logging in the rmcp 3 server-surface migration (`read` remains the
   complete RX path; `poll_interval_ms` and stream-only schema helpers are gone)
-- aggregate compact `tools/list` payload: **269740 bytes** — **+10776** vs the
-  Phase 4 baseline (26 tools / 258964 bytes, +4.2%; the Phase 1 review fix
-  (removed the dead `notification_drop_count` status field and obsolete stop-reason
-  prose) accounts for the 218-byte drop from the pre-fix snapshot; the `capture_boot`,
-  `export_log` contract hardening, and documentation growth account for the
-  bulk; removing the two subscription tools shrank the catalog from the
+- aggregate compact `tools/list` payload: **268802 bytes** — **+9838** vs the
+  historical baseline (26 tools / 258964 bytes, +3.8%; `capture_boot`,
+  `export_log` contract hardening, and documentation growth account for most
+  growth; removing the two subscription tools shrank the catalog from the
   pre-migration 27-tool / 288177-byte snapshot)
-- largest tools: `configure` 38801, `transact` 26721, `capture_boot` 25825,
-  `read` 23882, `open` 23834
+- largest tools: `configure` 38644, `transact` 26656, `capture_boot` 25791,
+  `read` 23848, `open` 23739
 - `export_log` (contract hardening): 2736 bytes (description 931, input schema
   542, output schema 1111) — the description states the disabled-by-default
   store, the `--capture-dir` requirement, the portable filename-only `path`
@@ -46,9 +44,9 @@ compares the live catalog against it.
   (`skip_serializing_if`-omitted on success).
 
 The evaluator's regression rule flags aggregate growth `>=5%`; the current
-report sits at **4.16%** (status `warning`-adjacent but below the flag) — the
-growth is the approved Phase 5/6 scope (a new tool plus contract hardening)
-minus the removed subscription tools, not schema bloat on remaining tools. The
+report sits at **3.80%** (status `warning` but below the flag) — the
+growth comes from `capture_boot` plus contract hardening, minus the removed
+subscription tools, not schema bloat on remaining tools. The
 tool-count guard (`tool_catalog_has_exactly_twenty_five_tools`) and the
 uint-format schema guards
 (`serial::schema::export_log_result_has_no_uint_formats`,
@@ -66,7 +64,7 @@ Accepted:
 - **Atomic `capture_boot`: yes** — one implemented call (360 request bytes,
   `stale_race=false`) vs the 5-call `boot_reset_manual_composition` (886
   bytes, `stale_race=true`, +59.4% request-byte reduction). The arm/reset
-  stale-data race Phase 4 measured is eliminated by the pump gate
+  stale-data race in the manual composition is eliminated by the pump gate
   (`src/rx_session.rs`): the pump holds `pump_gate` across one complete read
   + ring append, and `capture_boot` acquires the same gate for its
   purge → mark → assert sequence. Deterministic proof:

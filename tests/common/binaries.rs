@@ -11,13 +11,11 @@
 //! 2. Workspace default: `<CARGO_MANIFEST_DIR>/target/debug/serial-mcp`.
 //!    If the file is missing, the test process invokes
 //!    `cargo build --bin serial-mcp` from the workspace root and reuses
-//!    the result. The build runs inside a process-global `OnceLock` so
-//!    concurrent test threads share a single cargo invocation.
+//!    the result. Cargo's own target-directory lock serializes concurrent
+//!    build attempts.
 //!
-//! These helpers are intentionally synchronous: they are called from
-//! `#[ctor]` style preludes and from `Once`-guarded setup blocks, not
-//! from inside async test bodies. Spawning the binary itself remains
-//! the responsibility of the caller.
+//! These helpers are synchronous. Spawning the binary remains the caller's
+//! responsibility.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -60,16 +58,16 @@ pub fn serial_mcp_bin() -> PathBuf {
 /// Build the `serial-mcp` binary if it is not already on disk.
 ///
 /// Returns the resolved path (identical to [`serial_mcp_bin`]). The
-/// build runs at most once per test process; subsequent calls just
-/// re-check the artifact and return the path.
+/// Existing artifacts are reused; otherwise cargo builds the binary.
 pub fn ensure_serial_mcp_built() -> Result<PathBuf> {
     static BUILT: OnceLock<()> = OnceLock::new();
     let bin = serial_mcp_bin();
     if bin.is_file() {
         return Ok(bin);
     }
-    // First thread in wins; if cargo fails we want to surface the
-    // error, not silently swallow it from a follow-up thread.
+    // Mark that this process entered the auto-build path. Cargo's target-dir
+    // lock serializes concurrent cargo processes; every caller still checks
+    // its own build result.
     BUILT.get_or_init(|| ());
     run_cargo_build(&bin)?;
     Ok(bin)

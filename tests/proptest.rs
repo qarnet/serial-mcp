@@ -2,7 +2,7 @@
 //!
 //! Catches:
 //! - Serde roundtrip breakage (serialize→deserialize→re-serialize identical)
-//! - JSON Schema vs serialized output mismatches (the bug we fixed)
+//! - JSON Schema vs serialized output mismatches
 //! - Codec invariant violations (decode(encode(x)) == x)
 //! - Clamp/validation boundary panics (u64::MAX, usize::MAX)
 //! - Port name special-character safety

@@ -1,7 +1,6 @@
 //! Process-wide persistent profile store.
 //!
-//! Replaces the handler-local `Vec<Profile>` + path with a single store
-//! shared by every stdio/HTTP handler:
+//! One store is shared by every stdio/HTTP handler:
 //!
 //! - loads and validates the profile file on the production startup path,
 //! - serializes all in-process mutations behind one async mutex,

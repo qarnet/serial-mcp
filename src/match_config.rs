@@ -1,13 +1,13 @@
 //! Shared match configuration and byte-substring matching for RX tools.
 //!
-//! The `match` option on `read` (and the `transact` read half / `capture_boot` read pipeline) specifies a byte pattern to
-//! detect in the incoming RX stream. Matching always happens on raw bytes;
-//! `pattern_encoding` controls how the `pattern` string is decoded into the
-//! byte needle.
+//! The `match` option on `read` (and the `transact` read half / `capture_boot`
+//! read pipeline) specifies a byte pattern to detect in the incoming RX
+//! stream. Matching always happens on raw bytes; `pattern_encoding` controls
+//! how the `pattern` string is decoded into the byte needle.
 //!
 //! This module provides:
 //! - `MatchRequest` — the JSON-serialisable request shape
-//! - `MatchMode` — only `literal_substring` for now, extensible later
+//! - `MatchMode` — literal substring, byte-regex, or whole-line glob matching
 //! - `PatternEncoding` — alias for the encoding used to decode the pattern
 //! - `Matcher` — stateful pattern matcher supporting literal, regex, and glob
 //!
@@ -20,7 +20,7 @@
 //! - retained limit = `max_buffered_bytes + overlap_allowance`, where the
 //!   literal allowance is `needle.len().saturating_sub(1)` (so a match
 //!   straddling the cap boundary is still detected) and the regex/glob
-//!   allowance is the conservative constant [`REGEX_GLOB_OVERLAP_ALLOWANCE`]
+//!   allowance is the conservative constant `REGEX_GLOB_OVERLAP_ALLOWANCE`
 //!   (256 bytes; a conservative fixed cross-chunk allowance for
 //!   variable-length regex matches and arbitrarily long glob lines).
 //! - The retained window after every `push_bounded` call never exceeds the
@@ -65,7 +65,7 @@ pub struct MatchRequest {
 /// Configuration for how a match pattern is decoded and matched.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct MatchConfig {
-    /// Matching mode. Only `literal_substring` is supported in this phase.
+    /// Matching mode: literal byte substring, byte regex, or whole-line glob.
     #[serde(default = "default_match_mode")]
     pub mode: MatchMode,
     /// Encoding used to decode `pattern` into raw bytes before matching.
@@ -409,7 +409,7 @@ impl Matcher {
     /// Retention cap for this matcher given the connection's
     /// `max_buffered_bytes`: the cap plus the mode's overlap allowance
     /// (literal: `needle.len() - 1`; regex/glob:
-    /// [`REGEX_GLOB_OVERLAP_ALLOWANCE`]).
+    /// `REGEX_GLOB_OVERLAP_ALLOWANCE`).
     pub fn retained_window_limit(&self, max_buffered_bytes: usize) -> usize {
         let allowance = match self {
             Self::Literal { needle, .. } => needle.len().saturating_sub(1),

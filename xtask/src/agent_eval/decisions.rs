@@ -1,6 +1,6 @@
-//! Fixed decision thresholds for the agent-interface evaluation (from the
-//! Phase 4 handoff). All thresholds are constants fixed BEFORE looking at
-//! results; the evaluator only computes whether they are met.
+//! Fixed decision thresholds for the agent-interface evaluation. Thresholds
+//! are constants fixed before measurement; the evaluator only computes
+//! whether they are met.
 
 use serde::Serialize;
 
@@ -141,8 +141,8 @@ pub fn aggregate(scenarios: &[ScenarioMetrics]) -> AggregateMetrics {
         .map(|id| Comparison::new(by_id(id), modeled_of(id), 0))
         .collect();
 
-    // capture_boot (Phase 5, implemented) vs the pre-Phase-5 manual
-    // composition: one atomic call removes the arm/reset race of the
+    // capture_boot vs the manual composition: one atomic call removes the
+    // arm/reset race of the
     // 5-call open+read+set_dtr_rts×2+read sequence.
     let capture_boot = Comparison::new(
         by_id("boot_reset_manual_composition"),
@@ -207,7 +207,7 @@ pub struct Decision {
     pub reason: String,
 }
 
-/// The four Phase 4 decisions plus the automatic-profiles justification.
+/// Interface decisions plus the automatic-profiles justification.
 #[derive(Debug, Clone, Serialize)]
 pub struct Decisions {
     pub automatic_profiles: Decision,
@@ -218,12 +218,12 @@ pub struct Decisions {
 }
 
 /// Projected catalog growth for hypothetical variants. Measured catalog
-/// growth is 0% for all modeled candidates (none add tools in this phase);
+/// growth is 0% for all modeled candidates because none add tools;
 /// oneOf-branch growth inside existing schemas is not modeled, which the
 /// report states as a limitation.
 const MODELED_CATALOG_GROWTH_PCT: f64 = 0.0;
 
-/// Fixed thresholds (Phase 4 handoff).
+/// Fixed decision thresholds.
 const SHORTHAND_MIN_BYTE_REDUCTION_PCT: f64 = 20.0;
 const SHORTHAND_MIN_SCENARIOS: usize = 3;
 const SHORTHAND_MAX_CATALOG_GROWTH_PCT: f64 = 3.0;

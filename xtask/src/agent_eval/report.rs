@@ -17,7 +17,7 @@ pub fn render_json(report: &EvalReport) -> Result<String> {
 /// Render the human-readable decision record (`report.md`).
 pub fn render_md(report: &EvalReport) -> Result<String> {
     let mut out = String::new();
-    out.push_str("# Agent-Interface Evaluation Report (Phase 4)\n\n");
+    out.push_str("# Agent-Interface Evaluation Report\n\n");
     out.push_str("Deterministic local measurement: no network access, no user profiles, ");
     out.push_str("no hardware, no timestamps. Rerunning `xtask agent-eval` reproduces this ");
     out.push_str("report byte-for-byte (except explicitly excluded presentation paths).\n\n");
@@ -171,7 +171,7 @@ pub fn render_md(report: &EvalReport) -> Result<String> {
         d.versioned_facade_now.decision, d.versioned_facade_now.reason
     ));
     out.push_str(&format!(
-        "- Phase 5 atomic `capture_boot`: **{}** — {}\n",
+        "- atomic `capture_boot`: **{}** — {}\n",
         d.phase5_capture_boot.decision, d.phase5_capture_boot.reason
     ));
 

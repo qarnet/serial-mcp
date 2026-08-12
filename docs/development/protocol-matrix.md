@@ -11,8 +11,8 @@
 
 - **Status** — `shipped` · `deferred` (FEATURES.md) · `reference` (not a
   serial-framing target).
-- **Effort** — relative implementation cost given the existing 0.7.0 frame
-  pipeline (`src/framing/`).
+- **Effort** — relative implementation cost given the current frame pipeline
+  (`src/framing/`).
 - **License** — `free` = redistributable (RFC / IETF draft / explicitly free);
   `©` = copyrighted, cite-only.
 
@@ -34,8 +34,8 @@
 
 ## Reference-only specs (not serial-framing targets)
 
-These ship in the library for context but are **not** protocol-preset
-candidates; noted here so the matrix is complete.
+These are present in the local specification library for context but are
+**not** protocol-preset candidates; noted here so the matrix is complete.
 
 | Spec | Source (`resources/`) | Standard | Why it's here, not a target |
 |---|---|---|---|
@@ -46,9 +46,9 @@ candidates; noted here so the matrix is complete.
 ## Notes
 
 - The **`checksums` module** (`src/checksums.rs`) is the shared home for the
-  XOR checksum, LRC, and (future) `crc16_modbus` / FCS-16. Checksum failures
-  surface through the existing `FramingError` stop reason (0.7.0), not a new
-  error path.
+  XOR checksum, LRC, and any future `crc16_modbus` / FCS-16 primitives.
+  Checksum mismatches with `validate: true` are dropped and counted per frame;
+  stream-fatal framing errors use the `FramingError` stop reason.
 - New framing modes (`Cobs` shipped; later `HdlcLike`) are added
   **symmetrically** to `RxFramingMode` and `TxFramingMode` and wired into
   `preset_tx_framing` / `preset_rx_framing`. New parsers (`Nmea` and
