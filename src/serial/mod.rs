@@ -72,7 +72,7 @@ mod schema {
         Profile, ProfileMetadata, ProfilePersistenceResult, ProfileRevision, ProfileSelector,
         ProfileSessionResult,
     };
-    use crate::serial::{ConnectionStatus, PortInfo};
+    use crate::serial::{ConnectionStatus, PortInfo, PortTransport};
     use crate::tools::types::{
         CaptureBootArgs, CaptureBootReset, CaptureBootResult, ClearLogResult, CloseResult,
         ComputeChecksumResult, ConfigureResult, DeleteProfileResult, ExportLogResult, FlushResult,
@@ -145,6 +145,100 @@ mod schema {
     // Core identity + status types (the source of this regression).
     check_schema!(port_info_has_no_uint_formats, PortInfo);
     check_schema!(connection_status_has_no_uint_formats, ConnectionStatus);
+
+    /// Regression guard for the `PortInfo` `required` bug: schemars 1.2.2
+    /// does not recognise `Option<T>` through `#[schemars(schema_with = ...)]`,
+    /// so `vid`/`pid`/`interface` used to land in the schema's `required`
+    /// array even though non-USB ports (e.g. `/dev/ttyS0`) omit those fields
+    /// during serialization (`skip_serializing_if`). Strict MCP clients then
+    /// rejected `list_ports` output with
+    /// `Invalid structured content: 'vid' is a required property`.
+    ///
+    /// The fix keeps the `schema_with` override (it suppresses the
+    /// non-standard `uint16` format) and adds `#[serde(default)]`, which
+    /// makes schemars treat the field as optional without emitting any
+    /// `"default"` key (the default is `None`, so `skip_serializing_if`
+    /// skips it). Serialized output is unchanged.
+    #[test]
+    fn port_info_optional_usb_fields_not_required() {
+        let schema = schema_for!(PortInfo);
+        let json = serde_json::to_value(&schema).expect("schema serializes");
+        let required: Vec<&str> = json
+            .pointer("/required")
+            .and_then(Value::as_array)
+            .expect("PortInfo schema must have a required list")
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
+
+        // Optional USB-identity fields: must stay OUT of `required`.
+        for field in ["vid", "pid", "interface"] {
+            assert!(
+                !required.contains(&field),
+                "PortInfo schema lists optional USB field `{field}` in \
+                 required={required:?}; non-USB ports omit it during \
+                 serialization and MCP clients reject the payload. Keep \
+                 `#[serde(skip_serializing_if = \"Option::is_none\")]` and \
+                 add `default` (see src/port_info.rs)."
+            );
+            // Still declared in `properties`, just optional.
+            assert!(
+                json.pointer(&format!("/properties/{field}")).is_some(),
+                "PortInfo schema is missing the `{field}` property"
+            );
+        }
+
+        // Non-optional identity fields must stay required.
+        for field in ["name", "display_name", "description", "transport"] {
+            assert!(
+                required.contains(&field),
+                "PortInfo schema must keep `{field}` in required, got \
+                 required={required:?}"
+            );
+        }
+
+        // Serialized output is unchanged: `None` USB-identity fields are still
+        // omitted, so `skip_serializing_if` behaviour is intact even with
+        // `default` present.
+        let non_usb = PortInfo {
+            name: "/dev/ttyS0".into(),
+            display_name: "ttyS0".into(),
+            description: "Serial Port".into(),
+            hardware_id: None,
+            transport: PortTransport::Unknown,
+            vid: None,
+            pid: None,
+            serial_number: None,
+            manufacturer: None,
+            product: None,
+            interface: None,
+        };
+        let serialized = serde_json::to_value(&non_usb).expect("PortInfo serializes");
+        let obj = serialized
+            .as_object()
+            .expect("serialized PortInfo must be a JSON object");
+        for field in ["vid", "pid", "interface"] {
+            assert!(
+                !obj.contains_key(field),
+                "serialized non-USB PortInfo must omit `{field}`, got keys: {:?}",
+                obj.keys().collect::<Vec<_>>()
+            );
+        }
+
+        // The `default` evaluates to `None` (skipped), so the schema must not
+        // advertise a `"default"` key on the property — locks the claim made
+        // in the doc comment above.
+        for field in ["vid", "pid", "interface"] {
+            let prop = json
+                .pointer(&format!("/properties/{field}"))
+                .expect("PortInfo schema must declare the `{field}` property");
+            assert!(
+                prop.get("default").is_none(),
+                "PortInfo schema property `{field}` must not carry a \
+                 \"default\" key, got: {prop}"
+            );
+        }
+    }
 
     // Profile types (already fixed in b12b09fd; guarded against regressions).
     check_schema!(profile_has_no_uint_formats, Profile);
