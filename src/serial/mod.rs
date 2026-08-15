@@ -213,8 +213,7 @@ mod schema {
             product: None,
             interface: None,
         };
-        let serialized =
-            serde_json::to_value(&non_usb).expect("PortInfo serializes");
+        let serialized = serde_json::to_value(&non_usb).expect("PortInfo serializes");
         let obj = serialized
             .as_object()
             .expect("serialized PortInfo must be a JSON object");
