@@ -6,7 +6,14 @@ pub struct DiagnosePortArgs {
     /// OS-level port name to probe (e.g. "COM3", "/dev/ttyUSB0").
     pub port: String,
     /// Optional baud rate to try first. Defaults are tried otherwise.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    ///
+    /// `#[serde(default)]` must accompany `skip_serializing_if`: schemars
+    /// 1.2.2 does not see through `schema_with` to the `Option` type, so
+    /// without it this field would land in the schema's `required` array
+    /// even though callers omit it during serialization (see
+    /// `src/serial/port_info.rs` and `src/schema_helpers.rs`). The default
+    /// evaluates to `None` (skipped), so no `"default"` key is emitted.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
     #[schemars(schema_with = "crate::schema_helpers::option_uint_schema")]
     pub baud_rate: Option<u32>,
 }
