@@ -57,14 +57,22 @@ pub struct PortInfo {
     /// validators (logging a warning per call). Every `Option<uN>`/`uN`
     /// field that derives `JsonSchema` MUST carry this override — see
     /// `src/schema_helpers.rs` and the `serial::schema` regression tests.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    ///
+    /// `#[serde(default)]` is required alongside `skip_serializing_if`:
+    /// schemars 1.2.2 does not see through `schema_with` to the `Option`
+    /// type, so without it this field would land in the schema's `required`
+    /// array even though non-USB ports omit it during serialization. The
+    /// default evaluates to `None` (skipped), so no `"default"` key is
+    /// emitted into the schema.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
     #[schemars(schema_with = "crate::schema_helpers::option_uint_schema")]
     pub vid: Option<u16>,
     /// USB Product ID. `None` for non-USB ports.
     ///
     /// See `vid` for why the `#[schemars(schema_with = ...)]` override is
-    /// required on every unsigned-integer field that derives `JsonSchema`.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// required on every unsigned-integer field that derives `JsonSchema`,
+    /// and why `#[serde(default)]` must accompany `skip_serializing_if`.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
     #[schemars(schema_with = "crate::schema_helpers::option_uint_schema")]
     pub pid: Option<u16>,
     /// USB serial number string from the device descriptor.
@@ -79,8 +87,9 @@ pub struct PortInfo {
     /// USB interface index. `None` when not available or not a USB port.
     ///
     /// See `vid` for why the `#[schemars(schema_with = ...)]` override is
-    /// required on every unsigned-integer field that derives `JsonSchema`.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// required on every unsigned-integer field that derives `JsonSchema`,
+    /// and why `#[serde(default)]` must accompany `skip_serializing_if`.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
     #[schemars(schema_with = "crate::schema_helpers::option_uint_schema")]
     pub interface: Option<u8>,
 }
