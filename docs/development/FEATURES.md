@@ -298,6 +298,10 @@ Non-feature work, roughly in suggested order. From the 2026-07-05 repo review.
   is a known bug vector
 - schemars 1.x emits non-standard `"format": "uintN"` for unsigned
   integer fields; the per-field attribute is the workaround
+- `#[serde(skip_serializing_if = "Option::is_none")]` fields must also carry
+  `#[serde(default)]`: schemars 1.2.2 does not see through `schema_with` to
+  the `Option` type, so without it the field lands in `required` while
+  serialization omits it (the PortInfo vid/pid/interface miss)
 - a `UInt` (and `OptionUInt`) newtype that derives `JsonSchema` natively
   without the format keyword, OR a schemars visitor that strips the
   format globally, would collapse the entire class of bug and remove

@@ -21,6 +21,15 @@
 //! `#[schemars(schema_with = "crate::schema_helpers::uint_schema")]`
 //! (or `option_uint_schema` for `Option<uN>`).
 //!
+//! **Corollary:** if such a field is also omitted from serialized output via
+//! `#[serde(skip_serializing_if = "Option::is_none")]`, it MUST additionally
+//! carry `#[serde(default)]`: schemars 1.2.2 does not see through
+//! `schema_with` to the `Option` type, so without `default` the field lands
+//! in the schema's `required` array while serialization still omits it. The
+//! default evaluates to `None` (skipped), so no `"default"` key is emitted
+//! into the schema. See `src/serial/port_info.rs` (vid/pid/interface) and the
+//! `port_info_optional_usb_fields_not_required` regression test.
+//!
 //! **Guards:** `serial::schema` (per-type schema scan, covers all known public
 //! `JsonSchema` types) and `tools::tests::tool_schemas_have_no_nonstandard_uint_formats`
 //! (tool `outputSchema` string scan, now covers uint8/uint16/uint32/uint64).

@@ -69,7 +69,13 @@ python3 -m unittest discover -s scripts/tests -v
   Every `uN` / `Option<uN>` field on a struct that derives `JsonSchema` MUST
   be annotated with
   `#[schemars(schema_with = "crate::schema_helpers::uint_schema")]`
-  (or `option_uint_schema` for `Option<uN>`). Regression tests live in
+  (or `option_uint_schema` for `Option<uN>`). If such a field is also
+  omitted from serialized output via
+  `#[serde(skip_serializing_if = "Option::is_none")]`, it MUST additionally
+  carry `#[serde(default)]`: schemars 1.2.2 does not see through
+  `schema_with` to the `Option` type, so without `default` the field lands
+  in the schema's `required` array while serialization omits it (the
+  PortInfo vid/pid/interface miss). Regression tests live in
   `serial::schema` (`src/serial/mod.rs`) — extend the `check_schema!` list when
   adding a new `JsonSchema`-deriving struct with unsigned integer fields.
   History: b12b09fd, bc37a0b0, and the PortInfo (vid/pid/interface) regression
