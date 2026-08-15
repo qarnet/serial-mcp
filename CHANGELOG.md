@@ -2,6 +2,7 @@
 
 | Version | Date | Highlights |
 |---|---|---|
+| [0.9.3](#093) | 2026-08-15 | `list_ports` schema fix: optional `PortInfo` USB fields (`vid`/`pid`/`interface`) no longer required in the tool output schema (schemars 1.2.2 `schema_with` + `skip_serializing_if` mismatch), same fix + regression guard for `DiagnosePortArgs.baud_rate`; schema-drift fixes (isolated/transitive ref resolution, stateless HTTP protocol metadata required); read-loop decomposition into named control-flow units + `ReadDriver` state machine, async-trait `ConnectionOpener`; CI hardening (immutable-SHA action pins, versioned nrfutil provisioning with checksum verification, locked MCP validation npm deps); docs cleanup; rmcp 3.1.0, actions/setup-node 7 |
 | [0.9.2](#092) | 2026-08-04 | rmcp 1.7 → 3.0 migration (breaking pre-1.0 surface: MCP logging + `subscribe`/`unsubscribe` tools removed, `poll_interval_ms` dropped, tool count 27 → 25; `read`/`capture_boot` retained); dual exact MCP lifecycle (preferred `2026-07-28` discovery/stateless + permanent `2025-11-25` initialize/session, exact policy table); modern resource subscriptions (process-wide event hub, port watcher, post-success hints, stateless state sharing; legacy subscriptions disabled); version-correct SEP-2549 cache compliance (`ttlMs: 0`/private on cacheable families, manual paginated list handlers); compatibility proof (version-indexed matrix, real rmcp 1.7.0 client, pinned conformance 0.2.0-alpha.10 + Inspector 2.0.0, expected-failure baseline, policy doc); release/registry security hardening (CI-trusted reusable workflows, fail-closed registry publication); fixes, refactors, dependency/toolchain updates (Rust 1.97.1) |
 | [0.9.1](#091) | 2026-08-01 | lossless RX byte preservation via shared encoding fallback (exact spaced hex, effective encoding reported, no drop accounting on success) across `read`/`subscribe`/`transact`/`capture_boot` raw/frame/partial/match-context paths; unified matcher-owned bounded window for raw read/subscribe with global indexes; framing/serial/RX-tool module splits (public surface unchanged); hermetic mandatory config-schema validation + release/drift guards; pinned `quinn-proto` 0.11.15 (RUSTSEC-2026-0185 / CVE-2026-25800); Rust 1.88.0 workflow/Nix alignment; weekly fuzz + mutation hardening; Windows serial E2E deferred |
 | [0.9.0](#090) | 2026-08-01 | process-wide versioned `ProfileStore` + automatic high-confidence profile sessions (generated/reused, open overlay, observable bindings); write-through profile learning with revision-CAS/conflict/stale/close retry; `rollback_profile` + deletion guard; `list_ports` `profile_matches` discovery; decision-tree teaching + deterministic agent evaluator; atomic pump-gated cancellation-safe `capture_boot`; disabled-by-default `CaptureStore` with CLI quotas + no-clobber `export_log` (breaking: arbitrary paths removed); `flush(both)` RX backlog fix; tool count 25 → 27 |
@@ -97,6 +98,39 @@
 - Tool count drops from 23 → 22 (`seek` removed, folded into `read`).
 
 ## [Unreleased]
+
+## [0.9.3]
+
+### Fixes
+- `list_ports` output schema no longer declares `PortInfo.vid`/`pid`/`interface`
+  as required: the fields are `Option` and omitted from serialized output for
+  non-USB ports (`/dev/ttyS*`, legacy `COM*`), which made strict MCP clients
+  (jsonschema-based, e.g. the official Python SDK) reject the entire tool
+  result with `'vid' is a required property`. `#[serde(default)]` alongside
+  `skip_serializing_if` makes schemars 1.2.2 treat the `schema_with`-annotated
+  fields as optional; serialized output and the schema itself are otherwise
+  unchanged. Regression guard `port_info_optional_usb_fields_not_required`
+  fails on the old schema. (PR #66)
+- `DiagnosePortArgs.baud_rate` gets the same `serde(default)` treatment and a
+  mirroring regression guard — prompt argument schemas validate on the same
+  path as tool output.
+
+### Refactors
+- read loop decomposed into named control-flow units with an extracted
+  `ReadDriver` state machine (public surface unchanged);
+- `ConnectionOpener` boundary uses async-trait instead of handwritten
+  `Pin<Box<dyn Future>>`.
+
+### CI / maintenance
+- schema-drift fixes: isolated schema reference retrieval, transitive schema
+  reference resolution;
+- stateless HTTP transport requires SEP-2243 protocol metadata
+  (`MCP-Protocol-Version` + `_meta` agreement) for modern requests;
+- external GitHub Actions pinned to immutable SHAs; nrfutil provisioning
+  pinned to versioned packages with checksum verification; MCP validation
+  npm tree locked via committed lockfile;
+- rmcp 3.0.1 → 3.1.0, actions/setup-node 4.4.0 → 7.0.0;
+- documentation cleanup and baseline (docs/development hygiene marker).
 
 ## [0.9.2]
 

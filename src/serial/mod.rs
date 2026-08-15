@@ -240,6 +240,66 @@ mod schema {
         }
     }
 
+    /// Same schemars `required` bug as `PortInfo` vid/pid/interface, on the
+    /// prompt arguments type: `DiagnosePortArgs.baud_rate` is
+    /// `Option<u32>` with `schema_with` + `skip_serializing_if`, so before
+    /// the fix it landed in the schema's `required` array while callers
+    /// omit it during serialization. Strict MCP clients reject prompt
+    /// arguments on the same validation path as tool output.
+    #[test]
+    fn diagnose_port_args_baud_rate_not_required() {
+        let schema = schema_for!(crate::prompts::types::DiagnosePortArgs);
+        let json = serde_json::to_value(&schema).expect("schema serializes");
+        let required: Vec<&str> = json
+            .pointer("/required")
+            .and_then(Value::as_array)
+            .expect("DiagnosePortArgs schema must have a required list")
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
+
+        // Optional field: must stay OUT of `required`.
+        assert!(
+            !required.contains(&"baud_rate"),
+            "DiagnosePortArgs schema lists optional field `baud_rate` in \
+             required={required:?}; callers omit it during serialization \
+             and strict MCP clients reject the arguments. Keep \
+             `#[serde(skip_serializing_if = \"Option::is_none\")]` and add \
+             `default` (see src/prompts/types.rs)."
+        );
+        // Still declared in `properties`, just optional.
+        assert!(
+            json.pointer("/properties/baud_rate").is_some(),
+            "DiagnosePortArgs schema is missing the `baud_rate` property"
+        );
+        // No `"default"` key leaks into the schema (the default is `None`,
+        // so `skip_serializing_if` omits it from serialized output).
+        let prop = json
+            .pointer("/properties/baud_rate")
+            .expect("DiagnosePortArgs schema must declare `baud_rate`");
+        assert!(
+            prop.get("default").is_none(),
+            "DiagnosePortArgs schema property `baud_rate` must not carry a \
+             \"default\" key, got: {prop}"
+        );
+
+        // Serialized output unchanged: `None` is still omitted.
+        let args = crate::prompts::types::DiagnosePortArgs {
+            port: "/dev/ttyUSB0".into(),
+            baud_rate: None,
+        };
+        let obj = serde_json::to_value(&args)
+            .expect("DiagnosePortArgs serializes")
+            .as_object()
+            .expect("serialized DiagnosePortArgs must be a JSON object")
+            .clone();
+        assert!(
+            !obj.contains_key("baud_rate"),
+            "serialized DiagnosePortArgs must omit `baud_rate`, got keys: {:?}",
+            obj.keys().collect::<Vec<_>>()
+        );
+    }
+
     // Profile types (already fixed in b12b09fd; guarded against regressions).
     check_schema!(profile_has_no_uint_formats, Profile);
     check_schema!(profile_selector_has_no_uint_formats, ProfileSelector);

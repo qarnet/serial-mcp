@@ -209,6 +209,10 @@ bash scripts/test-mcp-compat.sh
 
 ## Development
 
+> **Before pushing or opening a PR, run `cargo fmt --all`** — CI enforces
+> `cargo fmt --all -- --check` as its first gate and a formatting failure
+> blocks the build/test/clippy jobs, so unformatted code is not mergeable.
+
 ```bash
 cargo test --locked
 cargo clippy --all-targets --locked -- -D warnings
