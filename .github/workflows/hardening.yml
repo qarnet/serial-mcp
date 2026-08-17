@@ -26,7 +26,7 @@ jobs:
   fuzz:
     name: fuzz smoke (${{ matrix.target }})
     runs-on: ubuntu-latest
-    timeout-minutes: 12
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
@@ -56,9 +56,14 @@ jobs:
 
       - name: Fuzz ${{ matrix.target }} (5 min)
         working-directory: fuzz
-        # libFuzzer budget of 300s per target; GNU timeout 360s as an outer
-        # hard cap so a hung target fails the job instead of idling.
-        run: timeout 360 cargo fuzz run "${{ matrix.target }}" -- -max_total_time=300
+        # libFuzzer budget of 300s per target; GNU timeout 600s as an outer
+        # hard cap so a hung target fails the job instead of idling. The cap
+        # must cover the cold nightly build too (~140s on a fresh runner) —
+        # the old 360s cap left only ~3.5 min of fuzzing and killed the run
+        # with exit 124 before the 300s budget elapsed.
+        # The nested fuzz/rust-toolchain.toml pins the nightly toolchain
+        # (required for -Zsanitizer) for every command run from fuzz/.
+        run: timeout 600 cargo fuzz run "${{ matrix.target }}" -- -max_total_time=300
 
       - name: Upload fuzz artifacts and corpus
         if: failure()
@@ -76,7 +81,7 @@ jobs:
   mutate:
     name: mutation (checksums + parsers)
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -100,17 +105,27 @@ jobs:
 
       - name: Mutate checksums + parsers
         # Focused scope only: src/checksums.rs and src/framing/parsers/**.
-        # Baseline enabled; 120s per-mutant timeout; 2 parallel jobs; only
-        # library tests. GNU timeout 1500s as the outer hard cap. Missed or
-        # timed-out mutants fail the job — exit status is NOT suppressed.
+        # Baseline enabled; 120s per-mutant timeout; 4 parallel jobs (the
+        # cargo-mutants default is ONE job at a time — the old --jobs 2 made
+        # the 1500s cap unreachable: 81 mutants × ~90s build each / 2 jobs ≈
+        # 61 min; dropping the flag entirely made it serial and even slower).
+        # CARGO_INCREMENTAL=1 overrides the dtolnay action's global
+        # CARGO_INCREMENTAL=0: cargo-mutants reuses one scratch tree across
+        # all mutants specifically to benefit from incremental builds, and
+        # without it every mutant is a full ~50s rebuild (66 mutants never
+        # finished in 2400s).
+        # GNU timeout 2400s as the outer hard cap. Missed or timed-out
+        # mutants fail the job — exit status is NOT suppressed.
         run: |
-          timeout 1500 cargo mutants \
+          timeout 2400 cargo mutants \
             --file src/checksums.rs \
             --file 'src/framing/parsers/**' \
             --cargo-arg=--locked \
             --timeout 120 \
-            --jobs 2 \
+            --jobs 4 \
             -- --lib
+        env:
+          CARGO_INCREMENTAL: "1"
 
       - name: Upload mutants.out
         if: failure()

@@ -219,20 +219,36 @@ bounded; a hung or slow run must fail the job, not idle.
 - **Fuzz smoke** — matrix over the three existing targets (`tool_call_json`,
   `codec_roundtrip`, `clamp_bounds`), `fail-fast: false`. Pinned toolchain
   `dtolnay/rust-toolchain@nightly-2026-07-15` (no floating nightly) + pinned
-  `cargo install cargo-fuzz --locked --version 0.13.2`. Per target:
-  libFuzzer `-max_total_time=300` wrapped in GNU `timeout 360`, job
-  `timeout-minutes: 12`. Ubuntu + `libudev-dev pkg-config`. On failure,
-  upload `fuzz/artifacts/<target>/` + `fuzz/corpus/<target>/` via
+  `cargo install cargo-fuzz --locked --version 0.13.2`. The nightly pin is
+  ALSO declared in the nested `fuzz/rust-toolchain.toml` (rustup resolves the
+  nearest toolchain file, so every cargo/rustup invocation from `fuzz/` uses
+  nightly — the declarative replacement for the old `RUSTUP_TOOLCHAIN` env
+  hack, which was needed because the repo-root `rust-toolchain.toml` (1.97.1)
+  overrides `rustup default` and made `cargo fuzz` reject
+  `-Zsanitizer=address`). Keep the two pins in sync. Per target: libFuzzer
+  `-max_total_time=300` wrapped in GNU `timeout 600` (must cover the cold
+  nightly build, ~140s on a fresh runner — the old 360s cap killed the run
+  with exit 124 before the 300s budget elapsed), job `timeout-minutes: 15`.
+  Ubuntu + `libudev-dev pkg-config`. On failure, upload
+  `fuzz/artifacts/<target>/` + `fuzz/corpus/<target>/` via
   `actions/upload-artifact@v7` (`if-no-files-found: warn`, `retention-days: 7`)
   — missing paths warn but never mask the original failure.
 - **Mutation** — project Rust `dtolnay/rust-toolchain@1.97.1` (NOT nightly;
   cargo-fuzz/nightly are isolated fuzz tooling, not an MSRV bump) + pinned
   `cargo install cargo-mutants --locked --version 27.1.0`. Focused scope only:
   `--file src/checksums.rs` and `--file 'src/framing/parsers/**'` (quote the
-  glob), with `--cargo-arg=--locked`, `--timeout 120`, `--jobs 2`, `-- --lib`.
-  Baseline stays enabled. Whole command wrapped in GNU `timeout 1500`, job
-  `timeout-minutes: 30`. Missed/time-out mutants fail the job — exit status is
-  never suppressed. On failure upload `mutants.out/` (same warn/no-mask rule).
+  glob), with `--cargo-arg=--locked`, `--timeout 120`, `--jobs 4`, `-- --lib`.
+  `--jobs 4` is REQUIRED: cargo-mutants' default is one job at a time, and
+  the old `--jobs 2` made the 1500s cap unreachable (81 mutants × ~90s / 2
+  jobs ≈ 61 min) so the run died with exit 124. The step also sets
+  `CARGO_INCREMENTAL: "1"` to override the dtolnay action's global
+  `CARGO_INCREMENTAL=0` — cargo-mutants reuses one scratch tree across all
+  mutants specifically to benefit from incremental builds, and without it
+  every mutant is a full ~50s rebuild (66 mutants never finished in 2400s).
+  Baseline stays enabled. Whole command wrapped in GNU `timeout 2400`, job
+  `timeout-minutes: 45`. Missed/time-out mutants fail the job — exit status
+  is never suppressed. On failure upload `mutants.out/` (same warn/no-mask
+  rule).
 - These jobs are NOT a PR-required gate.
 - Windows serial E2E is **deferred**: no privileged virtual-port driver
   installation on GitHub-hosted runners (com0com-style drivers are
