@@ -224,7 +224,9 @@ bounded; a hung or slow run must fail the job, not idle.
   (1.97.1) overrides `rustup default` — without it `cargo fuzz` runs stable and
   rejects `-Zsanitizer=address` ("the option `Z` is only accepted on the
   nightly compiler"). Per target: libFuzzer `-max_total_time=300` wrapped in
-  GNU `timeout 360`, job `timeout-minutes: 12`. Ubuntu + `libudev-dev
+  GNU `timeout 600` (must cover the cold nightly build, ~140s on a fresh
+  runner — the old 360s cap killed the run with exit 124 before the 300s
+  budget elapsed), job `timeout-minutes: 15`. Ubuntu + `libudev-dev
   pkg-config`. On failure, upload `fuzz/artifacts/<target>/` +
   `fuzz/corpus/<target>/` via `actions/upload-artifact@v7`
   (`if-no-files-found: warn`, `retention-days: 7`) — missing paths warn but

@@ -115,7 +115,10 @@
   - fuzz smoke: the repo `rust-toolchain.toml` (1.97.1) overrode `rustup
     default nightly-2026-07-15`, so `cargo fuzz` ran the stable toolchain and
     rejected `-Zsanitizer=address`; the fuzz step now sets
-    `RUSTUP_TOOLCHAIN: nightly-2026-07-15`;
+    `RUSTUP_TOOLCHAIN: nightly-2026-07-15`. The GNU timeout also rises
+    360s → 600s (job 12 → 15 min): the cap must cover the cold nightly
+    build (~140s on a fresh runner) or the run dies with exit 124 before
+    the 300s fuzz budget elapses;
   - mutation: `--jobs 2` removed (parallelism now defaults to nproc) and the
     GNU timeout raised 1500s → 2400s (job 30 → 45 min) — the old bounds were
     unreachable at ~90s per-mutant build (81 mutants × ~90s / 2 jobs ≈ 61 min)

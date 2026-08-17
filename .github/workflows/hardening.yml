@@ -26,7 +26,7 @@ jobs:
   fuzz:
     name: fuzz smoke (${{ matrix.target }})
     runs-on: ubuntu-latest
-    timeout-minutes: 12
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
@@ -62,11 +62,14 @@ jobs:
 
       - name: Fuzz ${{ matrix.target }} (5 min)
         working-directory: fuzz
-        # libFuzzer budget of 300s per target; GNU timeout 360s as an outer
-        # hard cap so a hung target fails the job instead of idling.
+        # libFuzzer budget of 300s per target; GNU timeout 600s as an outer
+        # hard cap so a hung target fails the job instead of idling. The cap
+        # must cover the cold nightly build too (~140s on a fresh runner) —
+        # the old 360s cap left only ~3.5 min of fuzzing and killed the run
+        # with exit 124 before the 300s budget elapsed.
         # RUSTUP_TOOLCHAIN overrides the repo rust-toolchain.toml pin so the
         # nightly toolchain (required for -Zsanitizer) is actually used.
-        run: timeout 360 cargo fuzz run "${{ matrix.target }}" -- -max_total_time=300
+        run: timeout 600 cargo fuzz run "${{ matrix.target }}" -- -max_total_time=300
         env:
           RUSTUP_TOOLCHAIN: nightly-2026-07-15
 
