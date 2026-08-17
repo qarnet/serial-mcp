@@ -115,16 +115,22 @@
 - Hardening workflow fixed after three consecutive weekly failures:
   - fuzz smoke: the repo `rust-toolchain.toml` (1.97.1) overrode `rustup
     default nightly-2026-07-15`, so `cargo fuzz` ran the stable toolchain and
-    rejected `-Zsanitizer=address`; the fuzz step now sets
-    `RUSTUP_TOOLCHAIN: nightly-2026-07-15`. The GNU timeout also rises
-    360s → 600s (job 12 → 15 min): the cap must cover the cold nightly
-    build (~140s on a fresh runner) or the run dies with exit 124 before
-    the 300s fuzz budget elapses;
+    rejected `-Zsanitizer=address`. Fixed declaratively: a nested
+    `fuzz/rust-toolchain.toml` pins the nightly for every command run from
+    `fuzz/` (rustup resolves the nearest toolchain file) — replacing the
+    `RUSTUP_TOOLCHAIN` env hack, mirroring how the nix-nrf-dev shell scopes
+    its toolchain. The GNU timeout also rises 360s → 600s (job 12 → 15 min):
+    the cap must cover the cold nightly build (~140s on a fresh runner) or
+    the run dies with exit 124 before the 300s fuzz budget elapses;
   - mutation: `--jobs 4` restored explicitly (cargo-mutants' default is ONE
     job at a time — dropping the flag made the run serial) and the GNU
     timeout raised 1500s → 2400s (job 30 → 45 min) — the old bounds were
     unreachable at ~90s per-mutant build (81 mutants × ~90s / 2 jobs ≈
-    61 min) and the run died with exit 124 before finishing;
+    61 min) and the run died with exit 124 before finishing. The step also
+    sets `CARGO_INCREMENTAL=1` to override the dtolnay action's global
+    `CARGO_INCREMENTAL=0`: cargo-mutants reuses one scratch tree across all
+    mutants to benefit from incremental builds, and without it every mutant
+    is a full ~50s rebuild (66 mutants never finished in 2400s);
 - `compat/mcp-validation` lockfile: `nanoid` 3.3.17 → 3.3.18 (fixes the
   dependabot high-severity alert "custom generators can loop indefinitely
   when size is zero"; `npm ci --ignore-scripts` + `npm ls` verified clean).

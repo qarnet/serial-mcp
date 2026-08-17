@@ -43,14 +43,8 @@ jobs:
         with:
           toolchain: nightly-2026-07-15
 
-      # The repo rust-toolchain.toml pins 1.97.1 and overrides `rustup
-      # default`; without this env var cargo fuzz would run the stable
-      # toolchain and reject the -Zsanitizer=address flag ("the option `Z`
-      # is only accepted on the nightly compiler").
       - name: Report Rust toolchain
         run: rustc --version --verbose
-        env:
-          RUSTUP_TOOLCHAIN: nightly-2026-07-15
 
       - name: Cache cargo registry + fuzz build
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
@@ -67,11 +61,9 @@ jobs:
         # must cover the cold nightly build too (~140s on a fresh runner) —
         # the old 360s cap left only ~3.5 min of fuzzing and killed the run
         # with exit 124 before the 300s budget elapsed.
-        # RUSTUP_TOOLCHAIN overrides the repo rust-toolchain.toml pin so the
-        # nightly toolchain (required for -Zsanitizer) is actually used.
+        # The nested fuzz/rust-toolchain.toml pins the nightly toolchain
+        # (required for -Zsanitizer) for every command run from fuzz/.
         run: timeout 600 cargo fuzz run "${{ matrix.target }}" -- -max_total_time=300
-        env:
-          RUSTUP_TOOLCHAIN: nightly-2026-07-15
 
       - name: Upload fuzz artifacts and corpus
         if: failure()
@@ -117,6 +109,11 @@ jobs:
         # cargo-mutants default is ONE job at a time — the old --jobs 2 made
         # the 1500s cap unreachable: 81 mutants × ~90s build each / 2 jobs ≈
         # 61 min; dropping the flag entirely made it serial and even slower).
+        # CARGO_INCREMENTAL=1 overrides the dtolnay action's global
+        # CARGO_INCREMENTAL=0: cargo-mutants reuses one scratch tree across
+        # all mutants specifically to benefit from incremental builds, and
+        # without it every mutant is a full ~50s rebuild (66 mutants never
+        # finished in 2400s).
         # GNU timeout 2400s as the outer hard cap. Missed or timed-out
         # mutants fail the job — exit status is NOT suppressed.
         run: |
@@ -127,6 +124,8 @@ jobs:
             --timeout 120 \
             --jobs 4 \
             -- --lib
+        env:
+          CARGO_INCREMENTAL: "1"
 
       - name: Upload mutants.out
         if: failure()
