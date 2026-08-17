@@ -113,9 +113,10 @@ jobs:
 
       - name: Mutate checksums + parsers
         # Focused scope only: src/checksums.rs and src/framing/parsers/**.
-        # Baseline enabled; 120s per-mutant timeout; parallel jobs default to
-        # nproc (4 on ubuntu-latest — the old --jobs 2 made the 1500s cap
-        # unreachable: 81 mutants × ~90s build each / 2 jobs ≈ 61 min).
+        # Baseline enabled; 120s per-mutant timeout; 4 parallel jobs (the
+        # cargo-mutants default is ONE job at a time — the old --jobs 2 made
+        # the 1500s cap unreachable: 81 mutants × ~90s build each / 2 jobs ≈
+        # 61 min; dropping the flag entirely made it serial and even slower).
         # GNU timeout 2400s as the outer hard cap. Missed or timed-out
         # mutants fail the job — exit status is NOT suppressed.
         run: |
@@ -124,6 +125,7 @@ jobs:
             --file 'src/framing/parsers/**' \
             --cargo-arg=--locked \
             --timeout 120 \
+            --jobs 4 \
             -- --lib
 
       - name: Upload mutants.out

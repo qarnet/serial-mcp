@@ -235,13 +235,13 @@ bounded; a hung or slow run must fail the job, not idle.
   cargo-fuzz/nightly are isolated fuzz tooling, not an MSRV bump) + pinned
   `cargo install cargo-mutants --locked --version 27.1.0`. Focused scope only:
   `--file src/checksums.rs` and `--file 'src/framing/parsers/**'` (quote the
-  glob), with `--cargo-arg=--locked`, `--timeout 120`, `-- --lib`. Parallel
-  jobs default to nproc (4 on ubuntu-latest) — do NOT re-add `--jobs 2`: with
-  ~90s per-mutant builds it made the old 1500s cap unreachable (81 mutants ×
-  ~90s / 2 jobs ≈ 61 min) and the run died with exit 124. Baseline stays
-  enabled. Whole command wrapped in GNU `timeout 2400`, job
-  `timeout-minutes: 45`. Missed/time-out mutants fail the job — exit status is
-  never suppressed. On failure upload `mutants.out/` (same warn/no-mask rule).
+  glob), with `--cargo-arg=--locked`, `--timeout 120`, `--jobs 4`, `-- --lib`.
+  `--jobs 4` is REQUIRED: cargo-mutants' default is one job at a time, and
+  the old `--jobs 2` made the 1500s cap unreachable (81 mutants × ~90s / 2
+  jobs ≈ 61 min) so the run died with exit 124. Baseline stays enabled.
+  Whole command wrapped in GNU `timeout 2400`, job `timeout-minutes: 45`.
+  Missed/time-out mutants fail the job — exit status is never suppressed.
+  On failure upload `mutants.out/` (same warn/no-mask rule).
 - These jobs are NOT a PR-required gate.
 - Windows serial E2E is **deferred**: no privileged virtual-port driver
   installation on GitHub-hosted runners (com0com-style drivers are

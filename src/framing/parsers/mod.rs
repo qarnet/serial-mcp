@@ -147,25 +147,6 @@ impl FrameParser for ShellPromptParser {
                 prompt_type: "generic".into(),
             });
         }
-        // user@host:path$ / user@host:path# prompts. Only the suffix after
-        // the last ':' matters — the earlier ends_with checks above already
-        // classify every prompt suffix, so this branch is reachable only for
-        // suffixes that are NOT a prompt (e.g. "user@host:/data" → Raw).
-        if let Some(at_pos) = trimmed.rfind('@') {
-            if let Some(colon_pos) = trimmed[at_pos..].find(':') {
-                let suffix = &trimmed[at_pos + colon_pos + 1..];
-                if suffix == "$ " || suffix == "$" || suffix == "# " || suffix == "#" {
-                    return Ok(ParsedFrame::ShellPrompt {
-                        prompt: trimmed.to_string(),
-                        prompt_type: if suffix.starts_with('#') {
-                            "root".to_string()
-                        } else {
-                            "user".to_string()
-                        },
-                    });
-                }
-            }
-        }
         Ok(ParsedFrame::Raw)
     }
 }
@@ -187,6 +168,34 @@ fn strip_trailing_newline(content: &mut Vec<u8>) {
         content.truncate(content.len() - 2);
     } else if content.ends_with(b"\n") {
         content.truncate(content.len() - 1);
+    }
+}
+
+#[cfg(test)]
+mod strip_tests {
+    use super::*;
+
+    #[test]
+    fn strip_trailing_newline_removes_crlf() {
+        let mut content = b"GPGLL,1,2\r\n".to_vec();
+        strip_trailing_newline(&mut content);
+        assert_eq!(content, b"GPGLL,1,2");
+    }
+
+    #[test]
+    fn strip_trailing_newline_removes_bare_lf() {
+        // Pins the bare-`\n` branch: a mutation turning `len() - 1` into
+        // `len() + 1` (or `/ 1`) must fail this test.
+        let mut content = b"GPGLL,1,2\n".to_vec();
+        strip_trailing_newline(&mut content);
+        assert_eq!(content, b"GPGLL,1,2");
+    }
+
+    #[test]
+    fn strip_trailing_newline_noop_without_newline() {
+        let mut content = b"GPGLL,1,2".to_vec();
+        strip_trailing_newline(&mut content);
+        assert_eq!(content, b"GPGLL,1,2");
     }
 }
 
@@ -574,18 +583,19 @@ mod tests {
 
     #[test]
     fn at_parser_cme_error_fields_are_split() {
-        // Pins the field split on the +CME ERROR branch: a mutation turning
-        // the `||` into `&&` (or dropping the branch) must fail this test.
+        // Pins the +CME ERROR branch (bare form without a colon, which does
+        // NOT hit the `+`-prefix response branch): a mutation turning the
+        // `||` into `&&` must fail this test.
         let p = AtCommandParser;
-        let result = p.parse(b"+CME ERROR: 100").unwrap();
+        let result = p.parse(b"+CME ERROR").unwrap();
         assert!(matches!(
             result,
             ParsedFrame::AtCommand {
                 response_type,
-                command: Some(ref c),
-                fields,
+                command: None,
+                status: Some(ref s),
                 ..
-            } if response_type == "response" && c == "CME ERROR" && fields == ["100"]
+            } if response_type == "error" && s == "+CME ERROR"
         ));
     }
 

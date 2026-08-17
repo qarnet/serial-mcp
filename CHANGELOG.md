@@ -102,13 +102,14 @@
 ### Fixes
 - `ShellPromptParser` drops the unreachable `user@host:path$` branch: every
   prompt suffix it could classify (`$ `, `$`, `# `, `#`) is already handled by
-  the earlier `ends_with` checks, so the branch was dead code (its `_user` /
-  `_host` bindings were unused). Removing it eliminates 12 mutation-testing
-  misses on arithmetic/boolean mutants that no test could ever catch.
+  the earlier `ends_with` checks, so the branch was dead code. Removing it
+  eliminates 12 mutation-testing misses on arithmetic/boolean mutants that no
+  test could ever catch.
 - `AtCommandParser` and `ShellPromptParser` gain regression tests that kill
   the surviving `+`/`*`/`-` and `||`/`&&` mutants in the `+CME ERROR` /
-  `+CMS ERROR` and bare `>` prompt branches (previously missed by the
-  mutation gate).
+  `+CMS ERROR` and bare `>` prompt branches, and `strip_trailing_newline`
+  gains direct tests for its `\r\n` / bare `\n` / no-op branches (previously
+  missed by the mutation gate).
 
 ### CI / maintenance
 - Hardening workflow fixed after three consecutive weekly failures:
@@ -119,10 +120,11 @@
     360s → 600s (job 12 → 15 min): the cap must cover the cold nightly
     build (~140s on a fresh runner) or the run dies with exit 124 before
     the 300s fuzz budget elapses;
-  - mutation: `--jobs 2` removed (parallelism now defaults to nproc) and the
-    GNU timeout raised 1500s → 2400s (job 30 → 45 min) — the old bounds were
-    unreachable at ~90s per-mutant build (81 mutants × ~90s / 2 jobs ≈ 61 min)
-    and the run died with exit 124 before finishing;
+  - mutation: `--jobs 4` restored explicitly (cargo-mutants' default is ONE
+    job at a time — dropping the flag made the run serial) and the GNU
+    timeout raised 1500s → 2400s (job 30 → 45 min) — the old bounds were
+    unreachable at ~90s per-mutant build (81 mutants × ~90s / 2 jobs ≈
+    61 min) and the run died with exit 124 before finishing;
 - `compat/mcp-validation` lockfile: `nanoid` 3.3.17 → 3.3.18 (fixes the
   dependabot high-severity alert "custom generators can loop indefinitely
   when size is zero"; `npm ci --ignore-scripts` + `npm ls` verified clean).
