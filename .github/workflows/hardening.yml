@@ -43,8 +43,14 @@ jobs:
         with:
           toolchain: nightly-2026-07-15
 
+      # The repo rust-toolchain.toml pins 1.97.1 and overrides `rustup
+      # default`; without this env var cargo fuzz would run the stable
+      # toolchain and reject the -Zsanitizer=address flag ("the option `Z`
+      # is only accepted on the nightly compiler").
       - name: Report Rust toolchain
         run: rustc --version --verbose
+        env:
+          RUSTUP_TOOLCHAIN: nightly-2026-07-15
 
       - name: Cache cargo registry + fuzz build
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
@@ -58,7 +64,11 @@ jobs:
         working-directory: fuzz
         # libFuzzer budget of 300s per target; GNU timeout 360s as an outer
         # hard cap so a hung target fails the job instead of idling.
+        # RUSTUP_TOOLCHAIN overrides the repo rust-toolchain.toml pin so the
+        # nightly toolchain (required for -Zsanitizer) is actually used.
         run: timeout 360 cargo fuzz run "${{ matrix.target }}" -- -max_total_time=300
+        env:
+          RUSTUP_TOOLCHAIN: nightly-2026-07-15
 
       - name: Upload fuzz artifacts and corpus
         if: failure()
@@ -76,7 +86,7 @@ jobs:
   mutate:
     name: mutation (checksums + parsers)
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -100,16 +110,17 @@ jobs:
 
       - name: Mutate checksums + parsers
         # Focused scope only: src/checksums.rs and src/framing/parsers/**.
-        # Baseline enabled; 120s per-mutant timeout; 2 parallel jobs; only
-        # library tests. GNU timeout 1500s as the outer hard cap. Missed or
-        # timed-out mutants fail the job — exit status is NOT suppressed.
+        # Baseline enabled; 120s per-mutant timeout; parallel jobs default to
+        # nproc (4 on ubuntu-latest — the old --jobs 2 made the 1500s cap
+        # unreachable: 81 mutants × ~90s build each / 2 jobs ≈ 61 min).
+        # GNU timeout 2400s as the outer hard cap. Missed or timed-out
+        # mutants fail the job — exit status is NOT suppressed.
         run: |
-          timeout 1500 cargo mutants \
+          timeout 2400 cargo mutants \
             --file src/checksums.rs \
             --file 'src/framing/parsers/**' \
             --cargo-arg=--locked \
             --timeout 120 \
-            --jobs 2 \
             -- --lib
 
       - name: Upload mutants.out

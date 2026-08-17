@@ -99,6 +99,31 @@
 
 ## [Unreleased]
 
+### Fixes
+- `ShellPromptParser` drops the unreachable `user@host:path$` branch: every
+  prompt suffix it could classify (`$ `, `$`, `# `, `#`) is already handled by
+  the earlier `ends_with` checks, so the branch was dead code (its `_user` /
+  `_host` bindings were unused). Removing it eliminates 12 mutation-testing
+  misses on arithmetic/boolean mutants that no test could ever catch.
+- `AtCommandParser` and `ShellPromptParser` gain regression tests that kill
+  the surviving `+`/`*`/`-` and `||`/`&&` mutants in the `+CME ERROR` /
+  `+CMS ERROR` and bare `>` prompt branches (previously missed by the
+  mutation gate).
+
+### CI / maintenance
+- Hardening workflow fixed after three consecutive weekly failures:
+  - fuzz smoke: the repo `rust-toolchain.toml` (1.97.1) overrode `rustup
+    default nightly-2026-07-15`, so `cargo fuzz` ran the stable toolchain and
+    rejected `-Zsanitizer=address`; the fuzz step now sets
+    `RUSTUP_TOOLCHAIN: nightly-2026-07-15`;
+  - mutation: `--jobs 2` removed (parallelism now defaults to nproc) and the
+    GNU timeout raised 1500s → 2400s (job 30 → 45 min) — the old bounds were
+    unreachable at ~90s per-mutant build (81 mutants × ~90s / 2 jobs ≈ 61 min)
+    and the run died with exit 124 before finishing;
+- `compat/mcp-validation` lockfile: `nanoid` 3.3.17 → 3.3.18 (fixes the
+  dependabot high-severity alert "custom generators can loop indefinitely
+  when size is zero"; `npm ci --ignore-scripts` + `npm ls` verified clean).
+
 ## [0.9.3]
 
 ### Fixes

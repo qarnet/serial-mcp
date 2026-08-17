@@ -219,19 +219,26 @@ bounded; a hung or slow run must fail the job, not idle.
 - **Fuzz smoke** — matrix over the three existing targets (`tool_call_json`,
   `codec_roundtrip`, `clamp_bounds`), `fail-fast: false`. Pinned toolchain
   `dtolnay/rust-toolchain@nightly-2026-07-15` (no floating nightly) + pinned
-  `cargo install cargo-fuzz --locked --version 0.13.2`. Per target:
-  libFuzzer `-max_total_time=300` wrapped in GNU `timeout 360`, job
-  `timeout-minutes: 12`. Ubuntu + `libudev-dev pkg-config`. On failure,
-  upload `fuzz/artifacts/<target>/` + `fuzz/corpus/<target>/` via
-  `actions/upload-artifact@v7` (`if-no-files-found: warn`, `retention-days: 7`)
-  — missing paths warn but never mask the original failure.
+  `cargo install cargo-fuzz --locked --version 0.13.2`. The fuzz step sets
+  `RUSTUP_TOOLCHAIN: nightly-2026-07-15` because the repo `rust-toolchain.toml`
+  (1.97.1) overrides `rustup default` — without it `cargo fuzz` runs stable and
+  rejects `-Zsanitizer=address` ("the option `Z` is only accepted on the
+  nightly compiler"). Per target: libFuzzer `-max_total_time=300` wrapped in
+  GNU `timeout 360`, job `timeout-minutes: 12`. Ubuntu + `libudev-dev
+  pkg-config`. On failure, upload `fuzz/artifacts/<target>/` +
+  `fuzz/corpus/<target>/` via `actions/upload-artifact@v7`
+  (`if-no-files-found: warn`, `retention-days: 7`) — missing paths warn but
+  never mask the original failure.
 - **Mutation** — project Rust `dtolnay/rust-toolchain@1.97.1` (NOT nightly;
   cargo-fuzz/nightly are isolated fuzz tooling, not an MSRV bump) + pinned
   `cargo install cargo-mutants --locked --version 27.1.0`. Focused scope only:
   `--file src/checksums.rs` and `--file 'src/framing/parsers/**'` (quote the
-  glob), with `--cargo-arg=--locked`, `--timeout 120`, `--jobs 2`, `-- --lib`.
-  Baseline stays enabled. Whole command wrapped in GNU `timeout 1500`, job
-  `timeout-minutes: 30`. Missed/time-out mutants fail the job — exit status is
+  glob), with `--cargo-arg=--locked`, `--timeout 120`, `-- --lib`. Parallel
+  jobs default to nproc (4 on ubuntu-latest) — do NOT re-add `--jobs 2`: with
+  ~90s per-mutant builds it made the old 1500s cap unreachable (81 mutants ×
+  ~90s / 2 jobs ≈ 61 min) and the run died with exit 124. Baseline stays
+  enabled. Whole command wrapped in GNU `timeout 2400`, job
+  `timeout-minutes: 45`. Missed/time-out mutants fail the job — exit status is
   never suppressed. On failure upload `mutants.out/` (same warn/no-mask rule).
 - These jobs are NOT a PR-required gate.
 - Windows serial E2E is **deferred**: no privileged virtual-port driver

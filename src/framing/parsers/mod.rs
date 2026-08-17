@@ -147,10 +147,12 @@ impl FrameParser for ShellPromptParser {
                 prompt_type: "generic".into(),
             });
         }
+        // user@host:path$ / user@host:path# prompts. Only the suffix after
+        // the last ':' matters — the earlier ends_with checks above already
+        // classify every prompt suffix, so this branch is reachable only for
+        // suffixes that are NOT a prompt (e.g. "user@host:/data" → Raw).
         if let Some(at_pos) = trimmed.rfind('@') {
             if let Some(colon_pos) = trimmed[at_pos..].find(':') {
-                let _user = &trimmed[..at_pos];
-                let _host = &trimmed[at_pos + 1..at_pos + colon_pos];
                 let suffix = &trimmed[at_pos + colon_pos + 1..];
                 if suffix == "$ " || suffix == "$" || suffix == "# " || suffix == "#" {
                     return Ok(ParsedFrame::ShellPrompt {
@@ -464,8 +466,9 @@ mod tests {
             ParsedFrame::AtCommand {
                 response_type,
                 command: Some(ref c),
+                fields,
                 ..
-            } if response_type == "response" && c == "CGREG"
+            } if response_type == "response" && c == "CGREG" && fields == ["0", "1"]
         ));
     }
 
@@ -523,6 +526,18 @@ mod tests {
     }
 
     #[test]
+    fn shell_prompt_bare_generic_arrow() {
+        // Bare `>` (no trailing space) must classify as a generic prompt; a
+        // mutation turning the `||` into `&&` would make this fall through
+        // to Raw.
+        let p = ShellPromptParser { custom: None };
+        let result = p.parse(b">").unwrap();
+        assert!(
+            matches!(result, ParsedFrame::ShellPrompt { prompt_type, .. } if prompt_type == "generic")
+        );
+    }
+
+    #[test]
     fn at_parser_empty_input() {
         let p = AtCommandParser;
         let result = p.parse(b"").unwrap();
@@ -554,6 +569,23 @@ mod tests {
                 command: Some(ref c),
                 ..
             } if response_type == "response" && c == "CMS ERROR"
+        ));
+    }
+
+    #[test]
+    fn at_parser_cme_error_fields_are_split() {
+        // Pins the field split on the +CME ERROR branch: a mutation turning
+        // the `||` into `&&` (or dropping the branch) must fail this test.
+        let p = AtCommandParser;
+        let result = p.parse(b"+CME ERROR: 100").unwrap();
+        assert!(matches!(
+            result,
+            ParsedFrame::AtCommand {
+                response_type,
+                command: Some(ref c),
+                fields,
+                ..
+            } if response_type == "response" && c == "CME ERROR" && fields == ["100"]
         ));
     }
 
