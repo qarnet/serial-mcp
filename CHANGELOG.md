@@ -134,13 +134,15 @@
 - `compat/mcp-validation` lockfile: `nanoid` 3.3.17 → 3.3.18 (fixes the
   dependabot high-severity alert "custom generators can loop indefinitely
   when size is zero"; `npm ci --ignore-scripts` + `npm ls` verified clean).
-- `release.yml` build job drops the `Swatinem/rust-cache` step (CodeQL
-  `actions/cache-poisoning/poisonable-step`, alert #15): the job executes
-  code from a caller-supplied ref (release-dry-run `workflow_dispatch`
-  input) while a restored main-scope cache would expose the cache token to
-  that code and let it poison entries the trusted release later restores.
-  Release builds are rare (per version bump); the extra build time is the
-  price of keeping the privileged path cache-free.
+- `release.yml` build job scopes the cargo cache to release mode only
+  (CodeQL `actions/cache-poisoning/poisonable-step`, alert #15): the cache
+  step now runs only when `inputs.mode == 'release'` — the trusted path
+  invoked by the CI gate with the immutable `github.sha`. The untrusted
+  path is dry-run (`workflow_dispatch` `ref` input, attacker-influenceable
+  code); it gets NO cache step, so its build can neither restore nor save
+  under the deterministic rust-cache key — nothing to poison, and the
+  release cache namespace is only ever written by trusted runs. The
+  trusted release keeps its cache; dry-run pays the uncached build time.
 
 ## [0.9.3]
 
