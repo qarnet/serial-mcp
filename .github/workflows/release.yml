@@ -174,9 +174,13 @@ jobs:
       - name: Report Rust toolchain
         run: rustc --version --verbose
 
-      - name: Cache cargo registry + build
-        if: matrix.os != 'windows-latest'
-        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      # No cargo cache here (CodeQL actions/cache-poisoning/poisonable-step,
+      # alert #15): this job executes code from a caller-supplied ref
+      # (release-dry-run workflow_dispatch input) while a restored main-scope
+      # cache would expose the cache token to that code and let it poison
+      # entries the trusted release later restores. Release builds are rare
+      # (per version bump); the ~2-3 min extra build time is the price of
+      # keeping the privileged path cache-free.
 
       - name: Configure cross-compilation environment
         if: matrix.linker != ''

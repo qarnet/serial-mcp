@@ -134,6 +134,13 @@
 - `compat/mcp-validation` lockfile: `nanoid` 3.3.17 → 3.3.18 (fixes the
   dependabot high-severity alert "custom generators can loop indefinitely
   when size is zero"; `npm ci --ignore-scripts` + `npm ls` verified clean).
+- `release.yml` build job drops the `Swatinem/rust-cache` step (CodeQL
+  `actions/cache-poisoning/poisonable-step`, alert #15): the job executes
+  code from a caller-supplied ref (release-dry-run `workflow_dispatch`
+  input) while a restored main-scope cache would expose the cache token to
+  that code and let it poison entries the trusted release later restores.
+  Release builds are rare (per version bump); the extra build time is the
+  price of keeping the privileged path cache-free.
 
 ## [0.9.3]
 
