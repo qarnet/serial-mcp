@@ -896,6 +896,1389 @@ fn capture_cli_options_synced_between_value_list_and_help() {
     }
 }
 
+#[test]
+fn native_replacement_plan_requires_public_pty_parity_before_removal() {
+    let development_index = repo_file("docs/development/README.md");
+    assert!(development_index.contains(
+        "[native-sim-replacement-research-plan.md](native-sim-replacement-research-plan.md)"
+    ));
+    let research = repo_file("docs/development/native-sim-replacement-research-plan.md");
+    for needle in [
+        "43",
+        "6",
+        "all seven shipped protocol presets",
+        "Hard rejection criteria",
+        "Required Proof-of-Concept Experiments",
+        "Step-by-Step Research TODO",
+        "Remove native_sim and NCS completely",
+        "Full required suite passes from clean checkout",
+    ] {
+        assert!(
+            research.contains(needle),
+            "native_sim replacement research plan must retain {needle:?}"
+        );
+    }
+    for artifact in [
+        "native-sim-test-traceability.md",
+        "native-sim-virtual-serial-candidate-survey.md",
+        "native-sim-boundary-prototype-results.md",
+        "native-sim-emulator-core-research.md",
+        "native-sim-protocol-peer-worksheets.md",
+        "native-sim-replacement-recommendation.md",
+        "replace-native-sim-with-rust-pty-device-fixture.md",
+    ] {
+        assert!(
+            research.contains(artifact),
+            "executed research plan must link {artifact:?}"
+        );
+    }
+    assert!(
+        research.contains("Recommendation approved and Phases A-E implemented")
+            && research.contains("peer-master closure")
+            && research.contains("Phase A resolved")
+            && research.contains("`connection_closed`")
+            && research.contains("Full differential outcome comparison")
+            && research.contains("precedes Phase F"),
+        "research plan must preserve initial blocker evidence and current migration status"
+    );
+    assert!(
+        !research.contains("awaits user approval"),
+        "research plan must not describe the approved replacement as awaiting approval"
+    );
+}
+
+const NATIVE_TRACEABILITY_ROWS: [&str; 49] = [
+    "native_ping_roundtrip",
+    "native_pending_read_then_write_ping_roundtrip",
+    "native_split_writes_preserve_command_order",
+    "native_framing_reports_single_split_command",
+    "native_trace_reports_exact_split_byte_sequence",
+    "native_read_match_on_spam_complete",
+    "native_read_buffer_budget_stops_under_flood",
+    "native_bootloader_touch_exits_42",
+    "native_list_ports_after_open",
+    "native_list_ports_includes_identity_fields",
+    "native_flush_after_write",
+    "native_get_status_after_write_increments_tx_counter",
+    "native_reconfigure_baud_rate_persists",
+    "native_ack_command_provides_pre_execution_ack",
+    "native_txbuf_status_reports_pending",
+    "native_flush_input_clears_host_rx",
+    "native_flush_during_arm_cmd_delay",
+    "native_flush_output_after_full_delivery_is_safe",
+    "native_partial_line_buffered_then_completed",
+    "native_read_regex_matches_pong",
+    "native_read_glob_matches_pong_line",
+    "native_auto_reconnect_preserves_connection",
+    "native_read_line_framing_splits_lines",
+    "native_read_json_parser_decodes_jsonout",
+    "native_read_at_parser_parses_pong",
+    "native_read_framing_max_frames_stops",
+    "native_read_framing_plus_match_combined",
+    "native_open_protocol_default_drives_write_and_read",
+    "native_explicit_rx_framing_beats_connection_default",
+    "native_read_slip_decodes_frame",
+    "native_read_slip_malformed_escape_returns_partial_result",
+    "native_read_delimiter_framing_decodes",
+    "native_read_length_prefixed_framing_decodes",
+    "native_read_start_end_framing_decodes",
+    "native_write_tx_framing_modes_observed_via_trace",
+    "native_read_explicit_line_endings_split_correctly",
+    "native_read_slip_recovers_after_error_on_next_call",
+    "native_read_cobs_preset_decodes_frame",
+    "native_read_ndjson_preset_decodes_json_frames",
+    "native_read_ndjson_preset_skips_empty_lines",
+    "native_read_nmea0183_preset_decodes_parsed_frame",
+    "native_read_modbus_ascii_preset_decodes_parsed_frame",
+    "native_capture_boot_arm_only_captures_post_arm_command_output",
+    "native_named_connection_appears_in_list_connections",
+    "native_set_flow_control_updates_summary_and_result",
+    "native_close_while_read_active_returns_normal_result",
+    "native_reopen_same_port_after_close_works",
+    "native_reopen_then_match_finds_fresh_output",
+    "native_open_with_flow_control_persists_in_summary",
+];
+
+const TRACEABILITY_REPLACEMENT_IDENTIFIERS: [&str; 35] = [
+    "ping_roundtrip_uses_real_path_and_literal_match",
+    "pending_read_receives_later_output_after_readiness_proven_hold",
+    "split_writes_preserve_one_command_and_exact_wire_order",
+    "named_connection_summary_uses_fixture_stable_path",
+    "reopen_same_path_returns_distinct_id_and_only_fresh_generation",
+    "status_reports_exact_io_deltas_and_activity",
+    "reconfigure_updates_status_and_connection_remains_functional",
+    "ack_peer_orders_ack_before_response_and_stops_after_disable",
+    "held_output_reports_nonzero_queue_then_drains_and_recovers",
+    "flush_input_discards_known_old_marker_and_keeps_new_marker",
+    "flush_after_command_acceptance_does_not_cancel_delayed_response",
+    "output_flush_after_full_delivery_preserves_later_traffic",
+    "regex_and_glob_matchers_find_complete_peer_line",
+    "line_framing_returns_exact_ordered_peer_frames",
+    "max_frames_stops_after_exact_limit",
+    "framing_plus_match_returns_matching_frame_and_index",
+    "call_time_line_framing_beats_connection_delimiter_default",
+    "delimiter_length_prefixed_and_start_end_decode_exact_payloads",
+    "explicit_line_endings_split_with_documented_terminator_semantics",
+    "tx_framing_modes_produce_exact_independent_wire_vectors",
+    "json_lines_preset_writes_line_and_preserves_object_only_parser_behavior",
+    "at_command_connection_default_drives_stateful_transact_and_parser_quirk",
+    "slip_preset_writes_independent_bytes_and_keeps_partial_error_then_recovery",
+    "cobs_preset_uses_independent_zero_byte_vector_for_write_and_read",
+    "ndjson_preset_parses_records_and_skips_blank_whitespace_lines",
+    "nmea0183_preset_parses_valid_independently_checksummed_sentence",
+    "modbus_ascii_preset_transact_parses_lrc_and_proves_peer_state_mutation",
+    "finite_flood_matcher_reaches_unique_completion_marker",
+    "live_buffer_budget_caps_finite_flood_with_exact_stop_metadata",
+    "public_mcp_ping_hold_disconnect_replace_and_reconnect",
+    "touch_write_causes_small_rust_child_peer_to_exit_42",
+    "flow_control_none_at_open_and_live_set_are_reflected_in_summary",
+    "close_interrupts_readiness_proven_live_read_with_connection_closed",
+    "capture_boot_arm_only_excludes_stale_bytes_and_preserves_shared_cursor",
+    "phase_e_public_boundary_repeat_gate",
+];
+
+/// Existing public tests that strengthen a non-retired native case. They are
+/// deliberately separate from retirement-only proofs so a retired-proof ID
+/// cannot become a blanket substitute for required replacement coverage.
+const TRACEABILITY_STRENGTHENED_EXISTING_PUBLIC_PROOF_IDENTIFIERS: [&str; 3] = [
+    "list_ports_preview_empty_store_reports_none_parallel_and_pure_ports",
+    "list_ports_preview_selected_winner_matches_later_bare_open",
+    "list_ports_preview_output_validates_against_generated_schema",
+];
+
+/// Existing public tests usable only to justify an explicit retired row.
+const TRACEABILITY_RETIREMENT_ONLY_PROOF_IDENTIFIERS: [&str; 2] = [
+    "call_tool_list_ports_returns_structured_result",
+    "ports_resource_includes_profile_match_map",
+];
+
+const RETIRED_NATIVE_TRACEABILITY_ROWS: [&str; 3] = [
+    "native_list_ports_after_open",
+    "native_flush_after_write",
+    "native_reopen_same_port_after_close_works",
+];
+
+fn traceability_mapping_rows(traceability: &str) -> Result<Vec<&str>, String> {
+    let start = traceability
+        .find("## Implemented Replacement Mapping")
+        .ok_or_else(|| "traceability document lacks implemented mapping heading".to_string())?;
+    let rest = &traceability[start..];
+    let end = rest
+        .find("\n## Disposition Rules")
+        .ok_or_else(|| "traceability mapping lacks disposition heading boundary".to_string())?;
+    Ok(rest[..end]
+        .lines()
+        .filter(|line| line.starts_with("| `native_"))
+        .collect())
+}
+
+fn traceability_mapping_cells(row: &str) -> Result<(&str, &str, &str), String> {
+    let cells: Vec<_> = row.trim().split('|').map(str::trim).collect();
+    if cells.len() != 5 || !cells[0].is_empty() || !cells[4].is_empty() {
+        return Err(format!("mapping row must have three table cells: {row}"));
+    }
+    Ok((cells[1], cells[2], cells[3]))
+}
+
+fn mapping_native_identifier(cell: &str) -> Result<String, String> {
+    let identifiers = inline_code_spans(cell);
+    if identifiers.len() != 1 || !identifiers[0].starts_with("native_") {
+        return Err(format!(
+            "mapping native cell must contain exactly one native test identifier: {cell}"
+        ));
+    }
+    Ok(identifiers[0].clone())
+}
+
+fn mapping_replacement_identifiers(cell: &str) -> Vec<String> {
+    inline_code_spans(cell)
+        .into_iter()
+        .map(|identifier| {
+            identifier
+                .rsplit("::")
+                .next()
+                .unwrap_or(identifier.as_str())
+                .to_owned()
+        })
+        .collect()
+}
+
+fn source_test_identifier_exists(identifier: &str) -> bool {
+    [
+        "tests/device_fixture.rs",
+        "tests/device_command_parity.rs",
+        "tests/device_framing_parity.rs",
+        "tests/device_protocol_parity.rs",
+        "tests/device_parity_repeat.rs",
+        "tests/http_integration.rs",
+        "tests/serial_pty.rs",
+    ]
+    .into_iter()
+    .any(|path| repo_file(path).contains(&format!("fn {identifier}")))
+}
+
+fn native_source_test_exists(identifier: &str) -> bool {
+    [
+        "tests/native_sim_validation/unix.rs",
+        "tests/native_sim_connection_lifecycle.rs",
+    ]
+    .into_iter()
+    .any(|path| repo_file(path).contains(&format!("fn {identifier}")))
+}
+
+fn is_non_retired_traceability_proof(identifier: &str) -> bool {
+    TRACEABILITY_REPLACEMENT_IDENTIFIERS.contains(&identifier)
+        || TRACEABILITY_STRENGTHENED_EXISTING_PUBLIC_PROOF_IDENTIFIERS.contains(&identifier)
+}
+
+#[test]
+fn native_traceability_mapping_is_exact_and_fixture_backed() {
+    // Expected names stay independent of source discovery. This catches a
+    // deleted/renamed native row, duplicate table row, stale/unknown mapping,
+    // or a cited replacement/retirement proof whose source test disappeared.
+    let traceability = repo_file("docs/development/native-sim-test-traceability.md");
+    let rows = traceability_mapping_rows(&traceability)
+        .unwrap_or_else(|error| panic!("native traceability mapping invalid: {error}"));
+    assert_eq!(
+        rows.len(),
+        NATIVE_TRACEABILITY_ROWS.len(),
+        "native traceability mapping must contain exactly {} rows",
+        NATIVE_TRACEABILITY_ROWS.len()
+    );
+    let mut mapped_native_names = Vec::with_capacity(rows.len());
+    let mut mapped_replacement_identifiers = std::collections::BTreeSet::new();
+    let mut retired_native_names = std::collections::BTreeSet::new();
+    let known_replacements: std::collections::BTreeSet<_> = TRACEABILITY_REPLACEMENT_IDENTIFIERS
+        .iter()
+        .chain(TRACEABILITY_STRENGTHENED_EXISTING_PUBLIC_PROOF_IDENTIFIERS.iter())
+        .chain(TRACEABILITY_RETIREMENT_ONLY_PROOF_IDENTIFIERS.iter())
+        .copied()
+        .collect();
+    for row in &rows {
+        let (native_cell, replacement_cell, evidence_cell) = traceability_mapping_cells(row)
+            .unwrap_or_else(|error| panic!("native traceability row invalid: {error}"));
+        let native = mapping_native_identifier(native_cell)
+            .unwrap_or_else(|error| panic!("native traceability row invalid: {error}"));
+        assert!(
+            NATIVE_TRACEABILITY_ROWS.contains(&native.as_str()),
+            "native traceability mapping contains unknown native case {native:?}: {row}"
+        );
+        mapped_native_names.push(native);
+        let is_retired = evidence_cell.contains("**Retired.**");
+        if is_retired {
+            retired_native_names.insert(
+                mapping_native_identifier(native_cell)
+                    .expect("mapping native cell was validated above"),
+            );
+        }
+        let replacements = mapping_replacement_identifiers(replacement_cell);
+        assert!(
+            !replacements.is_empty(),
+            "mapping row must cite at least one replacement or retirement proof: {row}"
+        );
+        for replacement in &replacements {
+            assert!(
+                known_replacements.contains(replacement.as_str()),
+                "mapping row cites unknown replacement/retirement proof {replacement:?}: {row}"
+            );
+            assert!(
+                source_test_identifier_exists(replacement),
+                "mapping row cites replacement/retirement proof {replacement:?} with no source test"
+            );
+            mapped_replacement_identifiers.insert(replacement.clone());
+        }
+        assert!(
+            is_retired
+                || replacements
+                    .iter()
+                    .all(|identifier| is_non_retired_traceability_proof(identifier)),
+            "non-retired mapping row may cite only required replacement identifiers or \
+             strengthened existing public proofs: {row}"
+        );
+    }
+    for native in NATIVE_TRACEABILITY_ROWS {
+        assert!(
+            native_source_test_exists(native),
+            "native traceability expected name {native:?} has no source test"
+        );
+        let occurrences = mapped_native_names
+            .iter()
+            .filter(|actual| actual.as_str() == native)
+            .count();
+        assert_eq!(
+            occurrences, 1,
+            "native traceability mapping must represent {native:?} exactly once; mapped={mapped_native_names:?}"
+        );
+    }
+    assert_eq!(
+        retired_native_names,
+        RETIRED_NATIVE_TRACEABILITY_ROWS
+            .into_iter()
+            .map(str::to_owned)
+            .collect(),
+        "traceability must keep exactly the three explicit retirement rows"
+    );
+    for identifier in TRACEABILITY_REPLACEMENT_IDENTIFIERS {
+        assert!(
+            traceability.contains(identifier),
+            "traceability document must cite replacement identifier {identifier:?}"
+        );
+        assert!(
+            source_test_identifier_exists(identifier),
+            "traceability replacement identifier {identifier:?} has no source test"
+        );
+        if identifier != "phase_e_public_boundary_repeat_gate" {
+            assert!(
+                mapped_replacement_identifiers.contains(identifier),
+                "traceability mapping rows must cite replacement identifier {identifier:?}"
+            );
+        }
+    }
+    for identifier in TRACEABILITY_STRENGTHENED_EXISTING_PUBLIC_PROOF_IDENTIFIERS {
+        assert!(
+            traceability.contains(identifier),
+            "traceability document must cite strengthened existing public proof {identifier:?}"
+        );
+        assert!(
+            source_test_identifier_exists(identifier),
+            "traceability strengthened existing public proof {identifier:?} has no source test"
+        );
+        assert!(
+            mapped_replacement_identifiers.contains(identifier),
+            "traceability mapping rows must cite strengthened existing public proof {identifier:?}"
+        );
+    }
+    for identifier in TRACEABILITY_RETIREMENT_ONLY_PROOF_IDENTIFIERS {
+        assert!(
+            traceability.contains(identifier),
+            "traceability document must cite retirement-only proof {identifier:?}"
+        );
+        assert!(
+            source_test_identifier_exists(identifier),
+            "traceability retirement-only proof {identifier:?} has no source test"
+        );
+        assert!(
+            mapped_replacement_identifiers.contains(identifier),
+            "traceability mapping rows must cite retirement-only proof {identifier:?}"
+        );
+    }
+}
+
+#[test]
+fn batch_thirteen_traceability_mapping_claim_is_exact() {
+    let traceability = repo_file("docs/development/native-sim-test-traceability.md");
+    let rows = traceability_mapping_rows(&traceability).expect("real mapping rows");
+    let row = rows
+        .into_iter()
+        .find(|row| row.contains("native_open_protocol_default_drives_write_and_read"))
+        .expect("Batch 13 traceability mapping row must exist");
+    let (_, _, evidence) =
+        traceability_mapping_cells(row).expect("Batch 13 traceability row must have three cells");
+    assert_eq!(
+        evidence,
+        "**Compared Batch 13.** Historical protocol-only open default controls bare write/read; stripped framed arm match and bare `ping` CR addition; existing `AtPeer` proof remains stronger."
+    );
+}
+
+#[test]
+fn batch_fourteen_traceability_mapping_claim_is_exact() {
+    const BATCH_FOURTEEN_CLAIM: &str =
+        "**Compared Batch 14.** Static three JSON object response; explicit line framing plus `json_lines` parser; exact `140/0/0` timeout result with three ordered parsed objects and positions `52/192/0/0/0/192`; existing JSON Lines fixture proof remains stronger.";
+    let traceability = repo_file("docs/development/native-sim-test-traceability.md");
+    let rows = traceability_mapping_rows(&traceability).expect("real mapping rows");
+    let row = rows
+        .into_iter()
+        .find(|row| row.contains("native_read_json_parser_decodes_jsonout"))
+        .expect("Batch 14 traceability mapping row must exist");
+    let (_, _, evidence) =
+        traceability_mapping_cells(row).expect("Batch 14 traceability row must have three cells");
+    assert_eq!(evidence, BATCH_FOURTEEN_CLAIM);
+
+    let validation_rows: Vec<_> = traceability
+        .lines()
+        .filter(|line| {
+            line.starts_with(
+                "| `native_read_json_parser_decodes_jsonout` | three changing sensor objects |",
+            )
+        })
+        .collect();
+    assert_eq!(
+        validation_rows.len(),
+        1,
+        "Batch 14 lower validation disposition row must exist exactly once"
+    );
+    let cells: Vec<_> = validation_rows[0]
+        .trim()
+        .split('|')
+        .map(str::trim)
+        .collect();
+    assert_eq!(
+        cells.len(),
+        6,
+        "Batch 14 lower validation disposition row must have four table cells"
+    );
+    assert_eq!(
+        cells[4], BATCH_FOURTEEN_CLAIM,
+        "Batch 14 implemented mapping and lower validation disposition must match"
+    );
+}
+
+#[test]
+fn batch_fifteen_traceability_mapping_claims_are_exact() {
+    const CASE_A: &str = "native_read_ndjson_preset_decodes_json_frames";
+    const CASE_A_CLAIM: &str =
+        "**Compared Batch 15.** Static NDJSON payload `{\"a\":1}\\n\\n{\"b\":2}\\n`; `protocol: {\"type\":\"ndjson\"}` uses auto line framing, `skip_empty:true`, and JSON parser; exact `17/0/0` timeout result with ordered parsed `a`/`b` frames and positions `52/69/0/0/0/69`; stronger NDJSON fixture proof remains independent.";
+    const CASE_B: &str = "native_read_ndjson_preset_skips_empty_lines";
+    const CASE_B_CLAIM: &str =
+        "**Compared Batch 15.** Static NDJSON payload `{\"a\":1}\\n\\n\\n{\"b\":2}\\n   \\n{\"c\":3}\\n`; `protocol: {\"type\":\"ndjson\"}` uses auto line framing, `skip_empty:true`, and JSON parser; exact `30/0/0` timeout result with ordered parsed `a`/`b`/`c` frames and positions `52/82/0/0/0/82`; blank and whitespace-only lines emit no frames; stronger NDJSON fixture proof remains independent.";
+
+    let traceability = repo_file("docs/development/native-sim-test-traceability.md");
+    let rows = traceability_mapping_rows(&traceability).expect("real mapping rows");
+    for (native_case, claim, lower_prefix) in [
+        (
+            CASE_A,
+            CASE_A_CLAIM,
+            "| `native_read_ndjson_preset_decodes_json_frames` | two records plus blank |",
+        ),
+        (
+            CASE_B,
+            CASE_B_CLAIM,
+            "| `native_read_ndjson_preset_skips_empty_lines` | records plus blank/whitespace lines |",
+        ),
+    ] {
+        let row = rows
+            .iter()
+            .copied()
+            .find(|row| row.contains(native_case))
+            .unwrap_or_else(|| panic!("Batch 15 traceability row missing: {native_case}"));
+        let (_, _, evidence) =
+            traceability_mapping_cells(row).expect("Batch 15 mapping row must have three cells");
+        assert_eq!(evidence, claim);
+
+        let validation_rows: Vec<_> = traceability
+            .lines()
+            .filter(|line| line.starts_with(lower_prefix))
+            .collect();
+        assert_eq!(
+            validation_rows.len(),
+            1,
+            "Batch 15 lower validation disposition row must exist exactly once for {native_case}"
+        );
+        let cells: Vec<_> = validation_rows[0]
+            .trim()
+            .split('|')
+            .map(str::trim)
+            .collect();
+        assert_eq!(
+            cells.len(),
+            6,
+            "Batch 15 lower validation disposition row must have four table cells"
+        );
+        assert_eq!(
+            cells[4], claim,
+            "Batch 15 mapping and lower validation disposition must match for {native_case}"
+        );
+    }
+}
+
+#[test]
+fn native_traceability_mapping_guard_rejects_duplicate_and_unknown_rows() {
+    let traceability = repo_file("docs/development/native-sim-test-traceability.md");
+    let rows = traceability_mapping_rows(&traceability).expect("real mapping rows");
+    let duplicate = format!("{}\n{}", rows.join("\n"), rows[0]);
+    let duplicate_rows: Vec<_> = duplicate
+        .lines()
+        .filter(|line| line.starts_with("| `native_"))
+        .collect();
+    assert_ne!(
+        duplicate_rows.len(),
+        NATIVE_TRACEABILITY_ROWS.len(),
+        "coverage lock must reject a duplicate native mapping row"
+    );
+    let unknown = rows[0].replacen(
+        "native_ping_roundtrip",
+        "native_unknown_traceability_case",
+        1,
+    );
+    assert!(
+        NATIVE_TRACEABILITY_ROWS
+            .iter()
+            .all(|native| !unknown.contains(native)),
+        "coverage lock fixture must reject an unknown native mapping row"
+    );
+}
+
+#[test]
+fn line_framing_traceability_records_differential_payload_adaptation() {
+    let traceability = repo_file("docs/development/native-sim-test-traceability.md");
+    for marker in [
+        "native_read_line_framing_splits_lines",
+        "write cmd 1 ping",
+        "info",
+        "compile timestamp",
+        "line_framing_returns_exact_ordered_peer_frames",
+    ] {
+        assert!(
+            traceability.contains(marker),
+            "line-framing traceability must retain {marker:?}"
+        );
+    }
+    assert!(
+        traceability.contains("not the original `pong`/`info`")
+            && traceability.contains("does not compare")
+            && traceability.contains("normalize that timestamp"),
+        "line-framing traceability must disclose deterministic payload adaptation"
+    );
+}
+
+const DIFFERENTIAL_BATCH_ONE_COMPARED_ROWS: [&str; 7] = [
+    "native_ping_roundtrip",
+    "native_split_writes_preserve_command_order",
+    "native_get_status_after_write_increments_tx_counter",
+    "native_reconfigure_baud_rate_persists",
+    "native_named_connection_appears_in_list_connections",
+    "native_set_flow_control_updates_summary_and_result",
+    "native_open_with_flow_control_persists_in_summary",
+];
+
+const DIFFERENTIAL_BATCH_ONE_BASELINE_AND_STRONGER_ROWS: [&str; 1] =
+    ["native_pending_read_then_write_ping_roundtrip"];
+const DIFFERENTIAL_BATCH_ONE_BASELINE_PROOF: &str =
+    "pending_read_receives_later_output_after_readiness_proven_hold";
+
+const DIFFERENTIAL_BATCH_TWO_COMPARED_ROWS: [&str; 1] = ["native_read_line_framing_splits_lines"];
+const DIFFERENTIAL_BATCH_TWO_BASELINE_AND_STRONGER_ROWS: [&str; 5] = [
+    "native_read_regex_matches_pong",
+    "native_read_glob_matches_pong_line",
+    "native_read_framing_max_frames_stops",
+    "native_read_framing_plus_match_combined",
+    "native_explicit_rx_framing_beats_connection_default",
+];
+const DIFFERENTIAL_BATCH_TWO_BASELINE_PROOF_BINDINGS: [(&str, &str, &str); 5] = [
+    (
+        "native_read_regex_matches_pong",
+        "regex_and_glob_matchers_find_complete_peer_line",
+        "REGEX_GLOB_BASELINE_PROOFS",
+    ),
+    (
+        "native_read_glob_matches_pong_line",
+        "regex_and_glob_matchers_find_complete_peer_line",
+        "REGEX_GLOB_BASELINE_PROOFS",
+    ),
+    (
+        "native_read_framing_max_frames_stops",
+        "max_frames_stops_after_exact_limit",
+        "MAX_FRAMES_BASELINE_PROOFS",
+    ),
+    (
+        "native_read_framing_plus_match_combined",
+        "framing_plus_match_returns_matching_frame_and_index",
+        "FRAMING_MATCH_BASELINE_PROOFS",
+    ),
+    (
+        "native_explicit_rx_framing_beats_connection_default",
+        "call_time_line_framing_beats_connection_delimiter_default",
+        "OPEN_DEFAULT_BASELINE_PROOFS",
+    ),
+];
+const DIFFERENTIAL_BATCH_THREE_COMPARED_ROWS: [&str; 3] = [
+    "native_read_delimiter_framing_decodes",
+    "native_read_start_end_framing_decodes",
+    "native_read_explicit_line_endings_split_correctly",
+];
+const DIFFERENTIAL_BATCH_THREE_BASELINE_AND_STRONGER_ROWS: [&str; 2] = [
+    "native_read_length_prefixed_framing_decodes",
+    "native_write_tx_framing_modes_observed_via_trace",
+];
+const DIFFERENTIAL_BATCH_THREE_BASELINE_PROOF_BINDINGS: [(&str, &str, &str); 2] = [
+    (
+        "native_read_length_prefixed_framing_decodes",
+        "delimiter_length_prefixed_and_start_end_decode_exact_payloads",
+        "RAW_LENGTH_BASELINE_PROOFS",
+    ),
+    (
+        "native_write_tx_framing_modes_observed_via_trace",
+        "tx_framing_modes_produce_exact_independent_wire_vectors",
+        "RAW_TX_BASELINE_PROOFS",
+    ),
+];
+const DIFFERENTIAL_BATCH_FOUR_BASELINE_AND_STRONGER_ROWS: [&str; 2] = [
+    "native_read_match_on_spam_complete",
+    "native_read_buffer_budget_stops_under_flood",
+];
+const DIFFERENTIAL_BATCH_FOUR_BASELINE_PROOF_BINDINGS: [(&str, &str, &str); 2] = [
+    (
+        "native_read_match_on_spam_complete",
+        "finite_flood_matcher_reaches_unique_completion_marker",
+        "FLOOD_MATCHER_BASELINE_PROOFS",
+    ),
+    (
+        "native_read_buffer_budget_stops_under_flood",
+        "live_buffer_budget_caps_finite_flood_with_exact_stop_metadata",
+        "FLOOD_BUFFER_BASELINE_PROOFS",
+    ),
+];
+const DIFFERENTIAL_BATCH_FIVE_BASELINE_AND_STRONGER_ROWS: [&str; 3] = [
+    "native_framing_reports_single_split_command",
+    "native_trace_reports_exact_split_byte_sequence",
+    "native_partial_line_buffered_then_completed",
+];
+const DIFFERENTIAL_BATCH_FIVE_BASELINE_PROOF_BINDINGS: [(&str, &str, &str); 3] = [
+    (
+        "native_framing_reports_single_split_command",
+        "split_writes_preserve_one_command_and_exact_wire_order",
+        "SPLIT_WRITES_BASELINE_PROOFS",
+    ),
+    (
+        "native_trace_reports_exact_split_byte_sequence",
+        "split_writes_preserve_one_command_and_exact_wire_order",
+        "SPLIT_WRITES_BASELINE_PROOFS",
+    ),
+    (
+        "native_partial_line_buffered_then_completed",
+        "split_writes_preserve_one_command_and_exact_wire_order",
+        "SPLIT_WRITES_BASELINE_PROOFS",
+    ),
+];
+const DIFFERENTIAL_BATCH_NINE_BASELINE_AND_STRONGER_ROWS: [&str; 1] =
+    ["native_read_slip_malformed_escape_returns_partial_result"];
+const DIFFERENTIAL_BATCH_NINE_BASELINE_PROOF_BINDINGS: [(&str, &str, &str); 1] = [(
+    "native_read_slip_malformed_escape_returns_partial_result",
+    "slip_preset_writes_independent_bytes_and_keeps_partial_error_then_recovery",
+    "SLIP_MALFORMED_BASELINE_PROOFS",
+)];
+const DIFFERENTIAL_BATCH_TEN_COMPARED_ROWS: [&str; 1] =
+    ["native_read_slip_recovers_after_error_on_next_call"];
+const DIFFERENTIAL_BATCH_ELEVEN_COMPARED_ROWS: [&str; 1] =
+    ["native_read_cobs_preset_decodes_frame"];
+const DIFFERENTIAL_BATCH_TWELVE_COMPARED_ROWS: [&str; 1] = ["native_read_at_parser_parses_pong"];
+const DIFFERENTIAL_BATCH_THIRTEEN_COMPARED_ROWS: [&str; 1] =
+    ["native_open_protocol_default_drives_write_and_read"];
+const DIFFERENTIAL_BATCH_FOURTEEN_COMPARED_ROWS: [&str; 1] =
+    ["native_read_json_parser_decodes_jsonout"];
+const DIFFERENTIAL_BATCH_FIFTEEN_COMPARED_ROWS: [&str; 2] = [
+    "native_read_ndjson_preset_decodes_json_frames",
+    "native_read_ndjson_preset_skips_empty_lines",
+];
+const DIFFERENTIAL_BATCH_SIX_COMPARED_ROWS: [&str; 1] =
+    ["native_ack_command_provides_pre_execution_ack"];
+const DIFFERENTIAL_BATCH_SEVEN_COMPARED_ROWS: [&str; 1] =
+    ["native_flush_output_after_full_delivery_is_safe"];
+const DIFFERENTIAL_BATCH_EIGHT_COMPARED_ROWS: [&str; 1] = ["native_read_slip_decodes_frame"];
+
+fn differential_registry_body(source: &str) -> Result<&str, String> {
+    let start = source
+        .find("const REGISTRY: &[DifferentialRow] = &[")
+        .ok_or_else(|| "native differential registry declaration is missing".to_string())?;
+    let rest = &source[start..];
+    let end = rest
+        .find("\n];\n\n#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]\npub struct RegistryCounts")
+        .ok_or_else(|| "native differential registry declaration has no bounded end".to_string())?;
+    Ok(&rest[..end])
+}
+
+fn differential_registry_row_status(body: &str, native_case: &str) -> Result<&'static str, String> {
+    let marker = format!("\"{native_case}\"");
+    let occurrence = body
+        .find(&marker)
+        .ok_or_else(|| format!("native differential registry lacks {native_case:?}"))?;
+    let row_start = body[..occurrence]
+        .rfind("DifferentialRow::")
+        .ok_or_else(|| {
+            format!("native differential registry row start missing for {native_case:?}")
+        })?;
+    let row = &body[row_start..occurrence];
+    if row.starts_with("DifferentialRow::compared") {
+        Ok("compared")
+    } else if row.starts_with("DifferentialRow::baseline_and_stronger") {
+        Ok("baseline_and_stronger")
+    } else if row.starts_with("DifferentialRow::retired") {
+        Ok("retired")
+    } else if row.starts_with("DifferentialRow::pending") {
+        Ok("pending")
+    } else {
+        Err(format!(
+            "native differential registry row has unknown status for {native_case:?}: {row:?}"
+        ))
+    }
+}
+
+fn differential_registry_row_body<'a>(body: &'a str, native_case: &str) -> Result<&'a str, String> {
+    let marker = format!("\"{native_case}\"");
+    let occurrence = body
+        .find(&marker)
+        .ok_or_else(|| format!("native differential registry lacks {native_case:?}"))?;
+    let row_start = body[..occurrence]
+        .rfind("DifferentialRow::")
+        .ok_or_else(|| {
+            format!("native differential registry row start missing for {native_case:?}")
+        })?;
+    let row_end = body[occurrence..]
+        .find("\n    DifferentialRow::")
+        .map(|offset| occurrence + offset)
+        .unwrap_or(body.len());
+    Ok(&body[row_start..row_end])
+}
+
+#[test]
+fn native_sim_differential_registry_and_docs_lock_batch_sets_and_counts() {
+    let source = repo_file("tests/common/native_sim_differential/registry.rs");
+    let body = differential_registry_body(&source)
+        .unwrap_or_else(|error| panic!("native differential registry invalid: {error}"));
+    assert_eq!(
+        body.matches("DifferentialRow::").count(),
+        49,
+        "differential registry must contain exactly 49 rows"
+    );
+
+    let mut compared = std::collections::BTreeSet::new();
+    let mut baseline_and_stronger = std::collections::BTreeSet::new();
+    let mut retired = std::collections::BTreeSet::new();
+    let mut pending = 0usize;
+    for native_case in NATIVE_TRACEABILITY_ROWS {
+        let marker = format!("\"{native_case}\"");
+        assert_eq!(
+            body.matches(&marker).count(),
+            1,
+            "differential registry must represent {native_case:?} exactly once"
+        );
+        match differential_registry_row_status(body, native_case)
+            .unwrap_or_else(|error| panic!("native differential registry invalid: {error}"))
+        {
+            "compared" => {
+                compared.insert(native_case);
+            }
+            "baseline_and_stronger" => {
+                baseline_and_stronger.insert(native_case);
+            }
+            "retired" => {
+                retired.insert(native_case);
+            }
+            "pending" => pending += 1,
+            status => panic!("unexpected parsed differential status {status:?}"),
+        }
+    }
+    let expected_compared = DIFFERENTIAL_BATCH_ONE_COMPARED_ROWS
+        .into_iter()
+        .chain(DIFFERENTIAL_BATCH_TWO_COMPARED_ROWS)
+        .chain(DIFFERENTIAL_BATCH_THREE_COMPARED_ROWS)
+        .chain(DIFFERENTIAL_BATCH_SIX_COMPARED_ROWS)
+        .chain(DIFFERENTIAL_BATCH_SEVEN_COMPARED_ROWS)
+        .chain(DIFFERENTIAL_BATCH_EIGHT_COMPARED_ROWS)
+        .chain(DIFFERENTIAL_BATCH_TEN_COMPARED_ROWS)
+        .chain(DIFFERENTIAL_BATCH_ELEVEN_COMPARED_ROWS)
+        .chain(DIFFERENTIAL_BATCH_TWELVE_COMPARED_ROWS)
+        .chain(DIFFERENTIAL_BATCH_THIRTEEN_COMPARED_ROWS)
+        .chain(DIFFERENTIAL_BATCH_FOURTEEN_COMPARED_ROWS)
+        .chain(DIFFERENTIAL_BATCH_FIFTEEN_COMPARED_ROWS)
+        .collect();
+    assert_eq!(
+        compared, expected_compared,
+        "differential registry compared-row set drifted"
+    );
+    assert_eq!(
+        compared.len(),
+        21,
+        "differential registry compared-row count drifted"
+    );
+    let expected_baseline_and_stronger = DIFFERENTIAL_BATCH_ONE_BASELINE_AND_STRONGER_ROWS
+        .into_iter()
+        .chain(DIFFERENTIAL_BATCH_TWO_BASELINE_AND_STRONGER_ROWS)
+        .chain(DIFFERENTIAL_BATCH_THREE_BASELINE_AND_STRONGER_ROWS)
+        .chain(DIFFERENTIAL_BATCH_FOUR_BASELINE_AND_STRONGER_ROWS)
+        .chain(DIFFERENTIAL_BATCH_FIVE_BASELINE_AND_STRONGER_ROWS)
+        .chain(DIFFERENTIAL_BATCH_NINE_BASELINE_AND_STRONGER_ROWS)
+        .collect();
+    assert_eq!(
+        baseline_and_stronger, expected_baseline_and_stronger,
+        "differential registry baseline-and-stronger row set drifted"
+    );
+    assert_eq!(
+        baseline_and_stronger.len(),
+        14,
+        "differential registry baseline-and-stronger count drifted"
+    );
+    assert_eq!(
+        retired,
+        RETIRED_NATIVE_TRACEABILITY_ROWS.into_iter().collect(),
+        "differential registry retired-row set drifted"
+    );
+    assert_eq!(
+        retired.len(),
+        3,
+        "differential registry retired-row count drifted"
+    );
+    assert_eq!(
+        pending, 11,
+        "differential registry pending-row count drifted"
+    );
+
+    for native_case in DIFFERENTIAL_BATCH_ONE_COMPARED_ROWS
+        .into_iter()
+        .chain(DIFFERENTIAL_BATCH_ONE_BASELINE_AND_STRONGER_ROWS)
+    {
+        let row = differential_registry_row_body(body, native_case)
+            .unwrap_or_else(|error| panic!("native differential registry invalid: {error}"));
+        assert!(
+            row.contains("DifferentialBatch::CommandLifecycle"),
+            "Batch 1 row {native_case:?} must retain explicit CommandLifecycle membership: {row}"
+        );
+    }
+    for native_case in DIFFERENTIAL_BATCH_TWO_COMPARED_ROWS
+        .into_iter()
+        .chain(DIFFERENTIAL_BATCH_TWO_BASELINE_AND_STRONGER_ROWS)
+    {
+        let row = differential_registry_row_body(body, native_case)
+            .unwrap_or_else(|error| panic!("native differential registry invalid: {error}"));
+        assert!(
+            row.contains("DifferentialBatch::GenericMatchingFraming"),
+            "Batch 2 row {native_case:?} must retain explicit GenericMatchingFraming membership: {row}"
+        );
+    }
+    for native_case in DIFFERENTIAL_BATCH_THREE_COMPARED_ROWS
+        .into_iter()
+        .chain(DIFFERENTIAL_BATCH_THREE_BASELINE_AND_STRONGER_ROWS)
+    {
+        let row = differential_registry_row_body(body, native_case)
+            .unwrap_or_else(|error| panic!("native differential registry invalid: {error}"));
+        assert!(
+            row.contains("DifferentialBatch::RawGenericFraming"),
+            "Batch 3 row {native_case:?} must retain explicit RawGenericFraming membership: {row}"
+        );
+    }
+    for native_case in DIFFERENTIAL_BATCH_FOUR_BASELINE_AND_STRONGER_ROWS {
+        let row = differential_registry_row_body(body, native_case)
+            .unwrap_or_else(|error| panic!("native differential registry invalid: {error}"));
+        assert!(
+            row.contains("DifferentialBatch::FloodBuffer"),
+            "Batch 4 row {native_case:?} must retain explicit FloodBuffer membership: {row}"
+        );
+    }
+    for native_case in DIFFERENTIAL_BATCH_FIVE_BASELINE_AND_STRONGER_ROWS {
+        let row = differential_registry_row_body(body, native_case)
+            .unwrap_or_else(|error| panic!("native differential registry invalid: {error}"));
+        assert!(
+            row.contains("DifferentialBatch::CommandDiagnostics"),
+            "Batch 5 row {native_case:?} must retain explicit CommandDiagnostics membership: {row}"
+        );
+    }
+    for native_case in DIFFERENTIAL_BATCH_SIX_COMPARED_ROWS {
+        let row = differential_registry_row_body(body, native_case)
+            .unwrap_or_else(|error| panic!("native differential registry invalid: {error}"));
+        assert!(
+            row.contains("DifferentialBatch::AckState")
+                && !row.contains("baseline_and_stronger")
+                && !row.contains("SPLIT_WRITES_BASELINE_PROOFS"),
+            "Batch 6 row {native_case:?} must be a direct AckState comparison without a baseline proof binding: {row}"
+        );
+    }
+    for native_case in DIFFERENTIAL_BATCH_SEVEN_COMPARED_ROWS {
+        let row = differential_registry_row_body(body, native_case)
+            .unwrap_or_else(|error| panic!("native differential registry invalid: {error}"));
+        assert!(
+            row.contains("DifferentialBatch::OutputFlush")
+                && row.contains("DifferentialCase::OutputFlushAfterDelivery")
+                && row.starts_with("DifferentialRow::compared")
+                && !row.contains("baseline_and_stronger")
+                && !row.contains("BASELINE_PROOFS"),
+            "Batch 7 row {native_case:?} must be a direct OutputFlush comparison without a baseline proof binding: {row}"
+        );
+    }
+    for native_case in DIFFERENTIAL_BATCH_EIGHT_COMPARED_ROWS {
+        let row = differential_registry_row_body(body, native_case)
+            .unwrap_or_else(|error| panic!("native differential registry invalid: {error}"));
+        assert!(
+            row.contains("DifferentialBatch::SlipHappy")
+                && row.contains("DifferentialCase::SlipHappyPath")
+                && row.starts_with("DifferentialRow::compared")
+                && !row.contains("baseline_and_stronger")
+                && !row.contains("BASELINE_PROOFS"),
+            "Batch 8 row {native_case:?} must be a direct SlipHappy comparison without a baseline proof binding: {row}"
+        );
+    }
+    for native_case in DIFFERENTIAL_BATCH_NINE_BASELINE_AND_STRONGER_ROWS {
+        let row = differential_registry_row_body(body, native_case)
+            .unwrap_or_else(|error| panic!("native differential registry invalid: {error}"));
+        assert!(
+            row.contains("DifferentialBatch::SlipMalformed")
+                && row.contains("DifferentialCase::SlipMalformedEscape")
+                && row.starts_with("DifferentialRow::baseline_and_stronger")
+                && row.contains("SLIP_MALFORMED_BASELINE_PROOFS"),
+            "Batch 9 row {native_case:?} must be a baseline-and-stronger SlipMalformed comparison with its proof binding: {row}"
+        );
+    }
+    for native_case in DIFFERENTIAL_BATCH_TEN_COMPARED_ROWS {
+        let row = differential_registry_row_body(body, native_case)
+            .unwrap_or_else(|error| panic!("native differential registry invalid: {error}"));
+        assert!(
+            row.contains("DifferentialBatch::SlipRecovery")
+                && row.contains("DifferentialCase::SlipRecoveryAfterMalformed")
+                && row.starts_with("DifferentialRow::compared")
+                && !row.contains("baseline_and_stronger")
+                && !row.contains("BASELINE_PROOFS"),
+            "Batch 10 row {native_case:?} must be a direct SlipRecovery comparison without a baseline proof binding: {row}"
+        );
+    }
+    for native_case in DIFFERENTIAL_BATCH_ELEVEN_COMPARED_ROWS {
+        let row = differential_registry_row_body(body, native_case)
+            .unwrap_or_else(|error| panic!("native differential registry invalid: {error}"));
+        assert!(
+            row.contains("DifferentialBatch::CobsPreset")
+                && row.contains("DifferentialCase::CobsPresetDecode")
+                && row.starts_with("DifferentialRow::compared")
+                && !row.contains("baseline_and_stronger")
+                && !row.contains("BASELINE_PROOFS"),
+            "Batch 11 row {native_case:?} must be a direct CobsPreset comparison without a baseline proof binding: {row}"
+        );
+    }
+    for native_case in DIFFERENTIAL_BATCH_TWELVE_COMPARED_ROWS {
+        let row = differential_registry_row_body(body, native_case)
+            .unwrap_or_else(|error| panic!("native differential registry invalid: {error}"));
+        assert!(
+            row.contains("DifferentialBatch::AtParser")
+                && row.contains("DifferentialCase::AtParserPong")
+                && row.starts_with("DifferentialRow::compared")
+                && !row.contains("baseline_and_stronger")
+                && !row.contains("BASELINE_PROOFS"),
+            "Batch 12 row {native_case:?} must be a direct AtParser comparison without a baseline proof binding: {row}"
+        );
+    }
+    for native_case in DIFFERENTIAL_BATCH_THIRTEEN_COMPARED_ROWS {
+        let row = differential_registry_row_body(body, native_case)
+            .unwrap_or_else(|error| panic!("native differential registry invalid: {error}"));
+        assert!(
+            row.contains("DifferentialBatch::AtProtocolDefault")
+                && row.contains("DifferentialCase::AtProtocolDefaultPong")
+                && row.starts_with("DifferentialRow::compared")
+                && !row.contains("baseline_and_stronger")
+                && !row.contains("BASELINE_PROOFS"),
+            "Batch 13 row {native_case:?} must be a direct AtProtocolDefault comparison without a baseline proof binding: {row}"
+        );
+    }
+    for native_case in DIFFERENTIAL_BATCH_FOURTEEN_COMPARED_ROWS {
+        let row = differential_registry_row_body(body, native_case)
+            .unwrap_or_else(|error| panic!("native differential registry invalid: {error}"));
+        assert!(
+            row.contains("DifferentialBatch::JsonParser")
+                && row.contains("DifferentialCase::JsonParserJsonout")
+                && row.starts_with("DifferentialRow::compared")
+                && !row.contains("baseline_and_stronger")
+                && !row.contains("BASELINE_PROOFS"),
+            "Batch 14 row {native_case:?} must be a direct JsonParser comparison without a baseline proof binding: {row}"
+        );
+    }
+    for (native_case, case) in [
+        (
+            "native_read_ndjson_preset_decodes_json_frames",
+            "DifferentialCase::NdjsonPresetJsonFrames",
+        ),
+        (
+            "native_read_ndjson_preset_skips_empty_lines",
+            "DifferentialCase::NdjsonPresetSkipsEmptyLines",
+        ),
+    ] {
+        let row = differential_registry_row_body(body, native_case)
+            .unwrap_or_else(|error| panic!("native differential registry invalid: {error}"));
+        assert!(
+            row.contains("DifferentialBatch::NdjsonPreset")
+                && row.contains(case)
+                && row.starts_with("DifferentialRow::compared")
+                && !row.contains("baseline_and_stronger")
+                && !row.contains("BASELINE_PROOFS"),
+            "Batch 15 row {native_case:?} must be a direct NdjsonPreset comparison without a baseline proof binding: {row}"
+        );
+    }
+
+    let batch_one_baseline =
+        differential_registry_row_body(body, "native_pending_read_then_write_ping_roundtrip")
+            .expect("Batch 1 baseline row must exist");
+    assert!(
+        batch_one_baseline.contains("PENDING_READ_BASELINE_PROOFS")
+            && source.contains(DIFFERENTIAL_BATCH_ONE_BASELINE_PROOF),
+        "differential registry Batch 1 baseline row must retain exact pending-read proof binding"
+    );
+    assert!(
+        source_test_identifier_exists(DIFFERENTIAL_BATCH_ONE_BASELINE_PROOF),
+        "differential registry Batch 1 baseline proof must retain a source test"
+    );
+    for (native_case, proof, proof_binding) in DIFFERENTIAL_BATCH_TWO_BASELINE_PROOF_BINDINGS {
+        let row = differential_registry_row_body(body, native_case)
+            .unwrap_or_else(|error| panic!("native differential registry invalid: {error}"));
+        assert!(
+            source.contains(proof),
+            "differential registry Batch 2 row {native_case:?} must retain proof {proof:?}"
+        );
+        assert!(
+            source_test_identifier_exists(proof),
+            "differential registry Batch 2 proof {proof:?} must retain a source test"
+        );
+        assert!(
+            row.contains(proof_binding),
+            "differential registry Batch 2 baseline row {native_case:?} must bind {proof_binding:?}: {row}"
+        );
+    }
+    for (native_case, proof, proof_binding) in DIFFERENTIAL_BATCH_THREE_BASELINE_PROOF_BINDINGS {
+        let row = differential_registry_row_body(body, native_case)
+            .unwrap_or_else(|error| panic!("native differential registry invalid: {error}"));
+        assert!(
+            source.contains(proof),
+            "differential registry Batch 3 row {native_case:?} must retain proof {proof:?}"
+        );
+        assert!(
+            source_test_identifier_exists(proof),
+            "differential registry Batch 3 proof {proof:?} must retain a source test"
+        );
+        assert!(
+            row.contains(proof_binding),
+            "differential registry Batch 3 baseline row {native_case:?} must bind {proof_binding:?}: {row}"
+        );
+    }
+    for (native_case, proof, proof_binding) in DIFFERENTIAL_BATCH_FOUR_BASELINE_PROOF_BINDINGS {
+        let row = differential_registry_row_body(body, native_case)
+            .unwrap_or_else(|error| panic!("native differential registry invalid: {error}"));
+        assert!(
+            source.contains(proof),
+            "differential registry Batch 4 row {native_case:?} must retain proof {proof:?}"
+        );
+        assert!(
+            source_test_identifier_exists(proof),
+            "differential registry Batch 4 proof {proof:?} must retain a source test"
+        );
+        assert!(
+            row.contains(proof_binding),
+            "differential registry Batch 4 baseline row {native_case:?} must bind {proof_binding:?}: {row}"
+        );
+    }
+    for (native_case, proof, proof_binding) in DIFFERENTIAL_BATCH_FIVE_BASELINE_PROOF_BINDINGS {
+        let row = differential_registry_row_body(body, native_case)
+            .unwrap_or_else(|error| panic!("native differential registry invalid: {error}"));
+        assert!(
+            source.contains(proof),
+            "differential registry Batch 5 row {native_case:?} must retain proof {proof:?}"
+        );
+        assert!(
+            source_test_identifier_exists(proof),
+            "differential registry Batch 5 proof {proof:?} must retain a source test"
+        );
+        assert!(
+            row.contains(proof_binding),
+            "differential registry Batch 5 baseline row {native_case:?} must bind {proof_binding:?}: {row}"
+        );
+    }
+    for (native_case, proof, proof_binding) in DIFFERENTIAL_BATCH_NINE_BASELINE_PROOF_BINDINGS {
+        let row = differential_registry_row_body(body, native_case)
+            .unwrap_or_else(|error| panic!("native differential registry invalid: {error}"));
+        assert!(
+            source.contains(proof),
+            "differential registry Batch 9 row {native_case:?} must retain proof {proof:?}"
+        );
+        assert!(
+            source_test_identifier_exists(proof),
+            "differential registry Batch 9 proof {proof:?} must retain a source test"
+        );
+        assert!(
+            row.contains(proof_binding),
+            "differential registry Batch 9 baseline row {native_case:?} must bind {proof_binding:?}: {row}"
+        );
+    }
+
+    for path in [
+        "docs/development/native-sim-replacement-research-progress.md",
+        "docs/development/native-sim-test-traceability.md",
+        "docs/development/native-sim-replacement-recommendation.md",
+    ] {
+        let document = repo_file(path);
+        for marker in [
+            "17 compared",
+            "18 compared",
+            "19 compared",
+            "15 compared",
+            "16 compared",
+            "14 compared",
+            "13 baseline-and-stronger",
+            "14 baseline-and-stronger",
+            "3 retired",
+            "17 pending",
+            "15 pending",
+            "14 pending",
+            "13 pending",
+            "16 pending",
+            "19 pending",
+            "18 pending",
+            "16/14/3/16",
+            "17/14/3/15",
+            "18/14/3/14",
+            "19/14/3/13",
+            "21 compared",
+            "11 pending",
+            "21/14/3/11",
+            "native_read_delimiter_framing_decodes",
+            "native_read_length_prefixed_framing_decodes",
+            "native_read_start_end_framing_decodes",
+            "native_write_tx_framing_modes_observed_via_trace",
+            "native_read_explicit_line_endings_split_correctly",
+            "native_read_match_on_spam_complete",
+            "native_read_buffer_budget_stops_under_flood",
+            "Batch 4",
+            "serial-mcp.native-sim-differential.flood-buffer-batch.v1",
+            "flood-buffer-batch.json",
+            "spam 1024 hex",
+            "spam 512 hex",
+            "max_buffered_bytes",
+            "all six stable",
+            "from_offset",
+            "next_offset",
+            "bytes_lost",
+            "buffered_remaining",
+            "start_offset",
+            "end_offset",
+            "elapsed_ms",
+            "omitted",
+            "modeled outcome",
+            "request echoes",
+            "prefilled",
+            "excluded",
+            "finite_flood_matcher_reaches_unique_completion_marker",
+            "live_buffer_budget_caps_finite_flood_with_exact_stop_metadata",
+            "native_framing_reports_single_split_command",
+            "native_trace_reports_exact_split_byte_sequence",
+            "native_partial_line_buffered_then_completed",
+            "Batch 5",
+            "serial-mcp.native-sim-differential.command-diagnostics-batch.v1",
+            "command-diagnostics-batch.json",
+            "LINE len=4 data=\"ping\"",
+            "RX[0]=0x70",
+            "split_writes_preserve_one_command_and_exact_wire_order",
+            "Batch 6",
+            "native_ack_command_provides_pre_execution_ack",
+            "serial-mcp.native-sim-differential.ack-state-batch.v1",
+            "ack-state-batch.json",
+            "ack on\\r\\n",
+            "ack 0\\r\\npong\\r\\n",
+            "ack 1\\r\\npong\\r\\n",
+            "ack 2\\r\\nack off\\r\\n",
+            "pong\\r\\n",
+            "32/40/0/0/0/40",
+            "40/53/0/0/0/53",
+            "53/66/0/0/0/66",
+            "66/82/0/0/0/82",
+            "82/88/0/0/0/88",
+            "match_found",
+            "no frames",
+            "no drops",
+            "no error",
+            "no truncation",
+            "ack_peer_orders_ack_before_response_and_stops_after_disable",
+            "Batch 7",
+            "native_flush_output_after_full_delivery_is_safe",
+            "serial-mcp.native-sim-differential.output-flush-batch.v1",
+            "output-flush-batch.json",
+            "First matched `pong`",
+            "output-only",
+            "32/38/0/0/0/38",
+            "38/44/0/0/0/44",
+            "elapsed_ms",
+            "intentional omission",
+            "26 covered rows",
+            "output_flush_after_full_delivery_preserves_later_traffic",
+            "Batch 8",
+            "native_read_slip_decodes_frame",
+            "serial-mcp.native-sim-differential.slip-happy-batch.v1",
+            "slip-happy-batch.json",
+            "arm_cmd 1000",
+            "arm_cmd delay=1000",
+            "sendraw hex C0706F6E67C0",
+            "c0 70 6f 6e 67 c0",
+            "70 6f 6e 67",
+            "max_frames",
+            "52/58/0/0/0/58",
+            "elapsed_ms",
+            "27 covered rows",
+            "slip_preset_writes_independent_bytes_and_keeps_partial_error_then_recovery",
+            "Batch 9",
+            "native_read_slip_malformed_escape_returns_partial_result",
+            "serial-mcp.native-sim-differential.slip-malformed-batch.v1",
+            "slip-malformed-batch.json",
+            "sendraw hex C0DB41C0",
+            "c0 db 41 c0",
+            "framing_error",
+            "SLIP framing error: invalid escape byte 0x41",
+            "52/56/0/0/0/56",
+            "28 covered rows",
+            "raw `rx_framing: slip`",
+            "protocol: slip",
+            "unmodeled request echoes",
+            "Batch 10",
+            "native_read_slip_recovers_after_error_on_next_call",
+            "serial-mcp.native-sim-differential.slip-recovery-batch.v1",
+            "slip-recovery-batch.json",
+            "shared public double-arm/sendraw scaffold",
+            "c0 db 41 c0",
+            "c0 70 6f 6e 67 c0",
+            "76/82/0/0/0/82",
+            "bytes_read/bytes_observed/bytes_returned",
+            "one raw SLIP frame",
+            "29 covered rows",
+            "Batch 11",
+            "native_read_cobs_preset_decodes_frame",
+            "serial-mcp.native-sim-differential.cobs-preset-batch.v1",
+            "cobs-preset-batch.json",
+            "static independent",
+            "00 05 70 6f 6e 67 00",
+            "sendraw hex 0005706F6E6700",
+            "bytes_written=decoded_bytes=28",
+            "protocol: {\"type\":\"cobs\"}",
+            "raw COBS framing",
+            "7/0/0",
+            "timeout",
+            "{\"parser\":\"raw\"}",
+            "52/59/0/0/0/59",
+            "broader zero-containing COBS TX/RX fixture proof",
+            "30 covered rows",
+            "Batch 12",
+            "native_read_at_parser_parses_pong",
+            "serial-mcp.native-sim-differential.at-parser-batch.v1",
+            "at-parser-batch.json",
+            "target/native-sim-differential/at-parser-characterization.json",
+            "52/58/0/0/0/58",
+            "6/0/0",
+            "rx_framing: line",
+            "rx_parser: at_command",
+            "explicit-parser",
+            "52b573c8a71da8aa52fa6ce12ce81d63f5f30756839ae8db3a1e4e56a6424eb5",
+            "31 covered rows",
+            "Batch 13",
+            "native_open_protocol_default_drives_write_and_read",
+            "serial-mcp.native-sim-differential.at-protocol-default-batch.v1",
+            "at-protocol-default-batch.json",
+            "protocol-only",
+            "bare `ping`",
+            "4→5",
+            "stripped framed arm match",
+            "pong\\r\\n",
+            "6/0/0",
+            "52/58/0/0/0/58",
+            "target/native-sim-differential/at-protocol-default-characterization.json",
+            "cce2c8a47d3d23eedfb857b5701428937174ab066bd6b64ce20e544776b68775",
+            "32 covered rows",
+            "Batch 14",
+            "native_read_json_parser_decodes_jsonout",
+            "serial-mcp.native-sim-differential.json-parser-batch.v1",
+            "json-parser-batch.json",
+            "static three JSON object response",
+            "explicit line",
+            "json_lines",
+            "140/0/0",
+            "three ordered parsed objects",
+            "52/192/0/0/0/192",
+            "target/native-sim-differential/json-parser-characterization.json",
+            "f51b5d77bac3904d214e2ea76794cf1d10f4d5aa8849224e750af30a8e9e3a06",
+            "existing stronger JSON Lines fixture proof",
+            "stronger `AtPeer` proof",
+            "Phase F blocked",
+            "Batch 15",
+            "native_read_ndjson_preset_decodes_json_frames",
+            "native_read_ndjson_preset_skips_empty_lines",
+            "serial-mcp.native-sim-differential.ndjson-preset-batch.v1",
+            "ndjson-preset-batch.json",
+            "sendraw hex 7B2261223A317D0A0A7B2262223A327D0A",
+            "sendraw hex 7B2261223A317D0A0A0A7B2262223A327D0A2020200A7B2263223A337D0A",
+            "protocol: {\"type\":\"ndjson\"}",
+            "auto line",
+            "skip_empty",
+            "17/0/0",
+            "30/0/0",
+            "52/69/0/0/0/69",
+            "52/82/0/0/0/82",
+            "target/native-sim-differential/ndjson-characterization.json",
+            "10c4273edcd2a53a0b5ff0d1ab310d319be8145db2f42aa153d5207c1b372ec3",
+            "ndjson_preset_parses_records_and_skips_blank_whitespace_lines",
+            "35 covered rows",
+        ] {
+            assert!(
+                document.contains(marker),
+                "{path} must state native differential registry/document marker {marker:?}"
+            );
+        }
+        let normalized = document.split_whitespace().collect::<Vec<_>>().join(" ");
+        for stale in [
+            "The independent 49-row registry now has 14 compared, 13 baseline-and-stronger",
+            "The independent 49-row registry now has 14 compared, 14 baseline-and-stronger",
+            "The independent registry is now 14/13/3/19",
+            "The independent registry is now 14/14/3/18",
+            "Registry status is now 14/13/3/19",
+            "Registry status is now 14/14/3/18",
+            "the 19 pending differential rows",
+            "the 18 pending differential rows",
+            "The registry is now 14/14/3/18",
+        ] {
+            assert!(
+                !normalized.contains(stale),
+                "{path} must not describe historical Batch 8 counts as current: {stale:?}"
+            );
+        }
+        assert!(
+            !normalized
+                .contains("The Batch 6 checkpoint recorded 14 compared, 13 baseline-and-stronger"),
+            "{path} must not label Batch 8 counts as a Batch 6 checkpoint"
+        );
+        assert!(
+            !document.contains("full differential parity complete")
+                && !document.contains("Phase F readiness proven"),
+            "{path} must not claim differential batches provide full migration parity"
+        );
+    }
+}
+
+#[test]
+fn phase_e_ci_and_xtask_wiring_stay_required() {
+    let ci = workflow_file("ci.yml");
+    let build_test = job_section(&ci, "build-test");
+    let replacement_step = build_test
+        .split("- name: Run required Rust PTY replacement suites")
+        .nth(1)
+        .and_then(|section| section.split("- name:").next())
+        .expect("CI build-test job must contain required Rust PTY replacement step");
+    for command in [
+        "cargo test --locked --test device_fixture -- --test-threads=1",
+        "cargo test --locked --test device_command_parity -- --test-threads=1",
+        "cargo test --locked --test device_framing_parity -- --test-threads=1",
+        "cargo test --locked --test device_protocol_parity -- --test-threads=1",
+        "cargo test --locked --test device_parity_repeat phase_e_public_boundary_repeat_gate -- --ignored --test-threads=1",
+    ] {
+        assert!(
+            replacement_step.contains(command),
+            "required replacement CI step must execute {command:?}"
+        );
+    }
+    assert!(
+        replacement_step.contains("matrix.os == 'ubuntu-latest' || matrix.os == 'macos-14'"),
+        "replacement CI step must run only Linux x86_64 and macOS arm64"
+    );
+    let xtask = repo_file("xtask/src/main.rs");
+    for suite in [
+        "device_fixture",
+        "device_command_parity",
+        "device_framing_parity",
+        "device_protocol_parity",
+    ] {
+        assert!(
+            xtask.contains(&format!("(\"{suite}\", false)")),
+            "xtask test must run required replacement suite {suite:?} normally"
+        );
+    }
+    let native = xtask
+        .find("(\"native_sim_validation\", true)")
+        .expect("xtask must retain native validation differential suite");
+    let replacement = xtask
+        .find("(\"device_fixture\", false)")
+        .expect("xtask must run replacement fixture suite");
+    assert!(
+        replacement < native,
+        "xtask must run required replacement suites before native differential suites"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // GitHub Actions security regression guards (alerts #7–#14)
 //

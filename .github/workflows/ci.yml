@@ -91,6 +91,22 @@ jobs:
       - name: cargo test
         run: cargo test --locked
 
+      # Required Rust PTY replacement evidence. Linux executes all real-PTY
+      # targets plus the bounded 100-iteration Phase E gate; macOS executes
+      # the fixture/command/framing boundary targets and naturally has zero
+      # Linux-only protocol cases. Windows retains compile + controlled-backend
+      # coverage only because no real COM fixture exists there.
+      - name: Run required Rust PTY replacement suites
+        if: matrix.os == 'ubuntu-latest' || matrix.os == 'macos-14'
+        run: |
+          cargo test --locked --test device_fixture -- --test-threads=1
+          cargo test --locked --test device_command_parity -- --test-threads=1
+          cargo test --locked --test device_framing_parity -- --test-threads=1
+          cargo test --locked --test device_protocol_parity -- --test-threads=1
+          if [ "${{ matrix.os }}" = "ubuntu-latest" ]; then
+            cargo test --locked --test device_parity_repeat phase_e_public_boundary_repeat_gate -- --ignored --test-threads=1
+          fi
+
       - name: cargo clippy
         run: cargo clippy --all-targets --locked -- -D warnings
 

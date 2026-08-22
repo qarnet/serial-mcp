@@ -126,7 +126,15 @@ fn run_helper(helper: &str, bin: &Path) -> Result<PathBuf> {
 pub struct NativeSimFirmware {
     child: tokio::process::Child,
     pty_path: String,
-    _stdout_drain: tokio::task::JoinHandle<()>,
+    stdout_drain: Option<tokio::task::JoinHandle<()>>,
+}
+
+/// Observable result from explicit native firmware cleanup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NativeSimShutdownReport {
+    /// `true` when the stdout drain needed bounded task abort fallback after
+    /// the child had already been killed and waited.
+    pub stdout_drain_aborted: bool,
 }
 
 impl NativeSimFirmware {
@@ -186,7 +194,7 @@ impl NativeSimFirmware {
         Ok(Self {
             child,
             pty_path,
-            _stdout_drain: drain,
+            stdout_drain: Some(drain),
         })
     }
 
@@ -199,11 +207,101 @@ impl NativeSimFirmware {
     pub fn try_exit_code(&mut self) -> Option<i32> {
         self.child.try_wait().ok().flatten().and_then(|s| s.code())
     }
+
+    /// Kill and wait for the firmware child, then join its stdout drain within
+    /// bounded time. [`Drop`] remains a best-effort fallback for existing
+    /// callers that do not use this explicit path.
+    pub async fn shutdown_and_join(mut self) -> Result<NativeSimShutdownReport> {
+        const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
+
+        let mut errors = Vec::new();
+        let needs_wait = match self.child.try_wait() {
+            Ok(Some(_)) => false,
+            Ok(None) => {
+                if let Err(error) = self.child.start_kill() {
+                    match self.child.try_wait() {
+                        Ok(Some(_)) => false,
+                        Ok(None) => {
+                            errors.push(format!("kill native_sim child: {error}"));
+                            true
+                        }
+                        Err(check_error) => {
+                            errors.push(format!(
+                                "kill native_sim child: {error}; recheck child state: {check_error}"
+                            ));
+                            true
+                        }
+                    }
+                } else {
+                    true
+                }
+            }
+            Err(error) => {
+                errors.push(format!("check native_sim child state: {error}"));
+                if let Err(kill_error) = self.child.start_kill() {
+                    errors.push(format!(
+                        "kill native_sim child after state-check failure: {kill_error}"
+                    ));
+                }
+                true
+            }
+        };
+
+        if needs_wait {
+            match tokio::time::timeout(SHUTDOWN_TIMEOUT, self.child.wait()).await {
+                Ok(Ok(_)) => {}
+                Ok(Err(error)) => errors.push(format!("wait for native_sim child: {error}")),
+                Err(_) => errors.push(format!(
+                    "timed out after {} ms waiting for native_sim child",
+                    SHUTDOWN_TIMEOUT.as_millis()
+                )),
+            }
+        }
+
+        let mut stdout_drain = self
+            .stdout_drain
+            .take()
+            .context("native_sim stdout drain task was already taken")?;
+        let stdout_drain_aborted =
+            match tokio::time::timeout(SHUTDOWN_TIMEOUT, &mut stdout_drain).await {
+                Ok(Ok(())) => false,
+                Ok(Err(error)) => {
+                    errors.push(format!("join native_sim stdout drain: {error}"));
+                    false
+                }
+                Err(_) => {
+                    stdout_drain.abort();
+                    match tokio::time::timeout(SHUTDOWN_TIMEOUT, &mut stdout_drain).await {
+                        Ok(Ok(())) => {}
+                        Ok(Err(error)) if error.is_cancelled() => {}
+                        Ok(Err(error)) => {
+                            errors.push(format!("join aborted native_sim stdout drain: {error}"))
+                        }
+                        Err(_) => errors.push(format!(
+                            "timed out after {} ms joining aborted native_sim stdout drain",
+                            SHUTDOWN_TIMEOUT.as_millis()
+                        )),
+                    }
+                    true
+                }
+            };
+
+        if errors.is_empty() {
+            Ok(NativeSimShutdownReport {
+                stdout_drain_aborted,
+            })
+        } else {
+            anyhow::bail!("native_sim explicit shutdown failed: {}", errors.join("; "))
+        }
+    }
 }
 
 impl Drop for NativeSimFirmware {
     fn drop(&mut self) {
         // start_kill sends SIGKILL, best-effort cleanup.
         self.child.start_kill().ok();
+        if let Some(stdout_drain) = self.stdout_drain.take() {
+            stdout_drain.abort();
+        }
     }
 }

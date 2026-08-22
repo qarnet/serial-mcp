@@ -16,9 +16,9 @@
 //!   before the first test run.
 //!
 //! - `xtask test`
-//!   Run unit tests plus four process-level integration suites (stdio, blob
-//!   resources, native_sim validation, native_sim lifecycle). Missing test
-//!   assets are built through the shared test helpers.
+//!   Run unit tests plus required Rust PTY replacement suites (fixture, command,
+//!   framing, and protocol parity), then stdio/blob and native_sim differential
+//!   suites. Missing test assets are built through the shared test helpers.
 //!
 //! - `xtask test-all`
 //!   Like `test`, plus the HTTP integration suite. The HTTP suite
@@ -114,7 +114,7 @@ USAGE:
 
 SUBCOMMANDS:
     build-test-assets   Build serial-mcp + native_sim firmware
-    test                Run unit + process-level integration tests
+    test                Run unit + Rust PTY + native differential integration tests
     test-all            Like 'test', plus the spawned-binary HTTP suite
     print-paths         Print the resolved test-asset paths
     agent-eval          Run the deterministic agent-interface evaluation
@@ -187,17 +187,22 @@ fn test(rest: &[String], include_http: bool) -> Result<()> {
     run(&mut unit, "cargo test --lib")?;
 
     // Process-level integration suites. Each `cargo test --test <foo>`
-    // builds the helper into a separate test binary. The
-    // native_sim firmware suites have their tests marked
+    // builds the helper into a separate test binary. The required real-PTY
+    // replacement suites run before the native_sim differential oracle. Only
+    // the native_sim firmware suites use
     // `#[ignore = "requires native_sim firmware binary"]` and need
-    // `--ignored`; the others run their default tests directly.
-    let hardware_suites: &[(&str, bool)] = &[
+    // `--ignored`.
+    let integration_suites: &[(&str, bool)] = &[
+        ("device_fixture", false),
+        ("device_command_parity", false),
+        ("device_framing_parity", false),
+        ("device_protocol_parity", false),
         ("stdio_integration", false),
         ("blob_resources", false),
         ("native_sim_validation", true),
         ("native_sim_connection_lifecycle", true),
     ];
-    for (suite, with_ignored) in hardware_suites {
+    for (suite, with_ignored) in integration_suites {
         let mut c = Command::new("cargo");
         c.current_dir(&root)
             .args(["test", "--test", suite, "--locked", "--"]);

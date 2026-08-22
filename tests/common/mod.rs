@@ -11,7 +11,11 @@
 
 pub mod binaries;
 pub mod controlled;
+#[cfg(unix)]
+pub mod device_fixture;
 pub mod firmware;
+#[cfg(target_os = "linux")]
+pub mod native_sim_differential;
 pub mod spawned;
 
 /// Absolute path to the `serial-mcp` workspace root.
@@ -318,6 +322,19 @@ impl TestServer {
             handle,
             watcher,
         }
+    }
+
+    /// Stop the test server and await its task after aborting the listener.
+    ///
+    /// Repeat gates use this explicit path so every iteration proves fixture,
+    /// client, and server teardown completes.
+    pub async fn shutdown_and_join(mut self) {
+        self.shutdown.cancel();
+        if let Some(watcher) = self.watcher.take() {
+            watcher.shutdown_and_join().await;
+        }
+        self.handle.abort();
+        let _ = (&mut self.handle).await;
     }
 }
 
@@ -640,7 +657,7 @@ pub mod pty {
     /// the slave path (opened by the server via `tokio_serial`).
     pub struct PtyPair {
         pub slave_path: PathBuf,
-        master: File,
+        master: Option<File>,
         // Kept alive until drop so the kernel doesn't reclaim the slave.
         _slave: OwnedFd,
     }
@@ -659,30 +676,54 @@ pub mod pty {
             let master = File::from_std(master_std);
             Ok(PtyPair {
                 slave_path,
-                master,
+                master: Some(master),
                 _slave: slave,
             })
         }
 
         pub async fn write_device(&mut self, bytes: &[u8]) -> std::io::Result<()> {
-            self.master.write_all(bytes).await?;
-            self.master.flush().await
+            let master = self.master.as_mut().ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::BrokenPipe, "PTY master closed")
+            })?;
+            master.write_all(bytes).await?;
+            master.flush().await
         }
 
         pub async fn read_device(&mut self, dst: &mut [u8]) -> std::io::Result<usize> {
-            self.master.read(dst).await
+            self.master
+                .as_mut()
+                .ok_or_else(|| {
+                    std::io::Error::new(std::io::ErrorKind::BrokenPipe, "PTY master closed")
+                })?
+                .read(dst)
+                .await
         }
 
         /// Read exactly `dst.len()` bytes from the device side or error.
         pub async fn read_device_exact(&mut self, dst: &mut [u8]) -> std::io::Result<()> {
-            self.master.read_exact(dst).await.map(|_| ())
+            self.master
+                .as_mut()
+                .ok_or_else(|| {
+                    std::io::Error::new(std::io::ErrorKind::BrokenPipe, "PTY master closed")
+                })?
+                .read_exact(dst)
+                .await
+                .map(|_| ())
+        }
+
+        /// Close the device side while retaining the slave descriptor and path.
+        pub fn close_master(&mut self) {
+            self.master.take();
         }
 
         /// Split the pair into its master file and slave fd so the
         /// test can move the master into a spawned emulator task whilst
         /// keeping the slave alive.
-        pub fn into_parts(self) -> (File, OwnedFd) {
-            (self.master, self._slave)
+        pub fn into_parts(mut self) -> (File, OwnedFd) {
+            (
+                self.master.take().expect("PTY master already closed"),
+                self._slave,
+            )
         }
     }
 }

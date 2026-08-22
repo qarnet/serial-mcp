@@ -36,6 +36,14 @@ cargo test --locked --test config_schema_validation -- --ignored
 cargo test --test native_sim_validation -- --ignored
 cargo test --test native_sim_connection_lifecycle -- --ignored --test-threads=1
 
+# Required Rust PTY replacement suite (native_sim remains differential oracle)
+cargo test --locked --test device_fixture -- --test-threads=1
+cargo test --locked --test device_command_parity -- --test-threads=1
+cargo test --locked --test device_framing_parity -- --test-threads=1
+cargo test --locked --test device_protocol_parity -- --test-threads=1
+cargo test --locked --test device_parity_repeat phase_e_public_boundary_repeat_gate \
+  -- --ignored --test-threads=1
+
 # The one complete MCP version compatibility gate (local and CI share this
 # exact path): locked binary build, lockfile-pinned MCP validation tooling
 # install (`npm ci --ignore-scripts` in compat/mcp-validation — lifecycle
@@ -177,6 +185,7 @@ python3 -m unittest discover -s scripts/tests -v
 - `tests/config_schema_validation.rs` validates all three vendored example configs (Claude Code, Codex, opencode) hermetically and offline — the vendored `models.dev` document is registered in memory under its original URI, a no-network retriever fails on anything else, and missing/malformed schema or instance fixtures fail the run (no skip path). Only the ignored case fetches latest upstream schemas.
 - `tests/native_sim_validation.rs` — native_sim firmware over PTY. 43 tests, pure software, fast (no hardware). Env: `SERIAL_MCP_NATIVE_SIM_BIN` (default `build/native_sim/firmware/zephyr/zephyr.exe`). Thin wrapper; all tests + helpers live in `tests/native_sim_validation/unix.rs` (Unix-only via `#[cfg(unix)]` module gate), with an empty `windows.rs` stub for future Windows-specific tests.
 - `tests/native_sim_connection_lifecycle.rs` — software-only lifecycle (6 tests): named connection, `set_flow_control`, close-while-read, reopen, touch-command bootloader entry. Run with `--test-threads=1`.
+- Required Rust PTY replacement targets are `tests/device_fixture.rs` (7), `tests/device_command_parity.rs` (19), `tests/device_framing_parity.rs` (8), and Linux-only `tests/device_protocol_parity.rs` (15). Linux x86_64 CI runs all four explicitly after ordinary `cargo test`; macOS arm64 runs fixture/command/framing (protocol target naturally has zero cfg-gated cases); Windows stays compile + controlled-backend only. Linux x86_64 also runs ignored `device_parity_repeat::phase_e_public_boundary_repeat_gate` explicitly: 100 fixed-order public MCP lifecycles, seed `0x50484153455f4545`, with bounded real fixture/server/client teardown. `native_sim` 43+6 remains temporary required differential oracle until Phase F.
 - There are no hardware-required tests in this repo. All test coverage is runnable on a normal Linux host.
 
 ## Firmware / NCS
@@ -274,11 +283,11 @@ cargo run --manifest-path xtask/Cargo.toml -- print-paths
 ```
 
 - `build-test-assets` — builds `serial-mcp` binary + native_sim firmware.
-- `test` — runs unit tests + stdio, blob, native_sim validation, and native_sim lifecycle suites.
+- `test` — runs unit tests + required Rust PTY fixture/command/framing/protocol suites, then stdio, blob, native_sim validation, and native_sim lifecycle differential suites.
 - `test-all` — same as `test` plus HTTP integration suite (spawned binary).
 - `print-paths` — emits resolved test-asset paths for debugging.
 - Both `test` and `test-all` pass `--test-threads=1` unless overridden.
-- The native_sim firmware suites are run with `--ignored` because their tests carry `#[ignore = "requires native_sim firmware binary"]`.
+- Required Rust PTY replacement suites run normally before native differential suites. The native_sim firmware suites are run with `--ignored` because their tests carry `#[ignore = "requires native_sim firmware binary"]`; ignored `device_parity_repeat` stays out of xtask so its 100 iterations run only in explicit Linux Phase E CI/verification commands.
 - Non-firmware suites (stdio, blob, http) run without `--ignored`. The only non-firmware `#[ignore]` is `config_schema_validation::example_configs_match_latest_upstream_schemas` (network fetch; run via `cargo test --test config_schema_validation -- --ignored`).
 - All test helpers (`tests/common/binaries.rs`, `tests/common/firmware.rs`, `tests/common/spawned.rs`) auto-build missing test assets on first use. `tests/common/firmware.rs` also owns the shared `NativeSimFirmware` process harness: build-on-demand, PTY-path discovery from stdout, background stdout drain, and kill-on-drop, with a Windows-compilable compile/runtime boundary.
 

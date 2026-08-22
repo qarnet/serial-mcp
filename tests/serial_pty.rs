@@ -110,6 +110,45 @@ async fn pty_device_write_then_client_read() {
 }
 
 #[tokio::test]
+async fn pty_peer_close_stops_pending_read_as_connection_closed() {
+    let (_server, client, _rx, mut pty, connection_id) = setup().await;
+
+    let reader = {
+        let peer = client.peer().clone();
+        let id = connection_id.clone();
+        tokio::spawn(async move {
+            peer.call_tool(tool_request(
+                "read",
+                json!({
+                    "connection_id": id,
+                    "from": { "type": "now" },
+                    "timeout_ms": 5000,
+                    "match": { "pattern": "never-arrives" }
+                }),
+            ))
+            .await
+        })
+    };
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(
+        !reader.is_finished(),
+        "read was not pending before peer close"
+    );
+    pty.close_master();
+
+    let result = tokio::time::timeout(Duration::from_secs(2), reader)
+        .await
+        .expect("read did not stop after peer close")
+        .expect("read task join")
+        .expect("read tool call");
+    assert_ne!(result.is_error, Some(true), "{result:?}");
+    let structured = result.structured_content.expect("structured");
+    assert_eq!(structured["stop_reason"], json!("connection_closed"));
+    client.cancel().await.ok();
+}
+
+#[tokio::test]
 async fn pty_device_binary_read_falls_back_to_exact_hex() {
     let (_server, client, _rx, mut pty, connection_id) = setup().await;
 

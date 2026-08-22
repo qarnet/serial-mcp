@@ -460,9 +460,11 @@ pub struct ReadResult {
     #[schemars(schema_with = "crate::schema_helpers::option_uint_schema")]
     pub from_offset: Option<u64>,
     /// Absolute stream offset of the cursor after this read (where the next
-    /// read starts). Equal to `from_offset + bytes_returned` for a consuming
-    /// read. To re-read the same bytes non-destructively, pass the same
-    /// `from` on the next read.
+    /// read starts), after consuming raw stream bytes. It commonly equals
+    /// `from_offset + bytes_returned`, but can differ when the result returns a
+    /// shaped payload or a framing error consumes malformed bytes while
+    /// returning zero bytes. To re-read the same bytes non-destructively, pass
+    /// the same `from` on the next read.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(schema_with = "crate::schema_helpers::option_uint_schema")]
     pub next_offset: Option<u64>,

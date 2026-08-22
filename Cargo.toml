@@ -62,5 +62,10 @@ mutants = "0.0.4"
 [target.'cfg(unix)'.dev-dependencies]
 nix = { version = "0.31", features = ["term", "fs"] }
 
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+cobs = "=0.5.1"
+rmodbus = "=0.12.2"
+slip-codec = "=0.4.0"
+
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(mutants)'] }
