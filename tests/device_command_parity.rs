@@ -6,7 +6,9 @@
 
 mod common;
 
+#[cfg(target_os = "linux")]
 use std::io::{Read as _, Write as _};
+#[cfg(target_os = "linux")]
 use std::process::Stdio;
 use std::time::Duration;
 
@@ -16,7 +18,9 @@ use common::device_fixture::{DeviceFixture, DeviceFixtureConfig, DevicePeer, Flo
 use common::{connect_client, tool_request, TestServer};
 use rmcp::model::CallToolResult;
 use serde_json::{json, Value};
+#[cfg(target_os = "linux")]
 use tokio::io::{AsyncBufReadExt, BufReader};
+#[cfg(target_os = "linux")]
 use tokio::process::Command;
 
 const WAIT: Duration = Duration::from_secs(2);
@@ -1104,6 +1108,7 @@ async fn wait_for_rx_bytes(
     .context("timed out waiting for RX counter")?
 }
 
+#[cfg(target_os = "linux")]
 async fn spawn_touch_exit_peer() -> Result<(tokio::process::Child, String)> {
     let executable = std::env::current_exe().context("resolve current test executable")?;
     let mut child = Command::new(executable)

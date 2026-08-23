@@ -17,7 +17,9 @@ use std::path::Path;
 
 fn repo_file(rel: &str) -> String {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(rel);
-    fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
+    fs::read_to_string(&path)
+        .map(|text| text.replace("\r\n", "\n"))
+        .unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
 }
 
 /// Count `#[tool(` attribute occurrences in src/server.rs.

@@ -162,6 +162,15 @@ fn public_mcp_ping_hold_disconnect_replace_and_reconnect() -> Result<()> {
         .await?;
         assert_success(&boot, "boot banner")?;
 
+        let first_pre_barrier_end = status(&client, &connection_id).await?["rx_end_offset"]
+            .as_u64()
+            .context("first barrier pre-end offset")?;
+        fixture
+            .run_script(vec![Action::Emit(b"FIRST-PONG-READY\r\n".to_vec())])
+            .await?;
+        let first_barrier_end =
+            wait_for_rx_barrier(&client, &connection_id, first_pre_barrier_end).await?;
+
         fixture.set_hold(true).await?;
         fixture.wait_for(WAIT, |snapshot| snapshot.held).await?;
         call_tool(
@@ -201,6 +210,11 @@ fn public_mcp_ping_hold_disconnect_replace_and_reconnect() -> Result<()> {
             })
         };
         assert!(!pending_match.is_finished());
+        wait_for_from_now_edge(&client, &connection_id, first_barrier_end).await?;
+        assert!(
+            !pending_match.is_finished(),
+            "pong read completed before held output release"
+        );
         fixture.set_hold(false).await?;
         let pong = tokio::time::timeout(WAIT, pending_match)
             .await
@@ -242,6 +256,14 @@ fn public_mcp_ping_hold_disconnect_replace_and_reconnect() -> Result<()> {
             json!("match_found")
         );
 
+        let disconnect_pre_barrier_end = status(&client, &connection_id).await?["rx_end_offset"]
+            .as_u64()
+            .context("disconnect barrier pre-end offset")?;
+        fixture
+            .run_script(vec![Action::Emit(b"DISCONNECT-READY\r\n".to_vec())])
+            .await?;
+        let disconnect_barrier_end =
+            wait_for_rx_barrier(&client, &connection_id, disconnect_pre_barrier_end).await?;
         let disconnect_read = {
             let peer = client.peer().clone();
             let connection_id = connection_id.clone();
@@ -258,7 +280,7 @@ fn public_mcp_ping_hold_disconnect_replace_and_reconnect() -> Result<()> {
                 .await
             })
         };
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        wait_for_from_now_edge(&client, &connection_id, disconnect_barrier_end).await?;
         assert!(
             !disconnect_read.is_finished(),
             "read was not pending before fixture disconnect"
@@ -404,6 +426,66 @@ async fn open_port<H: rmcp::handler::client::ClientHandler>(
         .as_str()
         .map(str::to_owned)
         .context("open result missing connection_id")
+}
+
+async fn status(
+    client: &rmcp::service::RunningService<rmcp::service::RoleClient, common::TestClientHandler>,
+    connection_id: &str,
+) -> Result<Value> {
+    let result = call_tool(
+        client,
+        "get_status",
+        json!({ "connection_id": connection_id }),
+    )
+    .await?;
+    assert_success(&result, "get_status")?;
+    result
+        .structured_content
+        .context("get_status missing structured content")
+}
+
+async fn wait_for_rx_barrier(
+    client: &rmcp::service::RunningService<rmcp::service::RoleClient, common::TestClientHandler>,
+    connection_id: &str,
+    pre_barrier_end: u64,
+) -> Result<u64> {
+    tokio::time::timeout(WAIT, async {
+        loop {
+            let state = status(client, connection_id).await?;
+            let rx_end = state["rx_end_offset"]
+                .as_u64()
+                .context("status rx_end_offset")?;
+            let rx_cursor = state["rx_cursor"].as_u64().context("status rx_cursor")?;
+            if rx_end > pre_barrier_end && rx_end > rx_cursor {
+                return Ok(rx_end);
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .context("timed out waiting for RX barrier")?
+}
+
+async fn wait_for_from_now_edge(
+    client: &rmcp::service::RunningService<rmcp::service::RoleClient, common::TestClientHandler>,
+    connection_id: &str,
+    barrier_end: u64,
+) -> Result<()> {
+    tokio::time::timeout(WAIT, async {
+        loop {
+            let state = status(client, connection_id).await?;
+            let rx_end = state["rx_end_offset"]
+                .as_u64()
+                .context("status rx_end_offset")?;
+            let rx_cursor = state["rx_cursor"].as_u64().context("status rx_cursor")?;
+            if rx_end >= barrier_end && rx_cursor == rx_end {
+                return Ok(());
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .context("timed out waiting for from=now live edge")?
 }
 
 async fn call_tool<H: rmcp::handler::client::ClientHandler>(
