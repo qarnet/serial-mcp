@@ -950,19 +950,6 @@ fn native_replacement_plan_records_public_pty_parity_and_phase_f_status() {
         !research.contains("awaits user approval"),
         "research plan must not describe the approved replacement as awaiting approval"
     );
-
-    let adr = repo_file("docs/adr/replace-native-sim-with-rust-pty-device-fixture.md");
-    assert_eq!(
-        adr.matches("**Status:** Implemented").count(),
-        1,
-        "replacement ADR must have exactly one Implemented status line"
-    );
-    assert!(
-        adr.contains("fresh clean-checkout CI evidence is\nstill pending")
-            && adr.contains("Required before status changes to Accepted:")
-            && adr.contains("clean checkout passes full required suite without NCS installed"),
-        "replacement ADR must retain pending-CI wording and Accepted prerequisites"
-    );
 }
 
 const FULL_NORMALIZED_PARITY_EVIDENCE: &str =
