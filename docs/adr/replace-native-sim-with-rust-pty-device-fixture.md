@@ -4,11 +4,12 @@
 
 ## Context
 
-serial-mcp currently uses an NCS/Zephyr `native_sim` firmware process for 49
-public-MCP serial tests. Required CI downloads or restores a multi-gigabyte NCS
-toolchain, builds C firmware, and runs ignored Rust suites in a dedicated job.
-The firmware models a command parser, timer, and TX ring, but acceptance needs
-only observable serial-peer behavior, not MCU or Zephyr internals.
+serial-mcp formerly used an NCS/Zephyr `native_sim` firmware process for 49
+public-MCP serial tests. Phase F removed that active source and configuration
+coupling after the accepted parity window; fresh clean-checkout CI evidence is
+still pending. The former firmware modeled a command parser, timer, and TX
+ring, but acceptance needs only observable serial-peer behavior, not MCU or
+Zephyr internals.
 
 Research compared direct `nix::pty::openpty`, `rustix-openpty`, and Python
 standard-library PTYs through the same production serial path. All transported
@@ -104,8 +105,9 @@ current one-command-latch firmware while staying behind real OS serial boundary.
 - PTY tests do not validate electrical UART behavior;
 - Windows remains compile-tested plus controlled-backend coverage until a
   suitable pre-provisioned signed-driver runner exists;
-- changelog retains historical NCS/native_sim references;
-- differential native/replacement window temporarily runs both suites.
+- changelog and migration records retain historical NCS/native_sim references;
+- the differential native/replacement window ran both suites before active
+  native source removal.
 
 ## Acceptance Evidence
 

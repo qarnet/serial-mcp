@@ -1,7 +1,6 @@
-//! First command/lifecycle parity batch for native_sim replacement.
+//! First command/lifecycle parity batch for Rust PTY device fixture.
 //!
-//! Every case opens fixture PTY through public MCP tools. Existing native_sim
-//! suites remain differential oracle until full migration gate passes.
+//! Every case opens fixture PTY through public MCP tools.
 
 #![cfg(unix)]
 

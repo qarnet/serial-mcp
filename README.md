@@ -218,9 +218,11 @@ cargo test --locked
 cargo clippy --all-targets --locked -- -D warnings
 cargo fmt --all -- --check
 
-# Firmware-based tests (require native_sim firmware, see firmware/AGENTS.md)
-cargo test --test native_sim_validation -- --ignored
-cargo test --test native_sim_connection_lifecycle -- --ignored --test-threads=1
+# Required Rust PTY fixture suites
+cargo test --locked --test device_fixture -- --test-threads=1
+cargo test --locked --test device_command_parity -- --test-threads=1
+cargo test --locked --test device_framing_parity -- --test-threads=1
+cargo test --locked --test device_protocol_parity -- --test-threads=1
 ```
 
 ## Documentation and status

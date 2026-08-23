@@ -21,3 +21,4 @@ logs
 compat/mcp-validation/node_modules/
 # local symlink to protocol reference material (specs, RFCs); not repo content
 /resources
+__pycache__/

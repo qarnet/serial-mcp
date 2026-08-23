@@ -1,15 +1,32 @@
 # `native_sim` Test Traceability and NCS Coupling
 
-**Status:** Phase E required Rust PTY gate complete on 2026-08-13. All 49
-native cases now have one explicit mapping row. Required Linux x86_64 CI runs
-the four normal replacement targets and the ignored 100-iteration deterministic
-repeat gate; macOS arm64 runs fixture/command/framing real-PTY coverage.
-`native_sim` remains required temporary differential oracle. No firmware, NCS,
-native job, release dependency, or Nix coupling is removed in this phase.
+**Status:** Phase E required Rust PTY gate and full normalized differential parity
+window accepted on 2026-08-23. All 49 historical native cases retain one
+explicit mapping row. Phase F removed active firmware, NCS, native-job,
+release-dependency, and Nix coupling from source/config; retained rows and
+batch evidence remain historical. Fresh clean-checkout CI acceptance remains
+pending, so ADR status stays Proposed.
 
-Batch 15 extends executable native-versus-fixture comparison through shared
-public MCP scenarios. Global registry status is **21 compared, 14
-baseline-and-stronger, 3 retired, and 11 pending** rows. Batch 1 remains an
+## Full normalized parity window — 2026-08-23
+
+> Full normalized differential parity window accepted on 2026-08-23: all 42 executable cases passed in three serial 22-batch runs; two consecutive canonical 22-report manifests matched SHA-256 `b31b3f3da1412d210096a618cc8d6b6acc5bbed167de525c8122704342c3d3fe`.
+
+> Local worktree verification on 2026-08-23 passed `nix flake check --accept-flake-config` and `nix develop --ignore-env`; the shell found no `west`, `nrfutil`, or `nrfutil-sdk-manager` on `PATH` before `cargo test --locked`. This is not fresh clean-checkout CI evidence.
+
+The 49-row registry classification is `26/16/7/0`: 26 Compared, 16
+BaselineAndStronger, 7 Retired, and 0 pending. Seven rows are retired with
+cited stronger public proofs:
+
+- `native_list_ports_after_open` — `call_tool_list_ports_returns_structured_result`, `ports_resource_includes_profile_match_map`, and `list_ports_preview_empty_store_reports_none_parallel_and_pure_ports`.
+- `native_flush_after_write` — `output_flush_after_full_delivery_preserves_later_traffic`.
+- `native_reopen_same_port_after_close_works` — `reopen_same_path_returns_distinct_id_and_only_fresh_generation`.
+- `native_list_ports_includes_identity_fields` — `list_ports_preview_empty_store_reports_none_parallel_and_pure_ports`, `list_ports_preview_selected_winner_matches_later_bare_open`, and `list_ports_preview_output_validates_against_generated_schema`.
+- `native_txbuf_status_reports_pending` — `held_output_reports_nonzero_queue_then_drains_and_recovers`.
+- `native_auto_reconnect_preserves_connection` — `public_mcp_ping_hold_disconnect_replace_and_reconnect`.
+- `native_capture_boot_arm_only_captures_post_arm_command_output` — `capture_boot_arm_only_excludes_stale_bytes_and_preserves_shared_cursor`.
+
+Batch 22 extends executable native-versus-fixture comparison through shared
+public MCP scenarios. Global registry status is **26 compared, 16 baseline-and-stronger, 7 retired, and 0 pending** rows. Batch 1 remains an
 isolated eight-case command/lifecycle report; Batch 2 remains six generic
 matching/framing cases; Batch 3 remains five raw generic-framing cases; Batch 4
 adds two flood/buffer cases; Batch 5 adds three command-diagnostic cases; Batch
@@ -19,11 +36,28 @@ baseline-and-stronger case; Batch 10 adds one direct raw SLIP recovery case;
 Batch 11 adds one direct COBS-preset case as a historical checkpoint; Batch 12
 adds one direct AT-parser case as a historical checkpoint; Batch 13 adds one
 protocol-default case as a historical checkpoint; Batch 14 adds one JSON-parser
-case as a historical checkpoint; Batch 15 is current and adds two NDJSON-preset
-cases. Each batch has a separate report. This covers 35
-executable rows, is not full differential parity, and does not
-permit Phase F work. Current counts are 21 compared, 14 baseline-and-stronger,
-3 retired, and 11 pending (`21/14/3/11`).
+case as a historical checkpoint; Batch 15 is historical and adds two
+NDJSON-preset cases; Batch 16 is historical and adds one NMEA-0183 preset case;
+Batch 17 is historical and adds one Modbus ASCII preset case; Batch 18 is
+historical and adds one close-while-read case; Batch 19 is historical and adds
+one reopen/fresh-output baseline-and-stronger case; Batch 20 is historical and adds
+one flush-during-armed-delay baseline-and-stronger case; Batch 21 is historical and
+adds one input-flush backlog Compared case; Batch 22 is historical and adds one
+bootloader-touch process-exit Compared case. Each batch has a separate report.
+The accepted full normalized parity window covers all 22 batches and all 42
+executable rows. Phase F subsequently removed active native/NCS source and
+configuration; fresh clean-checkout CI acceptance remains pending. Historical Batch 21 counts are 25 compared, 16 baseline-and-stronger,
+3 retired, and 5 pending (`25/16/3/5`) with 41 covered rows. Current counts are 26 compared, 16 baseline-and-stronger,
+7 retired, and 0 pending (`26/16/7/0`) with 46 covered rows. Global registry status is **26 compared, 16 baseline-and-stronger, 7 retired, and 0 pending** rows. Current status is **26 compared, 16 baseline-and-stronger, 7 retired, and 0 pending** (`26/16/7/0`) with 46 covered rows. All 49 registry rows now have compared, baseline-and-stronger, or explicit retired disposition; full normalized differential parity is accepted, active native/NCS source and configuration coupling is removed, and fresh clean-checkout CI acceptance remains pending. Historical Batch 20 counts are 24 compared, 16 baseline-and-stronger,
+3 retired, and 6 pending (`24/16/3/6`). Batch 20 historical registry status is **24 compared, 16 baseline-and-stronger, 3 retired, and 6 pending** rows. Historical Batch 19 status was 24
+compared, 15 baseline-and-stronger, 3 retired, and 7 pending (`24/15/3/7`)
+with 39 covered rows. Historical Batch 18 status was 24
+compared, 14 baseline-and-stronger, 3 retired, and 8 pending (`24/14/3/8`)
+with 38 covered rows. Historical Batch 16 status was 22 compared,
+14 baseline-and-stronger, 3 retired, and 10 pending (`22/14/3/10`) with 36 covered
+rows. Historical Batch 15 status was 21 compared,
+14 baseline-and-stronger, 3 retired, and 11 pending (`21/14/3/11`)
+with 35 covered rows.
 
 Batch 12 is direct explicit-parser evidence for
 `native_read_at_parser_parses_pong`. Both endpoints use standard anonymous public
@@ -52,8 +86,12 @@ Batch 12 report schema is
 The existing `at_command_connection_default_drives_stateful_transact_and_parser_quirk`
 `AtPeer` fixture test remains stronger stateful AT behavior. Batch 12 remains
 historical partial evidence; Batch 13 remains historical partial evidence; Batch
-14 remains historical partial evidence; Batch 15 is current partial evidence;
-Phase F blocked.
+14 remains historical partial evidence; Batch 15 remains historical partial
+evidence; Batch 16 is historical partial evidence; Batch 17 is historical partial
+evidence; Batch 18 is historical direct Compared evidence; Batch 19 is historical
+baseline-and-stronger evidence; Batch 20 is historical baseline-and-stronger
+evidence; Batch 21 is historical direct Compared evidence; Batch 22 is historical
+direct Compared evidence; Phase F blocked.
 
 Batch 13 is historical direct Compared evidence for
 `native_open_protocol_default_drives_write_and_read`. Open uses a protocol-only
@@ -91,7 +129,7 @@ and `pressure`. Positions are `52/192/0/0/0/192`. The report schema is
 proof remains stronger. The existing stronger JSON Lines fixture proof remains
 stronger. Batch 14 is historical partial evidence: 19 compared,
 14 baseline-and-stronger, 3 retired, and 13 pending (`19/14/3/13`) with 33
-covered rows. Batch 15 is current direct Compared evidence
+covered rows. Batch 15 is historical direct Compared evidence
 for the two NDJSON preset rows
 `native_read_ndjson_preset_decodes_json_frames` and
 `native_read_ndjson_preset_skips_empty_lines`.
@@ -113,8 +151,91 @@ command is
 `serial-mcp.native-sim-differential.ndjson-preset-batch.v1`, report is
 `ndjson-preset-batch.json`, and retained characterization is
 `target/native-sim-differential/ndjson-characterization.json` with SHA-256
-`10c4273edcd2a53a0b5ff0d1ab310d319be8145db2f42aa153d5207c1b372ec3`. Current
-registry is `21/14/3/11` with 35 covered rows; Phase F blocked.
+`10c4273edcd2a53a0b5ff0d1ab310d319be8145db2f42aa153d5207c1b372ec3`. Batch 15
+historical checkpoint is `21/14/3/11` with 35 covered rows.
+
+**Compared Batch 16.** Static 67-byte valid GGA sentence
+`$GPGGA,123519,4807.038,N,01131.000,E,1,08,0.9,545.4,M,46.9,M,,*47\r\n`;
+fixture command is `sendraw hex 2447504747412C3132333531392C343830372E3033382C4E2C30313133312E3030302C452C312C30382C302E392C3534352E342C4D2C34362E392C4D2C2C2A34370D0A`;
+`protocol: {"type":"nmea0183"}` uses start/end framing with markers excluded and
+NMEA parser; exact `67/0/0` timeout result with one UTF-8 `start_end` frame,
+parsed `talker_id="GP"`, `sentence_type="GGA"`, exact ordered fields
+`["123519","4807.038","N","01131.000","E","1","08","0.9","545.4","M","46.9","M","",""]`,
+`checksum_valid:true`, and positions `52/119/0/0/0/119`; stronger NMEA fixture
+proof remains independent. Batch 16 schema is
+`serial-mcp.native-sim-differential.nmea0183-preset-batch.v1`, report is
+`nmea0183-preset-batch.json`, and retained characterization is
+`target/native-sim-differential/nmea-characterization.json` with SHA-256
+`513d4906b285ef35a2b82ab085968de96f51576acc636244f0eb3a44868f1578`.
+Historical Batch 16 registry was `22/14/3/10` with 36 covered rows; Phase F
+blocked.
+
+**Compared Batch 17.** Static valid Modbus ASCII response
+`:010300000001FB\r\n`; the fixture command is
+`sendraw hex 3A30313033303030303030303146420D0A` with a 48-byte UTF-8 write.
+The target uses `protocol: {"type":"modbus_ascii"}` only; the preset supplies
+start/end framing with markers excluded and Modbus ASCII parsing. Exact target
+result is `17/0/0` bytes read/observed/returned, `timeout`, no match,
+truncation, drop, or error, with positions `52/69/0/0/0/69`. One UTF-8
+`start_end` frame has payload `010300000001FB` and parsed fields
+`address=1`, `function_code=3`, `data=[0,0,0,1]`, and `checksum_valid:true`.
+Batch 17 schema is
+`serial-mcp.native-sim-differential.modbus-ascii-preset-batch.v1`, report is
+`modbus-ascii-preset-batch.json` with SHA-256
+`97f9c00dc98e5cd83c440b2e90b7d9f72e58428f9e873f7f418475ef3a79ef9b`, and retained characterization is
+`target/native-sim-differential/modbus-ascii-characterization.json` with SHA-256
+`b390bdc693778be29a06e40033694e1032986a1700995d065f06d8092fc7973c`.
+The existing `modbus_ascii_preset_transact_parses_lrc_and_proves_peer_state_mutation`
+fixture proof remains stronger. Historical Batch 17 registry was `23/14/3/9` with
+37 covered rows; Phase F blocked.
+
+**Historical Compared Batch 18.** Readiness-proven public close sequence uses `arm_cmd 1000\r\n`, baseline `get_status.rx_bytes`, secondary unmatched `from={"type":"now"}` read, and primary marker command `sendraw hex 524541442D52454144592D4D41524B45520D0A\r\n` writing `READ-READY-MARKER\r\n` after `rx_bytes` increases by 19 while pending read remains unfinished; primary close returns normal anonymous profile with `source="disabled"`, `profile_persistence.operation="close_snapshot"`, and `profile_persistence.state="transient"`; pending read returns exact marker with `19/19/19`, `connection_closed`, no match/truncation/frames/drops/error, and positions `52/71/0/0/0/71`; stronger fixture proof remains independent. Batch 18 schema is
+`serial-mcp.native-sim-differential.close-while-read-batch.v1`, report is
+`close-while-read-batch.json` with SHA-256
+`fef0499d6504635c104fe3d125fe572c49e2ef4bec69a5b39c32bdeb50361a09`, and retained characterization is
+`target/native-sim-differential/close-while-read-characterization.json` with SHA-256
+`06a7adb2b4f1c1c6f8b3c8fd507ba9e5004df6dd7a9f4ef6b64c4fff87c3f69b`. Historical
+Batch 18 registry was `24/14/3/8` with 38 covered rows; Phase F blocked.
+
+**Historical Baseline-and-stronger Batch 19.** Standard anonymous first `open` at 115200 with `profile_mode: "none"`; boot banner is synchronized once because firmware emits it only at process start; first `write("ping\r\n")` is normal UTF-8 `6/6`, and positioned first literal `pong` read is exact `pong\r\n`, `6/6/6`, `match_found`, index 0, no frames/drops/error/truncation, positions `32/38/0/0/0/38`; normal first close retains disabled/transient close-profile checks; same endpoint second `open` requires a distinct raw connection ID, public status verifies `rx_bytes=0` before second command, and pending second `from={"type":"now"}` UTF-8 `pong` read uses bounded 100 ms baseline admission before independent-client `write("ping\r\n")`; second read is exact `pong\r\n`, `6/6/6`, `match_found`, index 0, no frames/drops/error/truncation, positions `0/6/0/0/0/6`; the status probe is not normalized; stronger fixture proof remains independent. Batch 19 schema is
+`serial-mcp.native-sim-differential.reopen-fresh-output-batch.v1`, report is
+`reopen-fresh-output-batch.json` with SHA-256
+`7c9d9071156739a0a2bc81a9ef2adba48a40132ba6bd1208b99e8e04a847d02e`. Current
+registry is historical `24/15/3/7` with 39 covered rows; Phase F blocked.
+
+**Historical Baseline-and-stronger Batch 20.** Standard anonymous `open` at 115200 with
+`profile_mode: "none"`; boot banner and arm acknowledgement are validated before
+normalized observations. Public `transact("arm_cmd 1000\r\n")` validates exact
+`arm_cmd delay=1000\r\n` acknowledgement but setup result is not normalized.
+Public `write("ping\r\n")` is normal anonymous UTF-8 `6/6`. Existing
+`INHERITED_BASELINE_DELAY` supplies one bounded 100 ms baseline admission window;
+it is not a peer-acceptance proof. Public `flush(target="both")` is retained as
+a normal anonymous `FlushObservation` with exact target `both`. Positioned
+`from={"type":"now"}` UTF-8 literal `pong\r\n` read returns exact `pong\r\n`,
+`6/6/6`, `match_found`, index 0, no truncation/frames/drops/error, and positions
+`52/58/0/0/52/58` in
+`from_offset/next_offset/bytes_lost/buffered_remaining/start_offset/end_offset`
+order. Stronger fixture proof remains
+`flush_after_command_acceptance_does_not_cancel_delayed_response`. Batch 20
+schema is `serial-mcp.native-sim-differential.flush-during-arm-delay-batch.v1`,
+report is `flush-during-arm-delay-batch.json` with SHA-256
+`4808262720b252c53f95e88a56ea1d8565b238251884aed364c0e43d0b07f500`, and the
+Batch 20 historical registry is `24/16/3/6` with 40 covered rows; Phase F blocked.
+
+**Historical Compared Batch 21.** Standard anonymous `open` at 115200 with `profile_mode: "none"` and boot-banner read remain the first two normalized observations; public UTF-8 old-marker write `sendraw hex 4F4C442D4D41524B45520D0A\r\n` is normal anonymous with exact `bytes_written=decoded_bytes=38`; status-only `get_status` polling proves old marker reached retained RX at `rx_bytes >= 44` and is not normalized; public `flush(target="input")` is normal anonymous with exact target `input`; public UTF-8 new-marker write `sendraw hex 4E45572D4D41524B45520D0A\r\n` is normal anonymous with exact `bytes_written=decoded_bytes=38`; status-only polling proves `rx_bytes >= 56` and is not normalized; positioned `from={"type":"buffer_start"}` UTF-8 literal `NEW-MARKER\r\n` read returns exact `NEW-MARKER\r\n`, `12/12/12`, `match_found`, index 0, no truncation/frames/drops/error, positions `44/56/0/0/44/56`; stronger fixture proof `flush_input_discards_known_old_marker_and_keeps_new_marker` remains independent. Batch 21 schema is `serial-mcp.native-sim-differential.input-flush-batch.v1`, report is `input-flush-batch.json` with SHA-256 `ff95074207f7de216780ede42a6d21583e4e88e5c5e5c6f81af4b588fa5dcfd8` after two matching runs, and historical registry is `25/16/3/5` with 41 covered rows; Phase F blocked.
+
+**Historical Compared Batch 22.** Standard anonymous `open` at 115200 with `profile_mode: "none"` and matching boot-banner read remain the first two normalized observations; fixture side is a real dedicated small Rust child PTY, not `FixtureExit::Crashed`; child emits exact `serial-mcp test firmware ready\r\n` before `PTY_PATH`; public UTF-8 `write("touch\r\n")` is normal anonymous with exact `bytes_written=decoded_bytes=7`; both native firmware and child endpoint exit exactly 42, retained as typed `process_exit` observation; terminal `touch exit(42)\r\n` response delivery is not claimed; no public `close` follows peer exit; stronger fixture proof `touch_write_causes_small_rust_child_peer_to_exit_42` remains independent. Batch 22 schema is `serial-mcp.native-sim-differential.bootloader-touch-exit-batch.v1`, report is `bootloader-touch-exit-batch.json` with SHA-256 `91befb4e3af3edd65c70c58208be03c09c8c29aed04f9b432e18c1d5becd4d9c` after two matching runs, and historical registry is `26/16/3/4` with 42 covered rows; Phase F blocked.
+
+Post-Batch 22 retirement: `native_list_ports_includes_identity_fields` is **Retired**, not a Batch 23 or differential case. Deterministic public real-PTY/injected-provider proofs `list_ports_preview_empty_store_reports_none_parallel_and_pure_ports`, `list_ports_preview_selected_winner_matches_later_bare_open`, and `list_ports_preview_output_validates_against_generated_schema` supersede ambient OS field/null checks. No new differential batch, report, or hash was created. The pre-txbuf-retirement checkpoint is `26/16/4/3` with 43 covered rows (26 compared, 16 baseline-and-stronger, 4 retired, and 3 pending); full parity and Phase F remain blocked.
+
+Post-Batch-22 txbuf retirement: `native_txbuf_status_reports_pending` is **Retired**, not a Batch 23 or differential case. Source did not observe a nonzero pending TX queue; `txbuf` and `hold` are firmware-only commands. `device_command_parity::held_output_reports_nonzero_queue_then_drains_and_recovers` proves nonzero held output, blocked read, drain, and recovery. No Batch 23, report, or hash was created. The historical pre-auto-reconnect-retirement checkpoint is `26/16/5/2` with 44 covered rows; full parity and Phase F remain blocked.
+
+Post-Batch-22 auto-reconnect retirement: `native_auto_reconnect_preserves_connection` is **Retired**, not a Batch 23 or differential case. Source only invokes `reconnect` while already open; strengthened `device_fixture::public_mcp_ping_hold_disconnect_replace_and_reconnect` preserves same ID/open state and post-no-op traffic, then proves peer loss, replacement, reconnect, and fresh exchange. No Batch 23, report, or hash was created. This is the historical pre-capture-boot-retirement checkpoint at `26/16/6/1` with 45 covered rows; full parity and Phase F remain blocked.
+
+Post-Batch-22 capture-boot retirement: `native_capture_boot_arm_only_captures_post_arm_command_output` is **Retired**, not a Batch 23 or differential case. Source only checks arm-only post-mark output after a consumed stale banner; strengthened `device_command_parity::capture_boot_arm_only_excludes_stale_bytes_and_preserves_shared_cursor` excludes stale bytes, preserves private-mark replay and shared cursor/history, and captures post-arm output. No Batch 23, report, or hash was created.
+
+Batch 21 retains exact marker bytes: old response `OLD-MARKER\r\n`; new response
+`NEW-MARKER\r\n`.
 
 ## Implemented Replacement Mapping
 
@@ -131,21 +252,21 @@ Current required replacement targets: `tests/device_fixture.rs`,
 | `native_trace_reports_exact_split_byte_sequence` | `split_writes_preserve_one_command_and_exact_wire_order` | exact lower-case `RX[n]=0xhh\r\n` trace plus one `pong` |
 | `native_read_match_on_spam_complete` | `finite_flood_matcher_reaches_unique_completion_marker` | exact live `spam 1024 hex` completion marker |
 | `native_read_buffer_budget_stops_under_flood` | `live_buffer_budget_caps_finite_flood_with_exact_stop_metadata` | live `spam 512 hex` exact 256-byte budget metadata |
-| `native_bootloader_touch_exits_42` | `touch_write_causes_small_rust_child_peer_to_exit_42` | real child exits 42 |
+| `native_bootloader_touch_exits_42` | `touch_write_causes_small_rust_child_peer_to_exit_42` | **Compared Batch 22.** Standard anonymous `open` at 115200 with `profile_mode: "none"` and matching boot-banner read remain the first two normalized observations; fixture side is a real dedicated small Rust child PTY, not `FixtureExit::Crashed`; child emits exact `serial-mcp test firmware ready\r\n` before `PTY_PATH`; public UTF-8 `write("touch\r\n")` is normal anonymous with exact `bytes_written=decoded_bytes=7`; both native firmware and child endpoint exit exactly 42, retained as typed `process_exit` observation; terminal `touch exit(42)\r\n` response delivery is not claimed; no public `close` follows peer exit; stronger fixture proof `touch_write_causes_small_rust_child_peer_to_exit_42` remains independent. |
 | `native_list_ports_after_open` | `call_tool_list_ports_returns_structured_result`; `ports_resource_includes_profile_match_map`; `list_ports_preview_empty_store_reports_none_parallel_and_pure_ports` | **Retired.** Deterministic public tool/resource preview proof is stronger than ambient enumeration. |
-| `native_list_ports_includes_identity_fields` | `list_ports_preview_empty_store_reports_none_parallel_and_pure_ports`; `list_ports_preview_selected_winner_matches_later_bare_open`; `list_ports_preview_output_validates_against_generated_schema` | strengthened real-PTY + injected-provider identity/schema proof |
+| `native_list_ports_includes_identity_fields` | `list_ports_preview_empty_store_reports_none_parallel_and_pure_ports`; `list_ports_preview_selected_winner_matches_later_bare_open`; `list_ports_preview_output_validates_against_generated_schema` | **Retired.** Deterministic injected-provider identity/profile/schema proofs supersede ambient OS field/null checks. |
 | `native_flush_after_write` | `output_flush_after_full_delivery_preserves_later_traffic` | **Retired.** Contract permits queued-output discard; stronger fully delivered output proof retains valid behavior. |
 | `native_get_status_after_write_increments_tx_counter` | `status_reports_exact_io_deltas_and_activity` | exact TX/RX/write deltas |
 | `native_reconfigure_baud_rate_persists` | `reconfigure_updates_status_and_connection_remains_functional` | transitions, status, post-change traffic |
 | `native_ack_command_provides_pre_execution_ack` | `ack_peer_orders_ack_before_response_and_stops_after_disable` | **Compared.** Direct ACK state-machine comparison; existing Rust-PTY proof remains stronger semantic coverage. |
-| `native_txbuf_status_reports_pending` | `held_output_reports_nonzero_queue_then_drains_and_recovers` | nonzero held queue and recovery |
-| `native_flush_input_clears_host_rx` | `flush_input_discards_known_old_marker_and_keeps_new_marker` | unique old/new markers |
-| `native_flush_during_arm_cmd_delay` | `flush_after_command_acceptance_does_not_cancel_delayed_response` | peer acceptance barrier |
+| `native_txbuf_status_reports_pending` | `held_output_reports_nonzero_queue_then_drains_and_recovers` | **Retired.** Source checks only idle `txbuf` diagnostics and hold recovery; deterministic public real-PTY proof covers nonzero held output, blocked read, drain, and recovery. |
+| `native_flush_input_clears_host_rx` | `flush_input_discards_known_old_marker_and_keeps_new_marker` | **Historical Compared Batch 21.** Standard anonymous `open` at 115200 with `profile_mode: "none"` and boot-banner read remain the first two normalized observations; public UTF-8 old-marker write `sendraw hex 4F4C442D4D41524B45520D0A\r\n` is normal anonymous with exact `bytes_written=decoded_bytes=38`; status-only `get_status` polling proves old marker reached retained RX at `rx_bytes >= 44` and is not normalized; public `flush(target="input")` is normal anonymous with exact target `input`; public UTF-8 new-marker write `sendraw hex 4E45572D4D41524B45520D0A\r\n` is normal anonymous with exact `bytes_written=decoded_bytes=38`; status-only polling proves `rx_bytes >= 56` and is not normalized; positioned `from={"type":"buffer_start"}` UTF-8 literal `NEW-MARKER\r\n` read returns exact `NEW-MARKER\r\n`, `12/12/12`, `match_found`, index 0, no truncation/frames/drops/error, positions `44/56/0/0/44/56`; stronger fixture proof `flush_input_discards_known_old_marker_and_keeps_new_marker` remains independent. |
+| `native_flush_during_arm_cmd_delay` | `flush_after_command_acceptance_does_not_cancel_delayed_response` | **Historical Baseline-and-stronger Batch 20.** Standard anonymous `open` at 115200 with `profile_mode: "none"`; boot banner and arm acknowledgement are validated before normalized observations; public `transact("arm_cmd 1000\r\n")` validates exact `arm_cmd delay=1000\r\n` acknowledgement but setup result is not normalized; public `write("ping\r\n")` is normal UTF-8 `6/6`; bounded 100 ms baseline admission window is not a peer-acceptance proof; public `flush(target="both")` is normal anonymous with exact target `both`; positioned `from={"type":"now"}` UTF-8 literal `pong\r\n` read is exact `pong\r\n`, `6/6/6`, `match_found`, index 0, no truncation/frames/drops/error, positions `52/58/0/0/52/58`; stronger fixture proof `flush_after_command_acceptance_does_not_cancel_delayed_response` remains independent. |
 | `native_flush_output_after_full_delivery_is_safe` | `output_flush_after_full_delivery_preserves_later_traffic` | **Compared.** First matched `pong` is delivery boundary; output-only flush retains cursor and later traffic. Existing Rust-PTY proof remains stronger semantic coverage. |
 | `native_partial_line_buffered_then_completed` | `split_writes_preserve_one_command_and_exact_wire_order` | `pi` stays pending for bounded delay; `ng\r\n` completes command |
 | `native_read_regex_matches_pong` | `regex_and_glob_matchers_find_complete_peer_line` | regex mode |
 | `native_read_glob_matches_pong_line` | `regex_and_glob_matchers_find_complete_peer_line` | glob mode |
-| `native_auto_reconnect_preserves_connection` | `public_mcp_ping_hold_disconnect_replace_and_reconnect` | disappearance, `connection_closed`, replacement, fresh exchange |
+| `native_auto_reconnect_preserves_connection` | `public_mcp_ping_hold_disconnect_replace_and_reconnect` | **Retired.** Source only invokes `reconnect` while already open; strengthened public real-PTY proof preserves same ID/open state and post-no-op traffic, then proves peer loss, replacement, reconnect, and fresh exchange. |
 | `native_read_line_framing_splits_lines` | `line_framing_returns_exact_ordered_peer_frames` | original native test remains required; exact ordered frame proof is retained |
 | `native_read_json_parser_decodes_jsonout` | `json_lines_preset_writes_line_and_preserves_object_only_parser_behavior` | **Compared Batch 14.** Static three JSON object response; explicit line framing plus `json_lines` parser; exact `140/0/0` timeout result with three ordered parsed objects and positions `52/192/0/0/0/192`; existing JSON Lines fixture proof remains stronger. |
 | `native_read_at_parser_parses_pong` | `at_command_connection_default_drives_stateful_transact_and_parser_quirk` | **Compared Batch 12.** Direct explicit-parser `line` + `at_command` result; existing `AtPeer` test remains stronger stateful AT behavior |
@@ -164,17 +285,17 @@ Current required replacement targets: `tests/device_fixture.rs`,
 | `native_read_cobs_preset_decodes_frame` | `cobs_preset_uses_independent_zero_byte_vector_for_write_and_read` | **Compared Batch 11.** Direct `protocol: {"type":"cobs"}` preset comparison uses static independent wire `00 05 70 6f 6e 67 00`; one raw-parser COBS frame remains distinct from raw COBS framing, while broader zero-containing COBS TX/RX fixture proof remains stronger semantic coverage. |
 | `native_read_ndjson_preset_decodes_json_frames` | `ndjson_preset_parses_records_and_skips_blank_whitespace_lines` | **Compared Batch 15.** Static NDJSON payload `{"a":1}\n\n{"b":2}\n`; `protocol: {"type":"ndjson"}` uses auto line framing, `skip_empty:true`, and JSON parser; exact `17/0/0` timeout result with ordered parsed `a`/`b` frames and positions `52/69/0/0/0/69`; stronger NDJSON fixture proof remains independent. |
 | `native_read_ndjson_preset_skips_empty_lines` | `ndjson_preset_parses_records_and_skips_blank_whitespace_lines` | **Compared Batch 15.** Static NDJSON payload `{"a":1}\n\n\n{"b":2}\n   \n{"c":3}\n`; `protocol: {"type":"ndjson"}` uses auto line framing, `skip_empty:true`, and JSON parser; exact `30/0/0` timeout result with ordered parsed `a`/`b`/`c` frames and positions `52/82/0/0/0/82`; blank and whitespace-only lines emit no frames; stronger NDJSON fixture proof remains independent. |
-| `native_read_nmea0183_preset_decodes_parsed_frame` | `nmea0183_preset_parses_valid_independently_checksummed_sentence` | checksum-valid parsed sentence |
-| `native_read_modbus_ascii_preset_decodes_parsed_frame` | `modbus_ascii_preset_transact_parses_lrc_and_proves_peer_state_mutation` | LRC and mutable peer |
-| `native_capture_boot_arm_only_captures_post_arm_command_output` | `capture_boot_arm_only_excludes_stale_bytes_and_preserves_shared_cursor` | arm-only stale exclusion/replay |
+| `native_read_nmea0183_preset_decodes_parsed_frame` | `nmea0183_preset_parses_valid_independently_checksummed_sentence` | **Compared Batch 16.** Static 67-byte valid GGA sentence `$GPGGA,123519,4807.038,N,01131.000,E,1,08,0.9,545.4,M,46.9,M,,*47\r\n`; `protocol: {"type":"nmea0183"}` uses start/end framing with markers excluded and NMEA parser; exact `67/0/0` timeout result with one UTF-8 `start_end` frame, parsed `talker_id="GP"`, `sentence_type="GGA"`, exact ordered fields `["123519","4807.038","N","01131.000","E","1","08","0.9","545.4","M","46.9","M","",""]`, `checksum_valid:true`, and positions `52/119/0/0/0/119`; stronger NMEA fixture proof remains independent. |
+| `native_read_modbus_ascii_preset_decodes_parsed_frame` | `modbus_ascii_preset_transact_parses_lrc_and_proves_peer_state_mutation` | **Compared Batch 17.** Static valid Modbus ASCII response `:010300000001FB\r\n`; `protocol: {"type":"modbus_ascii"}` uses start/end framing with markers excluded and Modbus ASCII parser; exact `17/0/0` timeout result with one UTF-8 `start_end` frame, parsed `address=1`, `function_code=3`, `data=[0,0,0,1]`, `checksum_valid:true`, and positions `52/69/0/0/0/69`; stronger Modbus fixture proof remains independent. |
+| `native_capture_boot_arm_only_captures_post_arm_command_output` | `capture_boot_arm_only_excludes_stale_bytes_and_preserves_shared_cursor` | **Retired.** Source only checks arm-only post-mark output after a consumed stale banner; deterministic public real-PTY proof excludes stale bytes, preserves private-mark replay and shared cursor/history, and captures post-arm output. |
 | `native_named_connection_appears_in_list_connections` | `named_connection_summary_uses_fixture_stable_path` | named public summary |
 | `native_set_flow_control_updates_summary_and_result` | `flow_control_none_at_open_and_live_set_are_reflected_in_summary` | live result/summary |
-| `native_close_while_read_active_returns_normal_result` | `close_interrupts_readiness_proven_live_read_with_connection_closed` | known-pending close result |
+| `native_close_while_read_active_returns_normal_result` | `close_interrupts_readiness_proven_live_read_with_connection_closed` | **Historical Compared Batch 18.** Readiness-proven public close sequence uses `arm_cmd 1000\r\n`, baseline `get_status.rx_bytes`, secondary unmatched `from={"type":"now"}` read, and primary marker command `sendraw hex 524541442D52454144592D4D41524B45520D0A\r\n` writing `READ-READY-MARKER\r\n` after `rx_bytes` increases by 19 while pending read remains unfinished; primary close returns normal anonymous profile with `source="disabled"`, `profile_persistence.operation="close_snapshot"`, and `profile_persistence.state="transient"`; pending read returns exact marker with `19/19/19`, `connection_closed`, no match/truncation/frames/drops/error, and positions `52/71/0/0/0/71`; stronger fixture proof remains independent. |
 | `native_reopen_same_port_after_close_works` | `reopen_same_path_returns_distinct_id_and_only_fresh_generation` | **Retired.** Stronger distinct-ID and fresh-generation proof retains reopen behavior. |
-| `native_reopen_then_match_finds_fresh_output` | `reopen_same_path_returns_distinct_id_and_only_fresh_generation` | distinct IDs and fresh output only |
+| `native_reopen_then_match_finds_fresh_output` | `reopen_same_path_returns_distinct_id_and_only_fresh_generation` | **Historical Baseline-and-stronger Batch 19.** Standard anonymous first `open` at 115200 with `profile_mode: "none"`; boot banner is synchronized once because firmware emits it only at process start; first `write("ping\r\n")` is normal UTF-8 `6/6`, and positioned first literal `pong` read is exact `pong\r\n`, `6/6/6`, `match_found`, index 0, no frames/drops/error/truncation, positions `32/38/0/0/0/38`; normal first close retains disabled/transient close-profile checks; same endpoint second `open` requires a distinct raw connection ID, public status verifies `rx_bytes=0` before second command, and pending second `from={"type":"now"}` UTF-8 `pong` read uses bounded 100 ms baseline admission before independent-client `write("ping\r\n")`; second read is exact `pong\r\n`, `6/6/6`, `match_found`, index 0, no frames/drops/error/truncation, positions `0/6/0/0/0/6`; the status probe is not normalized; stronger fixture proof remains independent. |
 | `native_open_with_flow_control_persists_in_summary` | `flow_control_none_at_open_and_live_set_are_reflected_in_summary` | open-time result/summary |
 
-Phase E gate: all 49 native rows now have one required replacement, cited
+Historical Phase E gate: all 49 native rows now have one required replacement, cited
 stronger proof, or explicit retired disposition. Current focused target totals are
 `device_fixture` 7/7, `device_command_parity` 19/19,
 `device_framing_parity` 8/8, and `device_protocol_parity` 15/15 (7 public
@@ -184,11 +305,16 @@ Linux x86_64 additionally invokes
 fixed-order iterations, seed `0x50484153455f4545`. Each iteration uses a real
 `DeviceFixture`, `TestServer`, MCP client, and public tools for ping, bounded
 flood, held/released output, post-delivery flush, peer disconnect,
-stable-path replacement/reconnect, and explicit teardown. Native oracle remains
-43/43 validation and 6/6 lifecycle; it remains required until full
-differential/migration gate passes.
+stable-path replacement/reconnect, and explicit teardown. Historical native
+oracle totals were 43/43 validation and 6/6 lifecycle. The accepted full
+normalized differential parity window covers all 22 batches and all 42
+executable cases; Phase F subsequently removed active native/NCS source and
+configuration. Fresh clean-checkout CI acceptance remains pending.
 
-## Executable Differential Batches
+## Historical Executable Differential Batches
+
+The following batch details retain historical native-versus-fixture evidence;
+they are not active test targets.
 
 `tests/native_sim_differential.rs` is Linux-only and ignored because it needs
 the prebuilt `native_sim` firmware binary. Each listed case invokes the same
@@ -495,8 +621,13 @@ historical checkpoint at 17 compared, 14 baseline-and-stronger, 3 retired, and
 15 pending (`17/14/3/15`) with 31 covered rows. Batch 13 is historical at
 18 compared, 14 baseline-and-stronger, 3 retired, and 14 pending
 (`18/14/3/14`) with 32 covered rows. Batch 14 was historical at
-`19/14/3/13` with 33 covered rows. Batch 15 is current at `21/14/3/11` with
-35 covered rows; Phase F blocked.
+`19/14/3/13` with 33 covered rows. Batch 15 is historical at `21/14/3/11`
+with 35 covered rows; Batch 16 is historical at `22/14/3/10` with 36 covered
+rows; Batch 17 is historical at `23/14/3/9` with 37 covered rows; Batch 18 is
+historical at `24/14/3/8` with 38 covered rows; Batch 19 is historical at
+`24/15/3/7` with 39 covered rows; Batch 20 is historical at `24/16/3/6` with 40
+covered rows; Batch 21 is historical at `25/16/3/5` with 41 covered rows; Batch
+22 is historical at `26/16/3/4` with 42 covered rows; post-Batch-22 pre-txbuf-retirement checkpoint is `26/16/4/3` with 43 covered rows (26 compared, 16 baseline-and-stronger, 4 retired, and 3 pending); Phase F blocked.
 
 ## Disposition Rules
 
@@ -510,7 +641,7 @@ historical checkpoint at 17 compared, 14 baseline-and-stronger, 3 retired, and
 - **Retired:** remove only after cited stronger public-boundary test remains in
   required CI. No coverage disappears silently.
 
-Summary: 20 unchanged, 6 parameterized, 17 strengthened, 3 split, 3 retired.
+Summary: 19 unchanged, 6 parameterized, 15 strengthened, 2 split, 7 retired.
 
 ## 43 Validation Tests
 
@@ -523,21 +654,21 @@ Summary: 20 unchanged, 6 parameterized, 17 strengthened, 3 split, 3 retired.
 | `native_trace_reports_exact_split_byte_sequence` | `trace on` | exact six-record lower-case trace for `ping\r\n` plus one `pong` | **Baseline-and-stronger Batch 5.** Exact public result is compared; the same split-write proof remains stronger. |
 | `native_read_match_on_spam_complete` | deterministic spam stream | matcher survives flood and stops at completion marker | **Unchanged; mapped.** `device_command_parity::finite_flood_matcher_reaches_unique_completion_marker`. |
 | `native_read_buffer_budget_stops_under_flood` | native original 65,536-byte spam; Batch 4 uses live 512-byte spam with default 256 | bounded read under flood | **Strengthened; mapped.** `device_command_parity::live_buffer_budget_caps_finite_flood_with_exact_stop_metadata` configures 256 live, asserts exact `max_buffered_bytes`, counters, coherent truncation, and no unsupported per-read field; variable prefilled 65,536 backlog fields stay characterization-only. |
-| `native_bootloader_touch_exits_42` | `touch` → process exit 42 | public write triggers peer process exit | **Strengthened; mapped.** `device_command_parity::touch_write_causes_small_rust_child_peer_to_exit_42` asserts write success and real Rust child exit 42. |
+| `native_bootloader_touch_exits_42` | `touch` → process exit 42 | public write triggers peer process exit | **Compared Batch 22.** Standard anonymous `open` at 115200 with `profile_mode: "none"` and matching boot-banner read remain the first two normalized observations; fixture side is a real dedicated small Rust child PTY, not `FixtureExit::Crashed`; child emits exact `serial-mcp test firmware ready\r\n` before `PTY_PATH`; public UTF-8 `write("touch\r\n")` is normal anonymous with exact `bytes_written=decoded_bytes=7`; both native firmware and child endpoint exit exactly 42, retained as typed `process_exit` observation; terminal `touch exit(42)\r\n` response delivery is not claimed; no public `close` follows peer exit; stronger fixture proof `touch_write_causes_small_rust_child_peer_to_exit_42` remains independent. |
 | `native_list_ports_after_open` | none; ambient OS enumeration | only asserts some host port exists | **Retired.** Stronger deterministic public proofs: `http_integration::call_tool_list_ports_returns_structured_result`, `http_integration::ports_resource_includes_profile_match_map`, and `serial_pty::list_ports_preview_empty_store_reports_none_parallel_and_pure_ports`. |
-| `native_list_ports_includes_identity_fields` | none; ambient OS enumeration | weak type/null checks | **Strengthened; mapped.** Existing public real-PTY + injected-provider proofs: `serial_pty::list_ports_preview_empty_store_reports_none_parallel_and_pure_ports`, `list_ports_preview_selected_winner_matches_later_bare_open`, and `list_ports_preview_output_validates_against_generated_schema`. |
+| `native_list_ports_includes_identity_fields` | none; ambient OS enumeration | weak type/null checks | **Retired.** Deterministic injected-provider identity/profile/schema proofs supersede ambient OS field/null checks: `serial_pty::list_ports_preview_empty_store_reports_none_parallel_and_pure_ports`, `serial_pty::list_ports_preview_selected_winner_matches_later_bare_open`, and `serial_pty::list_ports_preview_output_validates_against_generated_schema`. |
 | `native_flush_after_write` | `ping`, immediate output flush | racy delivery survives output flush | **Retired.** Contract permits queued TX discard. Keep stronger fully-delivered case below. |
 | `native_get_status_after_write_increments_tx_counter` | `ping` | status counters/activity exposed | **Strengthened.** Assert monotonic exact deltas from before/after snapshots. |
 | `native_reconfigure_baud_rate_persists` | PTY ignores physical baud; ping remains functional | MCP config/state mutation | **Strengthened.** Assert every result and status transition; state explicitly that PTY proves configuration, not wire baud. |
 | `native_ack_command_provides_pre_execution_ack` | `ack on/off`, sequence | ordered stateful peer responses | **Compared.** Exact five-step public payload/position comparison, including `ack 2\r\n` before `ack off\r\n`; `device_command_parity::ack_peer_orders_ack_before_response_and_stops_after_disable` remains stronger semantic proof. |
-| `native_txbuf_status_reports_pending` | TX hold/ring status | idle queue and hold recovery | **Split.** Separate idle status, nonzero held queue/backpressure, and release/recovery. |
-| `native_flush_input_clears_host_rx` | spam then input flush | stale RX discard | **Strengthened.** Use unique pre/post markers; prove old bytes absent and post-flush bytes readable. |
-| `native_flush_during_arm_cmd_delay` | one-shot delayed next command | flush race does not cancel peer command already received | **Unchanged.** Use explicit peer barrier around accepted command/delayed response. |
+| `native_txbuf_status_reports_pending` | TX hold/ring status | idle queue and hold recovery | **Retired.** Source checks only idle `txbuf` diagnostics and hold recovery; `device_command_parity::held_output_reports_nonzero_queue_then_drains_and_recovers` proves nonzero held output, blocked read, drain, and recovery. |
+| `native_flush_input_clears_host_rx` | spam then input flush | stale RX discard | **Historical Compared Batch 21.** Standard anonymous `open` at 115200 with `profile_mode: "none"` and boot-banner read remain the first two normalized observations; public UTF-8 old-marker write `sendraw hex 4F4C442D4D41524B45520D0A\r\n` is normal anonymous with exact `bytes_written=decoded_bytes=38`; status-only `get_status` polling proves old marker reached retained RX at `rx_bytes >= 44` and is not normalized; public `flush(target="input")` is normal anonymous with exact target `input`; public UTF-8 new-marker write `sendraw hex 4E45572D4D41524B45520D0A\r\n` is normal anonymous with exact `bytes_written=decoded_bytes=38`; status-only polling proves `rx_bytes >= 56` and is not normalized; positioned `from={"type":"buffer_start"}` UTF-8 literal `NEW-MARKER\r\n` read returns exact `NEW-MARKER\r\n`, `12/12/12`, `match_found`, index 0, no truncation/frames/drops/error, positions `44/56/0/0/44/56`; stronger fixture proof `flush_input_discards_known_old_marker_and_keeps_new_marker` remains independent. |
+| `native_flush_during_arm_cmd_delay` | one-shot delayed next command | flush race does not cancel peer command already received | **Historical Baseline-and-stronger Batch 20.** Standard anonymous `open` at 115200 with `profile_mode: "none"`; boot banner and arm acknowledgement are validated before normalized observations; public `transact("arm_cmd 1000\r\n")` validates exact `arm_cmd delay=1000\r\n` acknowledgement but setup result is not normalized; public `write("ping\r\n")` is normal UTF-8 `6/6`; bounded 100 ms baseline admission window is not a peer-acceptance proof; public `flush(target="both")` is normal anonymous with exact target `both`; positioned `from={"type":"now"}` UTF-8 literal `pong\r\n` read is exact `pong\r\n`, `6/6/6`, `match_found`, index 0, no truncation/frames/drops/error, positions `52/58/0/0/52/58`; stronger fixture proof `flush_after_command_acceptance_does_not_cancel_delayed_response` remains independent. |
 | `native_flush_output_after_full_delivery_is_safe` | ping fully delivered before output flush | safe output flush after delivery, later traffic works | **Compared Batch 7.** First matched `pong` is delivery boundary; existing output-only Rust-PTY proof remains stronger. |
 | `native_partial_line_buffered_then_completed` | partial `pi`, later `ng\r\n` | partial line remains pending, then exact `pong\r\n` completes | **Baseline-and-stronger Batch 5.** The differential case proves two bounded unfinished observations; the split-write public proof remains stronger. |
 | `native_read_regex_matches_pong` | ping | regex matcher | **Parameterized.** Preserve regex case with glob case. |
 | `native_read_glob_matches_pong_line` | ping | per-line glob matcher | **Parameterized.** Preserve glob case with regex case. |
-| `native_auto_reconnect_preserves_connection` | no peer loss; `reconnect` called while open | only no-op reconnect success | **Strengthened; mapped.** `device_fixture::public_mcp_ping_hold_disconnect_replace_and_reconnect` proves true disappearance, `connection_closed`, distinct endpoint replacement, reconnect, and fresh exchange. |
+| `native_auto_reconnect_preserves_connection` | no peer loss; `reconnect` called while open | only no-op reconnect success | **Retired.** Source only invokes `reconnect` while already open; `device_fixture::public_mcp_ping_hold_disconnect_replace_and_reconnect` preserves same ID/open state and post-no-op traffic, then proves peer loss, replacement, reconnect, and fresh exchange. |
 | `native_read_line_framing_splits_lines` | `ping`, `info` | line decoder emits multiple frames | **Required original native test remains.** It retains ordered pong/info assertions; Batch 2 uses the deterministic nested-command equivalent described above, while `line_framing_returns_exact_ordered_peer_frames` retains its fixture replacement proof. |
 | `native_read_json_parser_decodes_jsonout` | three changing sensor objects | JSON-lines parser output | **Compared Batch 14.** Static three JSON object response; explicit line framing plus `json_lines` parser; exact `140/0/0` timeout result with three ordered parsed objects and positions `52/192/0/0/0/192`; existing JSON Lines fixture proof remains stronger. |
 | `native_read_at_parser_parses_pong` | ping treated as AT data line | explicit AT parser classification | **Compared Batch 12.** Direct explicit `rx_framing: line` plus `rx_parser: at_command` evidence; existing `AtPeer` worksheet remains stronger stateful AT behavior. |
@@ -556,9 +687,9 @@ Summary: 20 unchanged, 6 parameterized, 17 strengthened, 3 split, 3 retired.
 | `native_read_cobs_preset_decodes_frame` | static independent plain-COBS `00 05 70 6f 6e 67 00` | `protocol: {"type":"cobs"}` preset decode with raw parser frame | **Compared Batch 11.** Exact `7/0/0` counters, `timeout`, raw parser, and `52/59/0/0/0/59`; broader zero-containing COBS TX/RX fixture proof remains stronger. |
 | `native_read_ndjson_preset_decodes_json_frames` | two records plus blank | NDJSON decode/blank skip | **Compared Batch 15.** Static NDJSON payload `{"a":1}\n\n{"b":2}\n`; `protocol: {"type":"ndjson"}` uses auto line framing, `skip_empty:true`, and JSON parser; exact `17/0/0` timeout result with ordered parsed `a`/`b` frames and positions `52/69/0/0/0/69`; stronger NDJSON fixture proof remains independent. |
 | `native_read_ndjson_preset_skips_empty_lines` | records plus blank/whitespace lines | whitespace skipping | **Compared Batch 15.** Static NDJSON payload `{"a":1}\n\n\n{"b":2}\n   \n{"c":3}\n`; `protocol: {"type":"ndjson"}` uses auto line framing, `skip_empty:true`, and JSON parser; exact `30/0/0` timeout result with ordered parsed `a`/`b`/`c` frames and positions `52/82/0/0/0/82`; blank and whitespace-only lines emit no frames; stronger NDJSON fixture proof remains independent. |
-| `native_read_nmea0183_preset_decodes_parsed_frame` | locally checksummed GGA | NMEA parser/checksum result | **Unchanged.** Add AIS/proprietary/bad/missing vectors in worksheet. |
-| `native_read_modbus_ascii_preset_decodes_parsed_frame` | official-style `:010300000001FB` request | address/function/LRC parse | **Unchanged.** Add mutable server/response paths in worksheet. |
-| `native_capture_boot_arm_only_captures_post_arm_command_output` | external ping after private mark | arm-only capture excludes stale banner and preserves shared cursor/history | **Unchanged; mapped.** `device_command_parity::capture_boot_arm_only_excludes_stale_bytes_and_preserves_shared_cursor` uses stale and post-mark markers, private capture offset replay, retained-history replay, and no reset-line claim. |
+| `native_read_nmea0183_preset_decodes_parsed_frame` | locally checksummed GGA | NMEA parser/checksum result | **Compared Batch 16.** Static 67-byte valid GGA sentence `$GPGGA,123519,4807.038,N,01131.000,E,1,08,0.9,545.4,M,46.9,M,,*47\r\n`; `protocol: {"type":"nmea0183"}` uses start/end framing with markers excluded and NMEA parser; exact `67/0/0` timeout result with one UTF-8 `start_end` frame, parsed `talker_id="GP"`, `sentence_type="GGA"`, exact ordered fields `["123519","4807.038","N","01131.000","E","1","08","0.9","545.4","M","46.9","M","",""]`, `checksum_valid:true`, and positions `52/119/0/0/0/119`; stronger NMEA fixture proof remains independent. |
+| `native_read_modbus_ascii_preset_decodes_parsed_frame` | official-style `:010300000001FB` response | address/function/data/LRC parse | **Compared Batch 17.** Static valid response `:010300000001FB\r\n`; protocol-only `modbus_ascii` preset; exact `17/0/0` counters, `timeout`, parsed address `1`, function `3`, data `[0,0,0,1]`, `checksum_valid:true`, and positions `52/69/0/0/0/69`; stronger mutable-peer fixture proof remains independent. |
+| `native_capture_boot_arm_only_captures_post_arm_command_output` | external ping after private mark | arm-only capture excludes stale banner and preserves shared cursor/history | **Retired.** Source only checks arm-only post-mark output after a consumed stale banner; `device_command_parity::capture_boot_arm_only_excludes_stale_bytes_and_preserves_shared_cursor` excludes stale bytes, preserves private-mark replay and shared cursor/history, and captures post-arm output. |
 
 ## 6 Lifecycle Tests
 
@@ -566,9 +697,9 @@ Summary: 20 unchanged, 6 parameterized, 17 strengthened, 3 split, 3 retired.
 |---|---|---|---|
 | `native_named_connection_appears_in_list_connections` | none | named real-path connection summary | **Unchanged.** |
 | `native_set_flow_control_updates_summary_and_result` | none; current value already `none` | result/summary agree | **Strengthened; mapped.** `device_command_parity::flow_control_none_at_open_and_live_set_are_reflected_in_summary` parameterizes open-time plus live `none`; PTY cannot prove physical hardware/software flow control, so controlled backend remains physical-effect proof. |
-| `native_close_while_read_active_returns_normal_result` | boot synchronized, then read/close race | structured read result after close | **Strengthened; mapped.** `device_command_parity::close_interrupts_readiness_proven_live_read_with_connection_closed` starts an unmatched `from=now` public read and requires `connection_closed`, not drained/timeout alternatives. |
+| `native_close_while_read_active_returns_normal_result` | readiness-proven marker | structured close and read result after close | **Historical Compared Batch 18.** Readiness-proven public close sequence uses `arm_cmd 1000\r\n`, baseline `get_status.rx_bytes`, secondary unmatched `from={"type":"now"}` read, and primary marker command `sendraw hex 524541442D52454144592D4D41524B45520D0A\r\n` writing `READ-READY-MARKER\r\n` after `rx_bytes` increases by 19 while pending read remains unfinished; primary close returns normal anonymous profile with `source="disabled"`, `profile_persistence.operation="close_snapshot"`, and `profile_persistence.state="transient"`; pending read returns exact marker with `19/19/19`, `connection_closed`, no match/truncation/frames/drops/error, and positions `52/71/0/0/0/71`; stronger fixture proof remains independent. |
 | `native_reopen_same_port_after_close_works` | ping then close/reopen | duplicate of stronger following case | **Retired.** Keep strengthened reopen/fresh-output test. |
-| `native_reopen_then_match_finds_fresh_output` | ping before and after reopen | same PTY path opens twice | **Strengthened.** Use unique generation marker, distinct connection IDs, and offset/from-now assertions to rule out stale pong. |
+| `native_reopen_then_match_finds_fresh_output` | ping before and after reopen | same PTY path opens twice | **Historical Baseline-and-stronger Batch 19.** Standard anonymous first `open` at 115200 with `profile_mode: "none"`; boot banner is synchronized once because firmware emits it only at process start; first `write("ping\r\n")` is normal UTF-8 `6/6`, and positioned first literal `pong` read is exact `pong\r\n`, `6/6/6`, `match_found`, index 0, no frames/drops/error/truncation, positions `32/38/0/0/0/38`; normal first close retains disabled/transient close-profile checks; same endpoint second `open` requires a distinct raw connection ID, public status verifies `rx_bytes=0` before second command, and pending second `from={"type":"now"}` UTF-8 `pong` read uses bounded 100 ms baseline admission before independent-client `write("ping\r\n")`; second read is exact `pong\r\n`, `6/6/6`, `match_found`, index 0, no frames/drops/error/truncation, positions `0/6/0/0/0/6`; the status probe is not normalized; stronger fixture proof remains independent. |
 | `native_open_with_flow_control_persists_in_summary` | none; opens with default `none` | open setting appears in summary | **Parameterized; mapped.** Combined with `device_command_parity::flow_control_none_at_open_and_live_set_are_reflected_in_summary`. |
 
 ## Firmware Behavior Required by Traceability
@@ -591,35 +722,35 @@ Do not reproduce unobserved Zephyr IRQ scheduling, `k_timer`, native board, or
 firmware implementation defects. Preserve a defect only if a public product
 contract depends on it and a characterization test says so.
 
-## Path-Level NCS Coupling Inventory
+## Historical Path-Level NCS Coupling Inventory and Phase F Disposition
 
-| Path | Current coupling | Final parity-gated action |
+| Path | Historical coupling | Phase F disposition |
 |---|---|---|
-| `.github/workflows/ci.yml` | dedicated NCS cache/install/build/native-test job; release depends on it | move replacement suite to normal Rust job, remove NCS job and release dependency |
-| `scripts/install-nrfutil-ci.sh` | pinned CI provisioning | delete |
-| `scripts/tests/test_install-nrfutil-ci.sh` | installer-only offline test | delete with installer |
-| `flake.nix` | `nix-nrf-dev`, `mkNrfShell`, NCS v3.3.0, multilib, firmware PATH | replace with ordinary Rust dev shell |
-| `flake.lock` | `nix-nrf-dev` and orphanable transitive nodes | regenerate after input removal |
-| `firmware/` | complete Zephyr native_sim test device and helpers | delete after differential parity |
-| `tests/common/firmware.rs` | build-on-demand `NativeSimFirmware` child harness | delete after replacement fixture owns lifecycle |
-| `tests/common/mod.rs` | exports firmware helper; independent `PtyPair` also here | remove firmware export; keep/strengthen PTY fixture |
-| `tests/native_sim_validation.rs` and directory | 43 ignored tests | move scenarios to required replacement suites, then delete wrappers |
-| `tests/native_sim_connection_lifecycle.rs` | 6 ignored tests | move scenarios, then delete |
-| `xtask/src/main.rs` | builds firmware, runs ignored suites, prints Zephyr path | remove firmware asset logic; run normal Rust fixture tests |
-| `xtask/src/agent_eval/scenarios.rs` | completion references point at native tests | repoint to replacement public-boundary tests |
-| `tests/doc_drift.rs` | research-plan guard and release-job guard | replace with shipped simulator coverage and zero-active-NCS guards |
-| `opencode.json` and `firmware/.clangd` | firmware C LSP through NCS shell | delete firmware LSP route; Nordic docs MCP is optional, not build coupling |
-| root `README.md`, `AGENTS.md`, development docs | native commands and NCS invariants | rewrite to replacement fixture after implementation |
-| `docs/development/agent-interface-baseline.json` | historical completion references | preserve historical metrics; repoint or explicitly archive references |
-| `CHANGELOG.md` | historical native/NCS releases | retain unchanged as history |
+| `.github/workflows/ci.yml` | dedicated NCS cache/install/build/native-test job; release depended on it | removed native job and release dependency; replacement suites remain in normal Rust job |
+| `scripts/install-nrfutil-ci.sh` | pinned CI provisioning | deleted |
+| `scripts/tests/test_install-nrfutil-ci.sh` | installer-only offline test | deleted with installer |
+| `flake.nix` | `nix-nrf-dev`, `mkNrfShell`, NCS v3.3.0, multilib, firmware PATH | replaced with ordinary Rust dev shell |
+| `flake.lock` | `nix-nrf-dev` and orphanable transitive nodes | pruned offline; surviving revisions unchanged |
+| `firmware/` | complete Zephyr native_sim test device and helpers | deleted active source/config |
+| `tests/common/firmware.rs` | build-on-demand `NativeSimFirmware` child harness | deleted |
+| `tests/common/mod.rs` | exported firmware helper; independent `PtyPair` also here | removed firmware export; retained PTY fixture |
+| `tests/native_sim_validation.rs` and directory | 43 ignored tests | replacement suites retained; wrappers deleted |
+| `tests/native_sim_connection_lifecycle.rs` | 6 ignored tests | replacement lifecycle proofs retained; suite deleted |
+| `xtask/src/main.rs` | built firmware, ran ignored suites, printed Zephyr path | removed firmware asset logic; runs normal Rust fixture tests |
+| `xtask/src/agent_eval/scenarios.rs` | completion references pointed at native tests | repointed to replacement public-boundary tests |
+| `tests/doc_drift.rs` | research-plan guard and release-job guard | retained 49-row proof; removed registry/source assertions and added zero-active-NCS guard |
+| `opencode.json` and `firmware/.clangd` | firmware C LSP through NCS shell | removed firmware LSP route; Nordic docs MCP remains optional |
+| root `README.md`, `AGENTS.md`, development docs | native commands and NCS invariants | active docs updated; historical evidence retained |
+| `docs/development/agent-interface-baseline.json` | historical completion references | preserved unchanged as historical metrics |
+| `CHANGELOG.md` | historical native/NCS releases | retained unchanged as history |
 
 Cargo has no NCS dependency. Keep `libudev-dev`, `pkg-config`, serialport,
 tokio-serial, and Unix PTY support. No unrelated active build/test path requires
 NCS.
 
-## Migration Gate
+## Historical Migration Gate
 
-No table row may disappear. Migration PR must mechanically map every current
-name to replacement test ID(s), compare normalized public outcomes against
-native fixture during parity window, and make replacement suite required before
-deleting native fixture.
+No table row disappeared. The migration mapped every former name to replacement
+test ID(s), compared normalized public outcomes during the parity window, made
+replacement suites required, and then removed active native fixture source.
+Fresh clean-checkout CI acceptance remains the final ADR acceptance gate.

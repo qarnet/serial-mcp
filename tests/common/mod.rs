@@ -13,9 +13,6 @@ pub mod binaries;
 pub mod controlled;
 #[cfg(unix)]
 pub mod device_fixture;
-pub mod firmware;
-#[cfg(target_os = "linux")]
-pub mod native_sim_differential;
 pub mod spawned;
 
 /// Absolute path to the `serial-mcp` workspace root.

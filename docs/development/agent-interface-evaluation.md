@@ -20,8 +20,9 @@ placeholders (`/dev/ttyACM0`, fixed UUID).
 `docs/development/agent-interface-baseline.json` is the committed **historical
 baseline**: it measures the 26-tool catalog (aggregate
 compact `tools/list` payload **258964 bytes**) and the then-modeled,
-hypothetical `capture_boot`. It is NOT the current catalog — the evaluator
-compares the live catalog against it.
+hypothetical `capture_boot`. Its five native_sim completion references are
+historical evidence and remain unchanged in that JSON. It is NOT the current
+catalog — the evaluator compares the live catalog against it.
 
 ## Current catalog (25 tools, 268802 bytes)
 
@@ -100,10 +101,9 @@ not modeled.
 - Request bytes exclude transport framing (HTTP/SSE headers) and result
   payloads; only request envelopes and the `tools/list` payload are measured.
 - Documentation friction is not measurable by a static harness.
-- native_sim's PTY UART has no modem-line callbacks, so DTR/RTS assertion is
-  not observable there; the arm-only capture test on native_sim covers the
-  real byte pipeline honestly, and the atomic-reset proof comes from the
-  controlled `SerialIo` backend over the public HTTP MCP surface. rmcp's
-  client discards post-cancel responses, so `stop_reason="cancelled"` is
-  proven at the unit level (`read_loop.rs::cancelled_token_read_returns_structured_cancelled_outcome`)
+- Real PTYs do not provide modem-line callbacks, so DTR/RTS assertion remains
+  covered by the controlled `SerialIo` backend over the public HTTP MCP
+  surface; the real-PTY arm-only test covers the byte pipeline. rmcp's client
+  discards post-cancel responses, so `stop_reason="cancelled"` is proven at
+  the unit level (`read_loop.rs::cancelled_token_read_returns_structured_cancelled_outcome`)
   while HTTP tests assert the observable release and control-lock release.

@@ -1,5 +1,8 @@
 # Native Simulator Differential Gate — Batch 14 JSON Parser Handoff
 
+> **Historical/superseded record:** Phase F removed active native_sim/NCS
+> source and configuration. Body preserves accepted differential evidence.
+
 ## Phase goal
 
 Promote exactly one stable characterized native row to isolated direct

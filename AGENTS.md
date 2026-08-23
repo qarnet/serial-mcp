@@ -32,11 +32,7 @@ cargo test --test config_schema_validation
 # networked schema drift check
 cargo test --locked --test config_schema_validation -- --ignored
 
-# native_sim tests (needs firmware built first — see Firmware section)
-cargo test --test native_sim_validation -- --ignored
-cargo test --test native_sim_connection_lifecycle -- --ignored --test-threads=1
-
-# Required Rust PTY replacement suite (native_sim remains differential oracle)
+# Required Rust PTY fixture suite
 cargo test --locked --test device_fixture -- --test-threads=1
 cargo test --locked --test device_command_parity -- --test-threads=1
 cargo test --locked --test device_framing_parity -- --test-threads=1
@@ -61,11 +57,15 @@ cargo clippy --locked --manifest-path compat/rmcp-1-client/Cargo.toml \
 
 # registry manifest builder unittest suite (offline, deterministic)
 python3 -m unittest discover -s scripts/tests -v
+
+# storage hygiene audit and Cargo-clean dry-run (read-only)
+python3 scripts/storage_hygiene.py audit --all-worktrees
+python3 scripts/storage_hygiene.py clean --all-worktrees --dry-run
 ```
 
 - CI runs exactly: fmt -> build -> test -> clippy, plus named Ubuntu gates for config-schema validation (`cargo test --locked --test config_schema_validation`), release/documentation consistency (`cargo test --locked --test doc_drift`), and the pinned `mcp-conformance` gate, which delegates ALL compatibility execution to `scripts/test-mcp-compat.sh` (lockfile-pinned conformance + Inspector tooling installed with `npm ci --ignore-scripts` and invoked as local binaries — no npx, no lifecycle scripts, no dynamic resolution — plus current typed/raw/stdio/subscription tests, actual rmcp 1.7.0 HTTP + stdio, both official conformance sets, and the Inspector 2.0.0 smoke — see the Phase 4 section).
 - CI and schema workflows set `RUSTFLAGS="-D warnings"`. Treat warnings as errors locally too.
-- `nix flake check` is part of CI. The source filter admits the complete `schemas/` tree (all four vendored schemas validate hermetically offline — missing fixtures fail) plus the `.github/workflows/` and `scripts/` trees (doc_drift and the registry-manifest builder tests read them at runtime — missing fixtures fail). The flake `checks` prove the filtered source ships every workflow fixture (`workflow-fixtures-present`) and that the builder unittest suite passes (`registry-manifest-builder-tests`). On Nix, prefer `nix develop` before changing firmware or release workflow bits.
+- `nix flake check` is part of CI. The source filter admits the complete `schemas/` tree (all four vendored schemas validate hermetically offline — missing fixtures fail) plus the `.github/workflows/` and `scripts/` trees (doc_drift and the registry-manifest builder tests read them at runtime — missing fixtures fail). The flake `checks` prove the filtered source ships every workflow fixture (`workflow-fixtures-present`) and that the builder unittest suite passes (`registry-manifest-builder-tests`). On Nix, prefer `nix develop` before changing release workflow bits.
 
 ## Invariants easy to break
 
@@ -183,33 +183,12 @@ python3 -m unittest discover -s scripts/tests -v
 - `tests/doc_drift.rs` — prose-vs-code drift guards: tool count across README/Cargo.toml/server.json, protocol-preset mentions, tagged `from` wire forms, capture CLI option sync, FEATURES.md shipped-items absence, `server.json` package/version rules, a CHANGELOG release contract (release-table row + body heading for the Cargo package version, `## [Unreleased]` before the current release) with synthetic negative proofs for each rule, and the Phase 4 gate guards: exactly the four documented expected-failure IDs in `conformance/expected-failures.yaml`, the lockfile-pinned MCP validation npm tree (`compat/mcp-validation/` — private `package.json` with exact direct versions `@modelcontextprotocol/conformance@0.2.0-alpha.10` / `@modelcontextprotocol/inspector@2.0.0`, committed `package-lock.json` with exact lockfile-root deps plus per-package versions and `sha512-` integrity for both locked packages), the runner's `npm ci --ignore-scripts` install and direct `node_modules/.bin` invocations with no `npx` anywhere in the validation flow (delegation to the shared runner only — no duplicated scenario loops, no `--suite all`, no `server-session-lifecycle`), the exact version-indexed scenario sets parsed from the runner's quoted shell assignments (`SCENARIOS_2025_11_25` / `SCENARIOS_2026_07_28` with exact `--spec-version` values and `-2025-11-25` / `-2026-07-28` report suffixes), the historical fixture pin (exact `=1.7.0`, `default-features = false`, required client/transport features, single lock entry, checksum `0810a9f7…f4058e`), the contract/docs wiring (policy doc, README, FEATURES, runner, expected-failure count), the Inspector smoke script wiring (local locked binary default, no npx fallback), and the README dual-protocol compliance claim.
 - `tests/protocol_compatibility.rs` — version-indexed compatibility matrix indexed by exact `TestProtocol::{V2026_07_28,V2025_11_25}` (a table-driven coverage lock compares `TestProtocol::ALL` against the raw `server/discover` `supportedVersions` wire output) plus the Phase 4 cache wire proofs: typed modern `ttlMs: Some(0)` / `cacheScope: Private` on every cacheable family and typed legacy absence; raw modern `ttlMs: 0` / `cacheScope: "private"` presence and raw legacy absence; `resultType` modern-present/legacy-absent; cursor-page behavior of the manual `tools/list`/`prompts/list` handlers. Raw expectations are fixture-local, never derived from production `src/mcp_protocol.rs`.
 - `tests/config_schema_validation.rs` validates all three vendored example configs (Claude Code, Codex, opencode) hermetically and offline — the vendored `models.dev` document is registered in memory under its original URI, a no-network retriever fails on anything else, and missing/malformed schema or instance fixtures fail the run (no skip path). Only the ignored case fetches latest upstream schemas.
-- `tests/native_sim_validation.rs` — native_sim firmware over PTY. 43 tests, pure software, fast (no hardware). Env: `SERIAL_MCP_NATIVE_SIM_BIN` (default `build/native_sim/firmware/zephyr/zephyr.exe`). Thin wrapper; all tests + helpers live in `tests/native_sim_validation/unix.rs` (Unix-only via `#[cfg(unix)]` module gate), with an empty `windows.rs` stub for future Windows-specific tests.
-- `tests/native_sim_connection_lifecycle.rs` — software-only lifecycle (6 tests): named connection, `set_flow_control`, close-while-read, reopen, touch-command bootloader entry. Run with `--test-threads=1`.
-- Required Rust PTY replacement targets are `tests/device_fixture.rs` (7), `tests/device_command_parity.rs` (19), `tests/device_framing_parity.rs` (8), and Linux-only `tests/device_protocol_parity.rs` (15). Linux x86_64 CI runs all four explicitly after ordinary `cargo test`; macOS arm64 runs fixture/command/framing (protocol target naturally has zero cfg-gated cases); Windows stays compile + controlled-backend only. Linux x86_64 also runs ignored `device_parity_repeat::phase_e_public_boundary_repeat_gate` explicitly: 100 fixed-order public MCP lifecycles, seed `0x50484153455f4545`, with bounded real fixture/server/client teardown. `native_sim` 43+6 remains temporary required differential oracle until Phase F.
+- Required Rust PTY fixture targets are `tests/device_fixture.rs` (7), `tests/device_command_parity.rs` (19), `tests/device_framing_parity.rs` (8), and Linux-only `tests/device_protocol_parity.rs` (15). Linux x86_64 CI runs all four explicitly after ordinary `cargo test`; macOS arm64 runs fixture/command/framing (protocol target naturally has zero cfg-gated cases); Windows stays compile + controlled-backend only. Linux x86_64 also runs ignored `device_parity_repeat::phase_e_public_boundary_repeat_gate` explicitly: 100 fixed-order public MCP lifecycles, seed `0x50484153455f4545`, with bounded real fixture/server/client teardown.
 - There are no hardware-required tests in this repo. All test coverage is runnable on a normal Linux host.
-
-## Firmware / NCS
-
-- Read `firmware/AGENTS.md` before touching Zephyr code; root file only keeps top-level gotchas.
-- Nordic toolchain env is owned by the `nix-nrf-dev` flake input (`mkNrfShell`): the dev shell itself stays clean (no `LD_LIBRARY_PATH`/`PYTHONHOME`/`PYTHONPATH`/`GIT_EXEC_PATH` pollution from the sdk-manager); the `west` wrapper loads `nrfutil sdk-manager toolchain env --ncs-version v3.3.0 --as-script sh` per command. The shell hook derives `ZEPHYR_BASE` and exposes firmware helpers on `PATH`.
-- Use helpers instead of retyping wrappers:
-
-```bash
-fw-build-native
-fw-run-native
-```
-
-- `native_sim` is a 32-bit host build (`-m32`). `nix-nrf-dev`'s `mkNrfShell` supplies multilib GCC; do not reintroduce "NixOS unsupported" guidance.
-- The XIAO BLE nRF52840 target was removed. The test firmware now targets `native_sim` only.
-- Do not switch firmware command channel away from `DT_CHOSEN(zephyr_console)`.
-- native_sim tests need firmware built first: `fw-build-native`. Firmware lives in dedicated build tree `build/native_sim`.
-- Firmware helpers also export `compile_commands.json` by default for LSP: writes `build/native_sim/firmware/compile_commands.json`.
-- Firmware LSP routing lives in `firmware/.clangd`: all firmware C/H files use the single compile DB. Keep this aligned with the build dir.
-- `opencode.json` runs `clangd` through `direnv exec .` with `--query-driver=/nix/store/*/bin/*` so Nix toolchain headers resolve. If opencode LSP regresses, check `opencode.json`, `firmware/.clangd`, then rebuild.
 
 ## Release workflow
 
-- The release runs as a reusable workflow invoked from the trusted CI pipeline only: on a `push` to `refs/heads/main`, after every required CI job (`nix-flake`, `build-test`, `native-sim`) succeeds, the CI `release` job calls `.github/workflows/release.yml` with `mode: release` and the immutable `github.sha`; the `publish-mcp-registry` job then calls the registry workflow under the same trusted gate, passing `${{ needs.release.outputs.version }}` and the immutable `github.sha` — so a merge without a version bump still publishes the registry entry (release skips, registry still runs). Pull requests can run CI but can never reach either privileged call. Manual release testing uses the separate read-only `release-dry-run.yml` (`workflow_dispatch`, `contents: read`, `mode: dry-run` — builds the four platform binaries and uploads Actions artifacts, never touches releases or crates.io).
+- The release runs as a reusable workflow invoked from the trusted CI pipeline only: on a `push` to `refs/heads/main`, after every required CI job (`nix-flake`, `build-test`) succeeds, the CI `release` job calls `.github/workflows/release.yml` with `mode: release` and the immutable `github.sha`; the `publish-mcp-registry` job then calls the registry workflow under the same trusted gate, passing `${{ needs.release.outputs.version }}` and the immutable `github.sha` — so a merge without a version bump still publishes the registry entry (release skips, registry still runs). Pull requests can run CI but can never reach either privileged call. Manual release testing uses the separate read-only `release-dry-run.yml` (`workflow_dispatch`, `contents: read`, `mode: dry-run` — builds the four platform binaries and uploads Actions artifacts, never touches releases or crates.io).
 - The reusable release workflow derives `v<version>` from `Cargo.toml` and exposes it as the `workflow_call` `version` output. If that version already has a **published** GitHub release, the run skips entirely (a leftover draft from a failed run is retryable, not skipped). It creates a draft release, builds the four platform binaries, attaches them to the draft, then seals it (publishing is what creates the tag under immutable releases), and publishes the crate — an already-published crates.io version is a no-op skip.
 - Bumping package version has release consequences.
 - Release artifacts are built for: `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`, `aarch64-apple-darwin`, `x86_64-pc-windows-msvc`.
@@ -270,6 +249,10 @@ bounded; a hung or slow run must fail the job, not idle.
 - Rust toolchain policy: CI, release, and schema-drift workflows install Rust 1.97.1 (`dtolnay/rust-toolchain@1.97.1`, each followed by a `rustc --version --verbose` report step); Nix derives the same version from `rust-toolchain.toml`. Bump both together.
 - Conventional commits used here: `feat:`, `fix:`, `docs:`, `test:`, `refactor:`.
 - Never add attribution footers or co-author lines.
+- Storage hygiene audit is read-only. Cleanup defaults to Cargo dry-run; invoke
+  `clean --apply` only after active `Cargo`/`rustc`/`ninja` work has stopped.
+  Protected corpus, artifacts, reports, and build paths stay out of cleanup
+  actions.
 
 ## Orchestrator (xtask)
 
@@ -277,19 +260,20 @@ Single entry-point for building test assets + running all tests in order:
 
 ```bash
 cargo run --manifest-path xtask/Cargo.toml -- build-test-assets
-cargo run --manifest-path xtask/Cargo.toml -- test
-cargo run --manifest-path xtask/Cargo.toml -- test-all
+cargo run --manifest-path xtask/Cargo.toml -- test [--keep-test-target]
+cargo run --manifest-path xtask/Cargo.toml -- test-all [--keep-test-target]
 cargo run --manifest-path xtask/Cargo.toml -- print-paths
 ```
 
-- `build-test-assets` — builds `serial-mcp` binary + native_sim firmware.
-- `test` — runs unit tests + required Rust PTY fixture/command/framing/protocol suites, then stdio, blob, native_sim validation, and native_sim lifecycle differential suites.
+- `build-test-assets` — builds `serial-mcp` binary.
+- `test` — reserves one direct disposable child under `target/`, prebuilds `serial-mcp` there, then runs unit tests + required Rust PTY fixture/command/framing/protocol suites, stdio, and blob.
 - `test-all` — same as `test` plus HTTP integration suite (spawned binary).
-- `print-paths` — emits resolved test-asset paths for debugging.
+- `test`/`test-all` remove reserved targets only after success. Failed or interrupted runs retain and print the target; `--keep-test-target` retains successful targets by request. These commands control Cargo children after xtask starts; outer `xtask/target/` launcher cache stays outside this lifecycle.
+- `print-paths` — emits the resolved serial-mcp test-asset path for debugging.
 - Both `test` and `test-all` pass `--test-threads=1` unless overridden.
-- Required Rust PTY replacement suites run normally before native differential suites. The native_sim firmware suites are run with `--ignored` because their tests carry `#[ignore = "requires native_sim firmware binary"]`; ignored `device_parity_repeat` stays out of xtask so its 100 iterations run only in explicit Linux Phase E CI/verification commands.
-- Non-firmware suites (stdio, blob, http) run without `--ignored`. The only non-firmware `#[ignore]` is `config_schema_validation::example_configs_match_latest_upstream_schemas` (network fetch; run via `cargo test --test config_schema_validation -- --ignored`).
-- All test helpers (`tests/common/binaries.rs`, `tests/common/firmware.rs`, `tests/common/spawned.rs`) auto-build missing test assets on first use. `tests/common/firmware.rs` also owns the shared `NativeSimFirmware` process harness: build-on-demand, PTY-path discovery from stdout, background stdout drain, and kill-on-drop, with a Windows-compilable compile/runtime boundary.
+- Required Rust PTY fixture suites run normally. Ignored `device_parity_repeat` stays out of xtask so its 100 iterations run only in explicit Linux CI/verification commands.
+- Normal suites (stdio, blob, http) run without `--ignored`. The only non-firmware `#[ignore]` is `config_schema_validation::example_configs_match_latest_upstream_schemas` (network fetch; run via `cargo test --test config_schema_validation -- --ignored`).
+- Test helpers (`tests/common/binaries.rs`, `tests/common/spawned.rs`) auto-build missing test assets on first use.
 
 ## Connection defaults & profiles
 
@@ -496,7 +480,7 @@ only the implementation invariants an agent must not break.
 - **Release guarantee:** `ResetReleaseGuard` (modeled on `BreakResetGuard`) is armed with the configured release state BEFORE assertion; every explicit path releases and disarms ONLY on success (`release_reset_lines`); its drop — after the pulse-scoped control guard in the unwind order — spawns a best-effort release through the PUBLIC `set_dtr_rts` (queued on the control lock). No unconditional disarm: a swallowed release failure on the cancellation path keeps the guard armed so drop retries. A closed/disconnected port counts as released. Assertion/release I/O failure = tool error with cleanup attempted.
 - **Private cursor extraction (`src/tools/read_loop.rs`):** `read_from_private_cursor(session, initial_cursor, ...) -> (ReadOutcome, final_cursor)` is the extracted read core; the shared wrapper reads the shared cursor, delegates, and applies the returned cursor. `read`/`transact` behavior unchanged; capture starts at its mark and discards the final cursor.
 - **Cancellation:** request-scoped `notifications/cancelled` during hold/settle releases lines first, then routes the already-cancelled token through the private read path → structured `stop_reason="cancelled"` result with offsets (unit-tested in read_loop.rs; rmcp's client discards post-cancel responses, so HTTP tests assert the observable release + control-lock release).
-- **Controlled backend tests** (`tests/common/controlled.rs` + `tests/http_integration.rs`): real HTTP MCP + injected `ControlledIo` recording line transitions and injecting RX bytes synchronously at assertion/release. Covers: stale exclusion + cursor/history preservation, immediate-bytes match stop, cancellation release, assertion/release failure cleanup, invalid-framing-before-lines, runtime SLIP error, NDJSON + hex/base64, silence + wall timeouts, disconnect (`connection_closed`), ring wrap `bytes_lost`, concurrent `set_dtr_rts` serialization, arm-only. PTY arm-only test in `tests/serial_pty.rs`; native_sim arm-only test in `tests/native_sim_validation/unix.rs` (honest about no DTR observation on native_sim's PTY UART).
+- **Controlled backend tests** (`tests/common/controlled.rs` + `tests/http_integration.rs`): real HTTP MCP + injected `ControlledIo` recording line transitions and injecting RX bytes synchronously at assertion/release. Covers: stale exclusion + cursor/history preservation, immediate-bytes match stop, cancellation release, assertion/release failure cleanup, invalid-framing-before-lines, runtime SLIP error, NDJSON + hex/base64, silence + wall timeouts, disconnect (`connection_closed`), ring wrap `bytes_lost`, concurrent `set_dtr_rts` serialization, arm-only. PTY arm-only test in `tests/serial_pty.rs`.
 
 ## Safe persistent capture
 

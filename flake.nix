@@ -9,10 +9,6 @@
     };
     crane.url = "github:ipetkov/crane";
     flake-utils.url = "github:numtide/flake-utils";
-    nix-nrf-dev = {
-      url = "github:qarnet/nix-nrf-dev";
-      inputs.nixpkgs.follows = "nixpkgs";
-    };
   };
 
   outputs =
@@ -22,7 +18,6 @@
       rust-overlay,
       crane,
       flake-utils,
-      nix-nrf-dev,
       ...
     }:
     flake-utils.lib.eachDefaultSystem (
@@ -54,7 +49,8 @@
             || pkgs.lib.hasPrefix "/example-configs" relPath
             # Test fixtures read via CARGO_MANIFEST_DIR must survive the
             # source filter: doc_drift reads README.md, server.json,
-            # CHANGELOG.md, docs/ (agent-config.md,
+            # CHANGELOG.md, both flake files, AGENTS.md, opencode.json, docs/
+            # (agent-config.md,
             # development/FEATURES.md, future evaluations), the CI workflow
             # (.github/workflows/ci.yml), conformance/expected-failures.yaml,
             # scripts/inspector-smoke.mjs, and the historical rmcp 1.7
@@ -75,6 +71,9 @@
             || pkgs.lib.hasSuffix "CHANGELOG.md" relPath
             || pkgs.lib.hasSuffix "server.json" relPath
             || pkgs.lib.hasSuffix "flake.nix" relPath
+            || pkgs.lib.hasSuffix "flake.lock" relPath
+            || pkgs.lib.hasSuffix "AGENTS.md" relPath
+            || pkgs.lib.hasSuffix "opencode.json" relPath
             || pkgs.lib.hasPrefix "/docs" relPath
             # Workflow fixtures and registry-manifest tooling: doc_drift reads
             # .github/workflows at runtime, and the builder unittest suite
@@ -226,16 +225,9 @@
 
         # `nix develop`
         #
-        # Hybrid shell: nix-nrf-dev's mkNrfShell owns the Nordic environment
-        # (sdk-manager variables scoped to the west wrapper) and the multilib
-        # GCC for native_sim; crane/Rust inputs and project tools come from
-        # this flake.
-        devShells.default = nix-nrf-dev.lib.${system}.mkNrfShell {
+        devShells.default = pkgs.mkShell {
           name = "serial-mcp";
-          ncsVersion = "v3.3.0";
-          withMultilib = true;
 
-          # Inherit nativeBuildInputs/buildInputs/env vars from the package.
           inputsFrom = [ serial-mcp ];
 
           # craneLib.devShell no longer injects the Rust toolchain into the
@@ -252,13 +244,10 @@
             ])
             ++ [ serial-mcp-dev ];
 
-          extraShellHook = ''
-            export PATH="$PWD/scripts:$PWD/firmware/bin:$PATH"
+          shellHook = ''
+            export PATH="$PWD/scripts:$PATH"
             echo "serial-mcp dev shell"
             echo "rustc: $(rustc --version)"
-            if command -v west >/dev/null 2>&1; then
-              echo "west: $(west --version 2>/dev/null | head -n 1)"
-            fi
           '';
         };
 
@@ -267,7 +256,7 @@
         # Only the package build is checked here. fmt, clippy, and the test
         # suite are all run by the build/test/clippy matrix in
         # .github/workflows/ci.yml on 4 OSes (ubuntu-latest,
-        # ubuntu-24.04-arm, macos-14, windows-latest) plus the native-sim job.
+        # ubuntu-24.04-arm, macos-14, windows-latest).
         # Re-running them via Nix duplicated that work (~10 min of redundant
         # crate compilation + test execution) without adding coverage — the
         # unique value of `nix flake check` is verifying the flake itself is

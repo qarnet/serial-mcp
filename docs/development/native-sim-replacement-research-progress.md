@@ -1,8 +1,13 @@
 # `native_sim` Replacement Research Progress
 
 **Checkpoint status:** Stages 0 through 5 research complete, user approved full
-staged migration, and Phases A-E are complete on 2026-08-13. No `native_sim`,
-firmware, NCS, CI native job, Nix, or firmware-asset dependency removed.
+staged migration, and Phases A-E are complete on 2026-08-13. The full normalized
+differential parity window is accepted on 2026-08-23. Phase F removed active
+`native_sim`, firmware, NCS, CI native-job, Nix, and firmware-asset coupling;
+retained batch material is historical evidence. Fresh clean-checkout CI
+acceptance and ADR acceptance remain pending.
+
+> Local worktree verification on 2026-08-23 passed `nix flake check --accept-flake-config` and `nix develop --ignore-env`; the shell found no `west`, `nrfutil`, or `nrfutil-sdk-manager` on `PATH` before `cargo test --locked`. This is not fresh clean-checkout CI evidence.
 
 This file is a resumable migration checkpoint. It records evidence already
 collected, conclusions, experiment failures, and next work. Public PTY
@@ -18,8 +23,17 @@ and Batch 11 adds direct COBS-preset comparison with a static independent wire;
 Batch 12 adds direct AT-parser comparison as historical evidence; Batch 13 adds
 direct AT protocol-default comparison as historical evidence; Batch 14 adds
 direct JSON-parser comparison as historical evidence; Batch 15 adds direct
-NDJSON-preset comparison as current evidence, while full parity and Phase F
-deletion remain incomplete.
+NDJSON-preset comparison as historical evidence; Batch 16 adds direct
+NMEA-0183 preset comparison as historical evidence; Batch 17 adds direct
+Modbus ASCII preset comparison as historical evidence; Batch 18 adds direct
+close-while-read comparison as historical evidence; Batch 19 adds a
+reopen/fresh-output baseline-and-stronger comparison as historical evidence;
+Batch 20 adds a flush-during-armed-delay baseline-and-stronger comparison as
+historical evidence; Batch 21 adds a direct input-flush backlog comparison as
+historical evidence; Batch 22 adds a direct bootloader-touch process-exit
+comparison as historical evidence. The accepted full normalized parity window
+covers all 22 batches and all 42 executable cases; Phase F then removed active
+native/NCS source and configuration.
 
 Batch 1 remains an isolated eight-scenario command/lifecycle batch through identical
 public MCP code against native firmware and the Rust PTY fixture. Batch 2 retains
@@ -35,8 +49,15 @@ scenario with its own schema/report output as a historical checkpoint. Batch 13
 adds one protocol-default scenario with its own schema/report output as a
 historical checkpoint. Batch 14 adds one JSON-parser scenario with its own
 schema/report output. Batch 15 adds two NDJSON-preset scenarios with its own
-schema/report output. Global registry status is **21 compared, 14
-baseline-and-stronger, 3 retired, and 11 pending** rows. Pending live reads use
+schema/report output. Batch 16 adds one NMEA-0183 preset scenario with its own
+schema/report output; Batch 17 adds one Modbus ASCII preset scenario with its own
+schema/report output; Batch 18 adds one close-while-read scenario with its own
+schema/report output; Batch 19 adds one reopen/fresh-output scenario with its own
+schema/report output; Batch 20 adds one flush-during-armed-delay scenario with its
+own schema/report output; Batch 21 adds one input-flush backlog scenario with its
+own schema/report output; Batch 22 adds one bootloader-touch process-exit scenario
+with its own schema/report output. Global registry status is **26 compared, 16
+baseline-and-stronger, 7 retired, and 0 pending** rows. Pending live reads use
 fixed 100 ms baseline-only delay plus independent exact-modern client for later
 public write, avoiding same-transport scheduling artifact. Required fixture
 proofs retain stronger readiness, exact frame-limit, framed-match, matcher, and
@@ -44,10 +65,18 @@ call-time precedence obligations. Batch 3 raw RX uses measured one-second
 delayed `sendraw` output and exact target-only wire, while TX uses independent
 peer-wire observations. Batch 4 uses measured live `spam 1024 hex` and
 `spam 512 hex` output with source-derived xorshift bytes and a connection-level
-256-byte buffer default. This is bounded migration evidence only;
-native suites remain required and full differential parity remains incomplete.
-Global status is now 21 compared, 14 baseline-and-stronger, 3 retired, and 11
-pending (`21/14/3/11`).
+256-byte buffer default. This is bounded historical migration evidence; the
+accepted full normalized parity window covers all 22 batches and all 42
+executable cases. Fresh clean-checkout CI acceptance remains pending.
+Historical Batch 21 counts are 25 compared, 16 baseline-and-stronger, 3 retired, and 5
+pending (`25/16/3/5`) with 41 covered rows. Current status is **26 compared, 16 baseline-and-stronger, 7 retired, and 0 pending** (`26/16/7/0`) with 46 covered rows. Historical Batch 20 counts are 24 compared, 16 baseline-and-stronger, 3 retired, and 6 pending (`24/16/3/6`). Batch 20 historical registry status is **24 compared, 16 baseline-and-stronger, 3 retired, and 6 pending** rows. Historical Batch 19 status was 24 compared, 15 baseline-and-stronger, 3 retired, and 7 pending (`24/15/3/7`) with 39 covered
+rows. Historical Batch 18 status was 24 compared, 14
+baseline-and-stronger, 3 retired, and 8 pending (`24/14/3/8`) with 38 covered
+rows. Historical Batch 16 status was 22 compared, 14
+baseline-and-stronger, 3 retired, and 10 pending (`22/14/3/10`) with 36 covered
+rows. Historical Batch 15 status was 21 compared, 14
+baseline-and-stronger, 3 retired, and 11 pending (`21/14/3/11`) with 35 covered
+rows.
 
 Batch 12 is direct explicit-parser evidence for
 `native_read_at_parser_parses_pong`. Both native and fixture endpoints use
@@ -74,8 +103,9 @@ Existing `at_command_connection_default_drives_stateful_transact_and_parser_quir
 `AtPeer` coverage remains stronger stateful AT behavior. Batch 12 is historical;
 Batch 13 is historical at 18 compared, 14 baseline-and-stronger, 3 retired, and
 14 pending (`18/14/3/14`) with 32 covered rows; Batch 14 is historical at
-`19/14/3/13` with 33 covered rows; Batch 15 is current and Phase F remains
-blocked.
+`19/14/3/13` with 33 covered rows; Batch 15 and Batch 16 are historical and
+Batch 17, Batch 18, Batch 19, Batch 20, and Batch 21 are historical; Batch 22 is
+historical direct Compared evidence. Phase F remains blocked.
 
 Batch 13 is historical direct Compared evidence for
 `native_open_protocol_default_drives_write_and_read`. Open carries the
@@ -109,8 +139,15 @@ three ordered parsed objects in UTF-8 line frames for `temp`, `humidity`, and
 `f51b5d77bac3904d214e2ea76794cf1d10f4d5aa8849224e750af30a8e9e3a06`. Existing
 `json_lines_preset_writes_line_and_preserves_object_only_parser_behavior` fixture
 proof remains stronger. The existing stronger JSON Lines fixture proof remains
-stronger. Batch 14 is historical; Batch 15 is current direct
-Compared evidence for two NDJSON-preset rows.
+stronger. Batch 14 is historical; Batch 15 is historical direct Compared
+evidence for two NDJSON-preset rows. Batch 16 is historical direct Compared
+evidence for one NMEA-0183 preset row. Batch 17 is historical direct Compared
+evidence for one Modbus ASCII preset row. Batch 18 is historical direct Compared
+evidence for one close-while-read row; Batch 19 is historical baseline-and-stronger
+evidence for one reopen/fresh-output row; Batch 20 is historical
+baseline-and-stronger evidence for one flush-during-armed-delay row; Batch 21 is
+historical direct Compared evidence for one input-flush backlog row; Batch 22 is
+historical direct Compared evidence for one bootloader-touch process-exit row.
 
 Batch 15 compares `native_read_ndjson_preset_decodes_json_frames` and
 `native_read_ndjson_preset_skips_empty_lines` through standard anonymous public
@@ -135,14 +172,228 @@ Schema is `serial-mcp.native-sim-differential.ndjson-preset-batch.v1`, report is
 `target/native-sim-differential/ndjson-characterization.json` with SHA-256
 `10c4273edcd2a53a0b5ff0d1ab310d319be8145db2f42aa153d5207c1b372ec3`. The
 `ndjson_preset_parses_records_and_skips_blank_whitespace_lines` fixture proof
-remains stronger. Current registry is `21/14/3/11` with 35 covered rows; Phase F
-blocked.
+remains stronger. Batch 15 historical checkpoint is `21/14/3/11` with 35
+covered rows; Phase F remains blocked.
+
+Batch 16 NMEA-0183 preset differential batch is complete:
+
+- exact row is `native_read_nmea0183_preset_decodes_parsed_frame`, a direct
+  Compared row in isolated `Nmea0183Preset` batch membership with no
+  baseline-proof binding;
+- both endpoints use standard anonymous public `open` at 115200 with
+  `profile_mode: "none"`, public boot-banner literal-match `read`, public
+  `transact("arm_cmd 1000\r\n")` matching exact `arm_cmd delay=1000\r\n`, and
+  public UTF-8 `write` of the exact 148-byte command
+  `sendraw hex 2447504747412C3132333531392C343830372E3033382C4E2C30313133312E3030302C452C312C30382C302E392C3534352E342C4D2C34362E392C4D2C2C2A34370D0A\r\n`;
+- target `read` uses `from={"type":"now"}`, UTF-8, 3000 ms, and only
+  `protocol: {"type":"nmea0183"}`. The preset supplies start/end framing with
+  markers excluded and NMEA parsing; no explicit framing/parser, sleep, flush,
+  or generic `sendraw` parser is used;
+- static raw wire is the exact 67-byte valid sentence
+  `$GPGGA,123519,4807.038,N,01131.000,E,1,08,0.9,545.4,M,46.9,M,,*47\r\n`.
+  The normalized target has `67/0/0` bytes read/observed/returned, stop reason
+  `timeout`, no match, truncation, drops, or error, one UTF-8 `start_end` frame,
+  parsed `talker_id="GP"`, `sentence_type="GGA"`, ordered fields
+  `["123519","4807.038","N","01131.000","E","1","08","0.9","545.4","M","46.9","M","",""]`,
+  and `checksum_valid:true`; positions are `52/119/0/0/0/119`;
+- schema is `serial-mcp.native-sim-differential.nmea0183-preset-batch.v1`, report
+  is `nmea0183-preset-batch.json`, and retained characterization is
+  `target/native-sim-differential/nmea-characterization.json` with SHA-256
+  `513d4906b285ef35a2b82ab085968de96f51576acc636244f0eb3a44868f1578`;
+- existing `nmea0183_preset_parses_valid_independently_checksummed_sentence`
+  fixture proof remains stronger. Historical Batch 16 registry was `22/14/3/10`
+  with 36 covered rows; Phase F blocked.
+
+Batch 17 Modbus ASCII preset differential batch is complete:
+
+- exact row is `native_read_modbus_ascii_preset_decodes_parsed_frame`, a direct
+  Compared row in isolated `ModbusAsciiPreset` batch membership with no
+  baseline-proof binding;
+- both endpoints use standard anonymous public `open` at 115200 with
+  `profile_mode: "none"`, public boot-banner literal-match `read`, public
+  `transact("arm_cmd 1000\r\n")` matching exact `arm_cmd delay=1000\r\n`, and
+  public UTF-8 `write` of the exact 48-byte command
+  `sendraw hex 3A30313033303030303030303146420D0A\r\n`;
+- target `read` uses `from={"type":"now"}`, UTF-8, 3000 ms, and only
+  `protocol: {"type":"modbus_ascii"}`. The preset supplies start/end framing
+  with markers excluded and Modbus ASCII parsing; no explicit framing/parser,
+  sleep, flush, or generic `sendraw` parser is used;
+- static raw wire is the exact 17-byte valid response `:010300000001FB\r\n`.
+  The normalized target has `17/0/0` bytes read/observed/returned, stop reason
+  `timeout`, no match, truncation, drops, or error, one UTF-8 `start_end` frame,
+  parsed `address=1`, `function_code=3`, `data=[0,0,0,1]`, and
+  `checksum_valid:true`; positions are `52/69/0/0/0/69`;
+- schema is `serial-mcp.native-sim-differential.modbus-ascii-preset-batch.v1`,
+  report is `modbus-ascii-preset-batch.json` with SHA-256
+  `97f9c00dc98e5cd83c440b2e90b7d9f72e58428f9e873f7f418475ef3a79ef9b`, and characterization is
+  `target/native-sim-differential/modbus-ascii-characterization.json` with
+  SHA-256 `b390bdc693778be29a06e40033694e1032986a1700995d065f06d8092fc7973c`;
+- existing `modbus_ascii_preset_transact_parses_lrc_and_proves_peer_state_mutation`
+  fixture proof remains stronger. Historical Batch 17 registry is `23/14/3/9`
+  with 37 covered rows; Phase F blocked.
+
+Historical Batch 18 close-while-read differential batch is complete:
+
+- exact row is `native_close_while_read_active_returns_normal_result`, a direct
+  Compared row in isolated `CloseWhileRead` batch membership with no
+  baseline-proof binding;
+- both endpoints use standard anonymous public `open` at 115200 with
+  `profile_mode: "none"`, public boot-banner literal-match `read`, public
+  `transact("arm_cmd 1000\r\n")` matching exact `arm_cmd delay=1000\r\n`, and
+  public UTF-8 marker write of the exact command
+  `sendraw hex 524541442D52454144592D4D41524B45520D0A\r\n`;
+- the secondary modern client starts an unmatched `from={"type":"now"}` read
+  with `encoding: "utf8"`, `timeout_ms: 3000`, and
+  `NEVER-CLOSE-MATCH`; the primary client polls normalized `get_status.rx_bytes`
+  until marker progress increases by 19 and proves the pending read remains unfinished before close;
+- primary `close` returns normal anonymous `source="disabled"` profile with
+  `profile_persistence.operation="close_snapshot"` and
+  `profile_persistence.state="transient"`; pending read returns exact
+  `READ-READY-MARKER\r\n` with `bytes_read/bytes_observed/bytes_returned` of
+  `19/19/19`, `stop_reason="connection_closed"`, unmatched, no truncation,
+  frames, drops, or error, and positions `52/71/0/0/0/71`;
+- schema is `serial-mcp.native-sim-differential.close-while-read-batch.v1`,
+  report is `close-while-read-batch.json` with SHA-256
+  `fef0499d6504635c104fe3d125fe572c49e2ef4bec69a5b39c32bdeb50361a09`, and
+  retained characterization is
+  `target/native-sim-differential/close-while-read-characterization.json` with
+  SHA-256 `06a7adb2b4f1c1c6f8b3c8fd507ba9e5004df6dd7a9f4ef6b64c4fff87c3f69b`;
+- existing `close_interrupts_readiness_proven_live_read_with_connection_closed`
+  fixture proof remains stronger. Historical Batch 18 registry was `24/14/3/8`
+  with 38 covered rows; Phase F blocked.
+
+**Historical Baseline-and-stronger Batch 19** reopen/fresh-output differential batch is
+complete:
+
+- exact row is `native_reopen_then_match_finds_fresh_output`, a
+  baseline-and-stronger row in isolated `ReopenFreshOutput` batch membership;
+  its required stronger proof is
+  `reopen_same_path_returns_distinct_id_and_only_fresh_generation`;
+- both endpoints use standard anonymous public `open` at 115200 with
+  `profile_mode: "none"`; firmware boot output is synchronized only on first
+  open because it is emitted once at process start, not on reopen;
+- first public `write("ping\r\n")` is normal UTF-8 with
+  `bytes_written=decoded_bytes=6`; first positioned literal `pong` read returns
+  exact `pong\r\n`, `6/6/6`, `match_found`, index 0, no frames/drops/error/
+  truncation, and positions `32/38/0/0/0/38`; first close retains the exact
+  disabled/transient anonymous close-profile checks;
+- second open uses the same endpoint path and requires a distinct raw
+  connection ID. A public status-only probe requires `rx_bytes=0` before the
+  second command and is excluded from normalized observations;
+- second pending `from={"type":"now"}` UTF-8 literal-match read uses the
+  bounded 100 ms baseline admission delay before an independent modern client
+  writes `ping\r\n`; second read returns exact `pong\r\n`, `6/6/6`,
+  `match_found`, index 0, no frames/drops/error/truncation, and positions
+  `0/6/0/0/0/6`;
+- schema is `serial-mcp.native-sim-differential.reopen-fresh-output-batch.v1`,
+  report is `reopen-fresh-output-batch.json` with SHA-256
+  `7c9d9071156739a0a2bc81a9ef2adba48a40132ba6bd1208b99e8e04a847d02e`;
+- existing `reopen_same_path_returns_distinct_id_and_only_fresh_generation`
+  fixture proof remains stronger. Historical registry is `24/15/3/7` with 39 covered rows;
+  Phase F blocked.
+
+**Historical Baseline-and-stronger Batch 20** flush-during-armed-delay differential batch is
+complete:
+
+- exact row is `native_flush_during_arm_cmd_delay`, a baseline-and-stronger row
+  in isolated `FlushDuringArmDelay` batch membership; its required stronger
+  proof is `flush_after_command_acceptance_does_not_cancel_delayed_response`;
+- both endpoints use standard anonymous public `open` at 115200 with
+  `profile_mode: "none"`; the existing boot synchronization remains the first
+  two normalized observations. Public `transact("arm_cmd 1000\r\n")` validates
+  exact `arm_cmd delay=1000\r\n` acknowledgement, but setup result is excluded
+  from normalized observations;
+- public primary `write("ping\r\n")` is normal anonymous UTF-8 with
+  `bytes_written=decoded_bytes=6`; the existing `INHERITED_BASELINE_DELAY` is
+  exactly 100 ms and is baseline admission only, not a peer-acceptance proof;
+- public primary `flush(target="both")` is retained as a normal anonymous
+  `FlushObservation` with exact target `both`. A positioned public read starts
+  at explicit `from={"type":"now"}`, uses UTF-8, 3000 ms, and literal
+  `pong\r\n`; it returns exact `pong\r\n`, `6/6/6`, `match_found`, index 0,
+  no truncation/frames/drops/error, and positions
+  `52/58/0/0/52/58` in
+  `from_offset/next_offset/bytes_lost/buffered_remaining/start_offset/end_offset`
+  order. Flush clears retained data by setting `start_offset` to the monotonic
+  live edge 52, not zero;
+- schema is `serial-mcp.native-sim-differential.flush-during-arm-delay-batch.v1`,
+  report is `flush-during-arm-delay-batch.json` with observed SHA-256
+  `4808262720b252c53f95e88a56ea1d8565b238251884aed364c0e43d0b07f500` after two
+   matching runs. The Batch 20 historical registry is `24/16/3/6`
+   with 40 covered rows; Phase F blocked.
+
+**Historical Compared Batch 21** input-flush backlog differential batch is complete:
+
+- exact row is `native_flush_input_clears_host_rx`, a direct Compared row in
+  isolated `FlushInputBacklog` batch membership with no baseline-proof binding;
+  the existing `flush_input_discards_known_old_marker_and_keeps_new_marker`
+  fixture proof remains stronger;
+- both endpoints use standard anonymous public `open` at 115200 with
+  `profile_mode: "none"`; boot synchronization remains the first two normalized
+  observations;
+- public UTF-8 write of
+  `sendraw hex 4F4C442D4D41524B45520D0A\r\n` returns normal anonymous
+  `bytes_written=decoded_bytes=38` and emits `OLD-MARKER\r\n`; status-only
+  `get_status` polling proves old marker RX progress at `rx_bytes >= 44` and is
+  excluded from normalized output;
+- public `flush(target="input")` returns normal anonymous with exact target
+  `input`; public UTF-8 write of
+  `sendraw hex 4E45572D4D41524B45520D0A\r\n` returns normal anonymous
+  `bytes_written=decoded_bytes=38` and emits `NEW-MARKER\r\n`; status-only
+  polling proves new marker RX progress at `rx_bytes >= 56` and is excluded from
+  normalized output;
+- positioned public `read` starts at explicit
+  `from={"type":"buffer_start"}`, uses UTF-8, 3000 ms, and literal
+  `NEW-MARKER\r\n`; it returns only exact `NEW-MARKER\r\n`, `12/12/12`,
+  `match_found`, index 0, no truncation/frames/drops/error, and positions
+  `44/56/0/0/44/56` in
+  `from_offset/next_offset/bytes_lost/buffered_remaining/start_offset/end_offset`
+  order. The returned payload proves old marker absence after input flush;
+- schema is `serial-mcp.native-sim-differential.input-flush-batch.v1`, report is
+  `input-flush-batch.json` with SHA-256
+  `ff95074207f7de216780ede42a6d21583e4e88e5c5e5c6f81af4b588fa5dcfd8` after two
+  matching runs. Historical registry is `25/16/3/5` with 41 covered rows; Phase F
+  blocked.
+
+**Historical Compared Batch 22** bootloader-touch process-exit differential batch is complete:
+
+- exact row is `native_bootloader_touch_exits_42`, a direct Compared row in
+  isolated `BootloaderTouchExit` batch membership with no baseline-proof
+  binding; the existing `touch_write_causes_small_rust_child_peer_to_exit_42`
+  fixture proof remains independent and stronger for process-exit coverage;
+- native endpoint is the existing firmware PTY. Fixture endpoint is a real
+  dedicated small Rust child process with its own raw PTY, not
+  `FixtureExit::Crashed`; child emits exact `serial-mcp test firmware ready\r\n`
+  before publishing `PTY_PATH`;
+- both endpoints use standard anonymous public `open` at 115200 with
+  `profile_mode: "none"`; matching boot-banner read remains the second
+  normalized observation. Public UTF-8 `write("touch\r\n")` is normal anonymous
+  with exact `bytes_written=decoded_bytes=7`;
+- both endpoints then exit exactly 42. Typed normalized outcomes retain
+  `{"kind":"process_exit","exit_code":42}`. The terminal
+  `touch exit(42)\r\n` response is deliberately not read, so this batch makes
+  no response-delivery claim; no public `close` follows peer exit;
+- schema is `serial-mcp.native-sim-differential.bootloader-touch-exit-batch.v1`,
+  report is `bootloader-touch-exit-batch.json` with SHA-256
+  `91befb4e3af3edd65c70c58208be03c09c8c29aed04f9b432e18c1d5becd4d9c` after two
+  matching runs. Historical registry is `26/16/3/4` with 42 covered rows; Phase F
+  blocked.
+
+Post-Batch 22 retirement: `native_list_ports_includes_identity_fields` is **Retired**, not a Batch 23 or differential case. Deterministic injected-provider identity/profile/schema proofs supersede ambient OS field/null checks. The three public real-PTY/injected-provider proofs are `list_ports_preview_empty_store_reports_none_parallel_and_pure_ports`, `list_ports_preview_selected_winner_matches_later_bare_open`, and `list_ports_preview_output_validates_against_generated_schema`. No new differential batch, report, or hash was created. The pre-txbuf-retirement checkpoint is `26/16/4/3` with 43 covered rows (26 compared, 16 baseline-and-stronger, 4 retired, and 3 pending); full parity and Phase F remain blocked.
+
+Post-Batch-22 txbuf retirement: `native_txbuf_status_reports_pending` is **Retired**, not a Batch 23 or differential case. Source did not observe a nonzero pending TX queue; `txbuf` and `hold` are firmware-only commands. `device_command_parity::held_output_reports_nonzero_queue_then_drains_and_recovers` proves nonzero held output, blocked read, drain, and recovery. No Batch 23, report, or hash was created. The historical pre-auto-reconnect-retirement checkpoint is `26/16/5/2` with 44 covered rows; full parity and Phase F remain blocked.
+
+Post-Batch-22 auto-reconnect retirement: `native_auto_reconnect_preserves_connection` is **Retired**, not a Batch 23 or differential case. Source only invokes `reconnect` while already open; strengthened `device_fixture::public_mcp_ping_hold_disconnect_replace_and_reconnect` preserves same ID/open state and post-no-op traffic, then proves peer loss, replacement, reconnect, and fresh exchange. No Batch 23, report, or hash was created. This is the historical pre-capture-boot-retirement checkpoint at `26/16/6/1` with 45 covered rows; full parity and Phase F remain blocked.
+
+Post-Batch-22 capture-boot retirement: `native_capture_boot_arm_only_captures_post_arm_command_output` is **Retired**, not a Batch 23 or differential case. Source only checks arm-only post-mark output after a consumed stale banner; strengthened `device_command_parity::capture_boot_arm_only_excludes_stale_bytes_and_preserves_shared_cursor` excludes stale bytes, preserves private-mark replay and shared cursor/history, and captures post-arm output. No Batch 23, report, or hash was created.
+
+All 49 registry rows now have compared, baseline-and-stronger, or explicit retired disposition; full differential parity and Phase F remain blocked.
 
 ## Scope Guard
 
 Current work includes narrow product disconnect fix plus test-only durable PTY
  fixture plus Batch 1, Batch 2, Batch 3, Batch 4, Batch 5, Batch 6, Batch 7,
- Batch 8, Batch 9, Batch 10, Batch 11, Batch 12, Batch 13, Batch 14, and Batch 15 differential execution. Existing 43 `native_sim_validation` tests and 6
+  Batch 8, Batch 9, Batch 10, Batch 11, Batch 12, Batch 13, Batch 14, Batch 15,
+  Batch 16, Batch 17, Batch 18, Batch 19, Batch 20, Batch 21, and Batch 22 differential execution. Existing 43 `native_sim_validation` tests and 6
 `native_sim_connection_lifecycle` tests remain required temporary differential
 oracle until replacement parity is proven. Phase E does not remove firmware,
 NCS setup, native CI gate, release dependency, Nix inputs, or firmware asset
@@ -242,9 +493,10 @@ Highest-risk current claims:
    `max_buffered_bytes` and `drained` and needs stronger result-field checks.
 4. `native_txbuf_status_reports_pending` never proves a nonzero pending queue;
    split idle status, held queue, and recovery.
-5. `native_close_while_read_active_returns_normal_result` allows `drained`,
-   `timeout`, or `connection_closed`, so it does not prove close interrupted a
-   known-pending read.
+5. `native_close_while_read_active_returns_normal_result` is covered by
+   historical readiness-proven Batch 18; its retained characterization remains
+   native-only evidence, while the direct fixture pair proves the same public
+   close/read result.
 6. `native_explicit_rx_framing_beats_connection_default` only supplies both
    values at open. Its name implies call-time precedence that it does not test.
 7. Historical `native_read_cobs_preset_decodes_frame` generated its fixture
@@ -307,7 +559,7 @@ Important source/document contradictions found:
   128-byte stack buffer to `uart_drv_send`. Long formatted output is undefined
   firmware behavior and must not become replacement contract.
 
-## NCS and `native_sim` Coupling Inventory Summary
+## Historical NCS and `native_sim` Coupling Inventory Summary
 
 Active chain:
 
@@ -321,20 +573,20 @@ CI native-sim job
   -> 43 + 6 ignored public-MCP tests
 ```
 
-Final removal set, only after parity:
+Phase F disposition after accepted parity:
 
-- `.github/workflows/ci.yml`: remove native job setup/cache/build and move
-  replacement suite into normal Rust gate; update release `needs`;
-- `scripts/install-nrfutil-ci.sh` and its offline tests;
+- `.github/workflows/ci.yml`: native job setup/cache/build removed; replacement
+  suite remains in normal Rust gate and release `needs` was updated;
+- `scripts/install-nrfutil-ci.sh` and its offline tests deleted;
 - `firmware/` including C source, Kconfig, board config, helper scripts, and
-  `.clangd`;
-- `tests/common/firmware.rs`, native wrappers, and native-named suites after
-  moving all traceable assertions;
+  `.clangd` deleted;
+- `tests/common/firmware.rs`, native wrappers, and native-named suites deleted
+  after all traceable assertions had replacement coverage;
 - `flake.nix` `nix-nrf-dev` input/mkNrfShell/multilib firmware setup and orphaned
-  `flake.lock` nodes;
-- xtask firmware build/path logic;
+  `flake.lock` nodes removed;
+- xtask firmware build/path logic removed;
 - evaluator completion references, active docs, README commands, and doc-drift
-  guards.
+  guards updated.
 
 Keep:
 
@@ -560,18 +812,15 @@ must not be hidden by fixture implementation.
 - exact protocol dependency set after prototypes and lockfile audit;
 - whether discovered parser behaviors are bugs, supported quirks, or migration
   changes;
-- ADR acceptance. ADR remains `Proposed` until full differential migration
-  evidence exists.
+- ADR acceptance. ADR remains `Proposed` until fresh clean-checkout CI evidence
+  exists.
 
 ## Next Work in Order
 
-1. Port and strengthen remaining native scenarios against `DeviceFixture`,
-   retaining native suites as differential oracle.
-2. Characterize parser questions before changing product semantics.
-3. Run required differential and 100-repeat parity gate, then compact macOS
-   boundary gate.
-4. Remove firmware/NCS/CI/Nix/xtask coupling only after parity passes.
-5. Update ADR to Accepted only with final migration evidence.
+1. Preserve accepted parity evidence and characterize parser questions before
+   changing product semantics.
+2. Obtain fresh clean-checkout CI evidence for final active-source acceptance.
+3. Update ADR to Accepted only after that final migration evidence.
 
 ## Research Artifact Verification
 
@@ -1135,8 +1384,9 @@ Phase C remaining non-protocol parity batch is complete:
   Ambient identity rows retire only with existing exact public `http_integration`
   and `serial_pty` citations in traceability;
 - current mapping is 49/49 rows: every row has a required replacement or a
-  cited stronger retired proof. This is **not** final migration parity: native
-  suites/NCS remain intact, and required differential/repeat/CI gates remain.
+  cited stronger retired proof. This historical mapping is retained after Phase
+  F active source/configuration removal; fresh clean-checkout CI acceptance
+  remains pending.
 
 Focused verification for this batch:
 
@@ -1145,17 +1395,26 @@ cargo test --locked --test device_command_parity -- --test-threads=1  # 19 passe
 ```
 
 The 43+6 native checkpoint was deliberately not rerun because it had already
-freshly passed before this work, per task scope. Remaining migration blockers:
-  the 17 pending differential rows, full differential outcome comparison, and
-only then native/NCS deletion work.
+freshly passed before this work, per task scope. The former migration checkpoint
+required full differential outcome comparison before native/NCS deletion work;
+the accepted Phase E window resolved that comparison. Phase F active source and
+configuration removal is recorded above; fresh clean-checkout no-NCS acceptance
+remains pending.
 
 ## Phase E Required Replacement and Repeat Gate
 
 Phase E is complete:
 
+> Full normalized differential parity window accepted on 2026-08-23: all 42 executable cases passed in three serial 22-batch runs; two consecutive canonical 22-report manifests matched SHA-256 `b31b3f3da1412d210096a618cc8d6b6acc5bbed167de525c8122704342c3d3fe`.
+
+The accepted window includes all 22 batches and all 42 executable cases. The
+historical 49-row registry classification is `26/16/7/0`; Phase F removed
+active native/NCS source and configuration, and fresh clean-checkout no-NCS
+acceptance remains pending.
+
 - `xtask test` and `test-all` run `device_fixture`,
   `device_command_parity`, `device_framing_parity`, and
-  `device_protocol_parity` normally before ignored native differential suites;
+  `device_protocol_parity` normally;
 - build/test CI explicitly reruns replacement targets after ordinary `cargo
   test` on Linux x86_64 and macOS arm64. Linux executes protocol cases; macOS
   retains compact fixture/command/framing real-PTY evidence. Windows adds no
@@ -1174,9 +1433,10 @@ Phase E is complete:
   status, exact positions, and deliberate `elapsed_ms` omission are also
   drift-locked.
 
-Native 43+6 remains intact and required temporary differential oracle. Phase F
-remains blocked on full differential parity evidence; Phase E does not relax
-existing assertions or remove NCS coupling.
+Native 43+6 is retained only as historical parity evidence. Phase E parity
+evidence is accepted; Phase F removed active native/NCS coupling. Fresh
+clean-checkout no-NCS acceptance remains pending, and Phase E assertions were
+not relaxed.
 
 ## Resume Checklist
 
@@ -1192,4 +1452,4 @@ After context loss, read in this order:
    `tests/device_fixture.rs`;
 7. `native-sim-test-traceability.md` before porting next scenario batch.
 
-Do not remove native suites or NCS coupling before differential parity.
+Do not rewrite historical parity evidence or generated report paths.

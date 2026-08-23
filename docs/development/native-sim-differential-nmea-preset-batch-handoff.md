@@ -1,5 +1,8 @@
 # Native Simulator Differential Gate — Batch 16 NMEA Preset Handoff
 
+> **Historical/superseded record:** Phase F removed active native_sim/NCS
+> source and configuration. Body preserves accepted differential evidence.
+
 ## Phase goal
 
 Promote exactly one characterized native row to isolated direct

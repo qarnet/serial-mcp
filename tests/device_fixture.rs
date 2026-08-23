@@ -4,6 +4,8 @@
 
 mod common;
 
+use std::future::Future;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -16,6 +18,19 @@ use rmcp::model::CallToolResult;
 use serde_json::{json, Value};
 
 const WAIT: Duration = Duration::from_secs(2);
+
+static FIXTURE_TEST_SERIALIZER: Mutex<()> = Mutex::new(());
+
+fn run_fixture_test(future: impl Future<Output = Result<()>>) -> Result<()> {
+    let _guard = FIXTURE_TEST_SERIALIZER
+        .lock()
+        .expect("fixture test serializer mutex poisoned");
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("build fixture test runtime")?;
+    runtime.block_on(future)
+}
 
 #[test]
 fn input_assembler_preserves_fragmented_and_batched_commands() {
@@ -89,237 +104,280 @@ fn output_queue_exact_boundary_hold_drop_block_and_drain_are_observable() {
     assert_eq!(blocking.stats().dropped, 0);
 }
 
-#[tokio::test]
-async fn fixture_scripts_expose_hold_fragmentation_delay_crash_and_shutdown() -> Result<()> {
-    let mut fixture =
-        DeviceFixture::spawn(PingPeer::default(), DeviceFixtureConfig::default()).await?;
-    fixture.set_hold(true).await?;
-    fixture.wait_for(WAIT, |snapshot| snapshot.held).await?;
-    fixture
-        .run_script(vec![
-            Action::EmitChunks(vec![b"A".to_vec(), b"BC".to_vec()]),
-            Action::Delay(Duration::from_millis(5)),
-            Action::Malformed(vec![0xDB, 0x41]),
-        ])
-        .await?;
-    let held = fixture
-        .wait_for(WAIT, |snapshot| snapshot.output_pending >= 1)
-        .await?;
-    assert_eq!(held.output_drained, 0);
-    fixture.set_hold(false).await?;
-    fixture
-        .wait_for(WAIT, |snapshot| snapshot.output_drained == 5)
-        .await?;
-    fixture.run_script(vec![Action::Crash(42)]).await?;
-    let terminal = fixture
-        .wait_for(WAIT, |snapshot| snapshot.exit.is_terminal())
-        .await?;
-    assert_eq!(terminal.exit, FixtureExit::Crashed(42));
-    let report = fixture.shutdown().await?;
-    assert_eq!(report.snapshot.exit, FixtureExit::Crashed(42));
-    assert!(!report.task_aborted);
-    Ok(())
+#[test]
+fn fixture_scripts_expose_hold_fragmentation_delay_crash_and_shutdown() -> Result<()> {
+    run_fixture_test(async {
+        let mut fixture =
+            DeviceFixture::spawn(PingPeer::default(), DeviceFixtureConfig::default()).await?;
+        fixture.set_hold(true).await?;
+        fixture.wait_for(WAIT, |snapshot| snapshot.held).await?;
+        fixture
+            .run_script(vec![
+                Action::EmitChunks(vec![b"A".to_vec(), b"BC".to_vec()]),
+                Action::Delay(Duration::from_millis(5)),
+                Action::Malformed(vec![0xDB, 0x41]),
+            ])
+            .await?;
+        let held = fixture
+            .wait_for(WAIT, |snapshot| snapshot.output_pending >= 1)
+            .await?;
+        assert_eq!(held.output_drained, 0);
+        fixture.set_hold(false).await?;
+        fixture
+            .wait_for(WAIT, |snapshot| snapshot.output_drained == 5)
+            .await?;
+        fixture.run_script(vec![Action::Crash(42)]).await?;
+        let terminal = fixture
+            .wait_for(WAIT, |snapshot| snapshot.exit.is_terminal())
+            .await?;
+        assert_eq!(terminal.exit, FixtureExit::Crashed(42));
+        let report = fixture.shutdown().await?;
+        assert_eq!(report.snapshot.exit, FixtureExit::Crashed(42));
+        assert!(!report.task_aborted);
+        Ok(())
+    })
 }
 
-#[tokio::test]
-async fn public_mcp_ping_hold_disconnect_replace_and_reconnect() -> Result<()> {
-    let mut fixture =
-        DeviceFixture::spawn(PingPeer::with_boot_banner(), DeviceFixtureConfig::default()).await?;
-    let stable_path = fixture.port_path().to_string_lossy().into_owned();
-    let first_physical_path = fixture.physical_path().to_owned();
-    let server = TestServer::start().await;
-    let (client, _) = connect_client(&server).await?;
-    let connection_id = open_port(&client, &stable_path, true).await?;
+#[test]
+fn public_mcp_ping_hold_disconnect_replace_and_reconnect() -> Result<()> {
+    run_fixture_test(async {
+        let mut fixture =
+            DeviceFixture::spawn(PingPeer::with_boot_banner(), DeviceFixtureConfig::default())
+                .await?;
+        let stable_path = fixture.port_path().to_string_lossy().into_owned();
+        let first_physical_path = fixture.physical_path().to_owned();
+        let server = TestServer::start().await;
+        let (client, _) = connect_client(&server).await?;
+        let connection_id = open_port(&client, &stable_path, true).await?;
 
-    let boot = call_tool(
-        &client,
-        "read",
-        json!({
-            "connection_id": connection_id,
-            "timeout_ms": 2000,
-            "match": { "pattern": "test device ready" }
-        }),
-    )
-    .await?;
-    assert_success(&boot, "boot banner")?;
-
-    fixture.set_hold(true).await?;
-    fixture.wait_for(WAIT, |snapshot| snapshot.held).await?;
-    call_tool(
-        &client,
-        "write",
-        json!({ "connection_id": connection_id, "data": "pi" }),
-    )
-    .await
-    .and_then(|result| assert_success(&result, "first ping fragment"))?;
-    call_tool(
-        &client,
-        "write",
-        json!({ "connection_id": connection_id, "data": "ng\r\n" }),
-    )
-    .await
-    .and_then(|result| assert_success(&result, "second ping fragment"))?;
-    fixture
-        .wait_for(WAIT, |snapshot| {
-            snapshot.commands_accepted == 1 && snapshot.output_pending > 0
-        })
+        let boot = call_tool(
+            &client,
+            "read",
+            json!({
+                "connection_id": connection_id,
+                "timeout_ms": 2000,
+                "match": { "pattern": "test device ready" }
+            }),
+        )
         .await?;
+        assert_success(&boot, "boot banner")?;
 
-    let pending_match = {
-        let peer = client.peer().clone();
-        let connection_id = connection_id.clone();
-        tokio::spawn(async move {
-            peer.call_tool(tool_request(
-                "read",
-                json!({
-                    "connection_id": connection_id,
-                    "from": { "type": "now" },
-                    "timeout_ms": 2000,
-                    "match": { "pattern": "pong seq=1" }
-                }),
-            ))
+        fixture.set_hold(true).await?;
+        fixture.wait_for(WAIT, |snapshot| snapshot.held).await?;
+        call_tool(
+            &client,
+            "write",
+            json!({ "connection_id": connection_id, "data": "pi" }),
+        )
+        .await
+        .and_then(|result| assert_success(&result, "first ping fragment"))?;
+        call_tool(
+            &client,
+            "write",
+            json!({ "connection_id": connection_id, "data": "ng\r\n" }),
+        )
+        .await
+        .and_then(|result| assert_success(&result, "second ping fragment"))?;
+        fixture
+            .wait_for(WAIT, |snapshot| {
+                snapshot.commands_accepted == 1 && snapshot.output_pending > 0
+            })
+            .await?;
+
+        let pending_match = {
+            let peer = client.peer().clone();
+            let connection_id = connection_id.clone();
+            tokio::spawn(async move {
+                peer.call_tool(tool_request(
+                    "read",
+                    json!({
+                        "connection_id": connection_id,
+                        "from": { "type": "now" },
+                        "timeout_ms": 2000,
+                        "match": { "pattern": "pong seq=1" }
+                    }),
+                ))
+                .await
+            })
+        };
+        assert!(!pending_match.is_finished());
+        fixture.set_hold(false).await?;
+        let pong = tokio::time::timeout(WAIT, pending_match)
             .await
-        })
-    };
-    assert!(!pending_match.is_finished());
-    fixture.set_hold(false).await?;
-    let pong = tokio::time::timeout(WAIT, pending_match)
-        .await
-        .context("pong read timeout")?
-        .context("pong task join")??;
-    assert_success(&pong, "pong read")?;
-    assert_eq!(structured(&pong)?["stop_reason"], json!("match_found"));
+            .context("pong read timeout")?
+            .context("pong task join")??;
+        assert_success(&pong, "pong read")?;
+        assert_eq!(structured(&pong)?["stop_reason"], json!("match_found"));
 
-    let disconnect_read = {
-        let peer = client.peer().clone();
-        let connection_id = connection_id.clone();
-        tokio::spawn(async move {
-            peer.call_tool(tool_request(
-                "read",
-                json!({
-                    "connection_id": connection_id,
-                    "from": { "type": "now" },
-                    "timeout_ms": 2000,
-                    "match": { "pattern": "never" }
-                }),
-            ))
+        let no_op_reconnect = call_tool(
+            &client,
+            "reconnect",
+            json!({ "connection_id": connection_id }),
+        )
+        .await?;
+        assert_success(&no_op_reconnect, "reconnect while open")?;
+        let no_op_state = structured(&no_op_reconnect)?;
+        assert_eq!(no_op_state["connection_id"], json!(connection_id));
+        assert_eq!(no_op_state["state"], json!("open"));
+        call_tool(
+            &client,
+            "write",
+            json!({ "connection_id": connection_id, "data": "ping\r\n" }),
+        )
+        .await
+        .and_then(|result| assert_success(&result, "post-no-op ping"))?;
+        let no_op_pong = call_tool(
+            &client,
+            "read",
+            json!({
+                "connection_id": connection_id,
+                "timeout_ms": 2000,
+                "match": { "pattern": "pong seq=2" }
+            }),
+        )
+        .await?;
+        assert_success(&no_op_pong, "post-no-op pong")?;
+        assert_eq!(
+            structured(&no_op_pong)?["stop_reason"],
+            json!("match_found")
+        );
+
+        let disconnect_read = {
+            let peer = client.peer().clone();
+            let connection_id = connection_id.clone();
+            tokio::spawn(async move {
+                peer.call_tool(tool_request(
+                    "read",
+                    json!({
+                        "connection_id": connection_id,
+                        "from": { "type": "now" },
+                        "timeout_ms": 2000,
+                        "match": { "pattern": "never" }
+                    }),
+                ))
+                .await
+            })
+        };
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            !disconnect_read.is_finished(),
+            "read was not pending before fixture disconnect"
+        );
+        fixture.disconnect_peer().await?;
+        let disconnected = tokio::time::timeout(WAIT, disconnect_read)
             .await
-        })
-    };
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    assert!(
-        !disconnect_read.is_finished(),
-        "read was not pending before fixture disconnect"
-    );
-    fixture.disconnect_peer().await?;
-    let disconnected = tokio::time::timeout(WAIT, disconnect_read)
-        .await
-        .context("disconnect read timeout")?
-        .context("disconnect task join")??;
-    assert_success(&disconnected, "disconnect read")?;
-    assert_eq!(
-        structured(&disconnected)?["stop_reason"],
-        json!("connection_closed")
-    );
+            .context("disconnect read timeout")?
+            .context("disconnect task join")??;
+        assert_success(&disconnected, "disconnect read")?;
+        assert_eq!(
+            structured(&disconnected)?["stop_reason"],
+            json!("connection_closed")
+        );
 
-    fixture.replace_endpoint(PingPeer::default()).await?;
-    assert_ne!(fixture.physical_path(), first_physical_path);
-    let reconnect = call_tool(
-        &client,
-        "reconnect",
-        json!({ "connection_id": connection_id }),
-    )
-    .await?;
-    assert_success(&reconnect, "reconnect to replacement")?;
-    call_tool(
-        &client,
-        "write",
-        json!({ "connection_id": connection_id, "data": "ping\r\n" }),
-    )
-    .await
-    .and_then(|result| assert_success(&result, "replacement ping"))?;
-    let replacement_pong = call_tool(
-        &client,
-        "read",
-        json!({
-            "connection_id": connection_id,
-            "timeout_ms": 2000,
-            "match": { "pattern": "pong seq=1" }
-        }),
-    )
-    .await?;
-    assert_success(&replacement_pong, "replacement pong")?;
-    assert_eq!(
-        structured(&replacement_pong)?["stop_reason"],
-        json!("match_found")
-    );
-
-    call_tool(&client, "close", json!({ "connection_id": connection_id }))
+        fixture.replace_endpoint(PingPeer::default()).await?;
+        assert_ne!(fixture.physical_path(), first_physical_path);
+        let reconnect = call_tool(
+            &client,
+            "reconnect",
+            json!({ "connection_id": connection_id }),
+        )
+        .await?;
+        assert_success(&reconnect, "reconnect to replacement")?;
+        call_tool(
+            &client,
+            "write",
+            json!({ "connection_id": connection_id, "data": "ping\r\n" }),
+        )
         .await
-        .and_then(|result| assert_success(&result, "close replacement"))?;
-    client.cancel().await.ok();
-    let report = fixture.shutdown().await?;
-    assert_eq!(report.snapshot.exit, FixtureExit::Shutdown);
-    assert!(!std::path::Path::new(&stable_path).exists());
-    Ok(())
+        .and_then(|result| assert_success(&result, "replacement ping"))?;
+        let replacement_pong = call_tool(
+            &client,
+            "read",
+            json!({
+                "connection_id": connection_id,
+                "timeout_ms": 2000,
+                "match": { "pattern": "pong seq=1" }
+            }),
+        )
+        .await?;
+        assert_success(&replacement_pong, "replacement pong")?;
+        assert_eq!(
+            structured(&replacement_pong)?["stop_reason"],
+            json!("match_found")
+        );
+
+        call_tool(&client, "close", json!({ "connection_id": connection_id }))
+            .await
+            .and_then(|result| assert_success(&result, "close replacement"))?;
+        client.cancel().await.ok();
+        let report = fixture.shutdown().await?;
+        assert_eq!(report.snapshot.exit, FixtureExit::Shutdown);
+        assert!(!std::path::Path::new(&stable_path).exists());
+        Ok(())
+    })
 }
 
-#[tokio::test]
-async fn spawned_server_opens_fixture_through_shipped_binary() -> Result<()> {
-    let fixture = DeviceFixture::spawn(PingPeer::default(), DeviceFixtureConfig::default()).await?;
-    let stable_path = fixture.port_path().to_string_lossy().into_owned();
-    let server = common::spawned::SpawnedServer::start().await;
-    let (client, _) = common::spawned::spawn_client(&server).await?;
-    let connection_id = open_port(&client, &stable_path, false).await?;
-    call_tool(
-        &client,
-        "write",
-        json!({ "connection_id": connection_id, "data": "ping\r\n" }),
-    )
-    .await
-    .and_then(|result| assert_success(&result, "spawned-server ping"))?;
-    let pong = call_tool(
-        &client,
-        "read",
-        json!({
-            "connection_id": connection_id,
-            "timeout_ms": 2000,
-            "match": { "pattern": "pong seq=1" }
-        }),
-    )
-    .await?;
-    assert_success(&pong, "spawned-server pong")?;
-    assert_eq!(
-        structured(&pong)?["matched"],
-        json!(true),
-        "unexpected spawned-server read result: {:?}",
-        structured(&pong)?
-    );
-    call_tool(&client, "close", json!({ "connection_id": connection_id }))
+#[test]
+fn spawned_server_opens_fixture_through_shipped_binary() -> Result<()> {
+    run_fixture_test(async {
+        let fixture =
+            DeviceFixture::spawn(PingPeer::default(), DeviceFixtureConfig::default()).await?;
+        let stable_path = fixture.port_path().to_string_lossy().into_owned();
+        let server = common::spawned::SpawnedServer::start().await;
+        let (client, _) = common::spawned::spawn_client(&server).await?;
+        let connection_id = open_port(&client, &stable_path, false).await?;
+        call_tool(
+            &client,
+            "write",
+            json!({ "connection_id": connection_id, "data": "ping\r\n" }),
+        )
         .await
-        .and_then(|result| assert_success(&result, "spawned-server close"))?;
-    client.cancel().await.ok();
-    fixture.shutdown().await?;
-    Ok(())
+        .and_then(|result| assert_success(&result, "spawned-server ping"))?;
+        let pong = call_tool(
+            &client,
+            "read",
+            json!({
+                "connection_id": connection_id,
+                "timeout_ms": 2000,
+                "match": { "pattern": "pong seq=1" }
+            }),
+        )
+        .await?;
+        assert_success(&pong, "spawned-server pong")?;
+        assert_eq!(
+            structured(&pong)?["matched"],
+            json!(true),
+            "unexpected spawned-server read result: {:?}",
+            structured(&pong)?
+        );
+        call_tool(&client, "close", json!({ "connection_id": connection_id }))
+            .await
+            .and_then(|result| assert_success(&result, "spawned-server close"))?;
+        client.cancel().await.ok();
+        fixture.shutdown().await?;
+        Ok(())
+    })
 }
 
 #[cfg(target_os = "linux")]
-#[tokio::test]
-async fn repeated_fixture_shutdown_returns_file_descriptors_to_baseline() -> Result<()> {
-    let baseline = std::fs::read_dir("/proc/self/fd")?.count();
-    for _ in 0..100 {
-        let fixture =
-            DeviceFixture::spawn(PingPeer::default(), DeviceFixtureConfig::default()).await?;
-        let stable_path = fixture.port_path().to_owned();
-        let report = fixture.shutdown().await?;
-        assert_eq!(report.snapshot.exit, FixtureExit::Shutdown);
-        assert!(!report.task_aborted);
-        assert!(!stable_path.exists());
-    }
-    tokio::task::yield_now().await;
-    let final_count = std::fs::read_dir("/proc/self/fd")?.count();
-    assert_eq!(final_count, baseline, "fixture leaked file descriptors");
-    Ok(())
+#[test]
+fn repeated_fixture_shutdown_returns_file_descriptors_to_baseline() -> Result<()> {
+    run_fixture_test(async {
+        let baseline = std::fs::read_dir("/proc/self/fd")?.count();
+        for _ in 0..100 {
+            let fixture =
+                DeviceFixture::spawn(PingPeer::default(), DeviceFixtureConfig::default()).await?;
+            let stable_path = fixture.port_path().to_owned();
+            let report = fixture.shutdown().await?;
+            assert_eq!(report.snapshot.exit, FixtureExit::Shutdown);
+            assert!(!report.task_aborted);
+            assert!(!stable_path.exists());
+        }
+        tokio::task::yield_now().await;
+        let final_count = std::fs::read_dir("/proc/self/fd")?.count();
+        assert_eq!(final_count, baseline, "fixture leaked file descriptors");
+        Ok(())
+    })
 }
 
 async fn open_port<H: rmcp::handler::client::ClientHandler>(

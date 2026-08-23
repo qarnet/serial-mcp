@@ -2,11 +2,13 @@
 
 **Status:** Recommendation approved and Phases A-E implemented on 2026-08-13.
 Direct `nix::pty::openpty` plus a Rust device fixture is the approved
-replacement. `native_sim` remains required temporary differential oracle; no
-native/NCS dependency has been removed. Full differential outcome comparison
-precedes Phase F; only then may `native_sim`, test firmware, nRF Connect SDK,
-Zephyr, `west`, `nrfutil`, and `nix-nrf-dev` leave serial-mcp test and CI
-requirements.
+replacement. Phase E evidence is complete, and Phase F removed active
+native_sim/NCS source and configuration from serial-mcp. Retained differential
+rows, batch handoffs, and research remain historical records. Phase F active source/configuration removal is recorded; Fresh clean-checkout CI acceptance and ADR acceptance remain pending.
+
+> Full normalized differential parity window accepted on 2026-08-23: all 42 executable cases passed in three serial 22-batch runs; two consecutive canonical 22-report manifests matched SHA-256 `b31b3f3da1412d210096a618cc8d6b6acc5bbed167de525c8122704342c3d3fe`.
+
+> Local worktree verification on 2026-08-23 passed `nix flake check --accept-flake-config` and `nix develop --ignore-env`; the shell found no `west`, `nrfutil`, or `nrfutil-sdk-manager` on `PATH` before `cargo test --locked`. This is not fresh clean-checkout CI evidence.
 
 ## Execution Outcome
 
@@ -29,8 +31,9 @@ classification and a 100/100 public `connection_closed` proof. Phase B resolved
 stable-path reconnect to a distinct replacement endpoint. Python fulfills the
 third viable boundary class; `socat` was unavailable and remains a waived
 comparator because it adds a relay process around the same PTY primitive without
-supplying the stateful peer. Full differential outcome comparison, macOS
-boundary evidence, and Phase F removal remain pending.
+supplying the stateful peer. The former migration gate required that Full differential outcome comparison precedes Phase F; that blocker is resolved by
+the accepted Phase E evidence. Phase F active source/configuration removal
+followed; fresh clean-checkout no-NCS acceptance remains pending.
 
 ## Objective
 
@@ -322,6 +325,17 @@ fails when a new shipped protocol lacks simulator coverage metadata.
 
 ## Step-by-Step Research TODO (historical plan and remaining gates)
 
+### Storage hygiene prerequisite
+
+Native-simulator replacement experimentation previously created one top-level
+integration-test target per disposable characterization. Cargo retained those
+large debug and incremental artifacts after source tests were deleted. Before
+adding another temporary native characterization, follow
+[storage-hygiene-plan.md](storage-hygiene-plan.md): use an existing integration
+target, keep bulk test artifacts disposable on success, and preserve only
+explicitly protected evidence artifacts. This is a development-storage policy,
+not permission to remove native_sim/NCS dependencies before parity proof.
+
 ### Stage 0 — Freeze scope and evidence
 
 - [ ] Record current `HEAD`, Rust version, host/kernel, NCS version, and exact
@@ -428,35 +442,36 @@ implementation started.
 - [x] Add selected fixture behind shared test interface.
 - [x] Map all 49 scenarios to required replacement or stronger public proof
       without weakening assertions.
-- [ ] Run native and replacement fixtures against normalized public outcomes.
+- [x] Run native and replacement fixtures against normalized public outcomes.
 - [x] Add missing true disconnect/recovery and fixture cleanup tests.
 - [x] Add full protocol peers and coverage-drift guard.
 - [x] Run timing/flood/hold/flush/close cases 100 times with recorded seed and
       zero unexpected failures.
 - [x] Make replacement suite required in CI while native remains temporary
       differential oracle.
-- [ ] Gather agreed parity window and resolve every mismatch.
+- [x] Gather agreed parity window and resolve every mismatch.
 
-**Exit:** blocked on full differential outcome comparison. Native remains the
-behavioral oracle until every mismatch is resolved.
+**Exit:** Phase E evidence is complete and its replacement targets remain the
+required active coverage. Phase F source/configuration removal followed; fresh
+clean-checkout no-NCS acceptance remains pending.
 
 ### Stage 7 — Remove native_sim and NCS completely
 
-- [ ] Delete `firmware/` and native firmware build helpers.
-- [ ] Delete `NativeSimFirmware` harness and rename/relocate native-specific
+- [x] Delete `firmware/` and native firmware build helpers.
+- [x] Delete `NativeSimFirmware` harness and retain migrated coverage in
       tests to device-fixture/protocol suites.
-- [ ] Remove NCS/nrfutil/native_sim CI provisioning, cache, disk-reclamation,
+- [x] Remove NCS/nrfutil/native_sim CI provisioning, cache, disk-reclamation,
       build, and cleanup steps.
-- [ ] Remove `nix-nrf-dev` input, NCS shell configuration, multilib-only
+- [x] Remove `nix-nrf-dev` input, NCS shell configuration, multilib-only
       requirements, firmware LSP config, and stale lock entries.
-- [ ] Remove xtask firmware build/path logic and replace commands with normal
+- [x] Remove xtask firmware build/path logic and replace commands with normal
       Rust test-asset handling if needed.
-- [ ] Remove NCS installer scripts/tests if no other repository path uses them.
-- [ ] Update README, contributor docs, `AGENTS.md`, evaluator completion refs,
-      changelog, and development indexes in same change.
-- [ ] Search repository for `native_sim`, `NativeSimFirmware`, `NCS`,
+- [x] Remove NCS installer scripts/tests if no other repository path uses them.
+- [x] Update README, contributor docs, `AGENTS.md`, evaluator completion refs,
+      and development indexes; retain changelog history.
+- [x] Search active source/config for `native_sim`, `NativeSimFirmware`, `NCS`,
       `nrfutil`, `west build`, `fw-build-native`, and `nix-nrf-dev`; classify
-      any retained historical changelog mentions rather than deleting history.
+      retained historical documentation rather than deleting history.
 - [ ] Run complete local and CI gates from clean checkout without NCS installed.
 
 **Exit:** clean checkout builds and runs full required suite using Rust/system

@@ -1,5 +1,8 @@
 # Native Simulator Differential Gate — Batch 15 NDJSON Preset Handoff
 
+> **Historical/superseded record:** Phase F removed active native_sim/NCS
+> source and configuration. Body preserves accepted differential evidence.
+
 ## Phase goal
 
 Promote exactly these two characterized native rows to one isolated direct
