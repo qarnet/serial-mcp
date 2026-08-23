@@ -5,7 +5,7 @@ window accepted on 2026-08-23. All 49 historical native cases retain one
 explicit mapping row. Phase F removed active firmware, NCS, native-job,
 release-dependency, and Nix coupling from source/config; retained rows and
 batch evidence remain historical. Fresh clean-checkout CI acceptance remains
-pending, so ADR status stays Proposed.
+pending, so ADR is Implemented while eventual Accepted status remains pending.
 
 ## Full normalized parity window — 2026-08-23
 

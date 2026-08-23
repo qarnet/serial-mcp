@@ -812,8 +812,8 @@ must not be hidden by fixture implementation.
 - exact protocol dependency set after prototypes and lockfile audit;
 - whether discovered parser behaviors are bugs, supported quirks, or migration
   changes;
-- ADR acceptance. ADR remains `Proposed` until fresh clean-checkout CI evidence
-  exists.
+- ADR acceptance. ADR is `Implemented`; it remains pending `Accepted` status
+  until fresh clean-checkout CI evidence exists.
 
 ## Next Work in Order
 

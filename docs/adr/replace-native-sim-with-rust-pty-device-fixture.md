@@ -1,6 +1,6 @@
 # Replace `native_sim` with a Rust PTY device fixture
 
-**Status:** Proposed
+**Status:** Implemented
 
 ## Context
 

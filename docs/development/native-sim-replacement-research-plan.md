@@ -20,7 +20,7 @@ rows, batch handoffs, and research remain historical records. Phase F active sou
 | [emulator core research](native-sim-emulator-core-research.md) | in-process layered fixture, clock/queue/fault/ownership design; 5 prototype tests pass |
 | [protocol peer worksheets](native-sim-protocol-peer-worksheets.md) | every shipped preset/framing/parser has state, vectors, faults, and oracle; 7 peer prototypes pass |
 | [replacement recommendation](native-sim-replacement-recommendation.md) | approved dependencies, architecture, tradeoffs, differential phases, rollback points, deletion set |
-| [proposed ADR](../adr/replace-native-sim-with-rust-pty-device-fixture.md) | remains Proposed until final migration evidence |
+| [implemented ADR](../adr/replace-native-sim-with-rust-pty-device-fixture.md) | Implemented; fresh clean-checkout CI acceptance remains pending before Accepted |
 | [resumable progress checkpoint](native-sim-replacement-research-progress.md) | detailed evidence, failures, current conclusions, and resume order |
 
 Initial Stage 2 research did not falsely pass hard acceptance. Every PTY
