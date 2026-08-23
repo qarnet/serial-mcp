@@ -4,8 +4,8 @@
 staged migration, and Phases A-E are complete on 2026-08-13. The full normalized
 differential parity window is accepted on 2026-08-23. Phase F removed active
 `native_sim`, firmware, NCS, CI native-job, Nix, and firmware-asset coupling;
-retained batch material is historical evidence. Fresh clean-checkout CI
-acceptance and ADR acceptance remain pending.
+retained batch material is historical evidence. Phase F acceptance is complete;
+see the canonical acceptance record below.
 
 Current platform scope: production-path real-PTY fixture tests are Linux-only
 because macOS `serialport` baud configuration invokes `IOSSIOSPEED`, which macOS
@@ -14,6 +14,26 @@ and controlled-backend tests; Linux-only fixture targets compile as zero tests
 there.
 
 > Local worktree verification on 2026-08-23 passed `nix flake check --accept-flake-config` and `nix develop --ignore-env`; the shell found no `west`, `nrfutil`, or `nrfutil-sdk-manager` on `PATH` before `cargo test --locked`. This is not fresh clean-checkout CI evidence.
+
+## Phase F Acceptance (2026-08-23)
+
+Phase F acceptance is complete. Fresh clean PR CI passed all CI acceptance gates
+without a native/NCS CI job. This section is canonical for current CI and
+workflow-cost evidence; historical parity, cache, and local-worktree records
+remain below unchanged.
+
+| Evidence | Result |
+|---|---|
+| Current clean PR CI | [Run 32653648970](https://github.com/qarnet/serial-mcp/actions/runs/32653648970), head `ed94d5323edadb5f58f4c7cde8ea683138e415bf`; **Success**. Passed format/build/test/clippy/Nix gates; Ubuntu x86_64 `device_fixture`, `device_command_parity`, `device_framing_parity`, and `device_protocol_parity` plus the 100-iteration `phase_e_public_boundary_repeat_gate`; Ubuntu ARM; macOS; Windows; and MCP conformance/Inspector. No native/NCS CI job exists. |
+| Local rustdoc verification | Passed during current acceptance-documentation verification via `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --locked`. This is local evidence, not a CI step. |
+| Pre-removal successful main baseline | [Run 32165413221](https://github.com/qarnet/serial-mcp/actions/runs/32165413221), commit `47ec3310be13f4c865bd11804791c749a2c4273f`; workflow wall time **1148 s = 19m08s**; `native_sim firmware + test` job **1073 s = 17m53s**. |
+| Current workflow wall time | **559 s = 9m19s**. |
+| Observed workflow delta | **589 s = 9m49s, 51.3% shorter** than baseline. |
+| NCS cache/job/install removal | Historical measured NCS cache upload was **8,118,945,638 bytes (~8.1 GB)**, documented with [run 31631588932](https://github.com/qarnet/serial-mcp/actions/runs/31631588932) below. Current CI has no NCS cache, job, or install; this does not claim all CI cache use disappeared. |
+
+The 589 s / 51.3% result is a one-run observed workflow wall-clock comparison,
+not a controlled benchmark. It records observed CI improvement, not a
+reproducible performance guarantee.
 
 This file is a resumable migration checkpoint. It records evidence already
 collected, conclusions, experiment failures, and next work. Public PTY
@@ -73,7 +93,8 @@ peer-wire observations. Batch 4 uses measured live `spam 1024 hex` and
 `spam 512 hex` output with source-derived xorshift bytes and a connection-level
 256-byte buffer default. This is bounded historical migration evidence; the
 accepted full normalized parity window covers all 22 batches and all 42
-executable cases. Fresh clean-checkout CI acceptance remains pending.
+executable cases. Fresh clean-checkout CI acceptance is complete; see the
+[canonical Phase F acceptance record](#phase-f-acceptance-2026-08-23).
 Historical Batch 21 counts are 25 compared, 16 baseline-and-stronger, 3 retired, and 5
 pending (`25/16/3/5`) with 41 covered rows. Current status is **26 compared, 16 baseline-and-stronger, 7 retired, and 0 pending** (`26/16/7/0`) with 46 covered rows. Historical Batch 20 counts are 24 compared, 16 baseline-and-stronger, 3 retired, and 6 pending (`24/16/3/6`). Batch 20 historical registry status is **24 compared, 16 baseline-and-stronger, 3 retired, and 6 pending** rows. Historical Batch 19 status was 24 compared, 15 baseline-and-stronger, 3 retired, and 7 pending (`24/15/3/7`) with 39 covered
 rows. Historical Batch 18 status was 24 compared, 14
@@ -111,7 +132,8 @@ Batch 13 is historical at 18 compared, 14 baseline-and-stronger, 3 retired, and
 14 pending (`18/14/3/14`) with 32 covered rows; Batch 14 is historical at
 `19/14/3/13` with 33 covered rows; Batch 15 and Batch 16 are historical and
 Batch 17, Batch 18, Batch 19, Batch 20, and Batch 21 are historical; Batch 22 is
-historical direct Compared evidence. Phase F remains blocked.
+historical direct Compared evidence. At that historical checkpoint, Phase F
+remained blocked.
 
 Batch 13 is historical direct Compared evidence for
 `native_open_protocol_default_drives_write_and_read`. Open carries the
@@ -179,7 +201,7 @@ Schema is `serial-mcp.native-sim-differential.ndjson-preset-batch.v1`, report is
 `10c4273edcd2a53a0b5ff0d1ab310d319be8145db2f42aa153d5207c1b372ec3`. The
 `ndjson_preset_parses_records_and_skips_blank_whitespace_lines` fixture proof
 remains stronger. Batch 15 historical checkpoint is `21/14/3/11` with 35
-covered rows; Phase F remains blocked.
+covered rows; at that historical checkpoint, Phase F remained blocked.
 
 Batch 16 NMEA-0183 preset differential batch is complete:
 
@@ -208,7 +230,7 @@ Batch 16 NMEA-0183 preset differential batch is complete:
   `513d4906b285ef35a2b82ab085968de96f51576acc636244f0eb3a44868f1578`;
 - existing `nmea0183_preset_parses_valid_independently_checksummed_sentence`
   fixture proof remains stronger. Historical Batch 16 registry was `22/14/3/10`
-  with 36 covered rows; Phase F blocked.
+  with 36 covered rows; at that historical checkpoint, Phase F was blocked.
 
 Batch 17 Modbus ASCII preset differential batch is complete:
 
@@ -236,7 +258,7 @@ Batch 17 Modbus ASCII preset differential batch is complete:
   SHA-256 `b390bdc693778be29a06e40033694e1032986a1700995d065f06d8092fc7973c`;
 - existing `modbus_ascii_preset_transact_parses_lrc_and_proves_peer_state_mutation`
   fixture proof remains stronger. Historical Batch 17 registry is `23/14/3/9`
-  with 37 covered rows; Phase F blocked.
+  with 37 covered rows; at that historical checkpoint, Phase F was blocked.
 
 Historical Batch 18 close-while-read differential batch is complete:
 
@@ -266,7 +288,7 @@ Historical Batch 18 close-while-read differential batch is complete:
   SHA-256 `06a7adb2b4f1c1c6f8b3c8fd507ba9e5004df6dd7a9f4ef6b64c4fff87c3f69b`;
 - existing `close_interrupts_readiness_proven_live_read_with_connection_closed`
   fixture proof remains stronger. Historical Batch 18 registry was `24/14/3/8`
-  with 38 covered rows; Phase F blocked.
+  with 38 covered rows; at that historical checkpoint, Phase F was blocked.
 
 **Historical Baseline-and-stronger Batch 19** reopen/fresh-output differential batch is
 complete:
@@ -296,7 +318,7 @@ complete:
   `7c9d9071156739a0a2bc81a9ef2adba48a40132ba6bd1208b99e8e04a847d02e`;
 - existing `reopen_same_path_returns_distinct_id_and_only_fresh_generation`
   fixture proof remains stronger. Historical registry is `24/15/3/7` with 39 covered rows;
-  Phase F blocked.
+  At that historical checkpoint, Phase F was blocked.
 
 **Historical Baseline-and-stronger Batch 20** flush-during-armed-delay differential batch is
 complete:
@@ -325,7 +347,7 @@ complete:
   report is `flush-during-arm-delay-batch.json` with observed SHA-256
   `4808262720b252c53f95e88a56ea1d8565b238251884aed364c0e43d0b07f500` after two
    matching runs. The Batch 20 historical registry is `24/16/3/6`
-   with 40 covered rows; Phase F blocked.
+   with 40 covered rows; at that historical checkpoint, Phase F was blocked.
 
 **Historical Compared Batch 21** input-flush backlog differential batch is complete:
 
@@ -357,8 +379,8 @@ complete:
 - schema is `serial-mcp.native-sim-differential.input-flush-batch.v1`, report is
   `input-flush-batch.json` with SHA-256
   `ff95074207f7de216780ede42a6d21583e4e88e5c5e5c6f81af4b588fa5dcfd8` after two
-  matching runs. Historical registry is `25/16/3/5` with 41 covered rows; Phase F
-  blocked.
+  matching runs. Historical registry is `25/16/3/5` with 41 covered rows; at that
+  historical checkpoint, Phase F was blocked.
 
 **Historical Compared Batch 22** bootloader-touch process-exit differential batch is complete:
 
@@ -381,18 +403,18 @@ complete:
 - schema is `serial-mcp.native-sim-differential.bootloader-touch-exit-batch.v1`,
   report is `bootloader-touch-exit-batch.json` with SHA-256
   `91befb4e3af3edd65c70c58208be03c09c8c29aed04f9b432e18c1d5becd4d9c` after two
-  matching runs. Historical registry is `26/16/3/4` with 42 covered rows; Phase F
-  blocked.
+  matching runs. Historical registry is `26/16/3/4` with 42 covered rows; at that
+  historical checkpoint, Phase F was blocked.
 
-Post-Batch 22 retirement: `native_list_ports_includes_identity_fields` is **Retired**, not a Batch 23 or differential case. Deterministic injected-provider identity/profile/schema proofs supersede ambient OS field/null checks. The three public real-PTY/injected-provider proofs are `list_ports_preview_empty_store_reports_none_parallel_and_pure_ports`, `list_ports_preview_selected_winner_matches_later_bare_open`, and `list_ports_preview_output_validates_against_generated_schema`. No new differential batch, report, or hash was created. The pre-txbuf-retirement checkpoint is `26/16/4/3` with 43 covered rows (26 compared, 16 baseline-and-stronger, 4 retired, and 3 pending); full parity and Phase F remain blocked.
+Post-Batch 22 retirement: `native_list_ports_includes_identity_fields` is **Retired**, not a Batch 23 or differential case. Deterministic injected-provider identity/profile/schema proofs supersede ambient OS field/null checks. The three public real-PTY/injected-provider proofs are `list_ports_preview_empty_store_reports_none_parallel_and_pure_ports`, `list_ports_preview_selected_winner_matches_later_bare_open`, and `list_ports_preview_output_validates_against_generated_schema`. No new differential batch, report, or hash was created. The pre-txbuf-retirement checkpoint is `26/16/4/3` with 43 covered rows (26 compared, 16 baseline-and-stronger, 4 retired, and 3 pending); at that historical checkpoint, full parity and Phase F remained blocked.
 
-Post-Batch-22 txbuf retirement: `native_txbuf_status_reports_pending` is **Retired**, not a Batch 23 or differential case. Source did not observe a nonzero pending TX queue; `txbuf` and `hold` are firmware-only commands. `device_command_parity::held_output_reports_nonzero_queue_then_drains_and_recovers` proves nonzero held output, blocked read, drain, and recovery. No Batch 23, report, or hash was created. The historical pre-auto-reconnect-retirement checkpoint is `26/16/5/2` with 44 covered rows; full parity and Phase F remain blocked.
+Post-Batch-22 txbuf retirement: `native_txbuf_status_reports_pending` is **Retired**, not a Batch 23 or differential case. Source did not observe a nonzero pending TX queue; `txbuf` and `hold` are firmware-only commands. `device_command_parity::held_output_reports_nonzero_queue_then_drains_and_recovers` proves nonzero held output, blocked read, drain, and recovery. No Batch 23, report, or hash was created. The historical pre-auto-reconnect-retirement checkpoint is `26/16/5/2` with 44 covered rows; at that historical checkpoint, full parity and Phase F remained blocked.
 
-Post-Batch-22 auto-reconnect retirement: `native_auto_reconnect_preserves_connection` is **Retired**, not a Batch 23 or differential case. Source only invokes `reconnect` while already open; strengthened `device_fixture::public_mcp_ping_hold_disconnect_replace_and_reconnect` preserves same ID/open state and post-no-op traffic, then proves peer loss, replacement, reconnect, and fresh exchange. No Batch 23, report, or hash was created. This is the historical pre-capture-boot-retirement checkpoint at `26/16/6/1` with 45 covered rows; full parity and Phase F remain blocked.
+Post-Batch-22 auto-reconnect retirement: `native_auto_reconnect_preserves_connection` is **Retired**, not a Batch 23 or differential case. Source only invokes `reconnect` while already open; strengthened `device_fixture::public_mcp_ping_hold_disconnect_replace_and_reconnect` preserves same ID/open state and post-no-op traffic, then proves peer loss, replacement, reconnect, and fresh exchange. No Batch 23, report, or hash was created. This is the historical pre-capture-boot-retirement checkpoint at `26/16/6/1` with 45 covered rows; at that historical checkpoint, full parity and Phase F remained blocked.
 
 Post-Batch-22 capture-boot retirement: `native_capture_boot_arm_only_captures_post_arm_command_output` is **Retired**, not a Batch 23 or differential case. Source only checks arm-only post-mark output after a consumed stale banner; strengthened `device_command_parity::capture_boot_arm_only_excludes_stale_bytes_and_preserves_shared_cursor` excludes stale bytes, preserves private-mark replay and shared cursor/history, and captures post-arm output. No Batch 23, report, or hash was created.
 
-All 49 registry rows now have compared, baseline-and-stronger, or explicit retired disposition; full differential parity and Phase F remain blocked.
+All 49 registry rows now have compared, baseline-and-stronger, or explicit retired disposition; at that historical checkpoint, full differential parity and Phase F remained blocked.
 
 ## Scope Guard
 
@@ -818,15 +840,12 @@ must not be hidden by fixture implementation.
 - exact protocol dependency set after prototypes and lockfile audit;
 - whether discovered parser behaviors are bugs, supported quirks, or migration
   changes;
-- ADR acceptance. ADR is `Implemented`; it remains pending `Accepted` status
-  until fresh clean-checkout CI evidence exists.
 
 ## Next Work in Order
 
 1. Preserve accepted parity evidence and characterize parser questions before
    changing product semantics.
-2. Obtain fresh clean-checkout CI evidence for final active-source acceptance.
-3. Update ADR to Accepted only after that final migration evidence.
+2. Keep current Phase F acceptance evidence linked from active status records.
 
 ## Research Artifact Verification
 
@@ -1330,14 +1349,14 @@ Batch 15 NDJSON-preset differential batch is complete:
 - existing `ndjson_preset_parses_records_and_skips_blank_whitespace_lines`
   fixture proof remains stronger. Current status is 21 compared,
   14 baseline-and-stronger, 3 retired, and 11 pending (`21/14/3/11`) with 35
-  covered rows; Phase F blocked.
+  covered rows; at that historical checkpoint, Phase F was blocked.
 
 Batch 1 remains eight cases, Batch 2 remains six cases, Batch 3 remains five
 cases, Batch 4 remains two cases, Batch 5 remains three cases, and Batch 6
 remains one case; Batch 7, Batch 8, Batch 9, Batch 10, Batch 11, Batch 12, and
 Batch 13 and Batch 14 remain one case each; Batch 15 has two cases. All fifteen
 report files stay isolated; 35 covered rows, full differential outcome parity,
-and Phase F remain blocked.
+and at that historical checkpoint, Phase F remained blocked.
 Native suites remain untouched and required.
 
 Phase C protocol-preset batch is complete:
@@ -1390,9 +1409,9 @@ Phase C remaining non-protocol parity batch is complete:
   Ambient identity rows retire only with existing exact public `http_integration`
   and `serial_pty` citations in traceability;
 - current mapping is 49/49 rows: every row has a required replacement or a
-  cited stronger retired proof. This historical mapping is retained after Phase
-  F active source/configuration removal; fresh clean-checkout CI acceptance
-  remains pending.
+  cited stronger retired proof. This historical mapping is retained after Phase F
+  active source/configuration removal; fresh clean-checkout CI acceptance is
+complete in the [canonical Phase F acceptance record](#phase-f-acceptance-2026-08-23).
 
 Focused verification for this batch:
 
@@ -1405,7 +1424,7 @@ freshly passed before this work, per task scope. The former migration checkpoint
 required full differential outcome comparison before native/NCS deletion work;
 the accepted Phase E window resolved that comparison. Phase F active source and
 configuration removal is recorded above; fresh clean-checkout no-NCS acceptance
-remains pending.
+is complete in the [canonical Phase F acceptance record](#phase-f-acceptance-2026-08-23).
 
 ## Phase E Required Replacement and Repeat Gate
 
@@ -1416,7 +1435,7 @@ Phase E is complete:
 The accepted window includes all 22 batches and all 42 executable cases. The
 historical 49-row registry classification is `26/16/7/0`; Phase F removed
 active native/NCS source and configuration, and fresh clean-checkout no-NCS
-acceptance remains pending.
+acceptance is complete; see the [canonical Phase F acceptance record](#phase-f-acceptance-2026-08-23).
 
 - `xtask test` and `test-all` run `device_fixture`,
   `device_command_parity`, `device_framing_parity`, and
@@ -1444,8 +1463,9 @@ acceptance remains pending.
 
 Native 43+6 is retained only as historical parity evidence. Phase E parity
 evidence is accepted; Phase F removed active native/NCS coupling. Fresh
-clean-checkout no-NCS acceptance remains pending, and Phase E assertions were
-not relaxed.
+clean-checkout no-NCS acceptance is complete; see the [canonical Phase F
+acceptance record](#phase-f-acceptance-2026-08-23). Phase E
+assertions were not relaxed.
 
 ## Resume Checklist
 

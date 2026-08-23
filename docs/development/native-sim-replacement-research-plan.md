@@ -4,7 +4,9 @@
 Direct `nix::pty::openpty` plus a Rust device fixture is the approved
 replacement. Phase E evidence is complete, and Phase F removed active
 native_sim/NCS source and configuration from serial-mcp. Retained differential
-rows, batch handoffs, and research remain historical records. Phase F active source/configuration removal is recorded; Fresh clean-checkout CI acceptance and ADR acceptance remain pending.
+rows, batch handoffs, and research remain historical records. Phase F active
+source/configuration removal and fresh clean-checkout CI acceptance are complete;
+ADR acceptance is recorded in the [canonical Phase F acceptance record](native-sim-replacement-research-progress.md).
 
 > Full normalized differential parity window accepted on 2026-08-23: all 42 executable cases passed in three serial 22-batch runs; two consecutive canonical 22-report manifests matched SHA-256 `b31b3f3da1412d210096a618cc8d6b6acc5bbed167de525c8122704342c3d3fe`.
 
@@ -20,7 +22,7 @@ rows, batch handoffs, and research remain historical records. Phase F active sou
 | [emulator core research](native-sim-emulator-core-research.md) | in-process layered fixture, clock/queue/fault/ownership design; 5 prototype tests pass |
 | [protocol peer worksheets](native-sim-protocol-peer-worksheets.md) | every shipped preset/framing/parser has state, vectors, faults, and oracle; 7 peer prototypes pass |
 | [replacement recommendation](native-sim-replacement-recommendation.md) | approved dependencies, architecture, tradeoffs, differential phases, rollback points, deletion set |
-| [implemented ADR](../adr/replace-native-sim-with-rust-pty-device-fixture.md) | Implemented; fresh clean-checkout CI acceptance remains pending before Accepted |
+| [accepted ADR](../adr/replace-native-sim-with-rust-pty-device-fixture.md) | Accepted after fresh clean-checkout CI evidence; see the [canonical Phase F acceptance record](native-sim-replacement-research-progress.md) |
 | [resumable progress checkpoint](native-sim-replacement-research-progress.md) | detailed evidence, failures, current conclusions, and resume order |
 
 Initial Stage 2 research did not falsely pass hard acceptance. Every PTY
@@ -33,7 +35,8 @@ third viable boundary class; `socat` was unavailable and remains a waived
 comparator because it adds a relay process around the same PTY primitive without
 supplying the stateful peer. The former migration gate required that Full differential outcome comparison precedes Phase F; that blocker is resolved by
 the accepted Phase E evidence. Phase F active source/configuration removal
-followed; fresh clean-checkout no-NCS acceptance remains pending.
+followed; fresh clean-checkout no-NCS acceptance is complete and recorded in the
+[canonical Phase F acceptance record](native-sim-replacement-research-progress.md).
 
 ## Objective
 
@@ -125,8 +128,8 @@ duplicates a stronger public-boundary test. No silent coverage deletion.
 ## Research Questions
 
 Research answered these questions before implementation began; they remain the
-source-backed acceptance record for the completed A-E phases and pending final
-differential gate:
+source-backed acceptance record for the completed A-E phases and final
+acceptance:
 
 ### Virtual serial boundary
 
@@ -453,7 +456,8 @@ implementation started.
 
 **Exit:** Phase E evidence is complete and its replacement targets remain the
 required active coverage. Phase F source/configuration removal followed; fresh
-clean-checkout no-NCS acceptance remains pending.
+clean-checkout no-NCS acceptance is complete in the [canonical Phase F
+acceptance record](native-sim-replacement-research-progress.md).
 
 ### Stage 7 — Remove native_sim and NCS completely
 
@@ -472,7 +476,9 @@ clean-checkout no-NCS acceptance remains pending.
 - [x] Search active source/config for `native_sim`, `NativeSimFirmware`, `NCS`,
       `nrfutil`, `west build`, `fw-build-native`, and `nix-nrf-dev`; classify
       retained historical documentation rather than deleting history.
-- [ ] Run complete local and CI gates from clean checkout without NCS installed.
+- [x] Run complete local and CI gates from clean checkout without NCS installed;
+      fresh PR CI evidence is recorded in the [canonical Phase F acceptance
+      record](native-sim-replacement-research-progress.md).
 
 **Exit:** clean checkout builds and runs full required suite using Rust/system
 dependencies only; no active test, build, dev-shell, or CI path requires NCS.
@@ -498,6 +504,10 @@ Native_sim removal is approved only when all hold:
 9. PTY physical-layer limitations remain documented and covered by controlled
    backend or optional hardware lane where relevant.
 10. Full format/build/test/clippy/doc/Nix gates pass.
+
+All ten criteria are satisfied. Current CI gate coverage and the canonical
+one-run timing/cache measurement are recorded in
+[native-sim-replacement-research-progress.md](native-sim-replacement-research-progress.md).
 
 ## Research Deliverables
 

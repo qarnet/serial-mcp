@@ -4,8 +4,9 @@
 window accepted on 2026-08-23. All 49 historical native cases retain one
 explicit mapping row. Phase F removed active firmware, NCS, native-job,
 release-dependency, and Nix coupling from source/config; retained rows and
-batch evidence remain historical. Fresh clean-checkout CI acceptance remains
-pending, so ADR is Implemented while eventual Accepted status remains pending.
+batch evidence remain historical. Fresh clean-checkout CI acceptance is
+complete, and ADR is Accepted; see the [canonical Phase F acceptance
+record](native-sim-replacement-research-progress.md).
 
 Current platform scope: production-path real-PTY fixture tests are Linux-only
 because macOS `serialport` baud configuration invokes `IOSSIOSPEED`, which macOS
@@ -52,9 +53,9 @@ adds one input-flush backlog Compared case; Batch 22 is historical and adds one
 bootloader-touch process-exit Compared case. Each batch has a separate report.
 The accepted full normalized parity window covers all 22 batches and all 42
 executable rows. Phase F subsequently removed active native/NCS source and
-configuration; fresh clean-checkout CI acceptance remains pending. Historical Batch 21 counts are 25 compared, 16 baseline-and-stronger,
+configuration; fresh clean-checkout CI acceptance is complete. Historical Batch 21 counts are 25 compared, 16 baseline-and-stronger,
 3 retired, and 5 pending (`25/16/3/5`) with 41 covered rows. Current counts are 26 compared, 16 baseline-and-stronger,
-7 retired, and 0 pending (`26/16/7/0`) with 46 covered rows. Global registry status is **26 compared, 16 baseline-and-stronger, 7 retired, and 0 pending** rows. Current status is **26 compared, 16 baseline-and-stronger, 7 retired, and 0 pending** (`26/16/7/0`) with 46 covered rows. All 49 registry rows now have compared, baseline-and-stronger, or explicit retired disposition; full normalized differential parity is accepted, active native/NCS source and configuration coupling is removed, and fresh clean-checkout CI acceptance remains pending. Historical Batch 20 counts are 24 compared, 16 baseline-and-stronger,
+7 retired, and 0 pending (`26/16/7/0`) with 46 covered rows. Global registry status is **26 compared, 16 baseline-and-stronger, 7 retired, and 0 pending** rows. Current status is **26 compared, 16 baseline-and-stronger, 7 retired, and 0 pending** (`26/16/7/0`) with 46 covered rows. All 49 registry rows now have compared, baseline-and-stronger, or explicit retired disposition; full normalized differential parity is accepted, active native/NCS source and configuration coupling is removed, and fresh clean-checkout CI acceptance is complete; see the [canonical Phase F acceptance record](native-sim-replacement-research-progress.md). Historical Batch 20 counts are 24 compared, 16 baseline-and-stronger,
 3 retired, and 6 pending (`24/16/3/6`). Batch 20 historical registry status is **24 compared, 16 baseline-and-stronger, 3 retired, and 6 pending** rows. Historical Batch 19 status was 24
 compared, 15 baseline-and-stronger, 3 retired, and 7 pending (`24/15/3/7`)
 with 39 covered rows. Historical Batch 18 status was 24
@@ -97,7 +98,7 @@ evidence; Batch 16 is historical partial evidence; Batch 17 is historical partia
 evidence; Batch 18 is historical direct Compared evidence; Batch 19 is historical
 baseline-and-stronger evidence; Batch 20 is historical baseline-and-stronger
 evidence; Batch 21 is historical direct Compared evidence; Batch 22 is historical
-direct Compared evidence; Phase F blocked.
+direct Compared evidence; at that historical checkpoint, Phase F was blocked.
 
 Batch 13 is historical direct Compared evidence for
 `native_open_protocol_default_drives_write_and_read`. Open uses a protocol-only
@@ -173,8 +174,8 @@ proof remains independent. Batch 16 schema is
 `nmea0183-preset-batch.json`, and retained characterization is
 `target/native-sim-differential/nmea-characterization.json` with SHA-256
 `513d4906b285ef35a2b82ab085968de96f51576acc636244f0eb3a44868f1578`.
-Historical Batch 16 registry was `22/14/3/10` with 36 covered rows; Phase F
-blocked.
+Historical Batch 16 registry was `22/14/3/10` with 36 covered rows; at that
+historical checkpoint, Phase F was blocked.
 
 **Compared Batch 17.** Static valid Modbus ASCII response
 `:010300000001FB\r\n`; the fixture command is
@@ -193,7 +194,7 @@ Batch 17 schema is
 `b390bdc693778be29a06e40033694e1032986a1700995d065f06d8092fc7973c`.
 The existing `modbus_ascii_preset_transact_parses_lrc_and_proves_peer_state_mutation`
 fixture proof remains stronger. Historical Batch 17 registry was `23/14/3/9` with
-37 covered rows; Phase F blocked.
+37 covered rows; at that historical checkpoint, Phase F was blocked.
 
 **Historical Compared Batch 18.** Readiness-proven public close sequence uses `arm_cmd 1000\r\n`, baseline `get_status.rx_bytes`, secondary unmatched `from={"type":"now"}` read, and primary marker command `sendraw hex 524541442D52454144592D4D41524B45520D0A\r\n` writing `READ-READY-MARKER\r\n` after `rx_bytes` increases by 19 while pending read remains unfinished; primary close returns normal anonymous profile with `source="disabled"`, `profile_persistence.operation="close_snapshot"`, and `profile_persistence.state="transient"`; pending read returns exact marker with `19/19/19`, `connection_closed`, no match/truncation/frames/drops/error, and positions `52/71/0/0/0/71`; stronger fixture proof remains independent. Batch 18 schema is
 `serial-mcp.native-sim-differential.close-while-read-batch.v1`, report is
@@ -201,13 +202,15 @@ fixture proof remains stronger. Historical Batch 17 registry was `23/14/3/9` wit
 `fef0499d6504635c104fe3d125fe572c49e2ef4bec69a5b39c32bdeb50361a09`, and retained characterization is
 `target/native-sim-differential/close-while-read-characterization.json` with SHA-256
 `06a7adb2b4f1c1c6f8b3c8fd507ba9e5004df6dd7a9f4ef6b64c4fff87c3f69b`. Historical
-Batch 18 registry was `24/14/3/8` with 38 covered rows; Phase F blocked.
+Batch 18 registry was `24/14/3/8` with 38 covered rows; at that historical
+checkpoint, Phase F was blocked.
 
 **Historical Baseline-and-stronger Batch 19.** Standard anonymous first `open` at 115200 with `profile_mode: "none"`; boot banner is synchronized once because firmware emits it only at process start; first `write("ping\r\n")` is normal UTF-8 `6/6`, and positioned first literal `pong` read is exact `pong\r\n`, `6/6/6`, `match_found`, index 0, no frames/drops/error/truncation, positions `32/38/0/0/0/38`; normal first close retains disabled/transient close-profile checks; same endpoint second `open` requires a distinct raw connection ID, public status verifies `rx_bytes=0` before second command, and pending second `from={"type":"now"}` UTF-8 `pong` read uses bounded 100 ms baseline admission before independent-client `write("ping\r\n")`; second read is exact `pong\r\n`, `6/6/6`, `match_found`, index 0, no frames/drops/error/truncation, positions `0/6/0/0/0/6`; the status probe is not normalized; stronger fixture proof remains independent. Batch 19 schema is
 `serial-mcp.native-sim-differential.reopen-fresh-output-batch.v1`, report is
 `reopen-fresh-output-batch.json` with SHA-256
 `7c9d9071156739a0a2bc81a9ef2adba48a40132ba6bd1208b99e8e04a847d02e`. Current
-registry is historical `24/15/3/7` with 39 covered rows; Phase F blocked.
+registry is historical `24/15/3/7` with 39 covered rows; at that historical
+checkpoint, Phase F was blocked.
 
 **Historical Baseline-and-stronger Batch 20.** Standard anonymous `open` at 115200 with
 `profile_mode: "none"`; boot banner and arm acknowledgement are validated before
@@ -226,17 +229,18 @@ order. Stronger fixture proof remains
 schema is `serial-mcp.native-sim-differential.flush-during-arm-delay-batch.v1`,
 report is `flush-during-arm-delay-batch.json` with SHA-256
 `4808262720b252c53f95e88a56ea1d8565b238251884aed364c0e43d0b07f500`, and the
-Batch 20 historical registry is `24/16/3/6` with 40 covered rows; Phase F blocked.
+Batch 20 historical registry is `24/16/3/6` with 40 covered rows; at that
+historical checkpoint, Phase F was blocked.
 
-**Historical Compared Batch 21.** Standard anonymous `open` at 115200 with `profile_mode: "none"` and boot-banner read remain the first two normalized observations; public UTF-8 old-marker write `sendraw hex 4F4C442D4D41524B45520D0A\r\n` is normal anonymous with exact `bytes_written=decoded_bytes=38`; status-only `get_status` polling proves old marker reached retained RX at `rx_bytes >= 44` and is not normalized; public `flush(target="input")` is normal anonymous with exact target `input`; public UTF-8 new-marker write `sendraw hex 4E45572D4D41524B45520D0A\r\n` is normal anonymous with exact `bytes_written=decoded_bytes=38`; status-only polling proves `rx_bytes >= 56` and is not normalized; positioned `from={"type":"buffer_start"}` UTF-8 literal `NEW-MARKER\r\n` read returns exact `NEW-MARKER\r\n`, `12/12/12`, `match_found`, index 0, no truncation/frames/drops/error, positions `44/56/0/0/44/56`; stronger fixture proof `flush_input_discards_known_old_marker_and_keeps_new_marker` remains independent. Batch 21 schema is `serial-mcp.native-sim-differential.input-flush-batch.v1`, report is `input-flush-batch.json` with SHA-256 `ff95074207f7de216780ede42a6d21583e4e88e5c5e5c6f81af4b588fa5dcfd8` after two matching runs, and historical registry is `25/16/3/5` with 41 covered rows; Phase F blocked.
+**Historical Compared Batch 21.** Standard anonymous `open` at 115200 with `profile_mode: "none"` and boot-banner read remain the first two normalized observations; public UTF-8 old-marker write `sendraw hex 4F4C442D4D41524B45520D0A\r\n` is normal anonymous with exact `bytes_written=decoded_bytes=38`; status-only `get_status` polling proves old marker reached retained RX at `rx_bytes >= 44` and is not normalized; public `flush(target="input")` is normal anonymous with exact target `input`; public UTF-8 new-marker write `sendraw hex 4E45572D4D41524B45520D0A\r\n` is normal anonymous with exact `bytes_written=decoded_bytes=38`; status-only polling proves `rx_bytes >= 56` and is not normalized; positioned `from={"type":"buffer_start"}` UTF-8 literal `NEW-MARKER\r\n` read returns exact `NEW-MARKER\r\n`, `12/12/12`, `match_found`, index 0, no truncation/frames/drops/error, positions `44/56/0/0/44/56`; stronger fixture proof `flush_input_discards_known_old_marker_and_keeps_new_marker` remains independent. Batch 21 schema is `serial-mcp.native-sim-differential.input-flush-batch.v1`, report is `input-flush-batch.json` with SHA-256 `ff95074207f7de216780ede42a6d21583e4e88e5c5e5c6f81af4b588fa5dcfd8` after two matching runs, and historical registry is `25/16/3/5` with 41 covered rows; at that historical checkpoint, Phase F was blocked.
 
-**Historical Compared Batch 22.** Standard anonymous `open` at 115200 with `profile_mode: "none"` and matching boot-banner read remain the first two normalized observations; fixture side is a real dedicated small Rust child PTY, not `FixtureExit::Crashed`; child emits exact `serial-mcp test firmware ready\r\n` before `PTY_PATH`; public UTF-8 `write("touch\r\n")` is normal anonymous with exact `bytes_written=decoded_bytes=7`; both native firmware and child endpoint exit exactly 42, retained as typed `process_exit` observation; terminal `touch exit(42)\r\n` response delivery is not claimed; no public `close` follows peer exit; stronger fixture proof `touch_write_causes_small_rust_child_peer_to_exit_42` remains independent. Batch 22 schema is `serial-mcp.native-sim-differential.bootloader-touch-exit-batch.v1`, report is `bootloader-touch-exit-batch.json` with SHA-256 `91befb4e3af3edd65c70c58208be03c09c8c29aed04f9b432e18c1d5becd4d9c` after two matching runs, and historical registry is `26/16/3/4` with 42 covered rows; Phase F blocked.
+**Historical Compared Batch 22.** Standard anonymous `open` at 115200 with `profile_mode: "none"` and matching boot-banner read remain the first two normalized observations; fixture side is a real dedicated small Rust child PTY, not `FixtureExit::Crashed`; child emits exact `serial-mcp test firmware ready\r\n` before `PTY_PATH`; public UTF-8 `write("touch\r\n")` is normal anonymous with exact `bytes_written=decoded_bytes=7`; both native firmware and child endpoint exit exactly 42, retained as typed `process_exit` observation; terminal `touch exit(42)\r\n` response delivery is not claimed; no public `close` follows peer exit; stronger fixture proof `touch_write_causes_small_rust_child_peer_to_exit_42` remains independent. Batch 22 schema is `serial-mcp.native-sim-differential.bootloader-touch-exit-batch.v1`, report is `bootloader-touch-exit-batch.json` with SHA-256 `91befb4e3af3edd65c70c58208be03c09c8c29aed04f9b432e18c1d5becd4d9c` after two matching runs, and historical registry is `26/16/3/4` with 42 covered rows; at that historical checkpoint, Phase F was blocked.
 
-Post-Batch 22 retirement: `native_list_ports_includes_identity_fields` is **Retired**, not a Batch 23 or differential case. Deterministic public real-PTY/injected-provider proofs `list_ports_preview_empty_store_reports_none_parallel_and_pure_ports`, `list_ports_preview_selected_winner_matches_later_bare_open`, and `list_ports_preview_output_validates_against_generated_schema` supersede ambient OS field/null checks. No new differential batch, report, or hash was created. The pre-txbuf-retirement checkpoint is `26/16/4/3` with 43 covered rows (26 compared, 16 baseline-and-stronger, 4 retired, and 3 pending); full parity and Phase F remain blocked.
+Post-Batch 22 retirement: `native_list_ports_includes_identity_fields` is **Retired**, not a Batch 23 or differential case. Deterministic public real-PTY/injected-provider proofs `list_ports_preview_empty_store_reports_none_parallel_and_pure_ports`, `list_ports_preview_selected_winner_matches_later_bare_open`, and `list_ports_preview_output_validates_against_generated_schema` supersede ambient OS field/null checks. No new differential batch, report, or hash was created. The pre-txbuf-retirement checkpoint is `26/16/4/3` with 43 covered rows (26 compared, 16 baseline-and-stronger, 4 retired, and 3 pending); at that historical checkpoint, full parity and Phase F remained blocked.
 
-Post-Batch-22 txbuf retirement: `native_txbuf_status_reports_pending` is **Retired**, not a Batch 23 or differential case. Source did not observe a nonzero pending TX queue; `txbuf` and `hold` are firmware-only commands. `device_command_parity::held_output_reports_nonzero_queue_then_drains_and_recovers` proves nonzero held output, blocked read, drain, and recovery. No Batch 23, report, or hash was created. The historical pre-auto-reconnect-retirement checkpoint is `26/16/5/2` with 44 covered rows; full parity and Phase F remain blocked.
+Post-Batch-22 txbuf retirement: `native_txbuf_status_reports_pending` is **Retired**, not a Batch 23 or differential case. Source did not observe a nonzero pending TX queue; `txbuf` and `hold` are firmware-only commands. `device_command_parity::held_output_reports_nonzero_queue_then_drains_and_recovers` proves nonzero held output, blocked read, drain, and recovery. No Batch 23, report, or hash was created. The historical pre-auto-reconnect-retirement checkpoint is `26/16/5/2` with 44 covered rows; at that historical checkpoint, full parity and Phase F remained blocked.
 
-Post-Batch-22 auto-reconnect retirement: `native_auto_reconnect_preserves_connection` is **Retired**, not a Batch 23 or differential case. Source only invokes `reconnect` while already open; strengthened `device_fixture::public_mcp_ping_hold_disconnect_replace_and_reconnect` preserves same ID/open state and post-no-op traffic, then proves peer loss, replacement, reconnect, and fresh exchange. No Batch 23, report, or hash was created. This is the historical pre-capture-boot-retirement checkpoint at `26/16/6/1` with 45 covered rows; full parity and Phase F remain blocked.
+Post-Batch-22 auto-reconnect retirement: `native_auto_reconnect_preserves_connection` is **Retired**, not a Batch 23 or differential case. Source only invokes `reconnect` while already open; strengthened `device_fixture::public_mcp_ping_hold_disconnect_replace_and_reconnect` preserves same ID/open state and post-no-op traffic, then proves peer loss, replacement, reconnect, and fresh exchange. No Batch 23, report, or hash was created. This is the historical pre-capture-boot-retirement checkpoint at `26/16/6/1` with 45 covered rows; at that historical checkpoint, full parity and Phase F remained blocked.
 
 Post-Batch-22 capture-boot retirement: `native_capture_boot_arm_only_captures_post_arm_command_output` is **Retired**, not a Batch 23 or differential case. Source only checks arm-only post-mark output after a consumed stale banner; strengthened `device_command_parity::capture_boot_arm_only_excludes_stale_bytes_and_preserves_shared_cursor` excludes stale bytes, preserves private-mark replay and shared cursor/history, and captures post-arm output. No Batch 23, report, or hash was created.
 
@@ -315,7 +319,9 @@ stable-path replacement/reconnect, and explicit teardown. Historical native
 oracle totals were 43/43 validation and 6/6 lifecycle. The accepted full
 normalized differential parity window covers all 22 batches and all 42
 executable cases; Phase F subsequently removed active native/NCS source and
-configuration. Fresh clean-checkout CI acceptance remains pending. Production-
+configuration. Fresh clean-checkout CI acceptance is complete; see the
+[canonical Phase F acceptance record](native-sim-replacement-research-progress.md).
+Production-
 path real-PTY fixture execution is Linux-only because macOS `serialport` baud
 configuration invokes `IOSSIOSPEED`, which macOS PTYs reject with `ENOTTY`;
 macOS still gets normal Rust fmt/build/test/clippy and controlled-backend tests.
@@ -469,8 +475,8 @@ baseline-and-stronger pairs and schema ID
 
 All eight batch reports remain isolated; Batch 5 and Batch 8 do not claim physical UART
 behavior, clean-checkout parity without NCS, CI wiring, or full differential
-parity. Native suites and Phase F remain blocked on complete differential
-outcome comparison.
+parity. At that historical checkpoint, native suites and Phase F remained
+blocked on complete differential outcome comparison.
 
 Batch 6 writes `ack-state-batch.json` with one direct Compared pair and schema ID
 `serial-mcp.native-sim-differential.ack-state-batch.v1`. It uses five ordinary
@@ -520,7 +526,7 @@ caller-supplied request echoes (`timeout_ms`, `no_new_rx_timeout_ms`) are not
 modeled. This intentional omission is separate from the request-echo model
 boundary. Batch 7 has no baseline
 proof binding. At the Batch 7 checkpoint, the registry had 26 covered rows and
-status 13/13/3/20; Phase F remained blocked.
+status 13/13/3/20; at that historical checkpoint, Phase F remained blocked.
 
 Batch 8 writes `slip-happy-batch.json` with schema ID
 `serial-mcp.native-sim-differential.slip-happy-batch.v1` and one direct
@@ -549,7 +555,8 @@ The existing `slip_preset_writes_independent_bytes_and_keeps_partial_error_then_
 proof remains the stronger Rust-PTY SLIP semantic proof; Batch 8 does not
 claim preset, malformed, recovery, or full protocol parity from this one raw
 `rx_framing: slip` row. The Batch 8 checkpoint recorded 14 compared, 13 baseline-and-stronger,
-3 retired, and 19 pending with 27 covered rows; Phase F remained blocked.
+3 retired, and 19 pending with 27 covered rows; at that historical checkpoint,
+Phase F remained blocked.
 
 Batch 9 writes `slip-malformed-batch.json` with schema ID
 `serial-mcp.native-sim-differential.slip-malformed-batch.v1` and one
@@ -636,7 +643,7 @@ rows; Batch 17 is historical at `23/14/3/9` with 37 covered rows; Batch 18 is
 historical at `24/14/3/8` with 38 covered rows; Batch 19 is historical at
 `24/15/3/7` with 39 covered rows; Batch 20 is historical at `24/16/3/6` with 40
 covered rows; Batch 21 is historical at `25/16/3/5` with 41 covered rows; Batch
-22 is historical at `26/16/3/4` with 42 covered rows; post-Batch-22 pre-txbuf-retirement checkpoint is `26/16/4/3` with 43 covered rows (26 compared, 16 baseline-and-stronger, 4 retired, and 3 pending); Phase F blocked.
+22 is historical at `26/16/3/4` with 42 covered rows; post-Batch-22 pre-txbuf-retirement checkpoint is `26/16/4/3` with 43 covered rows (26 compared, 16 baseline-and-stronger, 4 retired, and 3 pending); at that historical checkpoint, Phase F was blocked.
 
 ## Disposition Rules
 
@@ -762,4 +769,6 @@ NCS.
 No table row disappeared. The migration mapped every former name to replacement
 test ID(s), compared normalized public outcomes during the parity window, made
 replacement suites required, and then removed active native fixture source.
-Fresh clean-checkout CI acceptance remains the final ADR acceptance gate.
+Fresh clean-checkout CI acceptance is complete; the [canonical Phase F
+acceptance record](native-sim-replacement-research-progress.md) and accepted ADR
+are the current acceptance references.

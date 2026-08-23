@@ -1,6 +1,6 @@
 # Replace `native_sim` with a Rust PTY device fixture
 
-**Status:** Implemented
+**Status:** Accepted
 
 **Current platform scope:** Production-path real-PTY fixture tests run on Linux
 only. On macOS, `serialport` applies `IOSSIOSPEED` while configuring valid baud
@@ -12,10 +12,11 @@ exception, macOS PTY fallback, or production serial behavior change.
 
 serial-mcp formerly used an NCS/Zephyr `native_sim` firmware process for 49
 public-MCP serial tests. Phase F removed that active source and configuration
-coupling after the accepted parity window; fresh clean-checkout CI evidence is
-still pending. The former firmware modeled a command parser, timer, and TX
-ring, but acceptance needs only observable serial-peer behavior, not MCU or
-Zephyr internals.
+coupling after the accepted parity window; fresh clean-checkout CI acceptance is
+recorded in the [canonical Phase F acceptance record](../development/native-sim-replacement-research-progress.md).
+The former firmware modeled a command parser, timer, and TX ring, but
+acceptance needs only observable serial-peer behavior, not MCU or Zephyr
+internals.
 
 Research compared direct `nix::pty::openpty`, `rustix-openpty`, and Python
 standard-library PTYs through the same production serial path. All transported
@@ -52,8 +53,7 @@ deterministic line-control and failure injection.
 ## Proposed Decision
 
 Use direct `nix::pty::openpty` as primary Linux production-path serial boundary.
-Build a reusable
-Rust test fixture with:
+Build a reusable Rust test fixture with:
 
 - owned PTY master and retained slave descriptor;
 - explicit async shutdown and bounded task cleanup;
@@ -67,9 +67,11 @@ Rust test fixture with:
 - controlled backend retained for modem-line, BREAK, and deterministic I/O
   failure claims.
 
-Before accepting this ADR, fix and prove Linux PTY peer-disconnect
-classification so a pending public read reports `connection_closed`. Do not
-classify every `ErrorKind::Other` as fatal; characterize exact OS error first.
+Acceptance required fixing and proving Linux PTY peer-disconnect classification
+so a pending public read reports `connection_closed`. That proof is recorded in
+the [traceability record](../development/native-sim-test-traceability.md). Do
+not classify every `ErrorKind::Other` as fatal; characterize exact OS error
+first.
 
 Recommended independent helper pins:
 
@@ -103,7 +105,8 @@ current one-command-latch firmware while staying behind real OS serial boundary.
 ### Negative
 
 - fixture and peer library become repository-maintained test infrastructure;
-- Linux PTY disconnect classification needs product work before migration;
+- Linux PTY disconnect classification required product work before migration and
+  is now covered by the public `connection_closed` proof;
 - stable-symlink reconnect fixture needs careful no-clobber ownership/cleanup;
 - production-path real-PTY fixture tests are Linux-only because macOS
   `serialport` baud configuration invokes `IOSSIOSPEED` and macOS PTYs return
@@ -121,17 +124,30 @@ current one-command-latch firmware while staying behind real OS serial boundary.
 
 ## Acceptance Evidence
 
-Required before status changes to Accepted:
+All acceptance requirements are satisfied:
 
-1. all 49 traceability rows map to replacement tests with no weakened assertion;
-2. disconnect/replacement regression passes 100/100;
-3. every shipped preset/framing/parser has normal, fragmented, stateful, and
-   malformed/fault proof plus independent oracle metadata;
-4. replacement and native normalized public outcomes match for agreed parity
-   window;
-5. clean checkout passes full required suite without NCS installed;
-6. CI disk/time reduction is measured;
-7. format/build/test/clippy/rustdoc/Nix gates pass.
+1. **Satisfied:** all 49 traceability rows map to replacement tests with no
+   weakened assertion; see the [test traceability record](../development/native-sim-test-traceability.md).
+2. **Satisfied:** the disconnect/replacement regression passes 100/100; see the
+   [Phase E record](../development/native-sim-replacement-research-progress.md)
+   and its repeat-gate evidence.
+3. **Satisfied:** every shipped preset/framing/parser has normal, fragmented,
+   stateful, and malformed/fault proof plus independent oracle metadata; see the
+   [traceability record](../development/native-sim-test-traceability.md) and
+   [Phase E record](../development/native-sim-replacement-research-progress.md).
+4. **Satisfied:** replacement and native normalized public outcomes match for
+   the agreed parity window; see the [Phase E parity record](../development/native-sim-replacement-research-progress.md).
+5. **Satisfied:** the fresh clean checkout passes the full required suite
+   without NCS installed; see [fresh PR CI run 32653648970](https://github.com/qarnet/serial-mcp/actions/runs/32653648970)
+   and the [canonical acceptance record](../development/native-sim-replacement-research-progress.md).
+6. **Satisfied:** CI disk/time reduction is measured in the [canonical
+   acceptance record](../development/native-sim-replacement-research-progress.md),
+   with its one-run observed wall-clock comparison caveat.
+7. **Satisfied:** fresh CI passed format/build/test/clippy/Nix gates, including
+   [run 32653648970](https://github.com/qarnet/serial-mcp/actions/runs/32653648970).
+   Rustdoc passed locally during current acceptance-documentation verification
+   via `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --locked`; rustdoc was
+   not a CI step.
 
 Research evidence:
 
