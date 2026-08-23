@@ -1,11 +1,13 @@
 //! End-to-end tests with a real PTY pair standing in for a serial device.
 //!
-//! These tests open a Linux/macOS pseudo-terminal pair via `openpty(3)`,
-//! point the server at the slave path (`/dev/pts/N`) via the regular
-//! `open` MCP tool, and drive the master end from the test process as if
-//! it were a USB-Serial device. Unlike the in-memory loopback tests in
-//! `tests/http_integration.rs`, these exercise the real
-//! `tokio_serial::SerialStream` code path inside `SerialConnection`.
+//! These Linux-only tests open a pseudo-terminal pair via `openpty(3)`, point
+//! the server at the slave path (`/dev/pts/N`) via the regular `open` MCP tool,
+//! and drive the master end from the test process as if it were a USB-Serial
+//! device. Unlike the in-memory loopback tests in `tests/http_integration.rs`,
+//! these exercise the real `tokio_serial::SerialStream` code path inside
+//! `SerialConnection`. macOS `serialport` baud configuration invokes
+//! `IOSSIOSPEED`, which macOS PTYs reject with `ENOTTY`; macOS uses controlled-
+//! backend coverage instead.
 
 #![cfg(target_os = "linux")]
 

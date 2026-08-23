@@ -2,6 +2,12 @@
 
 **Status:** Implemented
 
+**Current platform scope:** Production-path real-PTY fixture tests run on Linux
+only. On macOS, `serialport` applies `IOSSIOSPEED` while configuring valid baud
+rates, and macOS PTYs return `ENOTTY`. macOS still runs normal Rust
+fmt/build/test/clippy and controlled-backend tests. This scope adds no baud-0
+exception, macOS PTY fallback, or production serial behavior change.
+
 ## Context
 
 serial-mcp formerly used an NCS/Zephyr `native_sim` firmware process for 49
@@ -31,7 +37,8 @@ deterministic line-control and failure injection.
   malformed-data, and recovery control;
 - keep protocol vectors independent from production codec implementations;
 - remove NCS, Zephyr, west, nrfutil, and multilib firmware CI cost;
-- keep Linux/macOS portability and state Windows limits honestly;
+- keep Linux real-PTY evidence, macOS product build/test/clippy plus
+  controlled-backend coverage, and state Windows limits honestly;
 - minimize new dependencies and lifecycle complexity.
 
 ## Considered Options
@@ -44,7 +51,8 @@ deterministic line-control and failure injection.
 
 ## Proposed Decision
 
-Use direct `nix::pty::openpty` as primary Unix serial boundary. Build a reusable
+Use direct `nix::pty::openpty` as primary Linux production-path serial boundary.
+Build a reusable
 Rust test fixture with:
 
 - owned PTY master and retained slave descriptor;
@@ -97,7 +105,9 @@ current one-command-latch firmware while staying behind real OS serial boundary.
 - fixture and peer library become repository-maintained test infrastructure;
 - Linux PTY disconnect classification needs product work before migration;
 - stable-symlink reconnect fixture needs careful no-clobber ownership/cleanup;
-- macOS needs separate behavioral verification;
+- production-path real-PTY fixture tests are Linux-only because macOS
+  `serialport` baud configuration invokes `IOSSIOSPEED` and macOS PTYs return
+  `ENOTTY`; macOS retains normal Rust and controlled-backend coverage;
 - optional helper crates add dev dependency/advisory surface.
 
 ### Neutral / Explicit Limits

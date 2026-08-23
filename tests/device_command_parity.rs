@@ -2,7 +2,7 @@
 //!
 //! Every case opens fixture PTY through public MCP tools.
 
-#![cfg(unix)]
+#![cfg(target_os = "linux")]
 
 mod common;
 

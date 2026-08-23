@@ -1,8 +1,10 @@
-//! Reusable real-PTY device fixture for public MCP integration tests.
+//! Reusable Linux real-PTY device fixture for public MCP integration tests.
 //!
 //! Fixture owns PTY pair, stable symlink, peer tasks, bounded queues, and
 //! explicit teardown. Serial-mcp sees only normal slave path and opens it through
-//! production serial code.
+//! production serial code. Production-path fixture tests are Linux-only because
+//! macOS `serialport` baud configuration invokes `IOSSIOSPEED`, which macOS PTYs
+//! reject with `ENOTTY`; macOS uses controlled-backend coverage instead.
 
 pub mod core;
 #[cfg(target_os = "linux")]

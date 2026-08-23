@@ -14,9 +14,10 @@
 //!   before the first test run.
 //!
 //! - `xtask test`
-//!   Run unit tests plus required Rust PTY fixture, command, framing, and
-//!   protocol suites, then stdio/blob. Missing test assets are built through
-//!   the shared test helper.
+//!   Run unit tests plus Linux-only required Rust PTY fixture, command,
+//!   framing, and protocol suites, then stdio/blob. Missing test assets are
+//!   built through the shared test helper. On macOS, Linux-only fixture
+//!   targets compile as zero tests and controlled-backend tests remain active.
 //!
 //! - `xtask test-all`
 //!   Like `test`, plus the HTTP integration suite. The HTTP suite
@@ -532,7 +533,8 @@ fn run_test_suites(
 
     // Process-level integration suites. Each `cargo test --test <foo>`
     // builds the helper into a separate test binary. The required real-PTY
-    // replacement suites run before the normal stdio/blob suites.
+    // Linux-only real-PTY replacement suites run before the normal stdio/blob
+    // suites. On macOS these targets compile as zero-test binaries.
     let integration_suites: &[(&str, bool)] = &[
         ("device_fixture", false),
         ("device_command_parity", false),

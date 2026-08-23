@@ -7,6 +7,12 @@ release-dependency, and Nix coupling from source/config; retained rows and
 batch evidence remain historical. Fresh clean-checkout CI acceptance remains
 pending, so ADR is Implemented while eventual Accepted status remains pending.
 
+Current platform scope: production-path real-PTY fixture tests are Linux-only
+because macOS `serialport` baud configuration invokes `IOSSIOSPEED`, which macOS
+PTYs reject with `ENOTTY`. macOS still gets normal Rust fmt/build/test/clippy
+and controlled-backend tests; Linux-only fixture targets compile as zero tests
+there.
+
 ## Full normalized parity window — 2026-08-23
 
 > Full normalized differential parity window accepted on 2026-08-23: all 42 executable cases passed in three serial 22-batch runs; two consecutive canonical 22-report manifests matched SHA-256 `b31b3f3da1412d210096a618cc8d6b6acc5bbed167de525c8122704342c3d3fe`.
@@ -239,7 +245,7 @@ Batch 21 retains exact marker bytes: old response `OLD-MARKER\r\n`; new response
 
 ## Implemented Replacement Mapping
 
-Current required replacement targets: `tests/device_fixture.rs`,
+Current Linux required replacement targets: `tests/device_fixture.rs`,
 `tests/device_command_parity.rs`, `tests/device_framing_parity.rs`, and
 `tests/device_protocol_parity.rs`.
 
@@ -309,7 +315,10 @@ stable-path replacement/reconnect, and explicit teardown. Historical native
 oracle totals were 43/43 validation and 6/6 lifecycle. The accepted full
 normalized differential parity window covers all 22 batches and all 42
 executable cases; Phase F subsequently removed active native/NCS source and
-configuration. Fresh clean-checkout CI acceptance remains pending.
+configuration. Fresh clean-checkout CI acceptance remains pending. Production-
+path real-PTY fixture execution is Linux-only because macOS `serialport` baud
+configuration invokes `IOSSIOSPEED`, which macOS PTYs reject with `ENOTTY`;
+macOS still gets normal Rust fmt/build/test/clippy and controlled-backend tests.
 
 ## Historical Executable Differential Batches
 

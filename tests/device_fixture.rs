@@ -1,6 +1,6 @@
 //! Durable real-PTY fixture behavior and public MCP boundary proofs.
 
-#![cfg(unix)]
+#![cfg(target_os = "linux")]
 
 mod common;
 

@@ -1,6 +1,6 @@
 //! Generic matcher and framing parity over reusable real-PTY fixture.
 
-#![cfg(unix)]
+#![cfg(target_os = "linux")]
 
 mod common;
 

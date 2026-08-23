@@ -479,8 +479,12 @@ remains oracle.
   parity; native differential runs are now historical.
 - **Complete:** Linux x86_64 runs timing/flood/hold/flush/disconnect/reconnect
   public lifecycle 100 times with fixed seed `0x50484153455f4545`.
-- **Complete:** macOS arm64 has compact fixture/command/framing real-PTY run;
-  Windows remains explicit compile/controlled coverage.
+- **Current platform scope:** production-path real-PTY fixture tests are
+  Linux-only because macOS `serialport` baud configuration invokes
+  `IOSSIOSPEED`, which macOS PTYs reject with `ENOTTY`. macOS still gets normal
+  Rust fmt/build/test/clippy and controlled-backend tests; Linux-only fixture
+  targets compile as zero tests there. Windows remains explicit
+  compile/controlled coverage.
 - **Accepted:** all 22 differential batches and all 42 executable cases are part
   of the accepted full normalized parity window. The current registry classifies
   all 49 rows as compared, baseline-and-stronger, or retired, with 46 covered

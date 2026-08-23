@@ -7,6 +7,12 @@ differential parity window is accepted on 2026-08-23. Phase F removed active
 retained batch material is historical evidence. Fresh clean-checkout CI
 acceptance and ADR acceptance remain pending.
 
+Current platform scope: production-path real-PTY fixture tests are Linux-only
+because macOS `serialport` baud configuration invokes `IOSSIOSPEED`, which macOS
+PTYs reject with `ENOTTY`. macOS still gets normal Rust fmt/build/test/clippy
+and controlled-backend tests; Linux-only fixture targets compile as zero tests
+there.
+
 > Local worktree verification on 2026-08-23 passed `nix flake check --accept-flake-config` and `nix develop --ignore-env`; the shell found no `west`, `nrfutil`, or `nrfutil-sdk-manager` on `PATH` before `cargo test --locked`. This is not fresh clean-checkout CI evidence.
 
 This file is a resumable migration checkpoint. It records evidence already
@@ -1415,9 +1421,12 @@ acceptance remains pending.
 - `xtask test` and `test-all` run `device_fixture`,
   `device_command_parity`, `device_framing_parity`, and
   `device_protocol_parity` normally;
-- build/test CI explicitly reruns replacement targets after ordinary `cargo
-  test` on Linux x86_64 and macOS arm64. Linux executes protocol cases; macOS
-  retains compact fixture/command/framing real-PTY evidence. Windows adds no
+- build/test CI explicitly reruns all replacement targets after ordinary
+  `cargo test` on Linux x86_64. Production-path real-PTY fixture execution is
+  Linux-only because macOS `serialport` baud configuration invokes
+  `IOSSIOSPEED`, which macOS PTYs reject with `ENOTTY`; macOS still runs normal
+  Rust fmt/build/test/clippy, its Linux-only fixture targets compile as zero
+  tests, and controlled-backend coverage remains active. Windows adds no
   real-COM execution;
 - Linux x86_64 explicitly invokes ignored
   `phase_e_public_boundary_repeat_gate` with `--test-threads=1`. It runs 100

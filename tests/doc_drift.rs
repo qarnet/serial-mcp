@@ -2145,8 +2145,12 @@ fn phase_f_ci_and_xtask_wiring_stay_replacement_only() {
         );
     }
     assert!(
-        replacement_step.contains("matrix.os == 'ubuntu-latest' || matrix.os == 'macos-14'"),
-        "replacement CI step must run only Linux x86_64 and macOS arm64"
+        replacement_step.contains("if: matrix.os == 'ubuntu-latest'\n"),
+        "replacement CI step must run only on Linux x86_64"
+    );
+    assert!(
+        !replacement_step.contains("macos-14"),
+        "replacement CI step must not run macOS real-PTY suites"
     );
     let xtask = repo_file("xtask/src/main.rs");
     for suite in [
