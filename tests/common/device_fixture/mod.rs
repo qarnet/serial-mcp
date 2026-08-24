@@ -2,9 +2,8 @@
 //!
 //! Fixture owns PTY pair, stable symlink, peer tasks, bounded queues, and
 //! explicit teardown. Serial-mcp sees only normal slave path and opens it through
-//! production serial code. Production-path fixture tests are Linux-only because
-//! macOS `serialport` baud configuration invokes `IOSSIOSPEED`, which macOS PTYs
-//! reject with `ENOTTY`; macOS uses controlled-backend coverage instead.
+//! production serial code. Production-path fixture tests run on Linux; macOS
+//! and Windows use regular Rust and controlled-backend coverage.
 
 pub mod core;
 #[cfg(target_os = "linux")]

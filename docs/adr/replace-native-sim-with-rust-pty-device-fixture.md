@@ -2,11 +2,9 @@
 
 **Status:** Implemented
 
-**Current platform scope:** Production-path real-PTY fixture tests run on Linux
-only. On macOS, `serialport` applies `IOSSIOSPEED` while configuring valid baud
-rates, and macOS PTYs return `ENOTTY`. macOS still runs normal Rust
-fmt/build/test/clippy and controlled-backend tests. This scope adds no baud-0
-exception, macOS PTY fallback, or production serial behavior change.
+**Current platform scope:** Production-path real-PTY fixture tests run on Linux.
+macOS and Windows run normal Rust fmt/build/test/clippy plus controlled-backend
+coverage. This scope adds no PTY fallback or production serial behavior change.
 
 ## Context
 
@@ -74,14 +72,14 @@ Recommended independent helper pins:
 
 ## Rationale
 
-Direct `nix` already exists in repository, returns owned descriptors, exposes
-stable slave path while pair lives, and measured identically to alternatives.
-Rustix adds dependency churn without measured gain. Python adds process and IPC
-variance. `socat` still needs a separate protocol peer and supervision.
+Direct `nix` already exists in repository, returns owned descriptors, and
+exposes a stable slave path while pair lives. Rustix adds dependency churn.
+Python adds process and IPC variance. `socat` still needs a separate protocol
+peer and supervision.
 Privileged drivers and full emulators violate CI cost or privilege goals.
 
-Rust fixture can model behaviors tests observe more deterministically than
-current one-command-latch firmware while staying behind real OS serial boundary.
+Rust fixture can model behaviors tests observe more deterministically than the
+former one-command-latch firmware while staying behind real OS serial boundary.
 
 ## Consequences
 
@@ -99,9 +97,8 @@ current one-command-latch firmware while staying behind real OS serial boundary.
 - Linux PTY disconnect classification is covered by the public
   `connection_closed` proof;
 - stable-symlink reconnect fixture needs careful no-clobber ownership/cleanup;
-- production-path real-PTY fixture tests are Linux-only because macOS
-  `serialport` baud configuration invokes `IOSSIOSPEED` and macOS PTYs return
-  `ENOTTY`; macOS retains normal Rust and controlled-backend coverage;
+- production-path real-PTY fixture tests run on Linux; macOS and Windows retain
+  normal Rust and controlled-backend coverage;
 - optional helper crates add dev dependency/advisory surface.
 
 ### Neutral / Explicit Limits

@@ -246,12 +246,11 @@ cargo test --locked --test device_fixture -- --test-threads=1
 cargo test --locked --test device_command_parity -- --test-threads=1
 cargo test --locked --test device_framing_parity -- --test-threads=1
 cargo test --locked --test device_protocol_parity -- --test-threads=1
+cargo test --locked --test device_parity_repeat public_boundary_repeat_gate -- --ignored --test-threads=1
 ```
 
-Production-path real-PTY fixture tests run on Linux only: macOS `serialport`
-baud configuration invokes `IOSSIOSPEED`, which macOS PTYs reject with
-`ENOTTY`. macOS still runs normal Rust fmt/build/test/clippy and controlled-
-backend tests; Linux-only fixture targets compile as zero tests there.
+Production-path real-PTY fixture tests run on Linux. macOS and Windows run
+normal Rust fmt/build/test/clippy plus controlled-backend coverage.
 
 ## Documentation and status
 

@@ -96,9 +96,9 @@
 - candidates: long `read`, `transact`, `capture_boot`, `send_break`, and any
   future firmware/file-transfer operation; keep normal synchronous execution
   for clients that do not declare Tasks support
-- not a replacement for open-ended RX availability notifications: current
-  rmcp clients must poll task state and task-status delivery through
-  `subscriptions/listen` is not available yet
+- not a replacement for open-ended RX availability notifications:
+  `subscriptions/listen` provides resource-change hints, not task status or RX
+  streaming; clients still poll task state
 - needs ownership/lifecycle design for connection close, client disconnect,
   server restart, task expiry, profile learning, and partial serial results
 
@@ -221,7 +221,7 @@
 
 ### RS-485 options
 - half-duplex bus semantics, direction control timing, RTS-based send control
-- needs a new testing strategy/firmware
+- needs physical half-duplex and direction-control testing
 
 ### RFC2217 backend support
 - server opens a remote serial device over network with control signals

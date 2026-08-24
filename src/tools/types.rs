@@ -617,8 +617,8 @@ pub struct ProfileSummary {
     pub defaults: crate::profiles::ProfileDefaults,
     /// Bookkeeping metadata (generated flag, revision, timestamps, usage).
     pub metadata: crate::profiles::ProfileMetadata,
-    /// Bounded history of prior selector/defaults snapshots (for future
-    /// rollback). Empty for profiles that were never overwritten.
+    /// Bounded history of prior selector/defaults snapshots for rollback.
+    /// Empty for profiles that were never overwritten.
     pub revisions: Vec<crate::profiles::ProfileRevision>,
 }
 
@@ -645,12 +645,14 @@ pub fn default_break_duration_ms() -> u64 {
 
 /// Configure connection defaults. Two modes:
 /// - `profile` mode: write defaults to a named profile in the profiles TOML.
-///   Applies to future `open_profile` calls. Does NOT touch live connections.
-/// - `connection` mode: mutate defaults on a live connection (the four
-///   framing defaults + reconnect_policy + max_buffered_bytes). Does NOT
-///   persist to disk. `rx_buffer_size`, serial-line params,
-///   `log_capacity`, and `log_enabled` only apply via profile + reopen
-///   (LogBuffer has no live setter for capacity/enabled).
+///   Applies to every future `open` that uses that profile (automatic or explicit).
+///   Does NOT touch live connections.
+/// - `connection` mode: update live-mutable defaults (the four framing
+///   defaults + reconnect_policy + max_buffered_bytes) and write the effective
+///   defaults through to a bound persistent profile when applicable.
+///   `rx_buffer_size`, serial-line parameters, `log_capacity`, and
+///   `log_enabled` remain profile/open-time-only (LogBuffer has no live setter
+///   for capacity/enabled).
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ConfigureArgs {
     /// Profile name to write (profile mode), or connection name to mutate
@@ -673,7 +675,8 @@ pub struct ConfigureArgs {
 pub struct ConfigureResult {
     /// Which mode was applied: "profile" or "connection".
     pub mode: String,
-    /// The effective defaults after applying the change.
+    /// Defaults represented by the change: resulting profile defaults in
+    /// profile mode, or requested defaults in connection mode.
     pub defaults: crate::profiles::ProfileDefaults,
     /// For profile mode: true if newly created, false if overwritten.
     /// For connection mode: always null.

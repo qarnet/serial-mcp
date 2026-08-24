@@ -197,9 +197,9 @@ mod tests {
         );
     }
 
-    /// Review gate: optional override fields must accept null and omission in
-    /// the generated schema, not merely be absent from `required`. Validate
-    /// public schema behavior with jsonschema as the tool schema guards do.
+    /// Optional override fields must accept null and omission in the generated
+    /// schema, not merely be absent from `required`. Validate public schema
+    /// behavior with jsonschema as the tool schema guards do.
     #[test]
     fn open_and_open_profile_schemas_accept_null_overrides() {
         use jsonschema::validator_for;

@@ -1,4 +1,4 @@
-//! Shared test harness for HTTP integration tests.
+//! Shared integration-test harness.
 //!
 //! Spins up the real `SerialHandler` behind an `axum` server on an
 //! auto-assigned port and connects to it with the real `rmcp` HTTP client
@@ -17,9 +17,8 @@ pub mod spawned;
 
 /// Absolute path to the `serial-mcp` workspace root.
 ///
-/// Resolved at first call by reading `CARGO_MANIFEST_DIR` (always
-/// populated by cargo when running tests) and walking up to the
-/// directory that contains `Cargo.toml`.
+/// Resolved at first call from `CARGO_MANIFEST_DIR`, which Cargo sets to the
+/// workspace root for this test target.
 pub fn workspace_root() -> &'static std::path::PathBuf {
     static WORKSPACE_ROOT: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
     WORKSPACE_ROOT.get_or_init(|| {
@@ -635,9 +634,8 @@ pub fn tool_request(name: &'static str, args: serde_json::Value) -> CallToolRequ
 //
 // `openpty` gives back a master fd and a slave fd whose device path
 // (`/dev/pts/N`) can be opened by `tokio_serial::SerialStream` on Linux
-// exactly like a real serial port. Production-path PTY tests stay Linux-only:
-// macOS `serialport` baud configuration invokes `IOSSIOSPEED`, which macOS
-// PTYs reject with `ENOTTY`. macOS coverage uses controlled backends instead.
+// exactly like a real serial port. Production-path PTY tests run on Linux;
+// macOS and Windows coverage uses controlled backends instead.
 
 #[cfg(unix)]
 pub mod pty {

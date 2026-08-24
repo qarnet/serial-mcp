@@ -24,8 +24,8 @@ use crate::tools::rx_consume::{
 // Read helpers
 // ------------------------------------------------------------------
 
-/// Outcome of a read call. `timed_out` distinguishes the genuine
-/// read-timeout case from a successful read of `bytes`.
+/// Outcome of a read call. Stop state and RX observations are carried in
+/// `meta`, including `stop_reason` and byte counts.
 pub struct ReadOutcome {
     pub bytes: Vec<u8>,
     pub elapsed_ms: u64,

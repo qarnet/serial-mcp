@@ -1,40 +1,7 @@
-//! `xtask` — repo-local test/build orchestrator for `serial-mcp`.
+//! Repo-local test/build orchestrator for `serial-mcp`.
 //!
-//! Centralizes the small set of commands an operator or CI run needs
-//! in order to take the repo from a clean checkout to a fully tested
-//! state, with no surprises. Each subcommand is intentionally thin:
-//! it shells out to existing helpers (`cargo`) and the
-//! `tests/common/binaries.rs` test helper via the `cargo test` build. We do
-//! not reimplement cargo or our own build pipeline in here.
-//!
-//! Subcommands:
-//!
-//! - `xtask build-test-assets`
-//!   Build the `serial-mcp` binary. Safe to run after a clean checkout or
-//!   before the first test run.
-//!
-//! - `xtask test`
-//!   Run unit tests plus Linux-only required Rust PTY fixture, command,
-//!   framing, and protocol suites, then stdio/blob. Missing test assets are
-//!   built through the shared test helper. On macOS, Linux-only fixture
-//!   targets compile as zero tests and controlled-backend tests remain active.
-//!
-//! - `xtask test-all`
-//!   Like `test`, plus the HTTP integration suite. The HTTP suite
-//!   spawns a real `serial-mcp --transport=http` child process and
-//!   also benefits from a built `serial-mcp` binary.
-//!
-//! - `xtask print-paths`
-//!   Print the on-disk path the test orchestrator resolves for the
-//!   serial-mcp binary.
-//!   Useful for debugging test wiring and for AGENTS.md cross-checks.
-//!
-//! - `xtask agent-eval [--output-dir PATH] [--baseline PATH] [--write-baseline PATH]`
-//!   Run the deterministic agent-interface evaluation: catalog bytes from the
-//!   live `tools/list` catalog plus fixed call-shape scenarios and decision
-//!   thresholds. Writes `report.json` and `report.md` under
-//!   `target/agent-interface-eval/` by default. No network, user config, or
-//!   timestamps.
+//! Commands build test assets, run required test suites, print the resolved
+//! binary path, and run deterministic agent-interface evaluation.
 
 use std::fs;
 use std::io::ErrorKind;
@@ -149,7 +116,7 @@ SUBCOMMANDS:
                         (optional --keep-test-target)
     test-all            Like 'test', plus the spawned-binary HTTP suite
                         (optional --keep-test-target)
-    print-paths         Print the resolved test-asset paths
+    print-paths         Print the resolved test-asset path
     agent-eval          Run the deterministic agent-interface evaluation
                         (--output-dir PATH, --baseline PATH,
                         --write-baseline PATH)
@@ -159,10 +126,7 @@ SUBCOMMANDS:
 }
 
 fn workspace_root() -> PathBuf {
-    // The xtask binary lives at <repo>/xtask/. We resolve the
-    // workspace root by walking up from the binary's own source path
-    // (compile-time constant), not from the process cwd, so the
-    // behavior is independent of where the user invoked the binary.
+    // CARGO_MANIFEST_DIR is <repo>/xtask; its parent is the workspace root.
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     manifest.parent().map(PathBuf::from).unwrap_or(manifest)
 }
