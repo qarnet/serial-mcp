@@ -11,7 +11,8 @@
 
 pub mod binaries;
 pub mod controlled;
-pub mod firmware;
+#[cfg(unix)]
+pub mod device_fixture;
 pub mod spawned;
 
 /// Absolute path to the `serial-mcp` workspace root.
@@ -88,10 +89,10 @@ use serial_mcp::serial::ConnectionManager;
 use serial_mcp::serial::PortProvider;
 use serial_mcp::SerialHandler;
 
-/// Static [`PortProvider`]: returns a fixed list of
-/// ports. `PortInfo.name` typically points at a real PTY slave so the full
-/// public `open` path and real serial I/O run while identity fields
-/// describe a synthetic USB device.
+/// Static [`PortProvider`]: returns a fixed list of ports. Linux-only
+/// production-path fixture tests use a `PortInfo.name` that points at a real
+/// PTY slave, while identity fields describe a synthetic USB device.
+/// Controlled-backend tests use the same provider without OS serial I/O.
 #[derive(Debug, Clone)]
 pub struct StaticPortProvider {
     pub ports: Vec<serial_mcp::serial::PortInfo>,
@@ -318,6 +319,19 @@ impl TestServer {
             handle,
             watcher,
         }
+    }
+
+    /// Stop the test server and await its task after aborting the listener.
+    ///
+    /// Repeat gates use this explicit path so every iteration proves fixture,
+    /// client, and server teardown completes.
+    pub async fn shutdown_and_join(mut self) {
+        self.shutdown.cancel();
+        if let Some(watcher) = self.watcher.take() {
+            watcher.shutdown_and_join().await;
+        }
+        self.handle.abort();
+        let _ = (&mut self.handle).await;
     }
 }
 
@@ -617,12 +631,13 @@ pub fn tool_request(name: &'static str, args: serde_json::Value) -> CallToolRequ
     CallToolRequestParams::new(name).with_arguments(args_object(args))
 }
 
-// ---- Unix PTY pair ----------------------------------------------------------
+// ---- Linux production-path PTY pair -----------------------------------------
 //
-// `openpty` on Linux/macOS gives back a master fd and a slave fd whose
-// device path (`/dev/pts/N`) can be opened by `tokio_serial::SerialStream`
-// exactly like a real serial port. The test holds the master and plays
-// the role of the device.
+// `openpty` gives back a master fd and a slave fd whose device path
+// (`/dev/pts/N`) can be opened by `tokio_serial::SerialStream` on Linux
+// exactly like a real serial port. Production-path PTY tests stay Linux-only:
+// macOS `serialport` baud configuration invokes `IOSSIOSPEED`, which macOS
+// PTYs reject with `ENOTTY`. macOS coverage uses controlled backends instead.
 
 #[cfg(unix)]
 pub mod pty {
@@ -640,7 +655,7 @@ pub mod pty {
     /// the slave path (opened by the server via `tokio_serial`).
     pub struct PtyPair {
         pub slave_path: PathBuf,
-        master: File,
+        master: Option<File>,
         // Kept alive until drop so the kernel doesn't reclaim the slave.
         _slave: OwnedFd,
     }
@@ -659,30 +674,54 @@ pub mod pty {
             let master = File::from_std(master_std);
             Ok(PtyPair {
                 slave_path,
-                master,
+                master: Some(master),
                 _slave: slave,
             })
         }
 
         pub async fn write_device(&mut self, bytes: &[u8]) -> std::io::Result<()> {
-            self.master.write_all(bytes).await?;
-            self.master.flush().await
+            let master = self.master.as_mut().ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::BrokenPipe, "PTY master closed")
+            })?;
+            master.write_all(bytes).await?;
+            master.flush().await
         }
 
         pub async fn read_device(&mut self, dst: &mut [u8]) -> std::io::Result<usize> {
-            self.master.read(dst).await
+            self.master
+                .as_mut()
+                .ok_or_else(|| {
+                    std::io::Error::new(std::io::ErrorKind::BrokenPipe, "PTY master closed")
+                })?
+                .read(dst)
+                .await
         }
 
         /// Read exactly `dst.len()` bytes from the device side or error.
         pub async fn read_device_exact(&mut self, dst: &mut [u8]) -> std::io::Result<()> {
-            self.master.read_exact(dst).await.map(|_| ())
+            self.master
+                .as_mut()
+                .ok_or_else(|| {
+                    std::io::Error::new(std::io::ErrorKind::BrokenPipe, "PTY master closed")
+                })?
+                .read_exact(dst)
+                .await
+                .map(|_| ())
+        }
+
+        /// Close the device side while retaining the slave descriptor and path.
+        pub fn close_master(&mut self) {
+            self.master.take();
         }
 
         /// Split the pair into its master file and slave fd so the
         /// test can move the master into a spawned emulator task whilst
         /// keeping the slave alive.
-        pub fn into_parts(self) -> (File, OwnedFd) {
-            (self.master, self._slave)
+        pub fn into_parts(mut self) -> (File, OwnedFd) {
+            (
+                self.master.take().expect("PTY master already closed"),
+                self._slave,
+            )
         }
     }
 }

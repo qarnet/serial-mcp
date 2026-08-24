@@ -3,9 +3,8 @@
 > Trimmed from the original roadmap. Items already shipped (device identity,
 > hot reconfigure, `get_status`, profiles, statistics, framing/packet decoder,
 > AT/JSON/shell protocol parsers, auto-reconnect, richer matching modes
-> regex/glob, event log, native_sim diagnostics, `--version`, the 7 protocol
-> presets) were removed. See [CHANGELOG.md](../../CHANGELOG.md) and the README
-> tool list for what landed.
+> regex/glob, event log, `--version`, the 7 protocol presets) were removed. See
+> [CHANGELOG.md](../../CHANGELOG.md) and the README tool list for what landed.
 >
 > **Protocol roadmap** (HDLC/PPP framing, Modbus RTU, MIDI, Firmata — all
 > deferred) is tracked per-protocol in
@@ -256,8 +255,8 @@
   support where available, and a real historical client fixture.
 
 ### User-facing loopback / virtual port backend
-- expose a virtual echo/scripted device as an openable backend (the
-  native_sim harness exists but is test-only)
+- expose a virtual echo/scripted device as an openable backend (the Rust PTY
+  fixture remains test-only)
 - lets agents demo and develop flows with no hardware attached
 
 ### Socket sharing / tee / shared live access

@@ -9,10 +9,6 @@
     };
     crane.url = "github:ipetkov/crane";
     flake-utils.url = "github:numtide/flake-utils";
-    nix-nrf-dev = {
-      url = "github:qarnet/nix-nrf-dev";
-      inputs.nixpkgs.follows = "nixpkgs";
-    };
   };
 
   outputs =
@@ -22,7 +18,6 @@
       rust-overlay,
       crane,
       flake-utils,
-      nix-nrf-dev,
       ...
     }:
     flake-utils.lib.eachDefaultSystem (
@@ -50,42 +45,11 @@
               relPath = pkgs.lib.removePrefix (toString ./.) (toString path);
             in
             craneLib.filterCargoSources path type
+            # Config-schema fixtures and registry-manifest tooling are read at
+            # runtime by their respective offline checks. A directory must
+            # itself match the filter or cleanSource prunes its whole subtree.
             || pkgs.lib.hasPrefix "/schemas" relPath
             || pkgs.lib.hasPrefix "/example-configs" relPath
-            # Test fixtures read via CARGO_MANIFEST_DIR must survive the
-            # source filter: doc_drift reads README.md, server.json,
-            # CHANGELOG.md, docs/ (agent-config.md,
-            # development/FEATURES.md, future evaluations), the CI workflow
-            # (.github/workflows/ci.yml), conformance/expected-failures.yaml,
-            # scripts/inspector-smoke.mjs, and the historical rmcp 1.7
-            # fixture (compat/rmcp-1-client/Cargo.toml + Cargo.lock — Phase 4
-            # policy drift guards); config_schema_validation reads schemas/
-            # and example-configs/ and REQUIRES them — a pruned fixture fails
-            # the build. relPath keeps a leading "/", hence the explicit
-            # "/" in every prefix below; a directory must itself match the
-            # filter or cleanSource prunes its whole subtree, so dirs are
-            # included as whole trees to spare future fixture edits.
-            #
-            # All four vendored schemas (including opencode.schema.json and
-            # the models.dev resource it refs) validate hermetically offline:
-            # the local validator registers the vendored models.dev document
-            # in memory under its original URI, so nothing here needs
-            # network access.
-            || pkgs.lib.hasSuffix "README.md" relPath
-            || pkgs.lib.hasSuffix "CHANGELOG.md" relPath
-            || pkgs.lib.hasSuffix "server.json" relPath
-            || pkgs.lib.hasSuffix "flake.nix" relPath
-            || pkgs.lib.hasPrefix "/docs" relPath
-            # Workflow fixtures and registry-manifest tooling: doc_drift reads
-            # .github/workflows at runtime, and the builder unittest suite
-            # lives in scripts/. Both must survive the source filter — a
-            # pruned fixture fails the checks below and the CI doc_drift job.
-            # The prefix is the containing directory itself (/.github), not
-            # just the workflows subdir: cleanSource prunes any subtree whose
-            # directory does not match the filter.
-            || pkgs.lib.hasPrefix "/.github" relPath
-            || pkgs.lib.hasPrefix "/conformance" relPath
-            || pkgs.lib.hasPrefix "/compat" relPath
             || pkgs.lib.hasPrefix "/scripts" relPath;
         };
 
@@ -226,16 +190,9 @@
 
         # `nix develop`
         #
-        # Hybrid shell: nix-nrf-dev's mkNrfShell owns the Nordic environment
-        # (sdk-manager variables scoped to the west wrapper) and the multilib
-        # GCC for native_sim; crane/Rust inputs and project tools come from
-        # this flake.
-        devShells.default = nix-nrf-dev.lib.${system}.mkNrfShell {
+        devShells.default = pkgs.mkShell {
           name = "serial-mcp";
-          ncsVersion = "v3.3.0";
-          withMultilib = true;
 
-          # Inherit nativeBuildInputs/buildInputs/env vars from the package.
           inputsFrom = [ serial-mcp ];
 
           # craneLib.devShell no longer injects the Rust toolchain into the
@@ -252,13 +209,10 @@
             ])
             ++ [ serial-mcp-dev ];
 
-          extraShellHook = ''
-            export PATH="$PWD/scripts:$PWD/firmware/bin:$PATH"
+          shellHook = ''
+            export PATH="$PWD/scripts:$PATH"
             echo "serial-mcp dev shell"
             echo "rustc: $(rustc --version)"
-            if command -v west >/dev/null 2>&1; then
-              echo "west: $(west --version 2>/dev/null | head -n 1)"
-            fi
           '';
         };
 
@@ -267,27 +221,13 @@
         # Only the package build is checked here. fmt, clippy, and the test
         # suite are all run by the build/test/clippy matrix in
         # .github/workflows/ci.yml on 4 OSes (ubuntu-latest,
-        # ubuntu-24.04-arm, macos-14, windows-latest) plus the native-sim job.
+        # ubuntu-24.04-arm, macos-14, windows-latest).
         # Re-running them via Nix duplicated that work (~10 min of redundant
         # crate compilation + test execution) without adding coverage — the
         # unique value of `nix flake check` is verifying the flake itself is
         # valid and the nixpkgs derivation builds. Keep it to that.
         checks = {
           inherit serial-mcp;
-
-          # Executable proof the filtered source ships every workflow fixture
-          # doc_drift reads at runtime. If the source filter ever prunes
-          # .github/workflows again, `nix flake check` fails here.
-          workflow-fixtures-present = pkgs.runCommand "workflow-fixtures-present" { } ''
-            test -f ${src}/.github/workflows/ci.yml
-            test -f ${src}/.github/workflows/hardening.yml
-            test -f ${src}/.github/workflows/publish-mcp-registry.yml
-            test -f ${src}/.github/workflows/publish-mcp-registry-backfill.yml
-            test -f ${src}/.github/workflows/release.yml
-            test -f ${src}/.github/workflows/release-dry-run.yml
-            test -f ${src}/.github/workflows/schema-drift.yml
-            touch $out
-          '';
 
           # Offline, deterministic unittest suite for the registry manifest
           # builder, run from the filtered source so it also proves scripts/

@@ -49,7 +49,10 @@ pub struct ReadOutcome {
     pub error: Option<String>,
     /// Absolute stream offset where this read's data starts.
     pub from_offset: Option<u64>,
-    /// Cursor value after this read: `from_offset + bytes.len()`.
+    /// Cursor value after this read, advanced by raw stream bytes consumed from
+    /// the ring. It commonly equals `from_offset + bytes.len()`, but can differ
+    /// after payload shaping or when a framing error consumes malformed bytes
+    /// while returning zero payload.
     pub next_offset: Option<u64>,
     /// Bytes lost to ring wrap since the cursor's original position.
     pub bytes_lost: u64,

@@ -690,8 +690,15 @@ impl SerialConnection {
                     _ = self.close_token.cancelled() => Err(SerialError::ConnectionClosed(self.display_name())),
                     res = io.read(dst) => Ok(res?),
                 }?;
-                self.record_rx_bytes(n);
-                Ok(n)
+                if n == 0 {
+                    Err(SerialError::IoError(std::io::Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        "serial peer closed",
+                    )))
+                } else {
+                    self.record_rx_bytes(n);
+                    Ok(n)
+                }
             }
             Some(ms) => {
                 let deadline = Instant::now() + Duration::from_millis(ms);
@@ -717,7 +724,12 @@ impl SerialConnection {
                                 self.record_rx_bytes(n);
                                 return Ok(n);
                             }
-                            Ok(Ok(_)) => {}
+                            Ok(Ok(_)) => {
+                                return Err(SerialError::IoError(std::io::Error::new(
+                                    std::io::ErrorKind::UnexpectedEof,
+                                    "serial peer closed",
+                                )))
+                            }
                             Ok(Err(e)) => return Err(SerialError::from(e)),
                             Err(_elapsed) => {}
                         }

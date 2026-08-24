@@ -9,21 +9,6 @@
       "target/**"
     ]
   },
-  "lsp": {
-    "clangd": {
-      "command": [
-        "direnv",
-        "exec",
-        ".",
-        "clangd",
-        "--query-driver=/nix/store/*/bin/*"
-      ],
-      "extensions": [
-        "c",
-        "h"
-      ]
-    }
-  },
   "mcp": {
     "serial-mcp": {
       "type": "local",
