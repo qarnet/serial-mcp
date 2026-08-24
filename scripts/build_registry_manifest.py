@@ -59,7 +59,7 @@ def load_template(template_path):
     if "packages" in doc:
         raise BuildError(
             f"template {template_path} already contains a packages array; "
-            "templates must omit it (tests/doc_drift.rs::server_json_omits_packages)"
+            "templates must omit it; packages are generated at publish time"
         )
     if not isinstance(doc.get("version"), str):
         raise BuildError(f"template {template_path} has no string version field")

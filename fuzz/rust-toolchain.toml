@@ -1,0 +1,13 @@
+# Fuzz workspace toolchain pin.
+#
+# The repo root rust-toolchain.toml pins stable 1.97.1 for the main build.
+# cargo-fuzz needs a nightly compiler (-Zsanitizer=address), so this nested
+# file pins the exact nightly for every cargo/rustup invocation run from the
+# fuzz/ directory (rustup resolves the nearest toolchain file). This is the
+# declarative replacement for RUSTUP_TOOLCHAIN env hacks — CI and local
+# rustup-based fuzzing both pick it up automatically.
+#
+# Keep in sync with the dtolnay/rust-toolchain pin in
+# .github/workflows/hardening.yml (fuzz smoke job).
+[toolchain]
+channel = "nightly-2026-07-15"

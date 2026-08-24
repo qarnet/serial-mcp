@@ -20,10 +20,12 @@ use crate::tools::rx_consume::{
     consume_frames, disconnect_state, frame_outcome_to_stop, DisconnectState, RxFrameSink, SinkFlow,
 };
 
+// ------------------------------------------------------------------
 // Read helpers
+// ------------------------------------------------------------------
 
-/// Outcome of a read call. `meta.stop_reason` identifies timeout versus normal
-/// read completion.
+/// Outcome of a read call. `timed_out` distinguishes the genuine
+/// read-timeout case from a successful read of `bytes`.
 pub struct ReadOutcome {
     pub bytes: Vec<u8>,
     pub elapsed_ms: u64,
@@ -38,16 +40,19 @@ pub struct ReadOutcome {
     /// Decoded frames, empty when framing was not configured.
     pub frames: Vec<crate::framing::Frame>,
     /// Number of frames dropped by the decoder (currently only checksum
-    /// mismatches with `validate: true`). Does not include encoding drops;
-    /// `build_read_result` counts those separately.
+    /// mismatches with `validate: true`). Does NOT include encoding
+    /// drops — those are counted separately in `build_read_result`.
     pub frames_dropped: usize,
     /// Framing/decode error text. `Some` when the read stopped with
     /// `stop_reason: framing_error`, else `None`. Surfaced as
     /// `ReadResult.error` by `build_read_result`.
     pub error: Option<String>,
-    /// Absolute stream offset where consumed data starts.
+    /// Absolute stream offset where this read's data starts.
     pub from_offset: Option<u64>,
-    /// Cursor value after this read, advanced by raw bytes consumed.
+    /// Cursor value after this read, advanced by raw stream bytes consumed from
+    /// the ring. It commonly equals `from_offset + bytes.len()`, but can differ
+    /// after payload shaping or when a framing error consumes malformed bytes
+    /// while returning zero payload.
     pub next_offset: Option<u64>,
     /// Bytes lost to ring wrap since the cursor's original position.
     pub bytes_lost: u64,
@@ -58,9 +63,9 @@ pub struct ReadOutcome {
 }
 
 /// `read`'s frame sink: collects every frame and records the first match so the
-/// caller can return it. Always returns `Continue`. `read` includes frames
-/// decoded after the matching one, so every frame decoded from the same chunk
-/// is preserved.
+/// caller can return it. Always returns `Continue` — read includes frames
+/// decoded after the matching one so every frame already decoded from the
+/// same chunk is preserved.
 struct ReadFrameSink<'a> {
     collected: &'a mut Vec<crate::framing::Frame>,
     match_data: Option<Vec<u8>>,
@@ -97,7 +102,9 @@ impl RxFrameSink for ReadFrameSink<'_> {
     }
 }
 
+// ------------------------------------------------------------------
 // Ring-based read (private and shared cursor paths)
+// ------------------------------------------------------------------
 
 /// Advance a caller-owned cursor by `consumed` bytes from `base`, clamped to
 /// the ring's live edge. Saturating by design; other branches keep their own
@@ -134,9 +141,9 @@ impl ReadAccumulator {
 
     /// Consume the accumulator into a generic `ReadOutcome` plus the final
     /// private cursor. Offsets derive from the ring's current start/end, the
-    /// original private cursor, and raw `consumed_offset`.
-    /// `payload_override` changes only the returned bytes, such as framed match
-    /// data or shaped live-match context. It never changes offsets.
+    /// ORIGINAL private cursor, and raw `consumed_offset`.
+    /// `payload_override` changes only the returned bytes (framed match data,
+    /// shaped live-match context) — never the offsets.
     #[allow(clippy::too_many_arguments)]
     fn into_outcome(
         self,
@@ -193,8 +200,8 @@ impl ReadAccumulator {
 
 /// Central completion descriptor for a private read. Every ordinary return
 /// path builds one and funnels it through [`complete_read`]. The payload
-/// override changes only the returned bytes, such as framed match data or
-/// shaped live-match context. It never changes consumed offsets.
+/// override changes only the returned bytes (framed match data, shaped
+/// live-match context) — never the consumed offsets.
 struct ReadCompletion {
     meta: RxStopMetadata,
     matched: bool,
@@ -232,8 +239,8 @@ fn complete_read(
 /// What processing one framed chunk produced. `Match` carries the first
 /// framed match's payload and indexes; `Stop` carries the translated stop
 /// outcome (max_frames, runtime decode error, sink stop) plus the sink's
-/// match frame index. That index is `None` for a stop outcome because a match
-/// returns earlier.
+/// match frame index (always `None` there — a match would have returned
+/// earlier).
 enum FramedChunkDecision {
     /// No stop condition; keep the outer loop running.
     Continue,
@@ -419,7 +426,7 @@ impl<'a> ReadDriver<'a> {
         let context_amount = self.matcher.as_ref().and_then(|m| m.context_amount());
         let needle_len = self.matcher.as_ref().and_then(|m| m.needle_len());
 
-        // Immediate raw cat path: no match, bytes available, no framing.
+        // Immediate raw cat path — no match, bytes available, no framing.
         let has_immediate_data = !initial_slice.bytes.is_empty() && self.matcher.is_none();
         if has_immediate_data && self.decoder.is_none() {
             let take = initial_slice.bytes.len().min(max_bytes);
@@ -506,8 +513,8 @@ impl<'a> ReadDriver<'a> {
                     final_cursor,
                 }));
             }
-            // History had no match. Include bytes read from the ring in the
-            // result so far.
+            // Not found in history — consume what we read from the ring for
+            // the result so far.
             self.acc.consumed_offset = take as u64;
             self.acc.returned_bytes = hist.to_vec();
             self.ctrl.notify_data_received();
@@ -667,10 +674,10 @@ impl<'a> ReadDriver<'a> {
             if let RxStopDecision::Stop(outcome) =
                 self.ctrl.push_data(data_count, buffered_len, match_result)
             {
-                // Live matches apply matcher-owned context shaping, using the
-                // same policy as the read path. Only the returned payload and
-                // relative match_index change; cursor consumption and stream
-                // offsets stay based on consumed bytes.
+                // Live matches apply matcher-owned context shaping (same
+                // policy as read path. Only the returned payload and the
+                // relative match_index change — cursor consumption and the
+                // stream offsets stay based on the consumed bytes.
                 let (match_bytes, match_index) = match outcome.match_index {
                     Some(idx) => match self
                         .matcher
@@ -818,7 +825,7 @@ impl<'a> ReadDriver<'a> {
                 }
             }
 
-            // New data arrived; read from the ring at the clocked cursor.
+            // New data arrived — read from ring at the clocked cursor.
             let slice = self.ring.read_from(
                 clocked_cursor,
                 self.max_bytes.saturating_sub(self.acc.returned_bytes.len()),
@@ -840,14 +847,14 @@ impl<'a> ReadDriver<'a> {
         }
     }
 }
-/// Drive a `read` from the ring buffer using a private cursor. Buffered but
-/// unread bytes return immediately. Pattern matching checks history first,
-/// then waits for new bytes.
+/// Drive a `read` from the ring buffer using a PRIVATE cursor, with cat
+/// semantics: buffered-but-unread bytes are returned immediately. Pattern
+/// matching checks history first, then waits for new bytes.
 ///
-/// This function never touches the shared `read` cursor. The caller supplies
-/// the start offset (`initial_cursor`) and receives the final private cursor so
-/// the shared wrapper can apply it. `capture_boot` starts at its atomic mark
-/// and discards the returned cursor.
+/// The shared `read` cursor is never touched. The caller supplies the start
+/// offset (`initial_cursor`) and receives the final private cursor so the
+/// shared wrapper can apply it. `capture_boot` starts at its atomic mark and
+/// discards the returned cursor.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn read_from_private_cursor(
     session: &crate::rx_session::RxSession,
@@ -902,9 +909,9 @@ pub(crate) async fn read_from_private_cursor(
     driver.run_wait(initial_slice.next_offset).await
 }
 
-/// Drive a `read` from the ring buffer with the shared read cursor. Read the
-/// current cursor, delegate to `read_from_private_cursor`, and apply the
-/// returned final cursor. `read` and `transact` call this wrapper.
+/// Drive a `read` from the ring buffer with the SHARED read cursor: reads
+/// the current cursor, delegates to `read_from_private_cursor`, and
+/// applies the returned final cursor. `read`/`transact` call this wrapper.
 #[allow(clippy::too_many_arguments)]
 pub async fn read_bytes_from_ring(
     session: Arc<RxSession>,
@@ -945,12 +952,12 @@ mod tests {
 
     use crate::serial::ConnectionManager;
 
-    // Private and shared cursor behavior.
+    // ── Private/shared cursor behavior ────────────────────────────────────
 
-    /// An already-cancelled request token routed through the private read path
-    /// yields a structured `cancelled` outcome with offsets, not an ad-hoc
-    /// error. This is the server-side behavior `capture_boot` produces for
-    /// request cancellation during hold/settle.
+    /// An already-cancelled request token routed through the private read
+    /// path yields a STRUCTURED `cancelled` outcome (with offsets), not an
+    /// ad-hoc error. This is the server-side behavior `capture_boot`
+    /// produces for request cancellation during hold/settle.
     #[tokio::test]
     async fn cancelled_token_read_returns_structured_cancelled_outcome() {
         use crate::rx_session::RxSessionManager;

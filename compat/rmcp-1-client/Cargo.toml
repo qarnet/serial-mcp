@@ -1,12 +1,12 @@
 # Historical MCP client interoperability fixture.
 #
-# Standalone package, not a root workspace member. Compiled against exact
-# pre-migration rmcp 1.7.0 so the current serial-mcp server can be exercised
-# by a real historical client over HTTP and stdio. Owns a committed Cargo.lock
-# and is built with --locked. Policy drift guard (tests/doc_drift.rs)
-# enforces the pinned rmcp 1.7.0 entry and historical checksum.
+# Standalone package (NOT a root workspace member) compiled against the exact
+# pre-migration rmcp 1.7.0 so the CURRENT serial-mcp server can be exercised
+# by a real historical client implementation over both HTTP and stdio. Owns a
+# committed Cargo.lock (built with --locked) pins the historical rmcp 1.7.0
+# entry and its checksum.
 #
-# Never published.
+# This package is never published.
 
 [package]
 name = "rmcp-1-client"
@@ -15,10 +15,11 @@ edition = "2021"
 publish = false
 
 [dependencies]
-# Exact pin. Compatibility depends on the historical client implementation,
-# not current rmcp resolution. `client` and the two transports are the complete
-# fixture surface; default-features = false excludes server/macros features and
-# prevents drift into current SDK behavior.
+# Exact pin: compatibility depends on the historical client implementation,
+# not on whatever rmcp resolves today. `client` + the two transports are the
+# complete surface the fixture uses; default-features = false keeps the
+# server/macros features out so the fixture cannot drift into current SDK
+# behavior.
 rmcp = { version = "=1.7.0", default-features = false, features = [
   "client",
   "transport-child-process",

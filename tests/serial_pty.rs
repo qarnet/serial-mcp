@@ -1,11 +1,13 @@
 //! End-to-end tests with a real PTY pair standing in for a serial device.
 //!
-//! These tests open a Linux pseudo-terminal pair via `openpty(3)`,
-//! point the server at the slave path (`/dev/pts/N`) via the regular
-//! `open` MCP tool, and drive the master end from the test process as if
-//! it were a USB-Serial device. Unlike the in-memory loopback tests in
-//! `tests/http_integration.rs`, these exercise the real
-//! `tokio_serial::SerialStream` code path inside `SerialConnection`.
+//! These Linux-only tests open a pseudo-terminal pair via `openpty(3)`, point
+//! the server at the slave path (`/dev/pts/N`) via the regular `open` MCP tool,
+//! and drive the master end from the test process as if it were a USB-Serial
+//! device. Unlike the in-memory loopback tests in `tests/http_integration.rs`,
+//! these exercise the real `tokio_serial::SerialStream` code path inside
+//! `SerialConnection`. macOS `serialport` baud configuration invokes
+//! `IOSSIOSPEED`, which macOS PTYs reject with `ENOTTY`; macOS uses controlled-
+//! backend coverage instead.
 
 #![cfg(target_os = "linux")]
 
@@ -110,10 +112,49 @@ async fn pty_device_write_then_client_read() {
 }
 
 #[tokio::test]
+async fn pty_peer_close_stops_pending_read_as_connection_closed() {
+    let (_server, client, _rx, mut pty, connection_id) = setup().await;
+
+    let reader = {
+        let peer = client.peer().clone();
+        let id = connection_id.clone();
+        tokio::spawn(async move {
+            peer.call_tool(tool_request(
+                "read",
+                json!({
+                    "connection_id": id,
+                    "from": { "type": "now" },
+                    "timeout_ms": 5000,
+                    "match": { "pattern": "never-arrives" }
+                }),
+            ))
+            .await
+        })
+    };
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(
+        !reader.is_finished(),
+        "read was not pending before peer close"
+    );
+    pty.close_master();
+
+    let result = tokio::time::timeout(Duration::from_secs(2), reader)
+        .await
+        .expect("read did not stop after peer close")
+        .expect("read task join")
+        .expect("read tool call");
+    assert_ne!(result.is_error, Some(true), "{result:?}");
+    let structured = result.structured_content.expect("structured");
+    assert_eq!(structured["stop_reason"], json!("connection_closed"));
+    client.cancel().await.ok();
+}
+
+#[tokio::test]
 async fn pty_device_binary_read_falls_back_to_exact_hex() {
     let (_server, client, _rx, mut pty, connection_id) = setup().await;
 
-    // Send invalid UTF-8 bytes through the real PTY serial path.
+    // Invalid UTF-8 bytes over the real PTY serial path.
     pty.write_device(&[0xDE, 0xAD, 0xBE, 0xEF, 0xFF])
         .await
         .unwrap();
@@ -135,8 +176,8 @@ async fn pty_device_binary_read_falls_back_to_exact_hex() {
     assert_eq!(structured["bytes_read"], json!(5));
     assert_eq!(structured["data"], json!("de ad be ef ff"));
     assert_eq!(structured["encoding"], json!("hex"));
-    // Buffered bytes stop with "drained". Otherwise the read waits and stops
-    // with "timeout". Both results carry the data.
+    // Cat path drains instantly ("drained") when bytes are already buffered;
+    // otherwise the read waits and stops at "timeout". Both carry the data.
     assert!(
         structured["stop_reason"] == json!("drained")
             || structured["stop_reason"] == json!("timeout"),
@@ -166,7 +207,7 @@ async fn pty_read_match_finds_real_serial_pattern() {
         })
     };
 
-    // Feed bytes in separate writes to exercise the read and match accumulator.
+    // Slow-feed bytes to exercise the read+match accumulator.
     tokio::time::sleep(Duration::from_millis(50)).await;
     pty.write_device(b"warming up... ").await.unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -190,7 +231,7 @@ async fn pty_read_match_finds_real_serial_pattern() {
 async fn pty_read_match_with_context_returns_shaped_payload() {
     let (_server, client, _rx, mut pty, connection_id) = setup().await;
 
-    // Write data first, then wait briefly for the PTY to buffer it.
+    // Write data first, then delay briefly to let the PTY buffer it.
     pty.write_device(b"AAAAprefix___OK>suffix").await.unwrap();
     tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -221,7 +262,7 @@ async fn pty_read_match_with_context_returns_shaped_payload() {
     let match_index = structured["match_index"].as_u64().expect("match_index") as usize;
     let data = structured["data"].as_str().expect("data");
     // "OK>" at byte 14 in "AAAAprefix___OK>suffix", context_amount=4:
-    // pre_start = 14 - 4 = 10, shaped = "x___OK>" (7 bytes), match_index = 4.
+    // pre_start = 14-4 = 10, shaped = "x___OK>" (7 bytes), match_index = 4.
     assert!(data.ends_with("OK>"), "data should end with OK>: {data:?}");
     assert_eq!(match_index, 4, "match_index should be 4: {structured:?}");
     assert!(
@@ -274,9 +315,9 @@ async fn pty_read_match_with_zero_context_returns_only_matched_bytes() {
 async fn pty_read_match_without_context_returns_full_accumulated() {
     let (_server, client, _rx, mut pty, connection_id) = setup().await;
 
-    // Write data before starting read so it is already in the PTY buffer.
+    // Write data to the PTY first so it's in the buffer before read starts.
     pty.write_device(b"junk OK> rest").await.unwrap();
-    // Wait briefly for the PTY to deliver the bytes.
+    // Small delay to let the PTY deliver the bytes.
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     let result = client
@@ -309,13 +350,13 @@ async fn pty_read_match_without_context_returns_full_accumulated() {
 async fn pty_read_literal_match_index_over_chunked_stream() {
     let (_server, client, _rx, mut pty, connection_id) = setup().await;
 
-    // Send two device writes, 100ms apart.
+    // Same chunked sequence: two device writes, 100ms apart.
     pty.write_device(b"warming up... ").await.unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
     pty.write_device(b"OK> ready").await.unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    // The literal match crosses chunks at global index 14.
+    // read: cross-chunk literal at global index 14.
     let result = client
         .peer()
         .call_tool(tool_request(
@@ -339,8 +380,9 @@ async fn pty_read_literal_match_index_over_chunked_stream() {
 async fn pty_read_live_match_applies_context_shaping() {
     let (_server, client, _rx, mut pty, connection_id) = setup().await;
 
-    // Start read before device data. The match then uses the live-path
-    // context shaping.
+    // Read starts BEFORE any device data: the match happens on the live
+    // (wait-loop) path, which must shape context via the matcher's
+    // live-path shaping.
     let read_handle = {
         let peer = client.peer().clone();
         let id = connection_id.clone();
@@ -374,8 +416,7 @@ async fn pty_read_live_match_applies_context_shaping() {
     let structured = result.structured_content.expect("structured");
     assert_eq!(structured["matched"], json!(true), "{structured:?}");
     assert_eq!(structured["stop_reason"], json!("match_found"));
-    // "OK>" is at global index 8. Context 4 produces "BBBBOK>" with
-    // relative index 4.
+    // "OK>" at global 8; context 4 -> shaped "BBBBOK>" with relative index 4.
     assert_eq!(structured["data"], json!("BBBBOK>"), "{structured:?}");
     assert_eq!(structured["match_index"], json!(4), "{structured:?}");
     assert_eq!(structured["bytes_read"], json!(7), "{structured:?}");
@@ -414,8 +455,7 @@ async fn pty_close_then_use_returns_is_error() {
 async fn pty_send_break_short_duration_timing() {
     let (_server, client, _rx, _pty, connection_id) = setup().await;
 
-    // A 50ms BREAK must release within about 100ms, not remain held until
-    // 250ms or more.
+    // Test that a 50ms BREAK is released within ~100ms, not held until 250ms+
     let start = std::time::Instant::now();
     let result = client
         .peer()
@@ -438,12 +478,12 @@ async fn pty_send_break_short_duration_timing() {
         .as_u64()
         .expect("actual_duration_ms");
 
-    // Accept 40-100ms for the 50ms BREAK.
+    // Should be close to 50ms (allow 40-100ms window)
     assert!(
         (40..=100).contains(&actual_duration),
         "send_break(50ms) took {actual_duration}ms, expected 40-100ms"
     );
-    // Keep the full round trip below 200ms.
+    // Full round-trip should also be reasonable
     assert!(
         elapsed <= 200,
         "send_break round-trip took {elapsed}ms, expected <200ms"
@@ -456,10 +496,10 @@ async fn pty_send_break_short_duration_timing() {
 async fn pty_read_line_auto_promotes_on_bare_cr_and_flushes_pending() {
     let (_server, client, _rx, mut pty, connection_id) = setup().await;
 
-    // A pending CR is not a frame yet.
+    // Pending CR, no frame yet.
     pty.write_device(b"line1\r").await.unwrap();
-    // The non-\n byte confirms bare CR, emits "line1", and promotes to
-    // CrMode. The following "line2\r" emits "line2".
+    // Second byte 'l' (non-\n) confirms bare CR → emit "line1", promote to
+    // CrMode, then "line2\r" splits on \r → emit "line2".
     pty.write_device(b"line2\r").await.unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
 
@@ -486,7 +526,7 @@ async fn pty_read_line_auto_promotes_on_bare_cr_and_flushes_pending() {
     client.cancel().await.ok();
 }
 
-// Ring-based read tests.
+// ── Ring-based read tests ────────────────────────────────────────────────
 
 /// Cat semantics: write then read returns buffered bytes immediately
 /// with stop_reason="drained".
@@ -574,7 +614,7 @@ async fn pty_read_wrap_reports_bytes_lost() {
     client.cancel().await.ok();
 }
 
-/// Read with `from: {"type":"buffer_start"}` replays retained history.
+/// read with `from: "buffer_start"` replays retained history.
 #[tokio::test]
 async fn pty_read_from_buffer_start() {
     let (_server, client, _rx, mut pty, connection_id) = setup().await;
@@ -582,7 +622,7 @@ async fn pty_read_from_buffer_start() {
     pty.write_device(b"RETAINED").await.unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    // Read with `from: {"type":"buffer_start"}` to replay retained bytes.
+    // read with from: "buffer_start" — replay everything retained.
     let result = client
         .peer()
         .call_tool(tool_request(
@@ -607,8 +647,9 @@ async fn pty_read_from_buffer_start() {
     client.cancel().await.ok();
 }
 
-/// Reading from the same offset is non-destructive. The cursor is reset to
-/// that offset before reading, so the same bytes return.
+/// Re-reading with the same `from` offset is non-destructive: the
+/// cursor is reset to `from` before reading, so the same bytes come
+/// back.
 #[tokio::test]
 async fn pty_read_reread_same_from_offset() {
     let (_server, client, _rx, mut pty, connection_id) = setup().await;
@@ -616,7 +657,7 @@ async fn pty_read_reread_same_from_offset() {
     pty.write_device(b"UNIQUE").await.unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    // First read with `from: {"type":"buffer_start"}`.
+    // First read from buffer_start.
     let first = client
         .peer()
         .call_tool(tool_request(
@@ -634,7 +675,7 @@ async fn pty_read_reread_same_from_offset() {
     let from_offset = s1["from_offset"].as_u64().expect("from_offset");
     let data1 = s1["data"].as_str().expect("data");
 
-    // Read again from the returned absolute offset.
+    // Re-read with the same from_offset.
     let second = client
         .peer()
         .call_tool(tool_request(
@@ -657,7 +698,7 @@ async fn pty_read_reread_same_from_offset() {
     client.cancel().await.ok();
 }
 
-/// `from: {"type":"now"}` skips buffered data and starts at the live edge.
+/// `from: "now"` skips buffered data, jumping to the live edge.
 #[tokio::test]
 async fn pty_read_from_now_skips_backlog() {
     let (_server, client, _rx, mut pty, connection_id) = setup().await;
@@ -665,7 +706,7 @@ async fn pty_read_from_now_skips_backlog() {
     pty.write_device(b"SKIP_ME").await.unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    // Read with `from: {"type":"now"}` to skip buffered bytes.
+    // read with from: "now" — skip buffered, should get nothing (or timeout).
     let result = client
         .peer()
         .call_tool(tool_request(
@@ -680,7 +721,7 @@ async fn pty_read_from_now_skips_backlog() {
         .unwrap();
     assert_ne!(result.is_error, Some(true), "{result:?}");
     let s = result.structured_content.expect("structured");
-    // The result must not contain the skipped marker.
+    // Skip past SKIP_ME — data should be empty or not contain it.
     let data = s["data"].as_str().unwrap_or("");
     assert!(
         !data.contains("SKIP_ME"),
@@ -689,16 +730,18 @@ async fn pty_read_from_now_skips_backlog() {
     client.cancel().await.ok();
 }
 
-/// `flush(target="both")` discards retained RX backlog. Pre-flush bytes must
-/// not return on a later read, while post-flush bytes remain readable. The
-/// test uses public tools only, and the connection must remain usable.
+/// flush(target="both") discards the retained RX backlog: stale pre-flush
+/// bytes must never come back on a later read, while post-flush bytes remain
+/// readable. Proves the fix via public tools only — the connection must stay
+/// usable, so the read's success cannot be explained by a dead stream.
 #[tokio::test]
 async fn pty_flush_both_discards_retained_rx_backlog() {
     let (_server, client, _rx, mut pty, connection_id) = setup().await;
 
+    // 1. Device writes a unique old marker.
     pty.write_device(b"OLD-MARKER-4711").await.unwrap();
 
-    // Poll public get_status until the old marker reaches the ring.
+    // 2. Poll public get_status until the backlog reached the ring (bounded).
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     let mut saw_backlog = false;
     while tokio::time::Instant::now() < deadline {
@@ -720,6 +763,7 @@ async fn pty_flush_both_discards_retained_rx_backlog() {
     }
     assert!(saw_backlog, "OLD marker never reached the RX ring");
 
+    // 3. Flush with target="both" — must discard the retained backlog.
     let flush = client
         .peer()
         .call_tool(tool_request(
@@ -730,10 +774,10 @@ async fn pty_flush_both_discards_retained_rx_backlog() {
         .unwrap();
     assert_ne!(flush.is_error, Some(true), "{flush:?}");
 
-    // Write a new marker only after flush returns.
+    // 4. Device sends a unique new marker after the flush returned.
     pty.write_device(b"NEW-MARKER-2299").await.unwrap();
 
-    // Read from the shared cursor, which flush clamped to the live edge.
+    // 5. Ordinary read (shared cursor, which flush clamped to the live edge).
     let read = client
         .peer()
         .call_tool(tool_request(
@@ -759,10 +803,9 @@ async fn pty_flush_both_discards_retained_rx_backlog() {
     client.cancel().await.ok();
 }
 
-// Read history with framing and matching.
+// ── Step 8 (12g): read from + framing/match ────────────────────────────────────
 
-/// Read with `from: {"type":"buffer_start"}` and line framing decodes all
-/// frames.
+/// read with `from: "buffer_start"` and line framing decodes all frames.
 #[tokio::test]
 async fn pty_read_from_buffer_start_with_framing_decodes_all_frames() {
     let (_server, client, _rx, mut pty, connection_id) = setup().await;
@@ -793,8 +836,7 @@ async fn pty_read_from_buffer_start_with_framing_decodes_all_frames() {
     client.cancel().await.ok();
 }
 
-/// Read with `from: {"type":"offset","offset":0}` and match scans from
-/// the given offset.
+/// read with `from: {"offset": 0}` and match scans from the given offset.
 #[tokio::test]
 async fn pty_read_from_offset_with_match_scans_from_offset() {
     let (_server, client, _rx, mut pty, connection_id) = setup().await;
@@ -802,7 +844,7 @@ async fn pty_read_from_offset_with_match_scans_from_offset() {
     pty.write_device(b"AAAAATARGETBBBBB").await.unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    // Read with `from: {"type":"offset","offset":0}`; the match is present.
+    // Read from offset 0 — match should be found.
     let result = client
         .peer()
         .call_tool(tool_request(
@@ -821,8 +863,7 @@ async fn pty_read_from_offset_with_match_scans_from_offset() {
     assert_eq!(s["matched"], true);
     assert_eq!(s["match_index"], 5, "match_index relative to returned data");
 
-    // Read with `from: {"type":"offset","offset":10}`; the match at
-    // absolute position 5 is outside the read range.
+    // Read from offset 10 — match is at absolute position 5 (<10), so missed.
     let result2 = client
         .peer()
         .call_tool(tool_request(
@@ -838,7 +879,7 @@ async fn pty_read_from_offset_with_match_scans_from_offset() {
         .unwrap();
     assert_ne!(result2.is_error, Some(true), "{result2:?}");
     let s2 = result2.structured_content.expect("structured");
-    // No match remains beyond offset 10, so the read stops on timeout.
+    // No match found past offset 10 — read should stop on timeout.
     assert_eq!(
         s2["matched"], false,
         "match should not be found from offset 10"
@@ -846,14 +887,14 @@ async fn pty_read_from_offset_with_match_scans_from_offset() {
     client.cancel().await.ok();
 }
 
-// Connection-mode configure tests.
+// ── configure tool: connection mode ──────────────────────────────────────────
 
 #[tokio::test]
 async fn pty_configure_connection_mutates_framing_default() {
     let (_server, client, _rx, mut pty, connection_id) = setup().await;
     pty.write_device(b"line1\nline2\n").await.unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
-    // Read with no framing to receive raw bytes.
+    // Read with no framing — raw bytes.
     let raw = client
         .peer()
         .call_tool(tool_request(
@@ -884,7 +925,7 @@ async fn pty_configure_connection_mutates_framing_default() {
         .unwrap();
     assert_ne!(cfg.is_error, Some(true), "{cfg:?}");
     assert_eq!(cfg.structured_content.unwrap()["mode"], "connection");
-    // Write more data and read with the new framing default.
+    // Write more data + read — should be framed now.
     pty.write_device(b"line3\nline4\n").await.unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
     let framed = client
@@ -908,14 +949,15 @@ async fn pty_configure_connection_mutates_framing_default() {
     client.cancel().await.ok();
 }
 
-/// Configure a profile with line framing, then pass the same framing
-/// explicitly to `open` and verify that `read` uses line framing.
+/// Create a profile with rx_framing default, then open the PTY with
+/// matching framing and verify that the read uses line framing.
 ///
-/// This test does not call `open_profile` or select the configured profile.
-/// It covers explicit-open framing only. Profile default application remains
-/// untested here.
+/// NOTE: open_profile would be the ideal end-to-end test here, but the
+/// default profile selector (all-None) matches any port — on systems
+/// with multiple ports it may pick the wrong one. This test validates
+/// that configure+open+framed-read composes correctly.
 #[tokio::test]
-async fn pty_explicit_open_framing_applies() {
+async fn pty_configure_profile_applies_on_open_profile() {
     let pty = PtyPair::open().expect("openpty");
     let slave_path = pty.slave_path.to_string_lossy().into_owned();
 
@@ -923,7 +965,7 @@ async fn pty_explicit_open_framing_applies() {
     let (client, _rx) = connect_client(&server).await.unwrap();
     let profile_name = "test-configure-apply";
 
-    // Configure a profile with line framing.
+    // Create profile with line framing.
     let _ = client
         .peer()
         .call_tool(tool_request(
@@ -936,7 +978,7 @@ async fn pty_explicit_open_framing_applies() {
         .await
         .unwrap();
 
-    // Open the PTY with explicit line framing.
+    // Open the PTY directly with the profile's framing.
     let open_r = client
         .peer()
         .call_tool(tool_request(
@@ -953,7 +995,7 @@ async fn pty_explicit_open_framing_applies() {
     let s = open_r.structured_content.expect("structured");
     let conn_id = s["connection_id"].as_str().unwrap().to_string();
 
-    // Read device data using the explicit line framing.
+    // Write data from device side — should be line-framed when read.
     let mut pty_mut = pty;
     pty_mut.write_device(b"frame1\nframe2\n").await.unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -972,10 +1014,11 @@ async fn pty_explicit_open_framing_applies() {
     let rs = read_r.structured_content.expect("structured");
     assert!(
         rs["frames"].is_array(),
-        "explicit framing should apply: {rs:?}"
+        "profile framing should apply: {rs:?}"
     );
     assert!(!rs["frames"].as_array().unwrap().is_empty());
 
+    // Cleanup.
     let _ = client
         .peer()
         .call_tool(tool_request("close", json!({"connection_id": conn_id})))
@@ -990,7 +1033,7 @@ async fn pty_explicit_open_framing_applies() {
     client.cancel().await.ok();
 }
 
-// Transact write-then-read tests.
+// ── transact: write-then-read ────────────────────────────────────────────────
 
 #[tokio::test]
 async fn pty_transact_writes_then_reads_response() {
@@ -998,7 +1041,7 @@ async fn pty_transact_writes_then_reads_response() {
     let (mut master_file, _slave) = pty.into_parts();
     let cid = connection_id.clone();
 
-    // The device emulator writes a response after 300ms.
+    // Spawn a device emulator that writes a response after a short delay.
     let emulator = tokio::spawn(async move {
         tokio::time::sleep(Duration::from_millis(300)).await;
         use tokio::io::AsyncWriteExt;
@@ -1026,25 +1069,27 @@ async fn pty_transact_writes_then_reads_response() {
         "write half: {s:?}"
     );
     let data = s["read"]["data"].as_str().unwrap_or("");
-    // Raw PTYs do not echo. The read half may receive the emulator's
-    // "pong\n" or time out; the write half must complete in either case.
+    // In raw PTY mode there is no echo; the device emulator writes "pong\n"
+    // which the read half should pick up. If timing causes a timeout, that's
+    // acceptable — verify write half at minimum.
     assert!(
         data.contains("pong") || s["read"]["bytes_read"].as_u64() == Some(0),
         "expected pong response or empty: {s:?}"
     );
 
     let _ = emulator.await;
-    // Dropping _slave closes the PTY.
+    // _slave dropped here, closing the PTY
     client.cancel().await.ok();
 }
 
 #[tokio::test]
 async fn pty_transact_from_now_skips_pre_write_buffer() {
     let (_server, client, _rx, mut pty, connection_id) = setup().await;
-    // Put data in the ring before the transact call.
+    // Pre-write some data from the device side so the ring has bytes
+    // before the transact call.
     pty.write_device(b"PREEXISTING\n").await.unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
-    // The default `from` is `{"type":"now"}`, so PREEXISTING is skipped.
+    // transact with default from: "now" — should skip PREEXISTING.
     let r = client
         .peer()
         .call_tool(tool_request(
@@ -1069,10 +1114,10 @@ async fn pty_transact_from_now_skips_pre_write_buffer() {
 #[tokio::test]
 async fn pty_transact_from_cursor_includes_pre_write_buffer() {
     let (_server, client, _rx, mut pty, connection_id) = setup().await;
-    // Put data in the ring before the transact call.
+    // Pre-write some data from the device side.
     pty.write_device(b"PREEXISTING\n").await.unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
-    // `from: {"type":"cursor"}` includes PREEXISTING.
+    // transact with from: "cursor" — should include PREEXISTING.
     let r = client
         .peer()
         .call_tool(tool_request(
@@ -1098,9 +1143,9 @@ async fn pty_transact_from_cursor_includes_pre_write_buffer() {
 #[tokio::test]
 async fn pty_transact_with_protocol_applies_both_directions() {
     let (_server, client, _rx, mut pty, connection_id) = setup().await;
-    // The at_command preset appends \r on TX and frames RX by line.
-    // Pre-write data so the read half has buffered bytes to decode. Use
-    // `from: {"type":"cursor"}` because `{"type":"now"}` skips them.
+    // at_command preset: TX appends \r, RX frames by line.
+    // Pre-write data from device so the read half has something to decode
+    // (use from: cursor to pick up buffered data; default now skips it).
     pty.write_device(b"OK\r\n").await.unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
     let r = client
@@ -1131,16 +1176,19 @@ async fn pty_transact_with_protocol_applies_both_directions() {
     client.cancel().await.ok();
 }
 
-/// Wrap the `call_tool` future in `tokio::time::timeout`, then cancel the
-/// client. A completed call, transport error, or timeout is acceptable. The
-/// test verifies that transact does not hang when the client disconnects
-/// during the read.
+/// Cancellation in the PTY harness uses the proven timeout-based pattern:
+/// wrap the call_tool future in `tokio::time::timeout`, then cancel the
+/// client. Accepts any outcome (completed before timeout, transport error,
+/// or timeout). Proves the transact tool does not hang forever when the
+/// client disconnects mid-read.
 #[tokio::test]
 async fn pty_transact_cancellation_aborts_read() {
     let (_server, client, _rx, _pty, connection_id) = setup().await;
 
-    // Use a long read timeout and a short outer timeout, then cancel the
-    // client while the read is in progress.
+    // Start a transact with a long read timeout. Race it against a short
+    // outer timeout + client cancel — proves the tool doesn't hang forever
+    // when the client disconnects mid-read. Matches the proven
+    // send_break_cancellation_stops_gracefully pattern.
     let result = tokio::time::timeout(
         Duration::from_millis(150),
         client.peer().call_tool(tool_request(
@@ -1154,38 +1202,47 @@ async fn pty_transact_cancellation_aborts_read() {
     )
     .await;
 
-    // Client cancellation tears down the transport. The runtime cleans up a
-    // transact task that is still running.
+    // Cancel the client — transport teardown. The transact task (if still
+    // running) is cleaned up by the runtime.
     client.cancel().await.ok();
 
-    // The call may complete before the outer timeout, return a transport
-    // error during teardown, or remain running until the runtime cleans it up.
+    // Either:
+    //  - the transact completed before the outer timeout (write half done,
+    //    read half may have is_error or a stop_reason), OR
+    //  - the outer timeout fired (transact still running — fine, runtime
+    //    cleans it up after cancel).
+    // Either way, this proves the tool doesn't hang forever.
     match result {
         Ok(Ok(call_result)) => {
-            // A completed call may contain a partial, empty, or cancelled
-            // read result depending on timing.
+            // Transact returned a result before the outer timeout. Inspect
+            // it loosely — the write half should have completed; the read
+            // half may be partial/empty/cancelled depending on timing.
             let s = call_result.structured_content.expect("structured");
             assert!(
                 s["write"]["bytes_written"].as_u64().unwrap_or(0) > 0,
                 "write half should complete before cancel: {s:?}"
             );
-            // Transport teardown may produce "cancelled", "connection_closed",
-            // or no read result.
+            // No assertion on read.stop_reason — transport teardown may
+            // produce any of: "cancelled", "connection_closed",
+            // or no read result at all.
         }
         Ok(Err(_)) => {
-            // Client teardown raced the tool response.
+            // Transport error before timeout — acceptable; client teardown
+            // raced the tool response.
         }
         Err(_) => {
-            // The outer timeout fired while transact was still running.
+            // Outer timeout fired — transact still running. Client was
+            // cancelled above; runtime cleans up the task.
         }
     }
 }
 
-// Automatic profile sessions.
+// ── Automatic profile sessions ──────────────────────────────────────────────
 //
-// These tests use a real PTY slave as the hardware port and an injected
-// StaticPortProvider for synthetic USB identity. Profile-session behavior is
-// checked through public MCP results and real serial traffic.
+// These tests exercise the full public `open`/`open_profile` path with a
+// REAL PTY slave as the hardware port while an injected StaticPortProvider
+// describes synthetic USB identity. They prove the profile-session behavior
+// is observable through public MCP results — not just field wiring.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -1293,9 +1350,9 @@ async fn session_harness(provider: Arc<StaticPortProvider>) -> SessionHarness {
     }
 }
 
-/// A first high-confidence bare open creates a generated persistent profile.
-/// `open`, `list_profiles`, `get_status`, and `list_connections` report the
-/// same binding, and real serial traffic flows.
+/// 1. First high-confidence bare open creates a generated persistent
+///    profile; open result, list_profiles, get_status, and list_connections
+///    all agree — and real serial traffic flows.
 #[tokio::test]
 async fn auto_session_first_open_creates_generated_profile_and_pty_traffic_flows() {
     let mut pty = PtyPair::open().expect("openpty");
@@ -1311,7 +1368,7 @@ async fn auto_session_first_open_creates_generated_profile_and_pty_traffic_flows
     let harness = session_harness(provider).await;
     let client = &harness._client;
 
-    // Bare open with no baud or defaults uses the built-in 115200 fallback.
+    // Bare open: no baud, no defaults — built-in 115200 fallback.
     let opened = open_port(client, &slave, json!({})).await;
     let connection_id = opened["connection_id"].as_str().unwrap().to_string();
     assert_eq!(opened["baud_rate"], json!(115200), "built-in baud fallback");
@@ -1341,6 +1398,7 @@ async fn auto_session_first_open_creates_generated_profile_and_pty_traffic_flows
         json!("HELLO-SESSION")
     );
 
+    // list_profiles agrees.
     let listed = client
         .peer()
         .call_tool(tool_request("list_profiles", json!({})))
@@ -1353,10 +1411,11 @@ async fn auto_session_first_open_creates_generated_profile_and_pty_traffic_flows
     assert_eq!(s["profiles"][0]["metadata"]["revision"], json!(1));
     assert_eq!(s["profiles"][0]["metadata"]["use_count"], json!(1));
     assert_eq!(s["profiles"][0]["selector"]["serial_number"], json!("SN-1"));
-    // Generated selector omits path, description, and manufacturer.
+    // Generated selector must NOT carry path/description/manufacturer.
     assert!(s["profiles"][0]["selector"]["port_pattern"].is_null());
     assert!(s["profiles"][0]["selector"]["manufacturer"].is_null());
 
+    // get_status agrees.
     let status = client
         .peer()
         .call_tool(tool_request(
@@ -1369,6 +1428,7 @@ async fn auto_session_first_open_creates_generated_profile_and_pty_traffic_flows
     assert_eq!(st["profile"]["profile_name"], json!("auto-fake-usb-serial"));
     assert_eq!(st["profile"]["source"], json!("generated"));
 
+    // list_connections agrees.
     let conns = client
         .peer()
         .call_tool(tool_request("list_connections", json!({})))
@@ -1383,8 +1443,8 @@ async fn auto_session_first_open_creates_generated_profile_and_pty_traffic_flows
     harness._client.cancel().await.ok();
 }
 
-/// Closing and reopening automatically selects the same profile and increments
-/// usage without bumping revision. Real traffic still flows.
+/// 2. Close/reopen automatically selects the same profile and increments
+///    usage without bumping revision; real traffic still flows.
 #[tokio::test]
 async fn auto_session_close_reopen_selects_same_profile_and_increments_usage() {
     let mut pty = PtyPair::open().expect("openpty");
@@ -1455,8 +1515,8 @@ async fn auto_session_close_reopen_selects_same_profile_and_increments_usage() {
     harness._client.cancel().await.ok();
 }
 
-/// A different serial number with the same VID/PID gets a different generated
-/// profile.
+/// 3. A different serial number with the same VID/PID gets a different
+///    generated profile.
 #[tokio::test]
 async fn auto_session_different_serial_same_vid_pid_gets_different_profile() {
     let pty1 = PtyPair::open().expect("openpty");
@@ -1492,8 +1552,9 @@ async fn auto_session_different_serial_same_vid_pid_gets_different_profile() {
     harness._client.cancel().await.ok();
 }
 
-/// Two live ports with a duplicate high fingerprint produce a transient
-/// ambiguity session. Settings are not applied to an indistinguishable device.
+/// 4. Two live ports with a duplicate high fingerprint produce a transient
+///    ambiguity session — settings are never applied to an
+///    indistinguishable device.
 #[tokio::test]
 async fn auto_session_duplicate_fingerprint_two_ports_is_transient() {
     let pty1 = PtyPair::open().expect("openpty");
@@ -1527,8 +1588,8 @@ async fn auto_session_duplicate_fingerprint_two_ports_is_transient() {
     harness._client.cancel().await.ok();
 }
 
-/// A weak PTY identity opens with a transient session and leaves the profile
-/// store untouched. No durable profile or file is created.
+/// 5. Weak PTY identity opens with a transient session and leaves the
+///    profile store untouched (no durable profile, no file).
 #[tokio::test]
 async fn auto_session_weak_pty_identity_is_transient_and_store_stays_empty() {
     let pty = PtyPair::open().expect("openpty");
@@ -1552,7 +1613,7 @@ async fn auto_session_weak_pty_identity_is_transient_and_store_stays_empty() {
         json!(0)
     );
 
-    // No durable profile was written, so the file must not exist.
+    // No durable profile was written — the file must not exist.
     assert!(
         !harness.profiles_path.exists(),
         "weak identity must not create a profiles file"
@@ -1561,8 +1622,8 @@ async fn auto_session_weak_pty_identity_is_transient_and_store_stays_empty() {
     harness._client.cancel().await.ok();
 }
 
-/// `profile_mode="none"` disables automatic selection and creation, and
-/// returns an observable disabled binding.
+/// 6. `profile_mode="none"` disables automatic selection/creation and
+///    returns an observable disabled binding.
 #[tokio::test]
 async fn auto_session_profile_mode_none_disables_selection_and_creation() {
     let pty = PtyPair::open().expect("openpty");
@@ -1602,9 +1663,10 @@ async fn auto_session_profile_mode_none_disables_selection_and_creation() {
     harness._client.cancel().await.ok();
 }
 
-/// An explicit open field overrides the selected profile's default for the
-/// live connection and is persisted immediately. The binding returns clean
-/// with a bumped revision, and the next bare reopen applies the override.
+/// 7. An explicit open field overrides the selected profile's default for
+///    the live connection AND is persisted write-through immediately
+///    (open-override learning): the binding comes back clean with
+///    a bumped revision, and the next bare reopen applies the override.
 #[tokio::test]
 async fn learning_explicit_open_override_persists_immediately_and_next_reopen_uses_it() {
     let pty = PtyPair::open().expect("openpty");
@@ -1680,8 +1742,8 @@ async fn learning_explicit_open_override_persists_immediately_and_next_reopen_us
     harness._client.cancel().await.ok();
 }
 
-/// A separate HTTP client observes the same active binding and generated
-/// profile.
+/// 8. A separate HTTP client observes the same active binding and the
+///    generated profile.
 #[tokio::test]
 async fn auto_session_second_http_client_observes_binding_and_profile() {
     let pty = PtyPair::open().expect("openpty");
@@ -1711,7 +1773,7 @@ async fn auto_session_second_http_client_observes_binding_and_profile() {
         .unwrap()
         .to_string();
 
-    // Client B sees the same binding.
+    // Client B sees the binding...
     let status = client_b
         .peer()
         .call_tool(tool_request(
@@ -1724,7 +1786,7 @@ async fn auto_session_second_http_client_observes_binding_and_profile() {
     assert_eq!(st["profile"]["profile_name"], json!(profile_name));
     assert_eq!(st["profile"]["source"], json!("generated"));
 
-    // Client B also sees the generated profile.
+    // ...and the generated profile.
     let listed = client_b
         .peer()
         .call_tool(tool_request("list_profiles", json!({})))
@@ -1754,8 +1816,9 @@ async fn auto_session_second_http_client_observes_binding_and_profile() {
     client_b.cancel().await.ok();
 }
 
-/// `open_profile` with two matching ports returns a tool error. One exact
-/// match works and becomes the last-used winner for a later bare open.
+/// 9. `open_profile` with two matching ports returns a tool error; exactly
+///    one match works and becomes the last-used winner for a later bare
+///    open.
 #[tokio::test]
 async fn open_profile_two_matching_ports_errors_and_exact_one_becomes_last_used_winner() {
     let pty1 = PtyPair::open().expect("openpty");
@@ -1769,8 +1832,7 @@ async fn open_profile_two_matching_ports_errors_and_exact_one_becomes_last_used_
     let harness = session_harness(provider).await;
     let client = &harness._client;
 
-    // The empty-selector profile matches both live ports, so open_profile
-    // returns a tool error.
+    // Empty-selector profile matches BOTH live ports → tool error.
     let cfg = client
         .peer()
         .call_tool(tool_request(
@@ -1804,7 +1866,8 @@ async fn open_profile_two_matching_ports_errors_and_exact_one_becomes_last_used_
         .unwrap()
         .to_string();
 
-    // Save a named snapshot while the first connection remains open.
+    // Name the same device explicitly via save_profile (while the first
+    // connection is still open — save_profile snapshots it).
     let saved = client
         .peer()
         .call_tool(tool_request(
@@ -1815,8 +1878,8 @@ async fn open_profile_two_matching_ports_errors_and_exact_one_becomes_last_used_
         .unwrap();
     assert_ne!(saved.is_error, Some(true), "{saved:?}");
 
-    // Close the first connection. open_profile now has one matching port and
-    // marks the profile used.
+    // Close the first connection, then open_profile the same port with
+    // exactly one match works and marks the profile used.
     close_port(client, &first_id).await;
 
     let explicit = client
@@ -1842,8 +1905,8 @@ async fn open_profile_two_matching_ports_errors_and_exact_one_becomes_last_used_
 
     close_port(client, &explicit_id).await;
 
-    // A later bare open selects the explicitly used profile, not the older
-    // generated one.
+    // A later bare open must select the explicitly used profile, not the
+    // older generated one.
     let reopened = open_port(client, &slave1, json!({})).await;
     assert_eq!(reopened["profile"]["source"], json!("automatic"));
     assert_eq!(
@@ -1855,7 +1918,7 @@ async fn open_profile_two_matching_ports_errors_and_exact_one_becomes_last_used_
     harness._client.cancel().await.ok();
 }
 
-/// Equal top-ranked profile timestamps produce observable ambiguity.
+/// 10. Equal top-ranked profile timestamps produce observable ambiguity.
 #[tokio::test]
 async fn open_auto_equal_top_ranked_timestamps_produce_ambiguity() {
     let pty = PtyPair::open().expect("openpty");
@@ -1928,7 +1991,7 @@ use_count = 1
         .collect();
     assert_eq!(candidates, vec!["ambig-a", "ambig-b"]);
 
-    // The ambiguous open applied neither profile and bumped neither profile.
+    // Neither profile was applied or bumped.
     let listed = client
         .peer()
         .call_tool(tool_request("list_profiles", json!({})))
@@ -1942,8 +2005,8 @@ use_count = 1
     client.cancel().await.ok();
 }
 
-/// Per-call read, write, and transact options do not alter usage, revision, or
-/// defaults of the bound profile.
+/// 11. Per-call read/write/transact options do not alter usage, revision,
+///     or defaults of the bound profile.
 #[tokio::test]
 async fn per_call_io_does_not_alter_usage_revision_or_defaults() {
     let mut pty = PtyPair::open().expect("openpty");
@@ -1968,7 +2031,7 @@ async fn per_call_io_does_not_alter_usage_revision_or_defaults() {
 
     let before = session_profile_snapshot(client, &profile_name).await;
 
-    // Exercise write, read, and transact with per-call options.
+    // Write (device drains), read, transact with per-call options.
     client
         .peer()
         .call_tool(tool_request(
@@ -2017,12 +2080,12 @@ async fn per_call_io_does_not_alter_usage_revision_or_defaults() {
     harness._client.cancel().await.ok();
 }
 
-/// Explicit `open_profile` on a weak-identity port reports the matched port's
-/// confidence (none or low), not a hardcoded high, while keeping
-/// `source=explicit`.
+/// 12. Review gate: explicit `open_profile` on a weak-identity port reports
+///     the matched port's OWN confidence (none/low), not a hardcoded high,
+///     while keeping source=explicit.
 #[tokio::test]
 async fn open_profile_explicit_binding_reports_matched_port_confidence() {
-    // Case 1: path-only PTY (unknown transport, no identity) reports None.
+    // Case 1: path-only PTY (unknown transport, no identity) → None.
     let pty_none = PtyPair::open().expect("openpty");
     let slave_none = pty_none.slave_path.to_string_lossy().into_owned();
     let provider_none = StaticPortProvider::new(vec![StaticPortProvider::weak_port(&slave_none)]);
@@ -2059,7 +2122,7 @@ async fn open_profile_explicit_binding_reports_matched_port_confidence() {
     assert_eq!(profile["profile_name"], json!("weak-pro"));
     harness_none._client.cancel().await.ok();
 
-    // Case 2: PCI-synthetic PTY (hardware ID only) reports Low.
+    // Case 2: PCI-synthetic PTY (hardware id only) → Low.
     let pty_low = PtyPair::open().expect("openpty");
     let slave_low = pty_low.slave_path.to_string_lossy().into_owned();
     let mut low_port = StaticPortProvider::weak_port(&slave_low);
@@ -2097,6 +2160,7 @@ async fn open_profile_explicit_binding_reports_matched_port_confidence() {
     );
     assert_eq!(profile["profile_name"], json!("pci-pro"));
 
+    // get_status agrees with the binding.
     let connection_id = opened.structured_content.as_ref().unwrap()["connection_id"]
         .as_str()
         .unwrap()
@@ -2116,9 +2180,9 @@ async fn open_profile_explicit_binding_reports_matched_port_confidence() {
     harness_low._client.cancel().await.ok();
 }
 
-/// Explicit `save_profile` of a generated-bound connection creates a
-/// user-owned profile (`generated=false`). This is a promotion, not a copy of
-/// the generated flag.
+/// 13. Review gate (M6): explicit `save_profile` of a generated-bound
+///     connection creates a USER-owned profile (`generated=false`) — a
+///     deliberate promotion, not a blind copy of the generated flag.
 #[tokio::test]
 async fn save_profile_on_generated_bound_connection_promotes_to_user_owned() {
     let pty = PtyPair::open().expect("openpty");
@@ -2181,12 +2245,12 @@ async fn save_profile_on_generated_bound_connection_promotes_to_user_owned() {
     harness._client.cancel().await.ok();
 }
 
-// Write-through learning, conflicts, and rollback.
+// ── Write-through learning, conflicts, rollback ──────────────────────────────
 //
-// These tests use the same harness: a real PTY and an injected high-confidence
-// StaticPortProvider. They exercise learning, partial failures, CAS and stale
-// state, rollback, and deletion protection through public MCP results and real
-// serial traffic.
+// Same harness as the profile-session tests: real PTY + injected
+// high-confidence StaticPortProvider. These tests prove learning,
+// partial-failure honesty, CAS/stale behavior, rollback, and deletion
+// protection through public MCP results and real serial traffic.
 
 /// Reconfigure one connection and return the structured result.
 async fn reconfigure_baud(
@@ -2210,8 +2274,8 @@ async fn reconfigure_baud(
     result.structured_content.expect("structured")
 }
 
-/// Reconfiguring the generated profile from revision 1 persists revision 2.
-/// Close and reopen apply the baud in live status.
+/// 1. Generated profile revision 1 → reconfigure baud → revision 2
+///    persisted; close/reopen applies the baud on live status.
 #[tokio::test]
 async fn learning_reconfigure_baud_bumps_revision_and_reopen_applies() {
     let pty = PtyPair::open().expect("openpty");
@@ -2264,7 +2328,7 @@ async fn learning_reconfigure_baud_bumps_revision_and_reopen_applies() {
     harness._client.cancel().await.ok();
 }
 
-/// `set_flow_control` persists and applies on reopen.
+/// 2. set_flow_control persists and applies on reopen.
 #[tokio::test]
 async fn learning_set_flow_control_persists_and_applies_on_reopen() {
     let pty = PtyPair::open().expect("openpty");
@@ -2319,8 +2383,8 @@ async fn learning_set_flow_control_persists_and_applies_on_reopen() {
     harness._client.cancel().await.ok();
 }
 
-/// Connection-mode configure persists framing. Reopen and an actual framed
-/// read verify it.
+/// 3. Connection-mode configure persists framing; reopen and an actual
+///    framed read prove it.
 #[tokio::test]
 async fn learning_connection_configure_framing_persists_and_framed_read_proves_it() {
     let mut pty = PtyPair::open().expect("openpty");
@@ -2386,7 +2450,7 @@ async fn learning_connection_configure_framing_persists_and_framed_read_proves_i
     harness._client.cancel().await.ok();
 }
 
-/// Multiple durable changes create a bounded revision history of five entries.
+/// 4. Multiple durable changes create a bounded revision history (max 5).
 #[tokio::test]
 async fn learning_multiple_changes_create_bounded_revision_history() {
     let pty = PtyPair::open().expect("openpty");
@@ -2409,7 +2473,7 @@ async fn learning_multiple_changes_create_bounded_revision_history() {
         .unwrap()
         .to_string();
 
-    // Five reconfigures after revision 1 produce revision 6.
+    // 5 reconfigures after the rev-1 generated profile → revision 6.
     for baud in [1200u32, 2400, 4800, 9600, 19200] {
         reconfigure_baud(client, &connection_id, baud).await;
     }
@@ -2438,10 +2502,10 @@ async fn learning_multiple_changes_create_bounded_revision_history() {
     harness._client.cancel().await.ok();
 }
 
-/// Non-durable operations do not change profile defaults or revision: BREAK,
-/// flush, and per-call framing and matching on read/write. DTR/RTS is covered
-/// by the http_integration loopback suite because PTYs cannot drive modem
-/// lines and return ENOTTY.
+/// 5. Non-durable operations never change profile defaults or revision:
+///    BREAK, flush, and per-call framing/match on read/write. (DTR/RTS is
+///    covered by the http_integration loopback suite; PTYs cannot drive
+///    modem lines — ENOTTY.)
 #[tokio::test]
 async fn non_learning_operations_do_not_alter_profile() {
     let mut pty = PtyPair::open().expect("openpty");
@@ -2566,11 +2630,10 @@ async fn non_learning_operations_do_not_alter_profile() {
     harness._client.cancel().await.ok();
 }
 
-/// Partial failure: live reconfigure succeeds while the profile write fails
-/// in a read-only directory. The result stays successful with
-/// `state="failed"`, the binding is dirty, and the cache and file stay old.
-/// Restoring permissions and closing cleanly retries persistence; reopen uses
-/// the new baud.
+/// 6. Partial failure: live reconfigure succeeds, profile write fails
+///    (read-only dir) → result stays successful with `state="failed"`,
+///    binding dirty, cache/file old. Restoring permissions + clean close
+///    retries and persists; reopen uses the new baud.
 #[tokio::test]
 async fn learning_partial_failure_reports_failed_and_clean_close_retries() {
     use std::os::unix::fs::PermissionsExt;
@@ -2677,10 +2740,10 @@ async fn learning_partial_failure_reports_failed_and_clean_close_retries() {
     client.cancel().await.ok();
 }
 
-/// CAS and stale state: an external profile-mode configure bumps the bound
-/// profile. The next live reconfigure succeeds but reports a conflict, the
-/// binding turns stale, and the newer profile remains untouched. Close does
-/// not overwrite the stale profile.
+/// 7. CAS/stale: an external profile-mode configure bumps the bound
+///    profile; the next live reconfigure succeeds but reports a conflict,
+///    the binding turns stale, and the newer profile remains untouched.
+///    Close does not overwrite the stale profile.
 #[tokio::test]
 async fn learning_cas_conflict_marks_stale_and_close_does_not_overwrite() {
     let pty = PtyPair::open().expect("openpty");
@@ -2705,7 +2768,7 @@ async fn learning_cas_conflict_marks_stale_and_close_does_not_overwrite() {
         .to_string();
     assert_eq!(opened["profile"]["revision"], json!(1));
 
-    // A second client bumps the profile to revision 2 with baud 14400.
+    // Second client bumps the profile to revision 2 with baud 14400.
     let cfg = client_b
         .peer()
         .call_tool(tool_request(
@@ -2720,7 +2783,7 @@ async fn learning_cas_conflict_marks_stale_and_close_does_not_overwrite() {
         .unwrap();
     assert_ne!(cfg.is_error, Some(true), "{cfg:?}");
 
-    // Live reconfigure succeeds while persistence reports a conflict.
+    // Live reconfigure succeeds; persistence reports a conflict.
     let r = reconfigure_baud(client, &connection_id, 9600).await;
     assert_eq!(r["baud_rate"], json!(9600), "hardware mutation applied");
     assert_eq!(r["profile_persistence"]["state"], json!("failed"));
@@ -2735,7 +2798,7 @@ async fn learning_cas_conflict_marks_stale_and_close_does_not_overwrite() {
     assert_eq!(r["profile"]["stale"], json!(true));
     assert_eq!(r["profile"]["dirty"], json!(true));
 
-    // The newer profile remains unchanged.
+    // The newer profile remains untouched.
     let (_, rev, defaults) = session_profile_snapshot(client, &profile_name).await;
     assert_eq!(rev, json!(2));
     assert_eq!(
@@ -2769,9 +2832,9 @@ async fn learning_cas_conflict_marks_stale_and_close_does_not_overwrite() {
     client_b.cancel().await.ok();
 }
 
-/// Rollback restores a prior baud as a new monotonic revision. The active
-/// connection stays unchanged and stale, close cannot overwrite the rollback,
-/// and reopen applies the rolled-back baud.
+/// 8. Rollback restores a prior baud as a new monotonic revision; the
+///    active connection stays unchanged and stale; close cannot overwrite
+///    the rollback; reopen applies the rolled-back baud.
 #[tokio::test]
 async fn rollback_restores_prior_baud_and_active_connection_stays_unchanged() {
     let pty = PtyPair::open().expect("openpty");
@@ -2793,7 +2856,7 @@ async fn rollback_restores_prior_baud_and_active_connection_stays_unchanged() {
         .as_str()
         .unwrap()
         .to_string();
-    // Revisions progress from 1 (115200) to 2 (9600) to 3 (19200).
+    // rev 1 (115200) → rev 2 (9600) → rev 3 (19200).
     reconfigure_baud(client, &connection_id, 9600).await;
     reconfigure_baud(client, &connection_id, 19200).await;
 
@@ -2820,7 +2883,7 @@ async fn rollback_restores_prior_baud_and_active_connection_stays_unchanged() {
     assert_eq!(rb_r["persistence"]["state"], json!("persisted"));
     assert_eq!(rb_r["persistence"]["operation"], json!("rollback"));
 
-    // The active connection keeps its live state and turns stale.
+    // Active connection stays on its live state and turns stale.
     let status = client
         .peer()
         .call_tool(tool_request(
@@ -2856,8 +2919,8 @@ async fn rollback_restores_prior_baud_and_active_connection_stays_unchanged() {
     harness._client.cancel().await.ok();
 }
 
-/// Rollback of a framing revision: after reopen, framed traffic verifies the
-/// restored framing default.
+/// 9. Rollback of a framing revision: after reopen, actual framed traffic
+///    proves the restored framing default.
 #[tokio::test]
 async fn rollback_framing_revision_proves_framed_traffic_after_reopen() {
     let mut pty = PtyPair::open().expect("openpty");
@@ -2873,8 +2936,8 @@ async fn rollback_framing_revision_proves_framed_traffic_after_reopen() {
     let harness = session_harness(provider).await;
     let client = &harness._client;
 
-    // Open with explicit rx_framing; the generated profile stores it in
-    // revision 1.
+    // Open with explicit rx_framing: the generated profile bakes the
+    // framing into revision 1.
     let opened = open_port(
         client,
         &slave,
@@ -2888,8 +2951,7 @@ async fn rollback_framing_revision_proves_framed_traffic_after_reopen() {
         .to_string();
     assert_eq!(opened["profile"]["revision"], json!(1));
 
-    // Connection-mode configure clears framing in revision 2, producing raw
-    // reads.
+    // Connection-mode configure clears the framing → revision 2 (raw).
     let cfg = client
         .peer()
         .call_tool(tool_request(
@@ -2930,8 +2992,8 @@ async fn rollback_framing_revision_proves_framed_traffic_after_reopen() {
     assert_eq!(rb_r["defaults"]["rx_framing"]["type"], json!("line"));
     assert_eq!(rb_r["active_connections_unchanged"], json!(1));
 
-    // Close reports failure for the stale binding without changing the file.
-    // Reopen and a framed read verify the restored framing.
+    // Close (stale → failed, file unchanged), reopen, framed read proves
+    // the restored framing.
     let cl = client
         .peer()
         .call_tool(tool_request(
@@ -2965,8 +3027,8 @@ async fn rollback_framing_revision_proves_framed_traffic_after_reopen() {
     harness._client.cancel().await.ok();
 }
 
-/// Wrong expected and evicted revisions are tool errors that leave the file
-/// unchanged.
+/// 10. Wrong expected revision and evicted revision are tool errors that
+///     leave the file unchanged.
 #[tokio::test]
 async fn rollback_wrong_expected_and_evicted_revision_error_without_file_change() {
     let pty = PtyPair::open().expect("openpty");
@@ -2994,7 +3056,7 @@ async fn rollback_wrong_expected_and_evicted_revision_error_without_file_change(
     assert_eq!(rev, json!(3));
     let original_baud = defaults["baud_rate"].clone();
 
-    // A wrong expected_revision reports a conflict and leaves the file alone.
+    // Wrong expected_revision → conflict, file unchanged.
     let bad = client
         .peer()
         .call_tool(tool_request(
@@ -3017,8 +3079,7 @@ async fn rollback_wrong_expected_and_evicted_revision_error_without_file_change(
     assert_eq!(rev, json!(3), "file unchanged after wrong CAS");
     assert_eq!(defaults["baud_rate"], original_baud);
 
-    // An evicted or missing target revision is a tool error; the file stays
-    // unchanged.
+    // Evicted/never-existing target revision → tool error, file unchanged.
     let bad = client
         .peer()
         .call_tool(tool_request(
@@ -3048,8 +3109,8 @@ async fn rollback_wrong_expected_and_evicted_revision_error_without_file_change(
     harness._client.cancel().await.ok();
 }
 
-/// Deleting a profile bound to an open connection reports the connection ID.
-/// After close, deletion succeeds.
+/// 11. Deleting a profile bound to an open connection errors with the
+///     connection ID; after close, deletion succeeds.
 #[tokio::test]
 async fn delete_profile_bound_to_open_connection_errors_and_succeeds_after_close() {
     let pty = PtyPair::open().expect("openpty");
@@ -3116,8 +3177,8 @@ async fn delete_profile_bound_to_open_connection_errors_and_succeeds_after_close
     harness._client.cancel().await.ok();
 }
 
-/// Rollback with no active bound connections reports zero. The reopened
-/// device applies the restored defaults.
+/// 12. Rollback with no active bound connections reports zero and the
+///     reopened device applies the restored defaults.
 #[tokio::test]
 async fn rollback_with_no_active_connections_reports_zero() {
     let pty = PtyPair::open().expect("openpty");
@@ -3174,11 +3235,12 @@ async fn rollback_with_no_active_connections_reports_zero() {
     harness._client.cancel().await.ok();
 }
 
-// `list_ports` profile discovery preview.
+// ── `list_ports` profile discovery preview ──────────────────────────────────
 //
-// These tests use real PTY slave paths, injected StaticPortProvider identity,
-// and public MCP calls only. The preview must predict bare `open(port=...)`
-// without marking profiles used or mutating the store.
+// Behavior-first tests for `ListPortsResult.profile_matches`: real PTY slave
+// paths, injected StaticPortProvider identity, and public MCP calls only.
+// The preview must exactly predict what a bare `open(port=...)` does,
+// without marking any profile used or mutating the store.
 
 /// Call `list_ports` through the public MCP surface and return the
 /// structured result.
@@ -3204,8 +3266,9 @@ fn match_for<'a>(listed: &'a serde_json::Value, port: &str) -> &'a serde_json::V
         .unwrap_or_else(|| panic!("no profile_match entry for {port}: {listed}"))
 }
 
-/// An empty store returns one `none` entry per port, parallel to `ports`.
-/// The `ports` array remains identical to the provider's raw `PortInfo` data.
+/// 1. Empty store: one `none` entry per port, parallel to `ports`, with the
+///    `ports` array serialized exactly like the provider's raw PortInfo
+///    (match metadata never contaminates OS enumeration).
 #[tokio::test]
 async fn list_ports_preview_empty_store_reports_none_parallel_and_pure_ports() {
     let pty1 = PtyPair::open().expect("openpty");
@@ -3253,8 +3316,9 @@ async fn list_ports_preview_empty_store_reports_none_parallel_and_pure_ports() {
     harness._client.cancel().await.ok();
 }
 
-/// Generated and saved high profiles preview as `selected` with the expected
-/// name and revision. The unique last-used winner matches a later bare open.
+/// 2. Generated/saved high profiles preview as `selected` with the right
+///    name/revision, and the unique last-used winner matches what a later
+///    bare `open` actually selects.
 #[tokio::test]
 async fn list_ports_preview_selected_winner_matches_later_bare_open() {
     let pty = PtyPair::open().expect("openpty");
@@ -3270,7 +3334,7 @@ async fn list_ports_preview_selected_winner_matches_later_bare_open() {
     let harness = session_harness(provider).await;
     let client = &harness._client;
 
-    // First bare open creates the generated profile at revision 1.
+    // First bare open creates the generated profile (revision 1).
     let opened = open_port(client, &slave, json!({})).await;
     let connection_id = opened["connection_id"].as_str().unwrap().to_string();
     assert_eq!(
@@ -3278,8 +3342,8 @@ async fn list_ports_preview_selected_winner_matches_later_bare_open() {
         json!("auto-fake-usb-serial")
     );
 
-    // Save a second, user-named profile for the same device. It has never been
-    // used, so it sorts oldest despite being newer on disk.
+    // Save a second, user-named profile for the same device. It has never
+    // been used, so it sorts oldest despite being newer on disk.
     let saved = client
         .peer()
         .call_tool(tool_request(
@@ -3291,8 +3355,7 @@ async fn list_ports_preview_selected_winner_matches_later_bare_open() {
     assert_ne!(saved.is_error, Some(true), "{saved:?}");
     close_port(client, &connection_id).await;
 
-    // Preview selects the generated profile as the unique most-recently-used
-    // winner.
+    // Preview: generated profile is the unique most-recently-used winner.
     let listed = call_list_ports(client).await;
     let high = match_for(&listed, &slave);
     assert_eq!(high["outcome"], json!("selected"));
@@ -3304,7 +3367,7 @@ async fn list_ports_preview_selected_winner_matches_later_bare_open() {
     assert_eq!(candidates[0]["revision"], json!(1));
     assert!(candidates[0]["last_used_at_ms"].is_number());
 
-    // Explicit use of the second profile makes it the winner.
+    // Explicit use of the second profile makes IT the winner.
     let opened = open_port(client, &slave, json!({ "profile_mode": "none" })).await;
     let connection_id = opened["connection_id"].as_str().unwrap().to_string();
     close_port(client, &connection_id).await;
@@ -3325,7 +3388,7 @@ async fn list_ports_preview_selected_winner_matches_later_bare_open() {
     assert_eq!(high["outcome"], json!("selected"));
     assert_eq!(high["selected_profile"], json!("my-dev"));
 
-    // Bare open selects the profile advertised by the preview.
+    // A bare open selects exactly what the preview advertised.
     let reopened = open_port(client, &slave, json!({})).await;
     assert_eq!(reopened["profile"]["profile_name"], json!("my-dev"));
     assert_eq!(reopened["profile"]["source"], json!("automatic"));
@@ -3335,8 +3398,9 @@ async fn list_ports_preview_selected_winner_matches_later_bare_open() {
     harness._client.cancel().await.ok();
 }
 
-/// Equal top rank from two never-used saved profiles returns `ambiguous`, lists
-/// both candidates, and leaves a bare open transient instead of guessing.
+/// 3. Equal top rank (two saved profiles that were never used): `ambiguous`,
+///    both candidates listed, no selected profile — and a bare open stays
+///    transient instead of guessing.
 #[tokio::test]
 async fn list_ports_preview_equal_timestamps_is_ambiguous_and_open_stays_transient() {
     let pty = PtyPair::open().expect("openpty");
@@ -3352,8 +3416,8 @@ async fn list_ports_preview_equal_timestamps_is_ambiguous_and_open_stays_transie
     let harness = session_harness(provider).await;
     let client = &harness._client;
 
-    // With profile_mode=none, no generated profile competes. Both saved
-    // profiles have last_used_at_ms = null and tie at the oldest rank.
+    // profile_mode=none: no generated profile competes; both saved profiles
+    // carry last_used_at_ms = null, so they tie at the oldest rank.
     let opened = open_port(client, &slave, json!({ "profile_mode": "none" })).await;
     let connection_id = opened["connection_id"].as_str().unwrap().to_string();
     for name in ["dev-a", "dev-b"] {
@@ -3381,8 +3445,7 @@ async fn list_ports_preview_equal_timestamps_is_ambiguous_and_open_stays_transie
         .collect();
     assert_eq!(candidate_names, vec!["dev-a", "dev-b"]);
 
-    // Bare open must not guess. It returns a transient session with both
-    // candidates.
+    // Bare open must not guess: transient session listing both candidates.
     let opened = open_port(client, &slave, json!({})).await;
     assert_eq!(opened["profile"]["source"], json!("transient"));
     assert_eq!(opened["profile"]["persistent"], json!(false));
@@ -3399,8 +3462,8 @@ async fn list_ports_preview_equal_timestamps_is_ambiguous_and_open_stays_transie
     harness._client.cancel().await.ok();
 }
 
-/// Duplicate live high fingerprints return `duplicate` for both ports and never
-/// select a profile, even when a matching profile exists.
+/// 4. Duplicate live high fingerprints: `duplicate` for BOTH ports, never a
+///    selection — even when a matching profile exists.
 #[tokio::test]
 async fn list_ports_preview_duplicate_fingerprints_report_duplicate() {
     let pty1 = PtyPair::open().expect("openpty");
@@ -3414,8 +3477,8 @@ async fn list_ports_preview_duplicate_fingerprints_report_duplicate() {
     let harness = session_harness(provider).await;
     let client = &harness._client;
 
-    // Write a matching profile through a second store instance using the same
-    // file. The preview must report `duplicate` for both ports.
+    // Give both ports a matching profile on disk via a second store
+    // instance (same file), then preview: both must be `duplicate`.
     let store2 = serial_mcp::profile_store::ProfileStore::open(harness.profiles_path.clone())
         .expect("second store instance on same file");
     store2
@@ -3450,9 +3513,9 @@ async fn list_ports_preview_duplicate_fingerprints_report_duplicate() {
     harness._client.cancel().await.ok();
 }
 
-/// Medium identity (VID/PID without a serial) is never auto-selected.
-/// Explicitly matching non-empty selectors are `ineligible` candidates, and
-/// empty selectors that match every port are excluded.
+/// 5. Medium identity (VID/PID, no serial): never auto-selected; explicitly
+///    matching non-empty selectors are `ineligible` candidates, and empty
+///    selectors (which match every port) are excluded.
 #[tokio::test]
 async fn list_ports_preview_medium_identity_ineligible_and_empty_selector_excluded() {
     let pty = PtyPair::open().expect("openpty");
@@ -3509,7 +3572,7 @@ async fn list_ports_preview_medium_identity_ineligible_and_empty_selector_exclud
     harness._client.cancel().await.ok();
 }
 
-/// Deleting the only matching profile returns the preview to `none`.
+/// 6. Deleting the only matching profile returns the preview to `none`.
 #[tokio::test]
 async fn list_ports_preview_delete_profile_returns_to_none() {
     let pty = PtyPair::open().expect("openpty");
@@ -3551,8 +3614,8 @@ async fn list_ports_preview_delete_profile_returns_to_none() {
     harness._client.cancel().await.ok();
 }
 
-/// A fresh read across store instances sees a second store's write to the same
-/// file immediately, as another process would.
+/// 7. Fresh read across store instances: a second store writing to the same
+///    file (as another process would) is visible to `list_ports` immediately.
 #[tokio::test]
 async fn list_ports_preview_fresh_read_sees_second_store_write() {
     let pty = PtyPair::open().expect("openpty");
@@ -3568,9 +3631,9 @@ async fn list_ports_preview_fresh_read_sees_second_store_write() {
     let harness = session_harness(provider).await;
     let client = &harness._client;
 
-    // A second store instance writes the file while the server cache is empty.
-    // list_ports must reload under the advisory lock instead of using stale
-    // cache data.
+    // The server's store cache is empty; a DIFFERENT store instance writes
+    // the file. list_ports must reload under the advisory lock (fresh read),
+    // not answer from the stale cache.
     let store2 = serial_mcp::profile_store::ProfileStore::open(harness.profiles_path.clone())
         .expect("second store instance on same file");
     store2
@@ -3602,12 +3665,16 @@ async fn list_ports_preview_fresh_read_sees_second_store_write() {
     harness._client.cancel().await.ok();
 }
 
-/// A real `list_ports` response validates schema wire types for preview
-/// entries with candidates and a selection, and rejects non-standard uint
-/// formats in the catalog schema.
+/// 8. A real `list_ports` response (with candidates and a selection)
+///    validates against the generated schema's wire types, and the
+///    catalog schema carries no non-standard uint formats.
 ///
-/// This test covers preview entries only. It does not validate the full raw OS
-/// enumeration payload.
+/// Note: the FULL generated `ListPortsResult` schema cannot validate raw OS
+/// enumeration output because schemars marks `PortInfo.vid`/`pid`/`interface`
+/// `required` while serde `skip_serializing_if` omits them when `None` — a
+/// pre-existing `PortInfo` schema quirk that the preview wire types must not
+/// touch (see the "Do not change `PortInfo`" non-scope). The preview wire
+/// types (`PortProfileMatch`/`ProfileMatchCandidate`) validate cleanly.
 #[tokio::test]
 async fn list_ports_preview_output_validates_against_generated_schema() {
     let pty = PtyPair::open().expect("openpty");
@@ -3684,7 +3751,7 @@ async fn list_ports_preview_output_validates_against_generated_schema() {
     harness._client.cancel().await.ok();
 }
 
-// `capture_boot` arm-only behavior over a real PTY.
+// ── capture_boot arm-only over a real PTY ────────────────────────────────────
 //
 // PTYs expose no modem-line callbacks, so DTR/RTS assertion cannot be
 // observed here (the atomic reset proof lives in the controlled backend in

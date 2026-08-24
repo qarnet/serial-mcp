@@ -241,10 +241,17 @@ cargo test --locked
 cargo clippy --all-targets --locked -- -D warnings
 cargo fmt --all -- --check
 
-# Firmware-based tests (require native_sim firmware, see firmware/AGENTS.md)
-cargo test --test native_sim_validation -- --ignored
-cargo test --test native_sim_connection_lifecycle -- --ignored --test-threads=1
+# Linux-only required Rust PTY fixture suites
+cargo test --locked --test device_fixture -- --test-threads=1
+cargo test --locked --test device_command_parity -- --test-threads=1
+cargo test --locked --test device_framing_parity -- --test-threads=1
+cargo test --locked --test device_protocol_parity -- --test-threads=1
 ```
+
+Production-path real-PTY fixture tests run on Linux only: macOS `serialport`
+baud configuration invokes `IOSSIOSPEED`, which macOS PTYs reject with
+`ENOTTY`. macOS still runs normal Rust fmt/build/test/clippy and controlled-
+backend tests; Linux-only fixture targets compile as zero tests there.
 
 ## Documentation and status
 

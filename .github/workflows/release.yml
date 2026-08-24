@@ -174,8 +174,19 @@ jobs:
       - name: Report Rust toolchain
         run: rustc --version --verbose
 
-      - name: Cache cargo registry + build
-        if: matrix.os != 'windows-latest'
+      # Cargo cache is RESTORED AND SAVED ONLY in release mode (CodeQL
+      # actions/cache-poisoning/poisonable-step, alert #15). The untrusted
+      # path is dry-run: its `ref` input is a workflow_dispatch value that
+      # could point at attacker-controlled code, and the cache action's POST
+      # step would tar whatever that code left in ~/.cargo/target and upload
+      # it under the deterministic rust-cache key — poisoning the entry the
+      # trusted release later restores. Release mode is only ever invoked by
+      # the trusted CI gate with the immutable github.sha, so its cache
+      # namespace is never written by untrusted code. Dry-run therefore gets
+      # NO cache step at all (nothing to restore, nothing to poison); the
+      # trusted release keeps its cache.
+      - name: Cache cargo registry + build (release mode only)
+        if: inputs.mode == 'release'
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
 
       - name: Configure cross-compilation environment

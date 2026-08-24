@@ -1,13 +1,13 @@
 name: Hardening
 
-# Scheduled and manual hardening only. This is not a PR gate. It runs a short
-# fuzz smoke for each existing target and focused checksum/parser mutation
-# tests with wall-clock bounds and failure artifact uploads. See
-# docs/development/windows-serial-e2e-investigation.md and AGENTS.md
-# "Hardening (scheduled)" for the full contract.
+# Scheduled/manual hardening only — NOT a PR-required gate. Runs a short
+# fuzz smoke per existing fuzz target and focused mutation testing on
+# checksums/parsers, with hard wall-clock bounds and failure artifact
+# upload. See docs/development/windows-serial-e2e-investigation.md and
+# AGENTS.md "Hardening (scheduled)" for the full contract.
 on:
   schedule:
-    # Sunday at 06:00 UTC each week.
+    # Weekly: Sunday 06:00 UTC.
     - cron: "0 6 * * 0"
   workflow_dispatch:
 
@@ -43,14 +43,8 @@ jobs:
         with:
           toolchain: nightly-2026-07-15
 
-      # rust-toolchain.toml pins 1.97.1 and overrides `rustup default`.
-      # Without this variable cargo fuzz would use stable and reject
-      # -Zsanitizer=address ("the option `Z` is only accepted on the nightly
-      # compiler").
       - name: Report Rust toolchain
         run: rustc --version --verbose
-        env:
-          RUSTUP_TOOLCHAIN: nightly-2026-07-15
 
       - name: Cache cargo registry + fuzz build
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
@@ -62,15 +56,14 @@ jobs:
 
       - name: Fuzz ${{ matrix.target }} (5 min)
         working-directory: fuzz
-        # Each target gets a 300s libFuzzer budget. GNU timeout 600s is the
-        # outer cap, so a hung target fails instead of idling. The cap includes
-        # the ~140s cold nightly build on a fresh runner. The old 360s cap
-        # left about 3.5 min for fuzzing and exited 124 before the 300s budget.
-        # RUSTUP_TOOLCHAIN overrides rust-toolchain.toml so -Zsanitizer uses
-        # nightly.
+        # libFuzzer budget of 300s per target; GNU timeout 600s as an outer
+        # hard cap so a hung target fails the job instead of idling. The cap
+        # must cover the cold nightly build too (~140s on a fresh runner) —
+        # the old 360s cap left only ~3.5 min of fuzzing and killed the run
+        # with exit 124 before the 300s budget elapsed.
+        # The nested fuzz/rust-toolchain.toml pins the nightly toolchain
+        # (required for -Zsanitizer) for every command run from fuzz/.
         run: timeout 600 cargo fuzz run "${{ matrix.target }}" -- -max_total_time=300
-        env:
-          RUSTUP_TOOLCHAIN: nightly-2026-07-15
 
       - name: Upload fuzz artifacts and corpus
         if: failure()
@@ -80,7 +73,8 @@ jobs:
           path: |
             fuzz/artifacts/${{ matrix.target }}
             fuzz/corpus/${{ matrix.target }}
-          # Missing paths warn and never mask the failed step's exit status.
+          # Paths may not exist (no crash); warn but never mask the original
+          # failing step's exit status.
           if-no-files-found: warn
           retention-days: 7
 
@@ -110,12 +104,18 @@ jobs:
         run: cargo install cargo-mutants --locked --version 27.1.0
 
       - name: Mutate checksums + parsers
-        # Scope is src/checksums.rs and src/framing/parsers/**. Baseline stays
-        # enabled. Each mutant has 120s and four parallel jobs. cargo-mutants
-        # defaults to one job; the old --jobs 2 made the 1500s cap unreachable:
-        # 81 mutants at ~90s each over two jobs took about 61 min. Removing the
-        # flag made it serial and slower. GNU timeout 2400s is the outer cap.
-        # Missed or timed-out mutants fail the job; exit status is preserved.
+        # Focused scope only: src/checksums.rs and src/framing/parsers/**.
+        # Baseline enabled; 120s per-mutant timeout; 4 parallel jobs (the
+        # cargo-mutants default is ONE job at a time — the old --jobs 2 made
+        # the 1500s cap unreachable: 81 mutants × ~90s build each / 2 jobs ≈
+        # 61 min; dropping the flag entirely made it serial and even slower).
+        # CARGO_INCREMENTAL=1 overrides the dtolnay action's global
+        # CARGO_INCREMENTAL=0: cargo-mutants reuses one scratch tree across
+        # all mutants specifically to benefit from incremental builds, and
+        # without it every mutant is a full ~50s rebuild (66 mutants never
+        # finished in 2400s).
+        # GNU timeout 2400s as the outer hard cap. Missed or timed-out
+        # mutants fail the job — exit status is NOT suppressed.
         run: |
           timeout 2400 cargo mutants \
             --file src/checksums.rs \
@@ -124,6 +124,8 @@ jobs:
             --timeout 120 \
             --jobs 4 \
             -- --lib
+        env:
+          CARGO_INCREMENTAL: "1"
 
       - name: Upload mutants.out
         if: failure()
@@ -131,7 +133,7 @@ jobs:
         with:
           name: mutants-out
           path: mutants.out
-          # Output may be absent when failure occurs before it is produced.
-          # Warn without masking the failed step's exit status.
+          # May not exist if the run failed before producing output; warn but
+          # never mask the original failing step's exit status.
           if-no-files-found: warn
           retention-days: 7

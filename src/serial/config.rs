@@ -315,6 +315,7 @@ pub fn is_fatal_disconnect(err: &std::io::Error) -> bool {
             | ErrorKind::ConnectionReset
             | ErrorKind::ConnectionAborted
             | ErrorKind::BrokenPipe
+            | ErrorKind::UnexpectedEof
             | ErrorKind::Interrupted
     )
 }
@@ -449,6 +450,17 @@ pub struct ConnectionStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unexpected_eof_is_fatal_disconnect_but_generic_other_is_not() {
+        assert!(is_fatal_disconnect(&std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            "serial peer closed",
+        )));
+        assert!(!is_fatal_disconnect(&std::io::Error::other(
+            "generic I/O error"
+        )));
+    }
 
     #[test]
     fn from_str_parses_config_enums() {
