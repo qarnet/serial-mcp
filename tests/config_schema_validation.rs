@@ -2,15 +2,15 @@ use jsonschema::{Resource, Retrieve, Uri};
 use serde_json::Value;
 use std::{fmt, fs, path::Path, path::PathBuf, time::Duration};
 
-/// Crate root, so fixture paths never depend on the process current
-/// directory.
+/// Crate root used to resolve fixture paths independently of the process
+/// current directory.
 const MANIFEST_DIR: &str = env!("CARGO_MANIFEST_DIR");
 
-/// Original URI of the vendored models.dev document; the opencode schema
-/// references it in four `$ref`s.
+/// Original URI for the vendored models.dev document, referenced by four
+/// `$ref`s in the opencode schema.
 const MODELS_DEV_URI: &str = "https://models.dev/model-schema.json";
 
-/// Path (relative to the crate root) of the vendored models.dev document.
+/// Path of the vendored models.dev document relative to the crate root.
 const MODELS_DEV_SCHEMA_PATH: &str = "schemas/models-dev-model.schema.json";
 
 #[derive(Debug, Clone, Copy)]
@@ -32,11 +32,10 @@ fn fixture_path(rel: &str) -> PathBuf {
     Path::new(MANIFEST_DIR).join(rel)
 }
 
-/// Required JSON loader used by every schema check.
+/// Load a required JSON fixture for schema checks.
 ///
-/// There is deliberately no skip path: a missing or malformed fixture is a
-/// hard failure. Read errors and parse errors are distinct errors and both
-/// carry the full path.
+/// No skip path exists: missing or malformed fixtures fail the test. Read and
+/// parse errors remain distinct and include the full path.
 fn load_json_file(path: &Path) -> Result<Value, String> {
     let text = fs::read_to_string(path)
         .map_err(|err| format!("failed to read {}: {err}", path.display()))?;
@@ -44,8 +43,8 @@ fn load_json_file(path: &Path) -> Result<Value, String> {
         .map_err(|err| format!("failed to parse JSON {}: {err}", path.display()))
 }
 
-/// Retriever for hermetic local validation: any resource that was not
-/// registered in memory is a hard failure. No network access, ever.
+/// Retriever for hermetic local validation. Unregistered resources fail, and
+/// this retriever never accesses the network.
 #[derive(Debug, Default, Clone, Copy)]
 struct NoNetworkRetriever;
 
@@ -71,17 +70,17 @@ impl fmt::Display for UnresolvedResourceError {
 
 impl std::error::Error for UnresolvedResourceError {}
 
-/// Compile a schema for local (offline) validation.
+/// Compile a schema for offline local validation.
 ///
-/// The vendored models.dev document is registered under its original URI so
-/// the opencode schema's external `$ref`s resolve without network access;
-/// any other external resource fails via [`NoNetworkRetriever`]. Claude Code
-/// and Codex compile through the same helper (registering the unused models
-/// resource is harmless and keeps one local path).
+/// Register the vendored models.dev document under its original URI so the
+/// opencode schema's external `$ref`s resolve without network access. Other
+/// external resources fail through [`NoNetworkRetriever`]. Claude Code and
+/// Codex use the same helper; registering the unused resource keeps one local
+/// path.
 fn compile_local(schema: &Value) -> Result<jsonschema::Validator, String> {
     let models_dev = load_json_file(&fixture_path(MODELS_DEV_SCHEMA_PATH))?;
-    // 0.49's `Resource::from_contents` is infallible; draft detection happens
-    // during `Registry::prepare`.
+    // jsonschema 0.49's `Resource::from_contents` is infallible; draft
+    // detection happens during `Registry::prepare`.
     let resource = Resource::from_contents(models_dev);
     let registry = jsonschema::Registry::new()
         .add(MODELS_DEV_URI, resource)
@@ -95,8 +94,8 @@ fn compile_local(schema: &Value) -> Result<jsonschema::Validator, String> {
         .map_err(|err| err.to_string())
 }
 
-/// Compile a schema with the hermetic retriever but WITHOUT the vendored
-/// models.dev resource registered — proves the opencode schema fails closed
+/// Compile a schema with the hermetic retriever without registering the
+/// vendored models.dev resource. This proves the opencode schema fails closed
 /// when its external resource is unavailable.
 fn compile_local_without_models_resource(schema: &Value) -> Result<jsonschema::Validator, String> {
     jsonschema::options()
@@ -105,16 +104,16 @@ fn compile_local_without_models_resource(schema: &Value) -> Result<jsonschema::V
         .map_err(|err| err.to_string())
 }
 
-/// Bounded HTTPS-only schema fetcher for the ignored latest-upstream test.
+/// Bounded HTTPS-only schema fetcher for ignored latest-upstream validation.
 ///
 /// Root schema fetches and transitive `$ref` retrieval share one configured
-/// blocking client (30 s timeout, descriptive user agent). The retriever is
-/// explicit rather than jsonschema's built-in HTTP resolver so jsonschema's
-/// transport features stay off: enabling them would unify reqwest 0.13 TLS
-/// features process-wide and break unrelated runtime clients (reqwest 0.13's
-/// `rustls-no-provider` requires a crypto provider installed before building
-/// a client). This path uses the project's own reqwest 0.12 blocking client,
-/// which configures its own provider, so only this test touches the network.
+/// blocking client with a 30 s timeout and descriptive user agent. An explicit
+/// retriever keeps jsonschema's built-in HTTP resolver and transport features
+/// disabled. Enabling them would unify reqwest 0.13 TLS features process-wide
+/// and break unrelated runtime clients because reqwest 0.13's
+/// `rustls-no-provider` requires a crypto provider before client construction.
+/// This path uses the project's reqwest 0.12 blocking client, which configures
+/// its own provider, so only this test accesses the network.
 const SCHEMA_FETCH_TIMEOUT: Duration = Duration::from_secs(30);
 const SCHEMA_FETCH_USER_AGENT: &str = "serial-mcp-schema-drift-check";
 
@@ -133,8 +132,8 @@ impl SchemaFetchClient {
         Ok(Self { client })
     }
 
-    /// Enforce the HTTPS-only boundary before any network I/O: external
-    /// schema documents are fetched over HTTPS or not at all.
+    /// Enforce the HTTPS-only boundary before network I/O. External schema
+    /// documents are fetched over HTTPS or rejected.
     fn https_only(url: &str) -> Result<(), String> {
         if url.starts_with("https://") {
             Ok(())
@@ -145,8 +144,8 @@ impl SchemaFetchClient {
         }
     }
 
-    /// Fetch and parse a schema document. Every failure keeps the URL plus
-    /// transport, HTTP-status, or JSON context.
+    /// Fetch and parse a schema document. Errors retain the URL and transport,
+    /// HTTP-status, or JSON context.
     fn fetch_value(&self, url: &str) -> Result<Value, String> {
         Self::https_only(url)?;
         let response = self
@@ -171,9 +170,9 @@ impl Retrieve for SchemaFetchClient {
         &self,
         uri: &Uri<String>,
     ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
-        // The URI is resolved to an absolute reference by jsonschema before
-        // retrieval; the HTTPS-only check still runs here so a non-HTTPS
-        // external `$ref` fails before any request is attempted.
+        // jsonschema resolves the URI to an absolute reference before
+        // retrieval. Run the HTTPS-only check here so a non-HTTPS external
+        // `$ref` fails before any request is attempted.
         let url = uri.as_str();
         Self::https_only(url).map_err(|err| Box::new(SchemaRetrievalError(err)))?;
         self.fetch_value(url).map_err(|err| {
@@ -261,8 +260,8 @@ fn remote_cases() -> [RemoteSchemaCase; 3] {
 #[test]
 fn example_configs_match_vendored_schemas() {
     let cases = local_cases();
-    // Exactly three vendored cases exist; a missing fixture must fail the
-    // whole run, never skip.
+    // Keep all three vendored cases required; missing fixtures fail instead of
+    // being skipped.
     assert_eq!(cases.len(), 3, "vendored schema case list changed");
     for case in cases {
         let schema =
@@ -354,19 +353,18 @@ fn opencode_with_vendored_models_resource_compiles_and_validates() {
 #[test]
 #[ignore = "requires network; checks latest upstream schemas"]
 fn example_configs_match_latest_upstream_schemas() {
-    // Generic HTTPS transitive resolution: upstream schemas (e.g. opencode ->
-    // models.dev) may `$ref` arbitrary remote documents, so the retriever
-    // must fetch any transitive HTTPS URL. This uses an explicit bounded
-    // retriever instead of enabling jsonschema's built-in transport features,
-    // which would globally change reqwest's TLS setup and break runtime
-    // clients; the local path stays fail-closed via `NoNetworkRetriever`.
+    // Upstream schemas may reference arbitrary HTTPS documents, so the
+    // retriever handles transitive HTTPS URLs. Explicit bounded retrieval
+    // avoids jsonschema's built-in transport features, which would change
+    // reqwest's TLS setup globally and break runtime clients. Local validation
+    // remains fail-closed through `NoNetworkRetriever`.
     let client = SchemaFetchClient::new().unwrap_or_else(|err| panic!("{err}"));
     for case in remote_cases() {
         let schema = client
             .fetch_value(case.schema_url)
             .unwrap_or_else(|err| panic!("{err}"));
-        // The local instance file is mandatory here too; only the schema is
-        // allowed to come from the network.
+        // Require the local instance file here too; only the schema may come
+        // from the network.
         let instance =
             load_json_file(&fixture_path(case.instance_path)).unwrap_or_else(|err| panic!("{err}"));
         let compiled = jsonschema::options()
@@ -384,9 +382,8 @@ fn example_configs_match_latest_upstream_schemas() {
 
 #[test]
 fn remote_retriever_rejects_non_https_references() {
-    // Deterministic and network-free: the retriever must reject a plain-HTTP
-    // external `$ref` before any request is attempted, proving the HTTPS-only
-    // boundary of the network path.
+    // Reject plain-HTTP external `$ref`s before any request. This keeps the
+    // check deterministic and network-free and proves the HTTPS-only boundary.
     let client = SchemaFetchClient::new().unwrap_or_else(|err| panic!("{err}"));
     let schema = serde_json::json!({ "$ref": "http://example.invalid/transitive-schema.json" });
     let err = format!(

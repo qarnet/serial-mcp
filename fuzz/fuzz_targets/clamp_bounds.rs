@@ -19,7 +19,7 @@ fuzz_target!(|data: &[u8]| {
     let _ = require_min_or_err("fuzz", value_usize, max_usize);
     let _ = clamp_timeout_or_err("fuzz", value_u64, max_u64);
 
-    // With known constants
+    // Also check the helpers against fixed production limits.
     let _ = clamp_or_err("read.max_bytes", value_usize, MAX_READ_BYTES);
     let _ = clamp_timeout_or_err("test", value_u64, MAX_TIMEOUT_MS);
 });

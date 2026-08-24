@@ -34,8 +34,8 @@ pub async fn list_ports(
         .list_available()
         .map_err(|e| log_tool_err("list_ports", "Failed to list ports", e))?;
 
-    // ONE fresh cross-process read for the whole preview: a corrupt or
-    // unreadable profile store is a tool error, never a silent "no matches".
+    // Read one fresh cross-process snapshot for the whole preview. A corrupt or
+    // unreadable profile store is a tool error, not a silent "no matches".
     let profiles = store
         .list_fresh()
         .await
@@ -51,26 +51,25 @@ pub async fn list_ports(
     }))
 }
 
-/// Pure preview of what a bare `open(port=...)` would do for every port,
-/// computed over ONE live port list + ONE fresh profile snapshot (the
-/// caller performs a single `ProfileStore::list_fresh()`). Never marks a
-/// profile used and never mutates the store.
+/// Preview what a bare `open(port=...)` would do for each port using one live
+/// port list and one fresh profile snapshot (the caller performs one
+/// `ProfileStore::list_fresh()`). Never marks a profile used or mutates the
+/// store.
 ///
 /// High identity reuses the open-time selection rules: candidates must pass
-/// `Profile::matches` AND carry the target's high identity fields; the
-/// unique maximum `last_used_at_ms` wins (`None` sorts oldest); equal top
-/// rank is `Ambiguous`. Candidate order is deterministic — newest first,
-/// then profile name for display only (a name never breaks a selection
-/// tie).
+/// `Profile::matches` and carry the target's high identity fields. The unique
+/// maximum `last_used_at_ms` wins (`None` sorts oldest); equal top rank is
+/// `Ambiguous`. Candidate order is deterministic: newest first, then profile
+/// name for display only. A name never breaks a selection tie.
 ///
-/// Medium/low/none identity is never automatically selected: explicitly
+/// Medium/low/none identity is never automatically selected. Explicitly
 /// matching non-empty selectors are listed as `Ineligible` candidates, and
 /// empty selectors (which match any port) are excluded. A high fingerprint
-/// shared by more than one live port yields `Duplicate` for every such
-/// port — settings are never applied to an indistinguishable device.
+/// shared by more than one live port yields `Duplicate` for every such port;
+/// settings are never applied to an indistinguishable device.
 pub fn compute_profile_matches(ports: &[PortInfo], profiles: &[Profile]) -> Vec<PortProfileMatch> {
-    // Count live occurrences of each canonical high fingerprint so every
-    // preview for the same device agrees on the duplicate flag.
+    // Count each canonical high fingerprint among live ports so previews for
+    // the same device agree on the duplicate flag.
     let mut high_counts: std::collections::HashMap<crate::profiles::HighIdentity, usize> =
         std::collections::HashMap::new();
     for port in ports {
@@ -122,10 +121,9 @@ pub fn compute_profile_matches(ports: &[PortInfo], profiles: &[Profile]) -> Vec<
         .collect()
 }
 
-/// Weak-identity preview (medium/low/none): never automatically selected.
-/// Explicitly matching non-empty selectors remain visible candidates,
-/// sorted by profile name; empty selectors (which match any port) are
-/// excluded.
+/// Weak-identity preview (medium/low/none); never automatically selected.
+/// Show explicitly matching non-empty selectors as `Ineligible` candidates,
+/// sorted by profile name. Exclude empty selectors, which match any port.
 fn weak_identity_profile_match(
     port: &PortInfo,
     confidence: IdentityConfidence,
@@ -150,10 +148,9 @@ fn weak_identity_profile_match(
     }
 }
 
-/// Ranked high-identity preview over the eligible profiles. Display
-/// candidates are ordered newest `last_used_at_ms` first, then name; the
-/// selection decision below uses timestamps ONLY — a name never breaks an
-/// equal top rank.
+/// Rank eligible high-identity profiles. Display candidates are ordered newest
+/// `last_used_at_ms` first, then name. Selection uses timestamps only; a name
+/// never breaks an equal top rank.
 fn ranked_profile_match(
     port: &PortInfo,
     confidence: IdentityConfidence,
@@ -213,24 +210,24 @@ pub async fn list_connections(
     }))
 }
 
-/// The profile-session plan for a bare `open`, decided BEFORE hardware is
-/// opened. Post-open steps (mark used / create generated / attach binding)
-/// run only after the hardware open succeeds.
+/// Profile-session plan for a bare `open`, decided before hardware open.
+/// Mark-used, generated-profile creation, and binding attachment run only after
+/// hardware open succeeds.
 enum SessionPlan {
-    /// `profile_mode="none"`: no automatic behavior at all.
+    /// `profile_mode="none"`: no automatic behavior.
     Disabled { confidence: IdentityConfidence },
-    /// Weak identity, duplicated live fingerprint, or equal top-ranked
-    /// profile timestamps: transient session, never persisted.
+    /// Weak identity, duplicated live fingerprint, or equal top-ranked profile
+    /// timestamps: transient session, never persisted.
     Transient {
         confidence: IdentityConfidence,
         candidates: Vec<String>,
     },
-    /// One uniquely most-recently-used high-confidence profile.
+    /// Unique most-recently-used high-confidence profile.
     Selected { profile: Profile },
     /// Explicit named selection via `open_profile`.
     Explicit { profile: Profile },
-    /// No matching profile yet: create a durable generated profile after
-    /// the hardware open succeeds.
+    /// No matching profile; create a durable generated profile after hardware
+    /// open succeeds.
     Generate,
 }
 
@@ -262,8 +259,8 @@ async fn plan_session(
         });
     };
 
-    // If multiple currently enumerated ports share the same high
-    // fingerprint, never apply settings to an indistinguishable device.
+    // If multiple enumerated ports share the same high fingerprint, do not
+    // apply settings to an indistinguishable device.
     let duplicates = live_ports
         .iter()
         .filter(|p| high_identity(p).as_ref() == Some(&identity))
@@ -289,8 +286,8 @@ async fn plan_session(
     }
 }
 
-/// Binding for a `profile_mode="none"` session: never persists, no
-/// candidates, no error.
+/// Binding for a `profile_mode="none"` session. It never persists and carries
+/// no candidates or error.
 fn disabled_binding(confidence: IdentityConfidence) -> ActiveProfileBinding {
     ActiveProfileBinding {
         profile_name: String::new(),
@@ -306,9 +303,9 @@ fn disabled_binding(confidence: IdentityConfidence) -> ActiveProfileBinding {
     }
 }
 
-/// Binding for a transient session: never persists, keeps the candidate
-/// list the caller could have selected from, and optionally carries a
-/// persistence error (generated-profile creation failure).
+/// Binding for a transient session. It never persists, keeps the candidate
+/// list available for explicit selection, and can carry a persistence error
+/// from generated-profile creation.
 fn transient_binding(
     confidence: IdentityConfidence,
     candidates: Vec<String>,
@@ -328,10 +325,9 @@ fn transient_binding(
     }
 }
 
-/// Binding for a persistent selected/generated profile. Name, generated
-/// flag, and revision derive from the supplied profile; persistence
-/// failures keep the connection on the original metadata and surface as
-/// `last_persistence_error`.
+/// Binding for a persistent selected/generated profile. Name, generated flag,
+/// and revision come from the supplied profile. Persistence failures retain the
+/// original metadata and surface as `last_persistence_error`.
 fn persistent_binding(
     profile: &Profile,
     source: ProfileSelectionSource,
@@ -353,9 +349,9 @@ fn persistent_binding(
     }
 }
 
-/// Mark the selected profile used and build its persistent binding. On
-/// mark-used failure the connection stays on the original profile metadata
-/// and the error is carried on the binding — never a hard open failure.
+/// Mark the selected profile used and build its persistent binding. On failure,
+/// retain the original profile metadata and carry the error on the binding; a
+/// mark-used failure is never a hard open failure.
 async fn mark_used_binding(
     store: &crate::profile_store::ProfileStore,
     profile: Profile,
@@ -369,13 +365,13 @@ async fn mark_used_binding(
     }
 }
 
-/// Shared post-open plumbing: attach the session binding computed from the
-/// resolved settings and the session plan to the already-open connection.
+/// Attach the session binding computed from resolved settings and the session
+/// plan to the already-open connection.
 ///
-/// Post-open PROFILE-METADATA failures (mark used / create generated) keep
-/// the connection open and surface as `last_persistence_error` — they are
-/// partial success, not open failure. The only error return is the
-/// unreachable case where a `Generate` plan has no high identity.
+/// Post-open metadata failures from mark-used or generated-profile creation
+/// keep the connection open and surface as `last_persistence_error`. They are
+/// partial success, not open failure. The only error return is `Generate` with
+/// no high identity.
 async fn attach_session_binding(
     store: &Arc<crate::profile_store::ProfileStore>,
     conn: &Arc<crate::serial::SerialConnection>,
@@ -406,8 +402,8 @@ async fn attach_session_binding(
         }
         SessionPlan::Explicit { profile } => {
             let dirty = dirty.unwrap_or(false);
-            // Explicit selection reports the matched port's own identity
-            // confidence — weak selectors are an explicit caller choice.
+            // Explicit selection reports the matched port's identity
+            // confidence; weak selectors are an explicit caller choice.
             mark_used_binding(
                 store,
                 profile,
@@ -418,7 +414,7 @@ async fn attach_session_binding(
             .await
         }
         SessionPlan::Generate => {
-            // Generated profile defaults equal the effective live settings.
+            // Generated profile defaults match the effective live settings.
             let defaults = resolved.as_profile_defaults();
             let selector = port_info.and_then(canonical_high_selector).ok_or_else(|| {
                 "Cannot create generated profile: no high-confidence identity".to_string()
@@ -432,9 +428,8 @@ async fn attach_session_binding(
                     false,
                     None,
                 ),
-                // Keep the connection open and bind a transient session
-                // carrying the error: do not report open failure or
-                // pretend the profile persisted.
+                // Keep the connection open with a transient binding carrying
+                // the error. Do not report open failure or claim persistence.
                 Err(e) => transient_binding(IdentityConfidence::High, Vec::new(), Some(e)),
             }
         }
@@ -443,10 +438,10 @@ async fn attach_session_binding(
     Ok(binding)
 }
 
-/// Whether the resolved effective settings differ from what the selected
-/// profile alone would produce (explicit overrides → dirty). Parse failures
-/// in the profile's defaults (invalid data bits etc.) propagate as errors so
-/// they surface BEFORE hardware open instead of silently mapping to clean.
+/// Whether resolved effective settings differ from the selected profile alone
+/// (explicit overrides make the result dirty). Parse failures in profile
+/// defaults (invalid data bits etc.) propagate before hardware open instead of
+/// mapping to clean.
 fn profile_only_differs(
     resolved: &ResolvedOpenSettings,
     profile: &Profile,
@@ -474,7 +469,7 @@ fn generated_label(port_info: Option<&PortInfo>) -> String {
     }
 }
 
-/// Shared open plumbing dependencies.
+/// Dependencies shared by open paths.
 struct OpenContext<'a> {
     connections: &'a Arc<ConnectionManager>,
     rx_sessions: &'a Arc<RxSessionManager>,
@@ -482,13 +477,13 @@ struct OpenContext<'a> {
     store: &'a Arc<crate::profile_store::ProfileStore>,
 }
 
-/// Shared hardware-open step: allowlist check, resolve settings, compute
-/// the selected-profile dirty flag (invalid profile defaults are a tool
-/// error BEFORE opening), open the port, set reconnect policy, start the RX
-/// session, then attach the profile-session binding (create/mark profile
-/// only after hardware open succeeds). Every successful open carries a
-/// binding; a missing connection or binding is an operational error, never
-/// a silently `None` result.
+/// Open hardware after the allowlist check, settings resolution, and
+/// selected-profile dirty comparison. Invalid profile defaults are a tool
+/// error before opening. Then set reconnect policy, start the RX session, and
+/// attach the profile-session binding; profile creation/marking happens only
+/// after hardware open succeeds. Every successful open carries a binding. A
+/// missing connection or binding is an operational error, never a silent
+/// `None` result.
 async fn open_connection(
     ctx: OpenContext<'_>,
     port: String,
@@ -506,8 +501,8 @@ async fn open_connection(
 
     let resolved = ResolvedOpenSettings::resolve(port.clone(), overlay, profile_defaults)?;
 
-    // Dirty comparison happens BEFORE hardware open so invalid profile
-    // defaults fail the call instead of producing a wrong binding.
+    // Compare dirty state before hardware open so invalid profile defaults fail
+    // the call instead of producing a wrong binding.
     let dirty = match &plan {
         SessionPlan::Selected { profile } | SessionPlan::Explicit { profile } => {
             Some(profile_only_differs(&resolved, profile)?)
@@ -523,8 +518,8 @@ async fn open_connection(
         .await
         .map_err(|e| log_tool_err("open", &format!("Failed to open port {port}"), e))?;
 
-    // Obtain the connection exactly once; absence after a successful open
-    // is an operational error, not a silent binding loss.
+    // Obtain the connection exactly once. Absence after a successful open is
+    // an operational error, not a silent binding loss.
     let connection = ctx.connections.get(&connection_id).await.map_err(|e| {
         log_tool_err(
             "open",
@@ -537,8 +532,7 @@ async fn open_connection(
     *connection.reconnect_policy.lock().expect("poisoned") = resolved.reconnect_policy.clone();
 
     // Create the RX session and start the always-on pump with a budgeted ring.
-    // The session is idempotent — if another code path created one first, this
-    // returns the existing session.
+    // The session is idempotent; an existing session is reused.
     let session = ctx
         .rx_sessions
         .get_or_create(Arc::clone(&connection), resolved.rx_buffer_size)
@@ -550,8 +544,8 @@ async fn open_connection(
         session.ring_capacity()
     );
 
-    // Post-open profile work: never close a working port merely because
-    // profile metadata failed — failures surface as `last_persistence_error`.
+    // Post-open profile work never closes a working port for metadata failure;
+    // failures surface as `last_persistence_error`.
     let binding = attach_session_binding(
         ctx.store,
         &connection,
@@ -562,12 +556,10 @@ async fn open_connection(
     )
     .await?;
 
-    // Open-override learning: a selected/explicit binding that is dirty
-    // (explicit fields differ from the profile's defaults) is persisted
-    // write-through before the open result returns. Persistence failure
-    // keeps the open a success — the result carries `failed` state and the
-    // binding stays dirty. Generated/transient/disabled sessions have
-    // nothing to persist.
+    // Open-override learning writes dirty selected/explicit bindings through
+    // before the open result returns. Failure keeps the open successful; the
+    // result carries `failed` state and the binding stays dirty.
+    // Generated, transient, and disabled sessions have nothing to persist.
     let mut session = binding.to_session_result();
     let mut profile_persistence = None;
     if binding.dirty {
@@ -606,9 +598,9 @@ pub async fn open(
     let port = args.port.clone();
     debug!("Opening {}", port);
 
-    // Enumerate once through the injectable provider: identity capture,
-    // duplicate-fingerprint detection, and automatic resolution all use
-    // the same live view.
+    // Enumerate once through the injectable provider. Identity capture,
+    // duplicate-fingerprint detection, and automatic resolution use this live
+    // view.
     let live_ports = provider
         .list_available()
         .map_err(|e| log_tool_err("open", "Failed to list ports", e))?;
@@ -707,14 +699,13 @@ pub async fn close(
 ) -> Result<Json<CloseResult>, String> {
     debug!("Closing {}", args.connection_id);
 
-    // Retain the connection Arc (and its binding) BEFORE the registry
-    // removes it, so the close snapshot can still read effective state.
+    // Retain the connection Arc and binding before the registry removes it so
+    // the close snapshot can still read effective state.
     let conn = lookup_connection(connections, &args.connection_id).await?;
     let name = conn.name().map(str::to_string);
 
-    // Hold the learning lock across the clean hardware close and the
-    // close-snapshot persistence so no concurrent durable mutation can
-    // interleave.
+    // Hold the learning lock across hardware close and close-snapshot
+    // persistence so no concurrent durable mutation can interleave.
     let _learning_guard = conn.learning_lock().lock().await;
 
     connections.close(&args.connection_id).await.map_err(|e| {
@@ -726,10 +717,9 @@ pub async fn close(
     })?;
     info!("Closed connection {}", args.connection_id);
 
-    // Close snapshot: only after successful hardware close, persist the
-    // effective defaults when the persistent binding is dirty or differs.
-    // A no-op is `NotNeeded`; persistence failure neither reopens hardware
-    // nor turns close into a tool error.
+    // After successful hardware close, persist effective defaults when the
+    // persistent binding is dirty or differs. A no-op is `NotNeeded`; failure
+    // neither reopens hardware nor turns close into a tool error.
     let (profile, persistence) =
         learning::learn(store, &conn, ProfilePersistenceOperation::CloseSnapshot).await;
 
@@ -843,8 +833,8 @@ pub async fn reconfigure(
         .map(|s| s.parse::<crate::serial::FlowControl>())
         .transpose()?;
 
-    // Hold the learning lock across live mutation → effective snapshot →
-    // CAS persistence → binding update.
+    // Hold the learning lock across live mutation, effective snapshot, CAS
+    // persistence, and binding update.
     let _learning_guard = conn.learning_lock().lock().await;
 
     let status = conn
@@ -860,9 +850,9 @@ pub async fn reconfigure(
 
     info!("Reconfigured {}: baud={}", conn_id, status.baud_rate);
 
-    // Write-through learning: hardware mutation succeeded; persist the
-    // effective defaults through the bound profile (if any). Persistence
-    // failure keeps the tool result successful with `state="failed"`.
+    // Write-through learning persists effective defaults through the bound
+    // profile after hardware mutation succeeds. Failure keeps the tool result
+    // successful with `state="failed"`.
     let (profile, persistence) =
         learning::learn(store, &conn, ProfilePersistenceOperation::Learned).await;
 
@@ -901,8 +891,8 @@ pub fn list_profiles(
     }))
 }
 
-/// Configure connection defaults. Two modes: profile (persist through the
-/// shared store) and connection (mutate live connection defaults).
+/// Configure defaults in profile mode (persist through the shared store) or
+/// connection mode (mutate live connection defaults).
 pub async fn configure(
     connections: &Arc<ConnectionManager>,
     store: &Arc<crate::profile_store::ProfileStore>,
@@ -922,12 +912,11 @@ pub async fn configure(
     }
 
     if let Some(profile_name) = args.profile.as_ref() {
-        // Profile mode: the store reloads under lock, preserves the
-        // on-disk selector, and persists before updating its cache. The
-        // effective profile (created flag + defaults) is returned from the
-        // same transaction — no racy second lookup. Profile mode never
-        // touches live connections, so `profile`/`profile_persistence`
-        // fields stay None.
+        // Profile mode reloads under lock, preserves the on-disk selector, and
+        // persists before updating its cache. The effective profile, including
+        // the created flag and defaults, comes from the same transaction. This
+        // mode never touches live connections, so `profile`/`profile_persistence`
+        // stay None.
         let (created, profile) = store
             .update_defaults_preserving_selector(
                 profile_name.clone(),
@@ -943,13 +932,13 @@ pub async fn configure(
             profile_persistence: None,
         }))
     } else {
-        // Connection mode: mutate the live connection's defaults.
+        // Connection mode mutates the live connection's defaults.
         let conn_id = args.connection_id.as_ref().unwrap();
         let conn = lookup_connection(connections, conn_id).await?;
 
-        // Hold the learning lock across the setters, the effective
-        // snapshot, and the CAS persistence attempt so concurrent durable
-        // requests cannot snapshot half-applied state.
+        // Hold the learning lock across setters, effective snapshot, and CAS
+        // persistence so concurrent durable requests cannot snapshot
+        // half-applied state.
         let _learning_guard = conn.learning_lock().lock().await;
 
         // Apply framing defaults.
@@ -961,12 +950,13 @@ pub async fn configure(
         *conn.reconnect_policy.lock().expect("poisoned") = args.defaults.reconnect_policy.clone();
         // Apply scalar defaults (Atomic).
         conn.set_max_buffered_bytes_default(args.defaults.max_buffered_bytes);
-        // log_capacity/log_enabled: LogBuffer has NO live setters. Documented as
-        // profile-only. rx_buffer_size: ring is fixed at open. Also profile-only.
+        // log_capacity/log_enabled: LogBuffer has no live setters; they are
+        // profile-only. rx_buffer_size: the ring is fixed at open and is also
+        // profile-only.
 
-        // Write-through learning for connection mode: persist the full
-        // effective defaults through the bound profile (if any). Failure
-        // keeps the result successful with `state="failed"`.
+        // Write-through learning persists full effective defaults through the
+        // bound profile, if any. Failure keeps the result successful with
+        // `state="failed"`.
         let (profile, persistence) =
             learning::learn(store, &conn, ProfilePersistenceOperation::Learned).await;
 
@@ -980,8 +970,8 @@ pub async fn configure(
     }
 }
 
-/// Save a new profile by snapshotting an open connection's identity
-/// and current configuration.
+/// Save a profile by snapshotting an open connection's identity and current
+/// configuration.
 pub async fn save_profile(
     connections: &Arc<ConnectionManager>,
     store: &Arc<crate::profile_store::ProfileStore>,
@@ -989,20 +979,19 @@ pub async fn save_profile(
 ) -> Result<Json<SaveProfileResult>, String> {
     let conn = lookup_connection(connections, &args.connection_id).await?;
 
-    // Hold the learning lock across the effective-defaults snapshot and
-    // the store upsert so a concurrent reconfigure/configure cannot yield
-    // a mixed snapshot (e.g. new baud with old framing defaults).
+    // Hold the learning lock across the effective-defaults snapshot and store
+    // upsert so concurrent reconfigure/configure cannot yield a mixed snapshot
+    // such as new baud with old framing defaults.
     let _learning_guard = conn.learning_lock().lock().await;
 
     let info = conn
         .port_info()
         .ok_or_else(|| format!("No port identity available for {}", args.connection_id))?;
 
-    // Snapshot the connection's full effective defaults from the shared
-    // helper (never a handler-local session manager); it covers serial
-    // parameters, framing/parser/protocol defaults, the stored RX buffer
-    // size, read defaults, reconnect policy, log config, and the
-    // connection name.
+    // Snapshot full effective defaults from the shared helper, never a
+    // handler-local session manager. It covers serial parameters,
+    // framing/parser/protocol defaults, stored RX buffer size, read defaults,
+    // reconnect policy, log config, and connection name.
     let defaults = conn.effective_defaults();
 
     let selector = crate::profiles::ProfileSelector {
@@ -1038,10 +1027,9 @@ pub async fn save_profile(
 
 /// Delete a profile by name.
 ///
-/// Rejects deletion while any same-process open connection binds the
-/// profile (the error lists the connection IDs). Cross-process active
-/// ownership cannot be known here; a later missing-profile CAS protects
-/// those processes.
+/// Reject deletion while any same-process open connection binds the profile;
+/// the error lists connection IDs. Cross-process active ownership is unknown,
+/// so a later missing-profile CAS protects those processes.
 pub async fn delete_profile(
     connections: &Arc<ConnectionManager>,
     store: &Arc<crate::profile_store::ProfileStore>,
@@ -1073,15 +1061,14 @@ pub async fn delete_profile(
     }))
 }
 
-/// Roll a profile back to a prior retained revision.
+/// Roll a profile back to a retained prior revision.
 ///
-/// Restores the target revision's selector/defaults as a NEW monotonic
-/// revision (`current + 1`), preserving generated/usage metadata. Live
-/// hardware is never touched: same-process connections bound to the
-/// profile are marked stale+dirty (so neither learning nor close can
-/// overwrite the rollback) and counted in the result. Wrong
-/// `expected_revision` or an evicted target revision is a tool error that
-/// leaves the file unchanged.
+/// Restore the target selector/defaults as a new monotonic revision
+/// (`current + 1`) while preserving generated/usage metadata. Live hardware
+/// is never touched. Same-process bound connections are marked stale+dirty so
+/// learning and close cannot overwrite the rollback, and are counted in the
+/// result. A wrong `expected_revision` or evicted target revision is a tool
+/// error that leaves the file unchanged.
 pub async fn rollback_profile(
     connections: &Arc<ConnectionManager>,
     store: &Arc<crate::profile_store::ProfileStore>,
@@ -1136,8 +1123,6 @@ pub async fn rollback_profile(
     }))
 }
 
-// ── Reconnect tool ─────────────────────────────────────────────────────
-
 pub async fn reconnect(
     connections: &Arc<ConnectionManager>,
     args: ReconnectArgs,
@@ -1155,8 +1140,6 @@ pub async fn reconnect(
         state: conn.state(),
     }))
 }
-
-// ── Log tools ──────────────────────────────────────────────────────────
 
 pub async fn get_log(
     connections: &Arc<ConnectionManager>,
@@ -1205,9 +1188,9 @@ pub async fn export_log(
     capture_store: &Arc<crate::capture_store::CaptureStore>,
     args: ExportLogArgs,
 ) -> Result<Json<ExportLogResult>, String> {
-    // Order matters: store enabled check and path validity run BEFORE any
-    // connection or file work — a disabled store or bad filename must fail
-    // without touching the connection or the capture root.
+    // Check store state and filename before connection or file work. A
+    // disabled store or invalid filename must fail without touching the
+    // connection or capture root.
     if !capture_store.is_enabled() {
         return Err(crate::capture_store::CAPTURE_DISABLED_ERROR.to_string());
     }
@@ -1215,8 +1198,8 @@ pub async fn export_log(
     let conn = lookup_connection(connections, &args.connection_id).await?;
 
     // Serialize the bounded snapshot in a blocking context so a large log
-    // never stalls a Tokio worker thread. The store then commits in its own
-    // spawn_blocking under the process-local + advisory locks.
+    // does not stall a Tokio worker thread. The store commits in its own
+    // spawn_blocking under process-local and advisory locks.
     let max_file_bytes = capture_store.max_file_bytes();
     let log = Arc::clone(conn.log());
     let snapshot = tokio::task::spawn_blocking(move || log.jsonl_snapshot(max_file_bytes))
@@ -1257,9 +1240,9 @@ mod tests {
         PortTransport, SerialConnection, SerialIo, StopBits,
     };
 
-    /// Minimal `SerialIo` for in-crate tool tests: no real hardware, all
-    /// control/reconfigure operations are no-ops. I/O returns EOF/0 — the
-    /// tests here never exchange bytes.
+    /// Minimal `SerialIo` for in-crate tool tests; no real hardware. Control
+    /// and reconfigure operations are no-ops; I/O returns EOF/0. Tests never
+    /// exchange bytes.
     struct FakeIo;
 
     impl AsyncRead for FakeIo {

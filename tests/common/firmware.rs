@@ -1,8 +1,8 @@
-//! Shared helpers that resolve the on-disk path of the
-//! `native_sim` test firmware binary used by integration tests, plus the
-//! [`NativeSimFirmware`] process harness that spawns it.
+//! Shared helpers for resolving the on-disk path of the `native_sim` test
+//! firmware binary and for the [`NativeSimFirmware`] process harness that
+//! spawns it.
 //!
-//! Three resolution rules, in order:
+//! Resolution follows three rules, in order:
 //!
 //! 1. Environment override: `SERIAL_MCP_NATIVE_SIM_BIN`. When set to a
 //!    non-empty string, the path is taken verbatim. CI artifacts and
@@ -11,14 +11,13 @@
 //! 2. Workspace default: `<CARGO_MANIFEST_DIR>/build/native_sim/firmware/zephyr/zephyr.exe`.
 //!
 //! 3. Auto-build: if the expected binary is missing, the test process
-//!    invokes the repo's `fw-build-native` helper, which produces a
-//!    pristine build with `compile_commands.json` for the LSP.
+//!    invokes the repo's `fw-build-native` helper. It produces a pristine
+//!    build with `compile_commands.json` for the LSP.
 //!
-//! These helpers are synchronous. Spawning the firmware itself is owned by
-//! [`NativeSimFirmware::spawn`] (async, cross-platform Tokio process
-//! I/O), which builds the binary on demand, discovers the PTY path from
-//! stdout, drains the remaining output in a background task, and kills
-//! the child on drop.
+//! These helpers are synchronous. [`NativeSimFirmware::spawn`] owns firmware
+//! spawning through async, cross-platform Tokio process/I/O. It builds the
+//! binary on demand, discovers the PTY path from stdout, drains remaining
+//! output in a background task, and kills the child on drop.
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -77,8 +76,8 @@ pub fn ensure_plain_firmware_built() -> Result<PathBuf> {
 }
 
 fn ensure_firmware_built(variant: &str, env_var: &str, helper: &str) -> Result<PathBuf> {
-    // Record entry into the auto-build path. This does not serialize `west`;
-    // native_sim suites run with `--test-threads=1`, and callers reuse an
+    // Record entry into the auto-build path. This does not serialize `west`.
+    // `native_sim` suites run with `--test-threads=1`, and callers reuse an
     // artifact that already exists.
     static BUILT: OnceLock<()> = OnceLock::new();
     let bin = firmware_bin_for_variant(variant, env_var);
@@ -117,12 +116,12 @@ fn run_helper(helper: &str, bin: &Path) -> Result<PathBuf> {
     Ok(bin.to_path_buf())
 }
 
-/// A running `native_sim` firmware instance with a known PTY path.
+/// Running `native_sim` firmware instance with a known PTY path.
 ///
-/// Spawns the firmware binary, parses the PTY path from stdout, and
-/// drains remaining output in a background task. Kills the process on
-/// drop. Spawning, discovery, and cleanup are all owned here — callers
-/// await [`NativeSimFirmware::spawn`] and use [`pty_path`](Self::pty_path).
+/// Spawns the firmware binary, parses the PTY path from stdout, and drains
+/// remaining output in a background task. It kills the process on drop.
+/// Spawning, discovery, and cleanup are owned here; callers await
+/// [`NativeSimFirmware::spawn`] and use [`pty_path`](Self::pty_path).
 pub struct NativeSimFirmware {
     child: tokio::process::Child,
     pty_path: String,
@@ -130,7 +129,7 @@ pub struct NativeSimFirmware {
 }
 
 impl NativeSimFirmware {
-    /// Spawn the firmware, parse the PTY path from its stdout.
+    /// Spawn the firmware and parse the PTY path from its stdout.
     ///
     /// Builds the firmware first via [`ensure_plain_firmware_built`] if
     /// the binary is missing, then reads stdout until the PTY path line
@@ -150,7 +149,7 @@ impl NativeSimFirmware {
         let stdout = child.stdout.take().context("stdout not piped")?;
         let mut reader = BufReader::new(stdout).lines();
 
-        // Read until we find the PTY path line:
+        // Read until the PTY path line appears:
         //   uart connected to pseudotty: /dev/pts/N
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
         let mut pty_path: Option<String> = None;
@@ -176,7 +175,8 @@ impl NativeSimFirmware {
         let pty_path = pty_path
             .ok_or_else(|| anyhow::anyhow!("zephyr.exe did not print PTY path within 5s"))?;
 
-        // Drain remaining stdout in background so the pipe buffer doesn't fill.
+        // Drain remaining stdout in the background so the pipe buffer does not
+        // fill.
         let drain = tokio::spawn(async move {
             while let Ok(Some(_line)) = reader.next_line().await {
                 // drain
@@ -203,7 +203,7 @@ impl NativeSimFirmware {
 
 impl Drop for NativeSimFirmware {
     fn drop(&mut self) {
-        // start_kill sends SIGKILL, best-effort cleanup.
+        // `start_kill` sends SIGKILL for best-effort cleanup.
         self.child.start_kill().ok();
     }
 }

@@ -4,7 +4,7 @@
 //! a single background pump task that reads from the serial port. The pump
 //! appends every received byte to a per-connection `RxRing`.
 //!
-//! The pump runs from `open` to `close` — bytes are captured regardless of
+//! The pump runs from `open` to `close`. Bytes are captured regardless of
 //! active tool calls. The ring is a budgeted allocation charged at open and
 //! released at close.
 //!
@@ -12,7 +12,7 @@
 //! shared cursor; a private cursor mode does not move the shared read cursor.
 //!
 //! - always-on pump from open to close
-//! - RxRing capture (all bytes preserved)
+//! - bounded `RxRing` retention and wrap-loss reporting
 //! - budget reservation for the ring at construction
 //! - pause on disconnect, resume on reconnect (same ring, same offsets)
 
@@ -31,8 +31,6 @@ use crate::resource_events::ResourceEventHub;
 use crate::rx_ring::RxRing;
 use crate::serial::SerialConnection;
 
-// ---- Per-connection session ------------------------------------------------
-
 /// Manages one pump task, RX ring, and shared read cursor for one connection.
 ///
 /// The `RxRing` captures all RX bytes from open to close. The pump appends
@@ -44,13 +42,13 @@ pub struct RxSession {
     pump_token: StdMutex<CancellationToken>,
     /// Async pump gate: the pump holds this across one complete
     /// read + ring append. `capture_boot` acquires the same gate so its mark
-    /// cannot race an in-flight pump read/append — a byte physically read
-    /// before the reset can never append after the mark.
+    /// cannot race an in-flight pump read/append. A byte physically read before
+    /// the reset can never append after the mark.
     pump_gate: Arc<AsyncMutex<()>>,
     /// Per-connection ring buffer capturing all RX bytes from open to close.
     ring: Arc<RxRing>,
     /// Process-wide resource event hub. The pump publishes connection
-    /// detail/raw/log updates AFTER each successful ring append (outside the
+    /// detail/raw/log updates after each successful ring append (outside the
     /// pump gate) so a listener woken by the event observes the new bytes.
     hub: Arc<ResourceEventHub>,
     /// Shared read cursor for `read`/`flush`. Absolute u64 offset.
@@ -102,8 +100,6 @@ impl RxSession {
     pub fn connection_id(&self) -> &str {
         &self.connection_id
     }
-
-    // ── Ring + cursor accessors ─────────────────────────────────────────────
 
     /// Borrow the ring buffer.
     pub(crate) fn ring(&self) -> &RxRing {
@@ -176,8 +172,8 @@ impl RxSession {
 
     /// Signal the pump to stop.
     ///
-    /// This only cancels the pump token — it does **not** wait for the pump
-    /// task to finish. Call [`Self::join_pump`] after shutdown to await
+    /// This only cancels the pump token. It does not wait for the pump task to
+    /// finish. Call [`Self::join_pump`] after shutdown to await
     /// pump exit. Safe to call multiple times.
     pub fn shutdown(&self) {
         self.pump_token
@@ -220,14 +216,12 @@ impl RxSession {
     }
 }
 
-// ---- Pump loop (standalone async function, not a method) -------------------
-
 /// Background task that reads from the serial port and appends to the ring.
 ///
 /// Runs from open to close. On fatal disconnect, pauses (50ms sleep loop)
 /// until the connection state returns to `Open` (reconnect succeeded) or
 /// `Closed` (reconnect exhausted/disabled). The ring persists across
-/// disconnect/reconnect cycles — `end_offset` is monotonic.
+/// disconnect/reconnect cycles. `end_offset` is monotonic.
 ///
 /// The pump holds `pump_gate` across one complete read + ring append and
 /// releases it before the disconnect pause/sleep. `capture_boot` acquires
@@ -235,8 +229,8 @@ impl RxSession {
 /// physically read before the mark can never be appended after it.
 ///
 /// After a successful `ring.append`, the gate is released and the pump
-/// synchronously publishes the connection detail/raw/log resource hints —
-/// AFTER the append and OUTSIDE the gate, so a listener woken by the event
+/// synchronously publishes the connection detail/raw/log resource hints after
+/// the append and outside the gate, so a listener woken by the event
 /// immediately observes the advanced ring end offset and the gate invariants
 /// (`capture_boot` atomicity) stay untouched. Publication never awaits:
 /// notifications are availability hints, not a byte ledger.
@@ -255,7 +249,7 @@ async fn pump_loop(
         if token.is_cancelled() {
             break;
         }
-        // Gate held across the read AND the ring append: this is the
+        // Gate held across the read and the ring append: this is the
         // atomic unit capture_boot waits on.
         let gate = pump_gate.lock().await;
         let read_result = tokio::select! {
@@ -275,7 +269,7 @@ async fn pump_loop(
                 // Append to the ring (capture all bytes).
                 ring.append(&chunk);
                 drop(gate);
-                // Publish AFTER the append and OUTSIDE the gate: a listener
+                // Publish after the append and outside the gate: a listener
                 // woken by these hints must be able to observe the new ring
                 // end offset immediately. Synchronous, never awaited.
                 hub.publish_connection_changed(&conn_id);
@@ -295,7 +289,7 @@ async fn pump_loop(
                     // capture_boot cannot block behind a paused pump.
                     drop(gate);
                     // Pause: wait for reconnect or close. The ring persists
-                    // across disconnect/reconnect — offsets stay monotonic.
+                    // across disconnect/reconnect. Offsets stay monotonic.
                     let pause_start = std::time::Instant::now();
                     debug!("rx_session: pump for {conn_id} pausing (disconnected)");
                     loop {
@@ -321,7 +315,7 @@ async fn pump_loop(
                                 return;
                             }
                             _ => {
-                                // Disconnected or Reconnecting — keep waiting.
+                                // Disconnected or Reconnecting: keep waiting.
                                 tokio::time::sleep(Duration::from_millis(50)).await;
                             }
                         }
@@ -340,8 +334,6 @@ async fn pump_loop(
 
     info!("rx_session: pump exiting for {conn_id}");
 }
-
-// ---- Session manager -------------------------------------------------------
 
 /// Manages [`RxSession`] instances keyed by connection id.
 ///
@@ -367,8 +359,9 @@ impl RxSessionManager {
     ///
     /// The session is created with a budgeted ring of `ring_capacity` bytes.
     /// The pump is started automatically on first creation. Returns the
-    /// existing session if one is already registered (ring_capacity is
-    /// ignored in that case — the ring was already allocated at open time).
+    /// existing session if one is already registered. In that case,
+    /// `ring_capacity` is ignored because the ring was already allocated at
+    /// open time.
     ///
     /// Returns `Err(String)` if ring budget reservation fails.
     pub async fn get_or_create(
@@ -422,8 +415,6 @@ impl RxSessionManager {
     }
 }
 
-// ---- Tests -----------------------------------------------------------------
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -458,8 +449,6 @@ mod tests {
         RxSessionManager::new(test_budget(), test_hub())
     }
 
-    // ── Manager idempotency ────────────────────────────────────────────────
-
     #[tokio::test]
     async fn manager_get_or_create_returns_same_session() {
         let (conn, _peer) = loopback_connection("test-idem");
@@ -470,8 +459,6 @@ mod tests {
         assert!(Arc::ptr_eq(&s1, &s2));
         assert_eq!(mgr.count().await, 1);
     }
-
-    // ── Manager remove ─────────────────────────────────────────────────────
 
     #[tokio::test]
     async fn manager_remove_awaits_pump_exit() {
@@ -505,8 +492,6 @@ mod tests {
         assert_eq!(mgr.count().await, 0);
     }
 
-    // ── Pump lifecycle (always-on model) ───────────────────────────────────
-
     #[tokio::test]
     async fn get_or_create_starts_pump() {
         let (conn, _peer) = loopback_connection("test-pump-start");
@@ -535,8 +520,6 @@ mod tests {
             .is_cancelled());
     }
 
-    // ── Remove lifecycle ───────────────────────────────────────────────────
-
     #[tokio::test]
     async fn removing_session_awaits_pump_and_drops_consumers() {
         let (conn, _peer) = loopback_connection("test-remove-lifecycle");
@@ -561,8 +544,6 @@ mod tests {
             "pump handle should be consumed after remove"
         );
     }
-
-    // ── Close causes pump exit ─────────────────────────────────────────────
 
     #[tokio::test]
     async fn connection_close_causes_pump_exit() {
@@ -591,8 +572,6 @@ mod tests {
             "pump should finish after connection close"
         );
     }
-
-    // ── Shutdown clean exit ────────────────────────────────────────────────
 
     #[tokio::test]
     async fn pump_exits_cleanly_on_shutdown_without_hanging() {
@@ -624,8 +603,6 @@ mod tests {
             .expect("pump_token")
             .is_cancelled());
     }
-
-    // ── Stress: repeated create + remove ──────────────────────────────────
 
     #[tokio::test]
     async fn repeated_create_remove_no_leaked_pump_tasks() {
@@ -663,8 +640,6 @@ mod tests {
         }
     }
 
-    // ── NEW: Ring capture without consumers ────────────────────────────────
-
     #[tokio::test]
     async fn ring_captures_bytes_without_consumers() {
         let (conn, mut peer) = loopback_connection("test-ring-no-consumers");
@@ -687,8 +662,6 @@ mod tests {
         session.shutdown_and_join().await;
     }
 
-    // ── NEW: Pump continues without consumers ─────────────────────────────
-
     #[tokio::test]
     async fn pump_keeps_running_when_no_consumers() {
         let (conn, mut peer) = loopback_connection("test-pump-no-consumers");
@@ -703,7 +676,7 @@ mod tests {
         let end_before = session.ring().end_offset();
         assert_eq!(end_before, 6, "ring should have 'before'");
 
-        // Pump must keep running — write more data.
+        // Pump must keep running, so write more data.
         peer.write_all(b"after").await.unwrap();
         tokio::time::sleep(Duration::from_millis(200)).await;
 
@@ -715,8 +688,6 @@ mod tests {
 
         session.shutdown_and_join().await;
     }
-
-    // ── NEW: Budget charged at open, released at close ────────────────────
 
     #[tokio::test]
     async fn budget_charged_at_open_released_at_close() {
@@ -781,8 +752,6 @@ mod tests {
         }
     }
 
-    // ── NEW: Read cursor accessors ─────────────────────────────────────────
-
     #[tokio::test]
     async fn read_cursor_starts_at_zero() {
         let (conn, _peer) = loopback_connection("test-cursor-zero");
@@ -802,8 +771,6 @@ mod tests {
         assert_eq!(session.read_cursor(), 0);
     }
 
-    // ── NEW: ensure_pump_running is idempotent ─────────────────────────────
-
     #[tokio::test]
     async fn ensure_pump_running_is_idempotent() {
         let (conn, _peer) = loopback_connection("test-pump-idem");
@@ -814,7 +781,7 @@ mod tests {
         session.ensure_pump_running();
         assert!(session.pump_task.lock().expect("pump_task").is_some());
 
-        // Call again — verify pump is still running (not restarted).
+        // Call again and verify the pump is still running, not restarted.
         session.ensure_pump_running();
         assert!(session.pump_task.lock().expect("pump_task").is_some());
         assert!(!session
@@ -848,8 +815,6 @@ mod tests {
         session.shutdown_and_join().await;
     }
 
-    // ── Pump gate barrier (deterministic) ──────────────────────────────────
-
     /// Controlled [`SerialIo`] backend for the pump-gate barrier test.
     ///
     /// The payload is pre-loaded but held back: `poll_read` parks the pump's
@@ -857,10 +822,10 @@ mod tests {
     /// bytes. Two explicit event-driven synchronization points expose the
     /// pump's progress without any wall-clock assumption:
     ///
-    /// - `read_started`: fired on the first `poll_read` — the pump's read is
+    /// - `read_started`: fired on the first `poll_read`. The pump's read is
     ///   in flight and the pump holds `pump_gate` (it acquires the gate
     ///   before calling `read`).
-    /// - `consumed`: fired when `poll_read` delivers the payload — the read
+    /// - `consumed`: fired when `poll_read` delivers the payload. The read
     ///   has returned with the bytes; the pump's ring append is the next
     ///   step, still under the gate.
     ///
@@ -914,7 +879,7 @@ mod tests {
         ) -> Poll<std::io::Result<()>> {
             *self.state.waker.lock().expect("waker poisoned") = Some(cx.waker().clone());
             // `notify_one` (not `notify_waiters`): the retained permit makes
-            // the read-start signal order-independent — it survives even if
+            // the read-start signal order-independent. It survives even if
             // the pump polls before the test registers `read_started.notified()`.
             self.state.read_started.notify_one();
             if !self.state.released.load(Ordering::SeqCst) {
@@ -993,7 +958,7 @@ mod tests {
         ));
         let session = test_session(Arc::clone(&conn));
 
-        // Register the read-start wait BEFORE the pump can possibly run
+        // Register the read-start wait before the pump can possibly run
         // (registration happens at `notified()` creation). Combined with the
         // backend's `notify_one`, the signal is order-independent: a pump
         // that polls before this line still leaves a retained permit.
@@ -1019,7 +984,7 @@ mod tests {
         // pump's read budget is 100ms: on timeout the gate is dropped and
         // immediately re-acquired between cycles, so a `try_lock` at that
         // exact instant can (benignly) succeed once. Yield so a runnable
-        // pump re-locks, then require the gate held — a pump that reads
+        // pump re-locks, then require the gate held. A pump that reads
         // outside the gate (regression) fails every attempt.
         let mut gate_held = false;
         for _ in 0..3 {
@@ -1040,11 +1005,11 @@ mod tests {
         // the acquisition afterwards still registers while the append is
         // the pump's next step under the gate.
         //
-        // Ordering safety: the wait is registered (notified()) BEFORE
+        // Ordering safety: the wait is registered (notified()) before
         // `release()`, and delivery can only happen after release (the
         // backend holds the payload until then). `notify_waiters` is
         // received when it happens after future creation, so the signal
-        // cannot be lost here — unlike `read_started` above, no retained
+        // cannot be lost here. Unlike `read_started` above, no retained
         // permit is needed.
         let consumed = state.consumed.notified();
         state.release();
@@ -1072,10 +1037,8 @@ mod tests {
         session.shutdown_and_join().await;
     }
 
-    // ── Pump publishes resource hints only after ring append ──────────────
-
-    /// The pump publishes connection detail/raw/log resource hints AFTER the
-    /// ring append and OUTSIDE the pump gate.
+    /// The pump publishes connection detail/raw/log resource hints after the
+    /// ring append and outside the pump gate.
     ///
     /// All synchronization is event-driven with the same [`PumpGateIo`]
     /// backend as the gate test: while the pump's read is in flight (payload
@@ -1110,7 +1073,7 @@ mod tests {
             .await
             .expect("pump read must start within the hang guard");
 
-        // A subscriber must NOT receive an update before the bytes are in
+        // A subscriber must not receive an update before the bytes are in
         // the ring.
         assert_eq!(
             session.ring().end_offset(),

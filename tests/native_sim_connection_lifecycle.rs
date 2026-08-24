@@ -1,19 +1,17 @@
-//! Software-only connection-lifecycle integration tests for serial-mcp.
+//! Software-only connection lifecycle integration tests for serial-mcp.
 //!
-//! These tests exercise the server's behavior end-to-end against a
-//! `native_sim` firmware PTY, using only software emulators — no
-//! physical hardware, USB-serial adapters, or board bring-up required.
+//! Each test drives the server end-to-end through one `native_sim` firmware PTY.
+//! The suite uses software emulation; it does not require physical hardware,
+//! USB-serial adapters, or board bring-up.
 //!
-//! Each test spawns its own `zephyr.exe` instance and parses the PTY path from
+//! Each test starts its own `zephyr.exe` instance and reads its PTY path from
 //! stdout. Run this suite with `--test-threads=1`; process teardown and PTY
 //! close can race at the OS layer when tests run in parallel.
 //!
-//! Coverage focus:
-//!   - Named connection bookkeeping in `list_connections`
-//!   - `set_flow_control` tool contract (result + summary round-trip)
-//!   - Close-while-pending-read behavior at the MCP-tool layer
-//!   - Reopen the same PTY path after close
-//!   - Fresh `read(match=...)` output after reopen
+//! Coverage includes named connection bookkeeping in `list_connections`, the
+//! `set_flow_control` result and summary round-trip, close-while-pending-read
+//! behavior at the MCP-tool layer, reopening the same PTY path, and fresh
+//! `read(match=...)` output after reopen.
 //!
 //! Run:
 //! ```sh
@@ -33,8 +31,6 @@ use common::{args_object, connect_client, tool_request, TestServer};
 
 const BAUD_RATE: u32 = 115200;
 const CONNECTION_NAME: &str = "lifecycle-uart";
-
-// ── MCP helpers ──────────────────────────────────────────────────────────────
 
 async fn open_pty(
     client: &rmcp::service::RunningService<rmcp::service::RoleClient, common::TestClientHandler>,
@@ -135,8 +131,8 @@ async fn close_connection(
     assert_ne!(result.is_error, Some(true), "close failed: {result:?}");
 }
 
-/// Wait for the firmware's boot banner to appear, then flush buffers so
-/// the connection starts from a known state.
+/// Wait for firmware's boot banner, then flush both connection directions so
+/// later lifecycle checks start from a known state.
 async fn sync_boot(
     client: &rmcp::service::RunningService<rmcp::service::RoleClient, common::TestClientHandler>,
     connection_id: &str,
@@ -162,9 +158,8 @@ async fn sync_boot(
     flush_both(client, connection_id).await;
 }
 
-// ── Test A: named connection appears in list_connections ─────────────────────
-
-/// A named connection appears in `list_connections` with its summary fields.
+/// Verify that `list_connections` reports named connection identity and serial
+/// settings.
 #[tokio::test]
 #[ignore = "requires native_sim firmware binary"]
 async fn native_named_connection_appears_in_list_connections() {
@@ -197,12 +192,9 @@ async fn native_named_connection_appears_in_list_connections() {
     drop(fw);
 }
 
-// ── Test B: set_flow_control tool round-trip ────────────────────────────────
-
-/// `set_flow_control` returns the requested mode, and `list_connections`
-/// reflects the updated summary. Uses `none`, the only mode
-/// guaranteed to be supported by every backend (including the PTY that
-/// backs the native_sim firmware).
+/// Verify that `set_flow_control` returns the requested mode and that
+/// `list_connections` reflects it. `none` is the only mode guaranteed by every
+/// backend, including the PTY backing the native_sim firmware.
 #[tokio::test]
 #[ignore = "requires native_sim firmware binary"]
 async fn native_set_flow_control_updates_summary_and_result() {
@@ -244,10 +236,9 @@ async fn native_set_flow_control_updates_summary_and_result() {
     drop(fw);
 }
 
-// ── Test C: close while read is pending returns a normal result ─────────────
-
-/// Closing while a read is in flight still yields a normal structured read
-/// result. Timing determines whether it drained, timed out, or observed close.
+/// Verify that closing the connection while `read` is in flight yields a normal
+/// structured result. Scheduling determines whether the read drains, times out,
+/// or observes connection close.
 #[tokio::test]
 #[ignore = "requires native_sim firmware binary"]
 async fn native_close_while_read_active_returns_normal_result() {
@@ -259,8 +250,8 @@ async fn native_close_while_read_active_returns_normal_result() {
     let id = open_pty(&client, &pty_path, CONNECTION_NAME).await;
     sync_boot(&client, &id).await;
 
-    // A plain read drains buffered bytes immediately when available; otherwise
-    // it can still be waiting when close interrupts it.
+    // A plain read drains available buffered bytes first, so close may interrupt
+    // only when no bytes remain and the wait is still active.
     let reader = {
         let peer = client.peer().clone();
         let id2 = id.clone();
@@ -277,15 +268,16 @@ async fn native_close_while_read_active_returns_normal_result() {
         })
     };
 
-    // Give the read a moment to start and drain the ring.
+    // Let the read enter its wait or drain path before closing the connection.
     tokio::time::sleep(Duration::from_millis(150)).await;
 
-    // Close succeeds whether the read already drained or is still waiting.
+    // Close remains valid whether the reader already drained or remains blocked.
     close_connection(&client, &id).await;
 
     let read_result = reader.await.unwrap().expect("read task join");
-    // Stop reason depends on timing: buffered bytes -> "drained", a late
-    // timeout -> "timeout", or close during the wait -> "connection_closed".
+    // Scheduling determines the stop reason: buffered data gives "drained",
+    // timeout gives "timeout", and close during the wait gives
+    // "connection_closed".
     assert_eq!(
         read_result.is_error,
         Some(false),
@@ -303,10 +295,8 @@ async fn native_close_while_read_active_returns_normal_result() {
     drop(fw);
 }
 
-// ── Test D: reopen same port after close works ──────────────────────────────
-
-/// The same native_sim PTY can be opened again after a clean close, and a
-/// fresh `ping` round-trip succeeds.
+/// Verify that the same native_sim PTY reopens after a clean close and that the
+/// new connection completes a fresh `ping` round-trip.
 #[tokio::test]
 #[ignore = "requires native_sim firmware binary"]
 async fn native_reopen_same_port_after_close_works() {
@@ -355,10 +345,8 @@ async fn native_reopen_same_port_after_close_works() {
     drop(fw);
 }
 
-// ── Test E: reopen + match finds only fresh post-reopen output ─────────────
-
-/// After reopening, a fresh `read(match=...)` sees the response to a new
-/// command on the new connection rather than stale session data.
+/// Verify that after reopen, a fresh `read(match=...)` sees the response to a
+/// new command rather than stale session data.
 #[tokio::test]
 #[ignore = "requires native_sim firmware binary"]
 async fn native_reopen_then_match_finds_fresh_output() {
@@ -368,7 +356,6 @@ async fn native_reopen_then_match_finds_fresh_output() {
     let server = TestServer::start().await;
     let (client, _rx) = connect_client(&server).await.unwrap();
 
-    // First connection: do a round-trip and close.
     let first_id = open_pty(&client, &pty_path, CONNECTION_NAME).await;
     sync_boot(&client, &first_id).await;
     write_cmd(&client, &first_id, "ping").await;
@@ -395,8 +382,8 @@ async fn native_reopen_then_match_finds_fresh_output() {
     );
     close_connection(&client, &first_id).await;
 
-    // Reopen the same PTY. The new connection must independently be
-    // able to issue a write and observe a match for the response.
+    // The new connection must issue a write and match its response independently;
+    // stale session data must not satisfy this read.
     let second_id = open_pty(&client, &pty_path, CONNECTION_NAME).await;
     sync_boot(&client, &second_id).await;
     write_cmd(&client, &second_id, "ping").await;
@@ -431,11 +418,8 @@ async fn native_reopen_then_match_finds_fresh_output() {
     drop(fw);
 }
 
-// ── Test F: set_flow_control accepted at open time for named connection ─────
-
-/// Covers the path where flow control is supplied on `open` (instead of
-/// via a later `set_flow_control` call). The resulting `list_connections`
-/// summary should reflect the requested mode.
+/// Verify that flow control supplied during `open` appears in the named
+/// connection's `list_connections` summary.
 #[tokio::test]
 #[ignore = "requires native_sim firmware binary"]
 async fn native_open_with_flow_control_persists_in_summary() {

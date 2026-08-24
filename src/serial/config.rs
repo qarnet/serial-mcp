@@ -13,10 +13,10 @@ use tokio_serial::ClearBuffer;
 use super::port_info::PortInfo;
 
 /// Largest baud rate accepted by [`crate::serial::SerialConnection::open`].
-/// Anything higher is treated as a typo or accidental overflow and rejected.
+/// Values above this limit are rejected.
 pub const MAX_BAUD_RATE: u32 = 4_000_000;
 
-// ---- Configuration enums -----------------------------------------------------
+// Configuration enums.
 
 #[derive(Debug, Clone, Copy, Deserialize, JsonSchema)]
 pub enum DataBits {
@@ -126,7 +126,7 @@ pub(crate) fn flow_control_to_str(f: FlowControl) -> String {
     }
 }
 
-// ---- String parsing (single source of truth) --------------------------------
+// String parsing helpers.
 
 impl std::str::FromStr for DataBits {
     type Err = String;
@@ -191,8 +191,7 @@ pub struct ConnectionConfig {
     /// OS-level port identity (VID, PID, serial, transport, etc.)
     /// Captured at open time for status and profile save operations.
     pub port_info: Option<PortInfo>,
-    /// Log buffer capacity in events. 0 or None disables logging.
-    /// Default: 1024.
+    /// Log buffer capacity in events. Zero disables logging. Default: 1024.
     #[serde(default = "default_log_capacity")]
     #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
     pub log_capacity: usize,
@@ -238,7 +237,7 @@ fn default_max_buffered_bytes() -> usize {
     32768
 }
 
-// ---- Connection state -------------------------------------------------------
+// Connection state.
 
 /// The health state of a live serial connection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -306,7 +305,7 @@ fn default_backoff_multiplier() -> f64 {
     2.0
 }
 
-/// Classify an I/O error as a fatal disconnect (port vanished).
+/// Return whether an I/O error is classified as a fatal connection loss.
 pub fn is_fatal_disconnect(err: &std::io::Error) -> bool {
     use std::io::ErrorKind;
     matches!(
@@ -320,7 +319,7 @@ pub fn is_fatal_disconnect(err: &std::io::Error) -> bool {
     )
 }
 
-// ---- Active profile-session binding -----------------------------------------
+// Active profile-session binding.
 
 /// Active profile-session binding stored on a connection.
 ///
@@ -363,7 +362,7 @@ impl ActiveProfileBinding {
     }
 }
 
-// ---- Flush target -----------------------------------------------------------
+// Flush target.
 
 /// Which OS-side buffer(s) a flush should clear.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
@@ -387,7 +386,7 @@ impl From<FlushTarget> for ClearBuffer {
     }
 }
 
-// ---- Connection summary / status --------------------------------------------
+// Connection summary and status.
 
 /// Public-facing summary of an open connection.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -445,7 +444,7 @@ pub struct ConnectionStatus {
     pub profile: Option<crate::profiles::ProfileSessionResult>,
 }
 
-// ---- Config parsing tests ---------------------------------------------------
+// Config parsing tests.
 
 #[cfg(test)]
 mod tests {

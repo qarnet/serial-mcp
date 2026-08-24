@@ -3,11 +3,11 @@
 #
 # Run the `native_sim` test firmware.
 #
-# Build dir:  build/native_sim
-# Result:     build/native_sim/firmware/zephyr/zephyr.exe
+# Default output directory: build/native_sim
+# Default firmware binary:  build/native_sim/firmware/zephyr/zephyr.exe
 #
-# Override the build dir by exporting SERIAL_MCP_FW_BUILD_DIR.
-# Override the binary path by exporting SERIAL_MCP_NATIVE_SIM_BIN.
+# Export SERIAL_MCP_FW_BUILD_DIR to override the output directory.
+# Export SERIAL_MCP_NATIVE_SIM_BIN to override the binary path.
 
 set -euo pipefail
 

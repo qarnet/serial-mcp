@@ -1,16 +1,15 @@
-//! Guards against tool-count drift between the code and its descriptions.
+//! Checks prose against the served MCP tool catalog.
 //!
-//! The number of MCP tools is hardcoded in three prose surfaces (README.md,
-//! Cargo.toml `description`, server.json `description`) and enumerated in the
-//! README tool catalog table. The registry listing shipped "12 tools" while the
-//! server had 22 because nothing tied these together — this test does.
+//! The tool count appears in README.md, Cargo.toml `description`,
+//! server.json `description`, and the README tool catalog table. The registry
+//! once listed "12 tools" while the server had 22. This test keeps them aligned.
 //!
-//! Source of truth: `serial_mcp::server::tool_catalog()`, the exact catalog the
-//! MCP router serves (the README table, Cargo.toml, and server.json must all
-//! agree with it). Detailed canonical contracts live in `docs/` guides
+//! Source of truth: `serial_mcp::server::tool_catalog()`, the exact catalog
+//! served by the MCP router. README, Cargo.toml, and server.json must agree
+//! with it. Detailed canonical contracts live in `docs/` guides
 //! (`docs/rx-and-reading.md`, `docs/device-profiles.md`,
-//! `docs/persistent-capture.md`); the README links them instead of
-//! re-owning the prose.
+//! `docs/persistent-capture.md`). README links those guides instead of
+//! duplicating their prose.
 
 use std::fs;
 use std::path::Path;
@@ -20,12 +19,12 @@ fn repo_file(rel: &str) -> String {
     fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
 }
 
-/// Count `#[tool(` attribute occurrences in src/server.rs.
+/// Count `#[tool(` attributes in src/server.rs.
 fn tool_count() -> usize {
     repo_file("src/server.rs").matches("#[tool(").count()
 }
 
-/// The exact tool-name set served by MCP, straight from the router's catalog.
+/// Return the exact tool-name set served by the router catalog.
 fn served_tool_names() -> Vec<String> {
     serial_mcp::server::tool_catalog()
         .into_iter()
@@ -33,7 +32,7 @@ fn served_tool_names() -> Vec<String> {
         .collect()
 }
 
-/// Extract every backtick-delimited inline-code span in `text`.
+/// Extract backtick-delimited inline-code spans from `text`.
 fn inline_code_spans(text: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut in_code = false;
@@ -58,8 +57,8 @@ fn inline_code_spans(text: &str) -> Vec<String> {
 
 #[test]
 fn tool_count_is_sane() {
-    // Guard the guard: if the attribute spelling ever changes, this fails
-    // loudly instead of letting the other tests trivially pass on 0.
+    // A changed attribute spelling must fail here instead of making the other
+    // tests pass trivially on a count of zero.
     assert!(
         tool_count() >= 10,
         "expected at least 10 #[tool( attributes in src/server.rs, found {} — \
@@ -81,10 +80,9 @@ fn readme_tool_catalog_matches_served_catalog() {
         .unwrap_or_else(|e| panic!("README tool catalog drifted: {e}"));
 }
 
-/// The README tool catalog table is the human view of the exact served
-/// catalog. Parse the "Tool catalog" section's inline-code identifiers and
-/// compare as sets: no missing, no extra, no duplicates — and the section
-/// heading must carry the visible count marker.
+/// Compare the README "Tool catalog" inline-code identifiers with the exact
+/// served catalog. Reject missing, extra, or duplicate names, and require the
+/// visible count marker in the section heading.
 fn check_readme_tool_catalog(readme: &str, expected: &[String]) -> Result<(), String> {
     let n = expected.len();
     let marker = format!("({n} tools)");
@@ -116,8 +114,8 @@ fn check_readme_tool_catalog(readme: &str, expected: &[String]) -> Result<(), St
 
 #[test]
 fn readme_tool_catalog_guard_rejects_dropped_tool() {
-    // Negative proof: drop one tool's inline-code span from the catalog
-    // section; the guard must name the set mismatch, not pass vacuously.
+    // Negative proof: remove one catalog name. The guard must report a set
+    // mismatch rather than pass without checking anything.
     let expected = served_tool_names();
     let readme = repo_file("README.md");
     let start = readme.find("## Tool catalog").expect("catalog section");
@@ -159,17 +157,16 @@ fn cargo_toml_description_tool_count_matches_code() {
 
 #[test]
 fn package_discovery_metadata_is_exact() {
-    // crates.io/GitHub listings surface three discovery surfaces first: the
-    // README H1 (line 1) and the Cargo [package] homepage/documentation
-    // fields. They must stay exact — a drifted H1 or a wrong link reads
-    // directly in registry and search-result listings.
+    // crates.io and GitHub show the README H1 and Cargo [package]
+    // homepage/documentation fields in discovery listings. Keep these exact:
+    // a drifted H1 or link appears directly in registry and search results.
     let readme = repo_file("README.md");
     let h1 = readme
         .lines()
         .next()
         .expect("README.md must have a first line");
     assert_eq!(
-        h1, "# Serial MCP — UART and USB-Serial Access for AI Agents",
+        h1, "# serial-mcp for UART and USB serial access",
         "README line 1 is the package-discovery H1 and must stay exact"
     );
 
@@ -205,9 +202,9 @@ fn server_json_description_tool_count_matches_code() {
 
 #[test]
 fn readme_mentions_every_protocol_preset() {
-    // The preset list also drifts (the pre-0.7.1 README stopped at SLIP).
-    // Keep this list in sync with `ProtocolPreset` in src/framing/config.rs; the
-    // enum source is grepped so adding a preset without README mention fails.
+    // The pre-0.7.1 README stopped at SLIP. Derive this list from
+    // `ProtocolPreset` in src/framing/config.rs so a new preset without a
+    // README mention fails.
     let framing = repo_file("src/framing/config.rs");
     let readme = repo_file("README.md");
     let enum_body = framing
@@ -215,7 +212,7 @@ fn readme_mentions_every_protocol_preset() {
         .nth(1)
         .and_then(|s| s.split('}').next())
         .expect("src/framing/config.rs must define ProtocolPreset");
-    // Serde renames variants to snake_case; derive the wire names.
+    // Serde renames variants to snake_case. Derive those wire names here.
     let wire_names: Vec<String> = enum_body
         .lines()
         .map(str::trim)
@@ -238,7 +235,7 @@ fn readme_mentions_every_protocol_preset() {
                 } else if c.is_ascii_digit() || c.is_ascii_lowercase() {
                     out.push(c);
                 } else {
-                    // Non-identifier char: not a plain variant line.
+                    // Ignore lines that are not plain variant identifiers.
                     return String::new();
                 }
             }
@@ -260,10 +257,9 @@ fn readme_mentions_every_protocol_preset() {
 
 #[test]
 fn rx_guide_readfrom_examples_use_tagged_wire_form() {
-    // The `ReadFrom` wire format is a tagged object (`{"type":"now"}`), not a
-    // bare string. The canonical contract lives in docs/rx-and-reading.md; the
-    // README links that guide. Prose that teaches the `from` parameter must
-    // not regress to string shorthand — agents copy these examples verbatim.
+    // `ReadFrom` is tagged-object-only: `{"type":"now"}`, not a bare string.
+    // docs/rx-and-reading.md owns the canonical contract, and README links it.
+    // Keep every `from` example tagged because agents copy these examples.
     let guide = repo_file("docs/rx-and-reading.md");
     for tagged in [
         r#"{"type":"cursor"}"#,
@@ -308,10 +304,9 @@ fn server_json_versions_match_cargo_toml() {
 
 #[test]
 fn changelog_matches_cargo_package_version() {
-    // Release roll contract: a Cargo.toml package version bump must come with
-    // a release table row and a matching body heading in CHANGELOG.md, plus
-    // an [Unreleased] heading above the current release. Reads the real
-    // Cargo.toml + CHANGELOG.md.
+    // A Cargo.toml package version bump requires a release table row, a
+    // matching CHANGELOG.md body heading, and an [Unreleased] heading above
+    // the current release. Read the real Cargo.toml and CHANGELOG.md.
     let version = cargo_toml_version();
     let changelog = repo_file("CHANGELOG.md");
     check_changelog_contract(&changelog, &version)
@@ -320,9 +315,8 @@ fn changelog_matches_cargo_package_version() {
 
 #[test]
 fn changelog_contract_rejects_missing_version_table_row() {
-    // Negative proof: drop only the current-version table row from a
-    // contract-satisfying fixture; the failure must name the table row, not
-    // the body headings.
+    // Negative proof: remove only the current-version table row. The failure
+    // must name the table-row rule, not a body-heading rule.
     let version = "9.9.9";
     let row = format!("| [{version}](#{}) |", version.replace('.', ""));
     let text = synthetic_changelog(version)
@@ -342,8 +336,8 @@ fn changelog_contract_rejects_missing_version_table_row() {
 
 #[test]
 fn changelog_contract_rejects_missing_version_heading() {
-    // Negative proof: drop only the `## [x.y.z]` body heading; the table row
-    // stays, so the failure must be the heading rule alone.
+    // Negative proof: remove only the `## [x.y.z]` body heading. The table row
+    // remains, so only the heading rule should fail.
     let version = "9.9.9";
     let text = synthetic_changelog(version)
         .lines()
@@ -359,7 +353,7 @@ fn changelog_contract_rejects_missing_version_heading() {
 
 #[test]
 fn changelog_contract_rejects_missing_unreleased_heading() {
-    // Negative proof: drop only the `## [Unreleased]` heading.
+    // Negative proof: remove only the `## [Unreleased]` heading.
     let version = "9.9.9";
     let text = synthetic_changelog(version)
         .lines()
@@ -375,9 +369,8 @@ fn changelog_contract_rejects_missing_unreleased_heading() {
 
 #[test]
 fn changelog_contract_rejects_unreleased_after_current_release() {
-    // Negative proof: swap the two headings so [Unreleased] sits after the
-    // current release; every earlier rule still passes, so only the ordering
-    // rule may fire.
+    // Negative proof: put [Unreleased] after the current release. Earlier
+    // rules still pass, so only the ordering rule should fail.
     let version = "9.9.9";
     let heading = format!("## [{version}]");
     let unreleased = "## [Unreleased]";
@@ -398,9 +391,8 @@ fn changelog_contract_rejects_unreleased_after_current_release() {
 
 #[test]
 fn server_json_version_mismatch_is_rejected() {
-    // Negative proof for the Cargo/server.json version equality: a committed
-    // template with a drifted version field must be reported with the
-    // mismatching value, not silently accepted.
+    // Negative proof for Cargo/server.json version equality: a drifted
+    // template version must be reported with its mismatching value.
     let cargo_version = cargo_toml_version();
     let server_json = repo_file("server.json");
     let v: serde_json::Value =
@@ -425,12 +417,11 @@ fn server_json_version_mismatch_is_rejected() {
 
 #[test]
 fn server_json_omits_packages() {
-    // The committed server.json is a registry template: the packages array
+    // Committed server.json is a registry template. The packages array
     // (release-asset URLs + fileSha256) is generated at publish time by
-    // .github/workflows/publish-mcp-registry.yml from the actual release
-    // binaries. A committed packages array goes stale on every release —
-    // 0.5.1 URLs and hashes survived in the repo until 0.7.3 — so it must
-    // not exist here.
+    // .github/workflows/publish-mcp-registry.yml from release binaries. A
+    // committed array goes stale: 0.5.1 URLs and hashes survived until 0.7.3.
+    // It must not exist here.
     let server_json = repo_file("server.json");
     let v: serde_json::Value =
         serde_json::from_str(&server_json).expect("server.json is valid JSON");
@@ -444,10 +435,9 @@ fn server_json_omits_packages() {
 
 #[test]
 fn readme_teaches_capture_boot_boot_path_and_semantics() {
-    // The README must teach capture_boot as the boot/reset path,
-    // and the tool description must state the private cursor, OS-input
-    // purge, optional line pulse, bounded in-memory result, and no file
-    // output.
+    // README must teach capture_boot as the boot/reset path. Its tool
+    // description must state the private cursor, OS-input purge, optional
+    // line pulse, bounded in-memory result, and no file output.
     let readme = repo_file("README.md");
     assert!(
         readme.contains("capture_boot"),
@@ -470,7 +460,7 @@ fn readme_teaches_capture_boot_boot_path_and_semantics() {
             "capture_boot tool description must state {needle:?}"
         );
     }
-    // The decision-tree instructions teach the boot path too.
+    // Server decision-tree instructions must teach the boot path too.
     let instructions = server
         .split("with_instructions(")
         .nth(1)
@@ -484,8 +474,8 @@ fn readme_teaches_capture_boot_boot_path_and_semantics() {
 
 #[test]
 fn readme_teaches_profile_discovery_and_common_flow() {
-    // The normal workflow is discover → bare open → transact →
-    // inspect the learned profile → escalate. Positive guidance assertions.
+    // Normal workflow: discover, bare open, transact, inspect the learned
+    // profile, then escalate. These assertions check positive guidance.
     let readme = repo_file("README.md");
     assert!(
         readme.contains("profile_matches"),
@@ -507,9 +497,9 @@ fn readme_teaches_profile_discovery_and_common_flow() {
 
 #[test]
 fn prompts_teach_current_decision_tree_without_stale_references() {
-    // The diagnose prompt must teach list_ports → bare open → transact →
-    // rollback, and neither prompt may reference removed tools or removed
-    // per-call fields.
+    // The diagnose prompt must teach list_ports, bare open, transact, and
+    // rollback. Neither prompt may reference removed tools or removed per-call
+    // fields.
     let diagnose = repo_file("src/prompts/diagnose.rs");
     assert!(
         diagnose.contains("`list_ports`") && diagnose.contains("profile_matches"),
@@ -550,8 +540,8 @@ fn prompts_teach_current_decision_tree_without_stale_references() {
 
 #[test]
 fn server_instructions_teach_decision_tree() {
-    // The server `instructions` string (served on initialize) must carry the
-    // decision tree, not a flat tool list.
+    // The server `instructions` string, served on initialize, must carry the
+    // decision tree rather than a flat tool list.
     let server = repo_file("src/server.rs");
     let instructions = server
         .split("with_instructions(")
@@ -575,9 +565,8 @@ fn server_instructions_teach_decision_tree() {
 
 #[test]
 fn agent_config_rx_troubleshooting_links_rx_guide() {
-    // docs/agent-config.md referenced the removed `#how-rx-works` anchor; the
-    // RX model contract now lives in docs/rx-and-reading.md and the
-    // troubleshooting entry must point there, with the target file existing.
+    // docs/agent-config.md must not use removed `#how-rx-works`. The RX model
+    // contract is in docs/rx-and-reading.md, and the target file must exist.
     let config = repo_file("docs/agent-config.md");
     assert!(
         !config.contains("#how-rx-works"),
@@ -596,10 +585,10 @@ fn agent_config_rx_troubleshooting_links_rx_guide() {
 
 #[test]
 fn features_md_does_not_relist_shipped_items() {
-    // FEATURES.md is the roadmap/tech-debt file only. Shipped items
-    // (configure, transact, compute_checksum, reconnect policy, ...) must not
-    // be re-added there — CHANGELOG.md and AGENTS.md own shipped truth, and a
-    // shipped marker in the roadmap reads as unbuilt or goes stale.
+    // FEATURES.md is only the roadmap/tech-debt file. Do not re-add shipped
+    // items (configure, transact, compute_checksum, reconnect policy, ...).
+    // CHANGELOG.md and AGENTS.md own shipped truth; a roadmap shipped marker
+    // makes completed work look unbuilt or becomes stale.
     let features = repo_file("docs/development/FEATURES.md");
     assert!(
         !features.contains("✅ **Shipped"),
@@ -613,10 +602,10 @@ fn features_md_does_not_relist_shipped_items() {
 
 #[test]
 fn consumed_implementation_handoffs_are_removed() {
-    // docs/development/github-actions-security-handoff.md documented GitHub
-    // Actions security hardening that has since shipped. Development policy
-    // says consumed implementation handoffs are removed from the tree (git
-    // history preserves them) — a surviving handoff reads as pending work.
+    // docs/development/github-actions-security-handoff.md described shipped
+    // GitHub Actions security hardening. Consumed implementation handoffs are
+    // removed from the tree; git history preserves them. A surviving handoff
+    // looks like pending work.
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("docs/development/github-actions-security-handoff.md");
     assert!(
@@ -629,11 +618,10 @@ fn consumed_implementation_handoffs_are_removed() {
 
 #[test]
 fn features_md_removed_roadmap_headings_stay_removed() {
-    // The old "Positive MCP cache hints" heading described the shipped
-    // ttlMs=0/private baseline as if it were an unbuilt feature, and
-    // "Multiple public subscriptions per connection" predated removal of the
-    // serial subscribe/unsubscribe tools. Neither may reappear, and the
-    // Per-client RX cursors item must not resurrect the removed cross-link.
+    // "Positive MCP cache hints" described the shipped ttlMs=0/private
+    // baseline as unbuilt. "Multiple public subscriptions per connection"
+    // predates removal of the serial subscribe/unsubscribe tools. Neither may
+    // return, and Per-client RX cursors must not restore that cross-link.
     let features = repo_file("docs/development/FEATURES.md");
     for heading in [
         "### Positive MCP cache hints",
@@ -658,10 +646,9 @@ fn features_md_removed_roadmap_headings_stay_removed() {
 
 #[test]
 fn features_md_cache_item_distinguishes_shipped_baseline_from_future_policy() {
-    // The roadmap item is ONLY the future positive-TTL policy: the shipped
-    // 2026-07-28 cache baseline (ttlMs=0, private) must be named as shipped,
-    // never as the unbuilt feature. Checked semantically so paragraph layout
-    // can change.
+    // The roadmap item covers only future positive-TTL policy. It must name
+    // the shipped 2026-07-28 cache baseline (ttlMs=0, private) as shipped, not
+    // as an unbuilt feature. Check semantics so paragraph layout can change.
     let features = repo_file("docs/development/FEATURES.md");
     let item = features
         .split("### Positive MCP cache TTL policy")
@@ -674,7 +661,7 @@ fn features_md_cache_item_distinguishes_shipped_baseline_from_future_policy() {
          baseline (ttlMs=0, private)"
     );
     assert!(
-        item.contains("future") || item.contains("NOT shipped") || item.contains("if pursued"),
+        item.contains("future") || item.contains("not shipped") || item.contains("if pursued"),
         "the cache-TTL item must frame positive TTL as future, not shipped: {item}"
     );
     for prereq in [
@@ -692,11 +679,10 @@ fn features_md_cache_item_distinguishes_shipped_baseline_from_future_policy() {
 
 #[test]
 fn features_md_baud_detection_stays_deferred_and_keeps_expliot_reference() {
-    // Baud-rate auto-detection is explicitly deferred: generic host-side
+    // Baud-rate auto-detection is explicitly deferred. Generic host-side
     // detection over a USB-serial adapter is heuristic, not waveform
-    // measurement, so the roadmap item must stay marked deferred. The
-    // EXPLIoT reference is a pointer to an existing solution — guard the
-    // deferred marker and the exact repository URL so neither drifts.
+    // measurement. The EXPLIoT reference points to an existing solution; keep
+    // the deferred marker and exact repository URL stable.
     let features = repo_file("docs/development/FEATURES.md");
     let item = features
         .split("### Baud-rate auto-detection")
@@ -715,9 +701,8 @@ fn features_md_baud_detection_stays_deferred_and_keeps_expliot_reference() {
 
 #[test]
 fn readme_links_capture_guide_with_short_summary() {
-    // The README owns a one-sentence summary of the capture contract and links
-    // the canonical guide; the detailed contract lives in
-    // docs/persistent-capture.md.
+    // README owns a one-sentence capture summary and links the canonical
+    // guide. The detailed contract lives in docs/persistent-capture.md.
     let readme = repo_file("README.md");
     assert!(
         readme.contains("--capture-dir"),
@@ -728,7 +713,7 @@ fn readme_links_capture_guide_with_short_summary() {
         "README must link the persistent-capture guide"
     );
     let summary = readme
-        .find("**Persistent capture:**")
+        .find("### Persistent capture")
         .map(|i| &readme[i..i + 600])
         .unwrap_or_default();
     assert!(
@@ -743,10 +728,10 @@ fn readme_links_capture_guide_with_short_summary() {
 
 #[test]
 fn capture_guide_documents_full_export_contract() {
-    // docs/persistent-capture.md is the canonical owner of the detailed
-    // contract: disabled by default, the exact quota options, filename-only
-    // portable paths, no-overwrite atomic snapshots, the advisory lock, and
-    // failure/durability semantics.
+    // docs/persistent-capture.md owns the detailed contract: disabled by
+    // default, exact quota options, filename-only portable paths,
+    // no-overwrite atomic snapshots, advisory locking, and failure/durability
+    // semantics.
     let guide = repo_file("docs/persistent-capture.md");
     for needle in [
         "--capture-dir",
@@ -769,10 +754,11 @@ fn capture_guide_documents_full_export_contract() {
 
 #[test]
 fn rx_guide_states_ring_capacity_and_rejects_removed_subscribe() {
-    // docs/rx-and-reading.md is the canonical RX contract. The ring's
-    // retention capacity is rx_buffer_size (fixed at open); max_buffered_bytes
-    // is the per-read/in-memory result cap, not the ring bound. The removed
-    // `subscribe` tool must not be suggested or code-formatted.
+    // docs/rx-and-reading.md owns the RX contract. The ring retains
+    // rx_buffer_size bytes, fixed at open. max_buffered_bytes is a
+    // connection-level read-result cap, not a per-call argument or ring-size
+    // control. The removed `subscribe` tool must not be suggested or
+    // code-formatted.
     let guide = repo_file("docs/rx-and-reading.md");
     let paragraphs: Vec<&str> = guide.split("\n\n").collect();
     let rx_para = paragraphs
@@ -819,9 +805,9 @@ fn device_profiles_guide_states_none_outcomes_and_explicit_weak() {
         "the `none` outcome must cover high-generated AND weak-transient \
          behavior: {none_line}"
     );
-    // One paragraph must tie explicit open_profile to weak identity — an
-    // independent document-wide mention of both would not prove the
-    // qualification is stated together.
+    // One paragraph must tie explicit open_profile to weak identity. Separate
+    // document-wide mentions would not prove that qualification is stated
+    // together.
     let weak_para = guide
         .split("\n\n")
         .find(|p| p.contains("open_profile") && p.contains("weak"))
@@ -838,9 +824,9 @@ fn device_profiles_guide_states_none_outcomes_and_explicit_weak() {
 
 #[test]
 fn docs_index_links_new_guides_and_targets_exist() {
-    // docs/README.md is the user-documentation index: it must link the three
-    // new user guides, agent config, the protocol guide, the development
-    // index, and the roadmap, and every relative target must exist on disk.
+    // docs/README.md is the user-documentation index. It must link the three
+    // user guides, agent config, protocol guide, development index, and
+    // roadmap. Every relative target must exist on disk.
     let index = repo_file("docs/README.md");
     let targets = [
         "agent-config.md",
@@ -868,9 +854,9 @@ fn docs_index_links_new_guides_and_targets_exist() {
 
 #[test]
 fn capture_cli_options_synced_between_value_list_and_help() {
-    // The VALUE_TAKING_OPTIONS const and the --help block must both list
-    // every capture option, or `--capture-dir --version` style detection
-    // silently drifts (see the CROSS-REFERENCE comment in main.rs).
+    // VALUE_TAKING_OPTIONS and the --help block must list every capture
+    // option. Otherwise `--capture-dir --version` detection can drift. See
+    // the CROSS-REFERENCE comment in main.rs.
     let main = repo_file("src/main.rs");
     let value_list = main
         .split("const VALUE_TAKING_OPTIONS: &[&str] = &[")
@@ -896,18 +882,16 @@ fn capture_cli_options_synced_between_value_list_and_help() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// GitHub Actions security regression guards (alerts #7–#14)
+// GitHub Actions security regression guards (alerts #7–#14).
 //
-// The release pipeline must stay structural: trusted CI (push to main) calls
-// the reusable release + registry workflows; nothing may reintroduce
-// event-driven privileged orchestration (workflow_run / pull_request_target),
-// secret inheritance, or event-derived checkouts.
-// ---------------------------------------------------------------------------
+// Keep the release pipeline structural: trusted CI on push to main calls the
+// reusable release and registry workflows. Do not reintroduce event-driven
+// privileged orchestration (workflow_run / pull_request_target), secret
+// inheritance, or event-derived checkouts.
 
-/// Every committed workflow file in .github/workflows/, sorted by name.
-/// Normalize workflow text to LF so parsing is independent of the checkout's
-/// line endings (Windows clones are CRLF).
+/// Return every committed workflow in .github/workflows/, sorted by name.
+/// Normalize text to LF so parsing is independent of checkout line endings;
+/// Windows clones can use CRLF.
 fn normalize_lf(text: &str) -> String {
     text.replace("\r\n", "\n")
 }
@@ -937,8 +921,8 @@ fn workflow_file(name: &str) -> String {
     text
 }
 
-/// Everything in a workflow before its first column-0 `jobs:` key: the
-/// `name` / `on` / `permissions` / `env` header.
+/// Return the workflow header before its first column-0 `jobs:` key. It holds
+/// the `name` / `on` / `permissions` / `env` fields.
 fn workflow_header(wf: &str) -> &str {
     let jobs = wf
         .find("\r\njobs:")
@@ -947,8 +931,8 @@ fn workflow_header(wf: &str) -> &str {
     &wf[..jobs]
 }
 
-/// The `on:` trigger block of a workflow: everything between the `on:` line
-/// and the next column-0 (non-comment) key.
+/// Return the `on:` trigger block between the `on:` line and the next
+/// column-0 non-comment key.
 fn trigger_block(wf: &str) -> &str {
     let start = wf
         .find("\r\non:")
@@ -975,8 +959,8 @@ fn trigger_block(wf: &str) -> &str {
     &rest[..end]
 }
 
-/// One job block: from the `  <name>:` header through the line before the next
-/// sibling job (a 2-space-indented `key:` line).
+/// Return one job block from its `  <name>:` header to the next sibling job.
+/// A sibling is a 2-space-indented `key:` line.
 fn job_section<'a>(wf: &'a str, name: &str) -> &'a str {
     let marker = format!("\r\n  {name}:\r\n");
     let marker_lf = format!("\n  {name}:\n");
@@ -1007,12 +991,12 @@ fn collapse_ws(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// The trusted-push gate every privileged caller job must carry.
+/// Check the trusted-push gate required by every privileged caller job.
 fn has_trusted_push_gate(job: &str) -> bool {
     collapse_ws(job).contains("github.event_name == 'push' && github.ref == 'refs/heads/main'")
 }
 
-/// Forbidden privileged-orchestration patterns across a whole workflow file.
+/// Return forbidden privileged-orchestration patterns in a workflow file.
 fn privileged_pattern_violations(wf: &str) -> Vec<&'static str> {
     [
         "workflow_run:",
@@ -1027,9 +1011,9 @@ fn privileged_pattern_violations(wf: &str) -> Vec<&'static str> {
 
 #[test]
 fn workflows_never_use_privileged_triggers_or_event_content() {
-    // No workflow may react to workflow_run / pull_request_target, inherit
-    // secrets, or read workflow_run event content. This is the whole point of
-    // the security remediation: privileged orchestration must not come back.
+    // Workflows must not react to workflow_run / pull_request_target, inherit
+    // secrets, or read workflow_run event content. This keeps privileged
+    // orchestration from returning.
     for (name, text) in workflow_files() {
         let violations = privileged_pattern_violations(&text);
         assert!(
@@ -1041,8 +1025,8 @@ fn workflows_never_use_privileged_triggers_or_event_content() {
 
 #[test]
 fn privileged_pattern_guard_rejects_vulnerable_fixtures() {
-    // Negative proof: each forbidden pattern must be detected, so the guard
-    // cannot pass vacuously on a textually weakened workflow.
+    // Negative proof: detect every forbidden pattern so a weakened workflow
+    // cannot pass without a match.
     let fixtures = [
         "on:\n  workflow_run:\n    types: [completed]\n",
         "on:\n  pull_request_target:\n    branches: [main]\n",
@@ -1060,11 +1044,10 @@ fn privileged_pattern_guard_rejects_vulnerable_fixtures() {
 /// Validate one workflow `uses:` line for immutable action pinning.
 ///
 /// Local reusable-workflow references (`uses: ./.github/...`) are exempt.
-/// Every external ref must be `owner/repo@<40-lowercase-hex-sha>` with a
-/// trailing readable version comment (e.g. ` # v7`, ` # master`). Returns the
-/// reason an offending line fails, or `None` when the line is compliant (or
-/// not a `uses:` line). Extracted as a pure function so the full-file scan and
-/// the synthetic negative proofs exercise the same code path.
+/// Each external ref must be `owner/repo@<40-lowercase-hex-sha>` with a
+/// readable version comment (for example ` # v7` or ` # master`). Return the
+/// violation reason, or `None` for a compliant or non-`uses:` line. The full
+/// scan and synthetic negative proofs call this same pure function.
 fn external_action_pin_violation(raw: &str) -> Option<String> {
     let trimmed = raw.trim();
     let value = trimmed.strip_prefix("uses:")?.trim();
@@ -1078,9 +1061,9 @@ fn external_action_pin_violation(raw: &str) -> Option<String> {
         None => (value, None),
     };
     let Some((action, revision)) = ref_part.rsplit_once('@') else {
-        // A non-local ref without a valid `action@revision` shape (a bare
-        // `actions/checkout`, a `docker://...` reference, ...) must fail —
-        // it can never satisfy the immutable-SHA policy.
+        // A non-local ref without `action@revision`, such as bare
+        // `actions/checkout` or `docker://...`, cannot satisfy the immutable
+        // SHA policy and must fail.
         return Some(format!(
             "external ref {ref_part:?} must be owner/repo@revision \
              (40-lowercase-hex SHA): {raw:?}"
@@ -1100,9 +1083,9 @@ fn external_action_pin_violation(raw: &str) -> Option<String> {
              (e.g. ` # v7`): {raw:?}"
         ));
     }
-    // The comment identifies the semantic version (`v7`, `v4.2.1`) or the
-    // generic rust-toolchain action (`master`); anything else — including a
-    // numeric prefix with trailing junk like `v7junk` — is not a version label.
+    // Accept semantic versions (`v7`, `v4.2.1`) and the generic
+    // rust-toolchain label (`master`). Reject other labels, including numeric
+    // prefixes with trailing junk such as `v7junk`.
     let comment = comment.unwrap();
     let comment_ok = comment == "master"
         || comment.strip_prefix('v').is_some_and(|rest| {
@@ -1123,9 +1106,9 @@ fn external_action_pin_violation(raw: &str) -> Option<String> {
 
 #[test]
 fn workflow_external_actions_pinned_to_immutable_sha() {
-    // Every external action ref in every workflow file must be an immutable
-    // 40-lowercase-hex SHA (with a readable version comment) — never a mutable
-    // `@vN` tag. Local `./` reusable workflow references are untouched.
+    // Every external action ref must use an immutable 40-lowercase-hex SHA
+    // with a readable version comment, never a mutable `@vN` tag. Local `./`
+    // reusable workflow references remain exempt.
     for (name, text) in workflow_files() {
         for (line_no, raw) in text.lines().enumerate() {
             if let Some(violation) = external_action_pin_violation(raw) {
@@ -1137,8 +1120,7 @@ fn workflow_external_actions_pinned_to_immutable_sha() {
 
 #[test]
 fn workflow_action_pin_guard_rejects_mutable_tags() {
-    // Negative proof: the guard must reject a synthetic mutable tag — the
-    // exact regression this pinning pass removes — and accept pinned forms.
+    // Negative proof: accept pinned forms and reject synthetic mutable tags.
     let pinned = "uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7";
     assert_eq!(external_action_pin_violation(pinned), None);
     assert_eq!(
@@ -1268,7 +1250,7 @@ fn ci_registry_caller_follows_release_read_only() {
 
 #[test]
 fn trusted_push_gate_guard_rejects_removed_gate() {
-    // Negative proof for the gate helper: a caller job without the exact
+    // Negative proof for the gate helper: a caller without the exact
     // push+main condition must not satisfy has_trusted_push_gate.
     let ci = workflow_file("ci.yml");
     let release = job_section(&ci, "release");
@@ -1334,8 +1316,8 @@ fn release_workflow_uses_job_level_least_privilege() {
 
 #[test]
 fn release_code_executing_jobs_are_read_only() {
-    // prepare, build, and publish-crate check out and execute repository code;
-    // they must never hold repository write permission.
+    // prepare, build, and publish-crate check out and execute repository code.
+    // They must not hold repository write permission.
     let release = workflow_file("release.yml");
     for name in ["prepare", "build", "publish-crate"] {
         let job = job_section(&release, name);
@@ -1353,8 +1335,8 @@ fn release_code_executing_jobs_are_read_only() {
 
 #[test]
 fn release_write_jobs_do_not_execute_project_code() {
-    // The only write-permission jobs are the GitHub release mutators. They
-    // must not check out or execute repository/project code.
+    // Only GitHub release mutators have write permission. They must not check
+    // out or execute repository/project code.
     let release = workflow_file("release.yml");
     for name in ["create-draft", "publish-release"] {
         let job = job_section(&release, name);
@@ -1374,9 +1356,8 @@ fn release_write_jobs_do_not_execute_project_code() {
 
 #[test]
 fn release_later_checkouts_use_resolved_sha() {
-    // inputs.ref is resolved once in prepare; every later checkout must pin
-    // the immutable resolved SHA so a moving branch cannot swap content
-    // between jobs.
+    // prepare resolves inputs.ref once. Later checkouts must use the immutable
+    // resolved SHA so a moving branch cannot swap content between jobs.
     let release = workflow_file("release.yml");
     let prepare = job_section(&release, "prepare");
     assert!(
@@ -1398,7 +1379,7 @@ fn release_later_checkouts_use_resolved_sha() {
 
 #[test]
 fn release_artifacts_flow_through_named_uploads_and_downloads() {
-    // Build jobs upload deterministic per-platform artifacts; the publish job
+    // Build jobs upload deterministic per-platform artifacts. The publish job
     // downloads exactly those four and uploads them to the draft.
     let release = workflow_file("release.yml");
     let build = job_section(&release, "build");
@@ -1469,9 +1450,8 @@ fn release_dry_run_is_dispatch_only_read_only_and_never_publishes() {
 
 #[test]
 fn workflow_parsers_accept_crlf_checkouts() {
-    // Windows checkouts normalize line endings to CRLF; every parser must
-    // yield identical results for CRLF and LF text (proven here, so a
-    // future edit cannot silently break Windows CI).
+    // Windows checkouts can use CRLF. Every parser must return the same result
+    // for CRLF and LF text; this test protects Windows CI from parser drift.
     let release = workflow_file("release.yml");
     let crlf = release.replace('\n', "\r\n");
     assert_eq!(
@@ -1501,10 +1481,10 @@ fn workflow_parsers_accept_crlf_checkouts() {
 
 #[test]
 fn flake_source_filter_ships_workflow_fixtures_and_scripts() {
-    // The flake source filter must admit .github/workflows (doc_drift reads
-    // them at runtime) and scripts/ (builder + unittest suite). A regression
-    // here fails doc_drift under `nix flake check`; the flake's own
-    // workflow-fixtures-present check is the executable proof.
+    // The flake source filter must include .github/workflows, which doc_drift
+    // reads at runtime, and scripts/, which contains the builder and unittest
+    // suite. Missing either breaks doc_drift under `nix flake check`; the
+    // flake's workflow-fixtures-present check proves this separately.
     let flake = repo_file("flake.nix");
     let filter_start = flake
         .find("filter =")
@@ -1522,13 +1502,13 @@ fn flake_source_filter_ships_workflow_fixtures_and_scripts() {
 
 #[test]
 fn publisher_workflow_uses_builder_and_no_nix_develop() {
-    // The registry manifest must be built by the offline builder from
-    // gh-downloaded assets; schema validation must use the independent
-    // jsonschema-cli package, never `nix develop` (which realizes serial-mcp).
+    // Build the registry manifest with the offline builder from gh-downloaded
+    // assets. Validate it with the independent jsonschema-cli package, never
+    // `nix develop`, which realizes serial-mcp.
     let publisher = workflow_file("publish-mcp-registry.yml");
     let has_nix_develop_run = publisher.lines().any(|line| {
-        // Ignore comment text; detect a "nix develop" invocation anywhere in
-        // the command (not just at the start of the line).
+        // Ignore comment text. Detect "nix develop" anywhere in the command,
+        // not only at line start.
         let code = line.split('#').next().unwrap_or("");
         code.split_whitespace()
             .collect::<Vec<_>>()
@@ -1590,10 +1570,9 @@ fn publisher_workflow_is_callable_with_ref_and_version() {
 
 #[test]
 fn publisher_consumes_staged_manifest_only() {
-    // The generated manifest must live in staging and be consumed from there
-    // by the builder, the schema validator, and the publisher. The committed
-    // repo-root server.json template is never a write or read target of the
-    // generated manifest.
+    // The builder, schema validator, and publisher must use the generated
+    // manifest in staging. The committed repo-root server.json template is
+    // never a read or write target for that manifest.
     let publisher = workflow_file("publish-mcp-registry.yml");
     assert!(
         publisher.contains("--output staging/server.json"),
@@ -1619,8 +1598,8 @@ fn publisher_consumes_staged_manifest_only() {
 
 #[test]
 fn publisher_rejects_unpublished_or_draft_releases() {
-    // gh release view alone accepts drafts; the publisher must verify the
-    // release is published (isDraft == false) via structured output.
+    // gh release view also accepts drafts. The publisher must verify a
+    // published release through structured output (isDraft == false).
     let publisher = workflow_file("publish-mcp-registry.yml");
     assert!(
         publisher.contains("--json isDraft") && publisher.contains(".isDraft"),
@@ -1763,20 +1742,19 @@ fn collect_versions(v: &serde_json::Value, out: &mut Vec<String>) {
     }
 }
 
-/// Compare every `version` field in a committed registry template against the
-/// Cargo package version. Returns each mismatching value; an empty vector
-/// means aligned. Errors when the template is unreadable or carries no
-/// version field at all (so the guard cannot pass vacuously on an empty tree).
+/// Compare every `version` field in a committed registry template with the
+/// Cargo package version. Return mismatching values; an empty vector means
+/// alignment. Error when the template is unreadable or has no version field,
+/// so an empty tree cannot pass without a check.
 fn server_json_version_mismatches(
     server_json: &str,
     cargo_version: &str,
 ) -> Result<Vec<String>, String> {
     let v: serde_json::Value = serde_json::from_str(server_json)
         .map_err(|e| format!("server.json is not valid JSON: {e}"))?;
-    // Collect every "version" field value anywhere in the JSON tree. With the
-    // packages array stripped from the committed file this is currently just
-    // the top-level field, but walking the whole tree keeps the guard honest
-    // if versioned sections are ever added back.
+    // Collect every "version" value in the JSON tree. The committed file
+    // currently has only its top-level field because packages are stripped,
+    // but walking the tree also covers any future versioned sections.
     let mut versions: Vec<String> = Vec::new();
     collect_versions(&v, &mut versions);
     if versions.is_empty() {
@@ -1790,10 +1768,9 @@ fn server_json_version_mismatches(
         .collect())
 }
 
-/// A minimal changelog satisfying the full contract for `version`. The
-/// negative tests below mutate exactly one element so each rule fails for its
-/// own named reason — this satisfies the plan's mutation-check requirement
-/// without dirtying the real CHANGELOG.md during test runs.
+/// Return a minimal changelog satisfying the full contract for `version`.
+/// Negative tests mutate one element at a time, so each rule reports its own
+/// reason without changing the real CHANGELOG.md during test runs.
 fn synthetic_changelog(version: &str) -> String {
     let anchor = version.replace('.', "");
     format!(
@@ -1813,7 +1790,7 @@ fn synthetic_changelog(version: &str) -> String {
     )
 }
 
-/// Changelog contract for the current package version:
+/// Check the changelog contract for the current package version:
 ///
 /// 1. release table contains a row beginning with `| [x.y.z](#xyz) |`
 ///    (anchor removes dots);
@@ -1821,9 +1798,9 @@ fn synthetic_changelog(version: &str) -> String {
 /// 3. body contains the exact heading `## [Unreleased]`;
 /// 4. the Unreleased heading occurs before the current release heading.
 ///
-/// All matching is line-based and exact, so prose mentions never satisfy the
-/// contract. Every violated rule is collected into one descriptive error, so
-/// an earlier failure can never mask a later rule.
+/// Matching is line-based and exact, so prose mentions do not satisfy the
+/// contract. Collect every violated rule into one descriptive error so an
+/// earlier failure does not mask a later rule.
 fn check_changelog_contract(changelog: &str, version: &str) -> Result<(), String> {
     let lines: Vec<&str> = changelog.lines().collect();
     let row_prefix = format!("| [{version}](#{}) |", version.replace('.', ""));
@@ -1866,12 +1843,10 @@ fn check_changelog_contract(changelog: &str, version: &str) -> Result<(), String
 
 fn cargo_toml_version() -> String {
     let manifest = repo_file("Cargo.toml");
-    // Parse the [package] version = "..." line.
     let line = manifest
         .lines()
         .find(|l| l.starts_with("version = "))
         .expect("Cargo.toml must have a `version = \"...\"` line");
-    // Extract the quoted string.
     let start = line.find('"').expect("version line has opening quote");
     let end = line.rfind('"').expect("version line has closing quote");
     line[start + 1..end].to_string()
@@ -1879,10 +1854,9 @@ fn cargo_toml_version() -> String {
 
 #[test]
 fn current_protocol_guide_omits_removed_streaming_tool() {
-    // docs/protocols.md must describe only retained tools: no deleted
-    // subscription notification types may appear in the current guide.
-    // Historical docs (CHANGELOG, migration plans, baselines) are allowed
-    // to mention old behavior; this guide is not.
+    // docs/protocols.md must describe only retained tools. Deleted
+    // subscription notification types may remain in historical docs
+    // (CHANGELOG, migration plans, baselines), but not in this current guide.
     let guide = repo_file("docs/protocols.md");
     for needle in [
         "SubscribeStopNotification",
@@ -1896,26 +1870,24 @@ fn current_protocol_guide_omits_removed_streaming_tool() {
     }
 }
 
-// =============================================================================
-// Phase 4: pinned official conformance + Inspector gates
-// =============================================================================
+// Pinned official conformance and Inspector gates.
 
-/// The exact pinned official conformance package (no floating tags).
+/// Exact pinned official conformance package; no floating tags.
 const PINNED_CONFORMANCE_PACKAGE: &str = "@modelcontextprotocol/conformance@0.2.0-alpha.10";
-/// The exact pinned official Inspector package (no floating tags).
+/// Exact pinned official Inspector package; no floating tags.
 const PINNED_INSPECTOR_PACKAGE: &str = "@modelcontextprotocol/inspector@2.0.0";
-/// The exact direct version of the pinned conformance package in the
-/// lockfile-pinned MCP validation npm project (compat/mcp-validation).
+/// Exact direct conformance version in the lockfile-pinned MCP validation
+/// npm project (compat/mcp-validation).
 const PINNED_CONFORMANCE_VERSION: &str = "0.2.0-alpha.10";
-/// The exact direct version of the pinned Inspector package in the
-/// lockfile-pinned MCP validation npm project (compat/mcp-validation).
+/// Exact direct Inspector version in the lockfile-pinned MCP validation npm
+/// project (compat/mcp-validation).
 const PINNED_INSPECTOR_VERSION: &str = "2.0.0";
-/// The exact pinned Node version for the conformance job.
+/// Exact Node version pinned by the conformance job.
 const PINNED_NODE_VERSION: &str = "22.19.0";
 
-/// The four documented fixture-dependent expected failures (server scope).
-/// A baseline entry that starts passing must fail the run as stale; the
-/// runner's exit-code contract enforces that, so these IDs must stay exact.
+/// Four documented fixture-dependent expected failures in server scope.
+/// A baseline entry that starts passing is stale and must fail the run. The
+/// runner's exit-code contract enforces this, so these IDs must stay exact.
 const EXPECTED_FAILURE_IDS: &[&str] = &[
     "server-stateless:sep-2575-server-rejects-undeclared-capability",
     "server-stateless:sep-2575-missing-capability-http-400",
@@ -1923,14 +1895,14 @@ const EXPECTED_FAILURE_IDS: &[&str] = &[
     "server-stateless:sep-2575-server-no-log-without-loglevel",
 ];
 
-/// The exact pinned historical rmcp 1.7.0 checksum (pre-migration resolution
-/// of the current SDK's predecessor). A dependency bump that changes the
-/// historical client implementation must fail here, not silently.
+/// Exact pinned checksum for historical rmcp 1.7.0, resolved before the
+/// current SDK migration. A dependency bump that changes the historical client
+/// implementation must fail here rather than silently changing it.
 const RMCP_1_7_0_CHECKSUM: &str =
     "0810a9f717d9828f475fe1f629f4c305c8464b7f496c3a854b58d29e65f4058e";
 
-/// The exact ordered `2025-11-25` official conformance scenario set. A new
-/// legacy scenario must be added here and in the runner together.
+/// Exact ordered official conformance scenarios for `2025-11-25`. Add a new
+/// legacy scenario here and in the runner together.
 const SCENARIOS_2025_11_25: &[&str] = &[
     "server-initialize",
     "ping",
@@ -1940,8 +1912,8 @@ const SCENARIOS_2025_11_25: &[&str] = &[
     "prompts-list",
 ];
 
-/// The exact ordered `2026-07-28` official conformance scenario set. A new
-/// modern scenario must be added here and in the runner together.
+/// Exact ordered official conformance scenarios for `2026-07-28`. Add a new
+/// modern scenario here and in the runner together.
 const SCENARIOS_2026_07_28: &[&str] = &[
     "server-stateless",
     "completion-complete",
@@ -1952,10 +1924,9 @@ const SCENARIOS_2026_07_28: &[&str] = &[
     "sep-2164-resource-not-found",
 ];
 
-/// Extract the ordered word list from a quoted shell assignment
-/// `VAR="word1 word2 ..."` in the compatibility runner. This is the exact
-/// scenario parser: loose `contains` checks let a scenario drop or reorder
-/// silently, the parsed array cannot.
+/// Extract the ordered words from a quoted shell assignment
+/// `VAR="word1 word2 ..."` in the compatibility runner. Loose `contains`
+/// checks allow dropped or reordered scenarios; this parsed array does not.
 fn parse_scenario_assignment(script: &str, var: &str) -> Vec<String> {
     let prefix = format!("{var}=\"");
     let line = script
@@ -1971,10 +1942,9 @@ fn parse_scenario_assignment(script: &str, var: &str) -> Vec<String> {
         .collect()
 }
 
-/// The runner's exact per-version scenario contract: ordered scenario sets,
-/// exact `--spec-version` values, and exact `-2025-11-25` / `-2026-07-28`
-/// report suffixes. Returns on the first descriptive violation; each check
-/// names the exact expected value so the drift stays diagnosable.
+/// Check the runner's per-version contract: ordered scenario sets, exact
+/// `--spec-version` values, and exact `-2025-11-25` / `-2026-07-28` report
+/// suffixes. Return the first descriptive violation with its expected value.
 fn runner_scenario_contract(script: &str) -> Result<(), String> {
     let legacy = parse_scenario_assignment(script, "SCENARIOS_2025_11_25");
     if legacy != SCENARIOS_2025_11_25 {
@@ -2018,8 +1988,7 @@ fn conformance_expected_failures_are_exactly_the_four_documented_checks() {
             "expected-failures.yaml must baseline exactly {id:?}"
         );
     }
-    // No other baselined checks: every list line under server: is one of the
-    // four documented IDs.
+    // Every list line under server: must be one of the four documented IDs.
     let baselined: Vec<&str> = server_section
         .lines()
         .filter(|l| l.trim_start().starts_with("- "))
@@ -2040,18 +2009,18 @@ fn ci_conformance_job_pins_packages_and_never_runs_suite_all() {
         .split("mcp-conformance:")
         .nth(1)
         .expect("ci.yml must define the mcp-conformance job");
-    // The job delegates compatibility execution to the shared runner: local
-    // and CI must share one executable path. Exact package pins, scenario
-    // lists, and the expected-failure baseline live in the runner script
-    // (guarded by `compat_runner_pins_packages_and_never_runs_suite_all` and
-    // `ci_scenario_lists_match_pinned_runner_scenarios`).
+    // Local and CI compatibility execution must use the shared runner. The
+    // runner owns package pins, scenario lists, and the expected-failure
+    // baseline. Its contracts are checked by
+    // `compat_runner_pins_packages_and_never_runs_suite_all` and
+    // `ci_scenario_lists_match_pinned_runner_scenarios`.
     assert!(
         job.contains("bash scripts/test-mcp-compat.sh"),
         "mcp-conformance job must invoke the shared runner"
     );
-    // The job delegates ALL compatibility execution to the runner: it must
-    // not duplicate scenario loops (no --scenario/--spec-version invocations
-    // may appear in CI YAML).
+    // The job delegates all compatibility execution to the runner. It must
+    // not duplicate scenario loops; CI YAML must contain no
+    // --scenario/--spec-version invocations.
     let scenario_loops: Vec<&str> = job
         .lines()
         .filter(|l| l.contains("--scenario") && !l.trim_start().starts_with('#'))
@@ -2081,8 +2050,7 @@ fn ci_conformance_job_pins_packages_and_never_runs_suite_all() {
         job.contains("permissions:") && job.contains("contents: read"),
         "mcp-conformance job must run with contents: read permissions"
     );
-    // Comments may explain why `--suite all` is forbidden; only an actual
-    // (non-comment) usage counts.
+    // Ignore comments when checking for actual `--suite all` usage.
     let suite_all_usage: Vec<&str> = job
         .lines()
         .filter(|l| l.contains("--suite all") && !l.trim_start().starts_with('#'))
@@ -2091,10 +2059,9 @@ fn ci_conformance_job_pins_packages_and_never_runs_suite_all() {
         suite_all_usage.is_empty(),
         "mcp-conformance job must never run `--suite all`: {suite_all_usage:?}"
     );
-    // Validation is fully lockfile-pinned: the CI job must never resolve
-    // packages dynamically with npx (the runner installs from the committed
-    // lockfile with lifecycle scripts disabled). Comments may explain the
-    // rule; only actual usage counts.
+    // Validation is lockfile-pinned. The CI job must not resolve packages with
+    // npx; the runner installs from the committed lockfile with lifecycle
+    // scripts disabled. Ignore comments and count only actual usage.
     let npx_usage: Vec<&str> = job
         .lines()
         .filter(|l| l.contains("npx") && !l.trim_start().starts_with('#'))
@@ -2107,13 +2074,13 @@ fn ci_conformance_job_pins_packages_and_never_runs_suite_all() {
 
 #[test]
 fn compat_runner_pins_packages_and_never_runs_suite_all() {
-    // The shared runner is the executable compatibility gate: it must install
-    // the lockfile-pinned validation tree with `npm ci --ignore-scripts`
-    // (lifecycle scripts disabled, no npx), invoke the local conformance /
-    // mcp-inspector binaries directly, wire the Inspector smoke script, apply
-    // the exact expected-failure baseline path, exercise the historical
-    // fixture over BOTH transports, run under `set -euo pipefail`, and never
-    // run `--suite all` (comments may explain why it is forbidden).
+    // The shared runner is the executable compatibility gate. It must install
+    // the lockfile-pinned tree with `npm ci --ignore-scripts` (lifecycle
+    // scripts disabled and no npx), invoke local conformance and mcp-inspector
+    // binaries directly, wire the Inspector smoke script, apply the exact
+    // expected-failure baseline path, exercise the historical fixture over
+    // both transports, run under `set -euo pipefail`, and never run
+    // `--suite all`.
     let script = repo_file("scripts/test-mcp-compat.sh");
     assert!(
         script.contains(PINNED_CONFORMANCE_PACKAGE),
@@ -2178,29 +2145,28 @@ fn compat_runner_pins_packages_and_never_runs_suite_all() {
 
 #[test]
 fn compat_runner_scenario_contract_is_exact_per_version() {
-    // The exact version-indexed scenario contract: ordered quoted
-    // assignments, exact --spec-version values, and exact report suffixes.
+    // Check ordered quoted assignments, exact --spec-version values, and exact
+    // report suffixes for each protocol version.
     runner_scenario_contract(&repo_file("scripts/test-mcp-compat.sh"))
         .unwrap_or_else(|e| panic!("runner scenario contract violated: {e}"));
 }
 
-/// The committed MCP validation npm project contract: a private package.json
-/// with EXACT direct dependency versions (no `^`/`~`/tags/ranges), and a
-/// committed package-lock.json whose lockfile-root dependencies are the exact
-/// same versions and whose locked conformance + Inspector package entries
-/// carry exact versions plus `sha512-` integrity hashes. The validation flow
-/// installs ONLY from this lockfile (`npm ci --ignore-scripts`) — a lockfile
-/// that no longer resolves the pinned versions or loses integrity breaks the
-/// supply-chain pin.
+/// Check the committed MCP validation npm project contract: private
+/// package.json, exact direct dependency versions (no `^`/`~`/tags/ranges),
+/// and package-lock.json with matching lockfile-root dependencies. Locked
+/// conformance and Inspector entries must carry exact versions and `sha512-`
+/// integrity hashes. The validation flow installs only from this lockfile
+/// (`npm ci --ignore-scripts`); changed resolutions or missing integrity break
+/// the supply-chain pin.
 ///
-/// The `overrides` block is a peer-range fix, not a product dependency: the
+/// The `overrides` block fixes peer ranges; it is not a product dependency.
 /// Inspector's transitive `ink-form@2.0.1` pulls `ink-select-input@5.0.0`
-/// (peer `ink ^4`) alongside `ink-text-input@6.0.0` (peer `ink >=5`), which
-/// no single ink instance can satisfy — npm auto-overrides that peer conflict
-/// into an INVALID tree (`npm ls` exits nonzero). Pinning `ink` to `6.8.0`
-/// and `ink-form`'s `ink-select-input` to `6.2.0` (peer `ink >=5.0.0`) makes
-/// every ink peer edge satisfiable by one instance, so `npm ls --all` is
-/// clean. Both pins are exact versions, so they stay fully lockfile-pinned.
+/// (peer `ink ^4`) alongside `ink-text-input@6.0.0` (peer `ink >=5`). No
+/// single ink instance satisfies both, so npm auto-overrides the conflict into
+/// an INVALID tree (`npm ls` exits nonzero). Pin `ink` to `6.8.0` and
+/// `ink-form`'s `ink-select-input` to `6.2.0` (peer `ink >=5.0.0`) so one
+/// instance satisfies every ink peer edge and `npm ls --all` is clean. Both
+/// pins are exact versions and remain lockfile-pinned.
 fn mcp_validation_npm_contract(manifest: &str, lock: &str) -> Result<(), String> {
     let manifest: serde_json::Value = serde_json::from_str(manifest)
         .map_err(|e| format!("package.json must be valid JSON: {e}"))?;
@@ -2240,10 +2206,9 @@ fn mcp_validation_npm_contract(manifest: &str, lock: &str) -> Result<(), String>
     }
 
     // Peer-range fix guard: without these exact overrides npm resolves the
-    // ink-form peer conflict into an invalid tree (`npm ls` fails). If the
-    // upstream graph is ever fixed so the overrides become removable, update
-    // this guard together with the overrides and re-run `npm ls --all` in
-    // compat/mcp-validation.
+    // ink-form conflict into an invalid tree (`npm ls` fails). If upstream
+    // fixes the graph and the overrides become removable, update this guard
+    // with the overrides and re-run `npm ls --all` in compat/mcp-validation.
     let overrides = manifest
         .get("overrides")
         .and_then(serde_json::Value::as_object)
@@ -2327,9 +2292,9 @@ fn mcp_validation_npm_contract(manifest: &str, lock: &str) -> Result<(), String>
         }
     }
 
-    // The overridden ink peer range must resolve to the exact overridden
-    // versions in the lockfile too (locked `ink` 6.8.0 + `ink-select-input`
-    // 6.2.0), so a lockfile regenerated without the overrides fails here.
+    // The lockfile must also resolve the overridden versions: locked `ink`
+    // 6.8.0 and `ink-select-input` 6.2.0. A lockfile regenerated without the
+    // overrides must fail here.
     for (locked_name, version) in [("ink", "6.8.0"), ("ink-select-input", "6.2.0")] {
         let entry = packages
             .get(&format!("node_modules/{locked_name}"))
@@ -2349,10 +2314,10 @@ fn mcp_validation_npm_contract(manifest: &str, lock: &str) -> Result<(), String>
 
 #[test]
 fn mcp_validation_npm_tree_is_lockfile_pinned() {
-    // Observable supply-chain contract: exact direct versions, exact
-    // lockfile-root deps, and locked per-package versions + integrity for the
-    // conformance and Inspector packages. The runner installs from this
-    // lockfile with lifecycle scripts disabled and never via npx.
+    // Supply-chain contract: exact direct versions, exact lockfile-root deps,
+    // and locked versions plus integrity for conformance and Inspector. The
+    // runner installs from this lockfile with lifecycle scripts disabled and
+    // never via npx.
     mcp_validation_npm_contract(
         &repo_file("compat/mcp-validation/package.json"),
         &repo_file("compat/mcp-validation/package-lock.json"),
@@ -2362,8 +2327,8 @@ fn mcp_validation_npm_tree_is_lockfile_pinned() {
 
 #[test]
 fn mcp_validation_contract_rejects_a_drifted_direct_version() {
-    // Negative proof: drifting the manifest's conformance direct version away
-    // from the lockfile must fail the contract naming the package.
+    // Negative proof: changing the manifest's conformance version away from
+    // the lockfile must fail with the package name.
     let manifest = repo_file("compat/mcp-validation/package.json");
     let mutated = manifest.replace(
         &format!("\"@modelcontextprotocol/conformance\": \"{PINNED_CONFORMANCE_VERSION}\""),
@@ -2383,10 +2348,9 @@ fn mcp_validation_contract_rejects_a_drifted_direct_version() {
 
 #[test]
 fn scenario_contract_rejects_a_dropped_scenario_word() {
-    // Negative proof for the exact-scenario parser/check: removing one word
-    // from the real 2025-11-25 assignment must fail the contract naming the
-    // scenario set (the loose `contains` checks it replaces could not catch
-    // this).
+    // Negative proof for the exact-scenario parser: removing one word from
+    // the real 2025-11-25 assignment must name the scenario set. Loose
+    // `contains` checks would not catch this.
     let script = repo_file("scripts/test-mcp-compat.sh");
     let assignment = script
         .lines()
@@ -2402,8 +2366,8 @@ fn scenario_contract_rejects_a_dropped_scenario_word() {
 
 #[test]
 fn scenario_contract_rejects_a_drifted_report_suffix() {
-    // Negative proof: drifting the modern report suffix must fail the
-    // contract naming the report dir.
+    // Negative proof: changing the modern report suffix must name the report
+    // directory rule.
     let script = repo_file("scripts/test-mcp-compat.sh");
     let mutated = script.replace(
         "\"$REPORT_DIR/$sc-2026-07-28\"",
@@ -2418,12 +2382,11 @@ fn scenario_contract_rejects_a_drifted_report_suffix() {
 
 #[test]
 fn historical_fixture_pins_exact_rmcp_1_7_0() {
-    // The fixture is the real historical-client proof: its manifest must pin
-    // rmcp exactly =1.7.0 with default-features = false and only the required
-    // client/transport features, and its committed lockfile must resolve
-    // exactly one rmcp package at 1.7.0 with the historical checksum. A
-    // bumped or loosened dependency silently changes the client
-    // implementation under test.
+    // This fixture is the historical-client proof. Its manifest must pin rmcp
+    // exactly =1.7.0 with default-features = false and only the required
+    // client/transport features. Its lockfile must resolve one rmcp package at
+    // 1.7.0 with the historical checksum. A bumped or loosened dependency
+    // changes the client implementation under test.
     let manifest: toml::Value = toml::from_str(&repo_file("compat/rmcp-1-client/Cargo.toml"))
         .expect("compat/rmcp-1-client/Cargo.toml must be valid TOML");
     let rmcp = manifest
@@ -2497,8 +2460,8 @@ fn historical_fixture_pins_exact_rmcp_1_7_0() {
 fn policy_doc_states_support_table_and_permanent_legacy_contract() {
     // The durable compatibility policy must name both versions in preferred
     // order (2026-07-28 first), the permanent 2025-11-25 retention rule, the
-    // exact shared runner command, the historical fixture, and the
-    // no-implicit-known-version-support rule. Anchor checks only — no brittle
+    // exact shared runner command, the historical fixture, and the rule that
+    // known versions do not imply support. Use anchor checks, not a brittle
     // whole-prose snapshot.
     let policy = repo_file("docs/development/mcp-version-compatibility-policy.md");
     let modern = policy
@@ -2535,16 +2498,16 @@ fn policy_doc_states_support_table_and_permanent_legacy_contract() {
 
 #[test]
 fn features_md_tracks_pre_2025_11_25_as_demand_driven_feature_idea() {
-    // Older protocol revisions are a potential feature, not current support:
-    // FEATURES.md must carry the item under Wish, label it non-current and
-    // demand-driven, and keep the supported set at exactly the two versions.
+    // Older protocol revisions are a potential feature, not current support.
+    // FEATURES.md must place the item under Wish, label it non-current and
+    // demand-driven, and keep exactly the two supported versions.
     let features = repo_file("docs/development/FEATURES.md");
     assert!(
         features.contains("Earlier MCP protocol revisions (pre-2025-11-25)"),
         "FEATURES.md must track the pre-2025-11-25 item under Wish"
     );
     assert!(
-        features.contains("NOT current support"),
+        features.contains("not current support"),
         "FEATURES.md must state the item is not current support"
     );
     assert!(
@@ -2559,19 +2522,18 @@ fn features_md_tracks_pre_2025_11_25_as_demand_driven_feature_idea() {
 
 #[test]
 fn ci_scenario_lists_match_pinned_runner_scenarios() {
-    // The pinned conformance package provides no `server-session-lifecycle`
-    // scenario; the legacy initialize/session lifecycle is covered by
-    // `server-initialize`. Exact per-version ordered scenario sets,
-    // `--spec-version` values, and report suffixes are asserted by
-    // `compat_runner_scenario_contract_is_exact_per_version` (parser-based);
-    // this test guards the two rules that live outside that contract.
+    // The pinned conformance package has no `server-session-lifecycle`
+    // scenario. `server-initialize` covers the legacy initialize/session
+    // lifecycle. `compat_runner_scenario_contract_is_exact_per_version`
+    // checks ordered per-version scenarios, `--spec-version` values, and
+    // report suffixes; this test checks the two remaining rules.
     let script = repo_file("scripts/test-mcp-compat.sh");
     assert!(
         script.contains("server-initialize"),
         "test-mcp-compat.sh must run the server-initialize legacy session scenario"
     );
-    // Scoped to actual scenario-loop lines: the runner comment explains the
-    // missing scenario by name, which must not trip this guard.
+    // Inspect scenario-loop lines only. The runner comment names the missing
+    // scenario and must not trip this guard.
     let scenario_loop_references_it = script
         .lines()
         .any(|l| l.contains("for sc in") && l.contains("server-session-lifecycle"));
@@ -2581,9 +2543,8 @@ fn ci_scenario_lists_match_pinned_runner_scenarios() {
          (absent from the pinned runner; server-initialize covers the legacy \
          session lifecycle)"
     );
-    // Runner exit status must never be suppressed: the runner's global
-    // `set -euo pipefail` fails the whole script on any nonzero exit
-    // (anchored here on the `set -e` substring).
+    // The runner's global `set -euo pipefail` must propagate every nonzero
+    // exit. Anchor this check on the `set -e` substring.
     assert!(
         script.contains("set -e"),
         "test-mcp-compat.sh must fail on any nonzero runner exit"
@@ -2612,9 +2573,9 @@ fn inspector_smoke_script_pins_inspector_and_covers_expected_surface() {
             "inspector-smoke.mjs must contain {needle:?}"
         );
     }
-    // The default Inspector command must be the lockfile-pinned LOCAL binary
-    // (compat/mcp-validation/node_modules/.bin/mcp-inspector) — never npx,
-    // never a dynamic package resolution.
+    // The default Inspector command must be the lockfile-pinned local binary
+    // (compat/mcp-validation/node_modules/.bin/mcp-inspector), never npx or a
+    // dynamic package resolution.
     assert!(
         script.contains("LOCKED_INSPECTOR_BIN")
             && script.contains("mcp-validation")
@@ -2622,8 +2583,8 @@ fn inspector_smoke_script_pins_inspector_and_covers_expected_surface() {
         "inspector-smoke.mjs must default to the local locked Inspector \
          binary from compat/mcp-validation"
     );
-    // Same rule scoped to non-comment lines: comments may explain the rule
-    // ("never npx"), only actual usage counts.
+    // Apply the same rule to non-comment lines. Comments may explain "never
+    // npx"; only actual usage counts.
     let npx_usage: Vec<&str> = script
         .lines()
         .filter(|l| {
@@ -2636,23 +2597,23 @@ fn inspector_smoke_script_pins_inspector_and_covers_expected_surface() {
         npx_usage.is_empty(),
         "inspector-smoke.mjs must never use npx in code: {npx_usage:?}"
     );
-    // The standalone `--inspector-cmd` option must consume every following
-    // argv token (at least one required) — regression guard for the parsing
-    // fix; a rewrite that only matches `--inspector-cmd=<path>` or the env
-    // var silently breaks the documented multi-token form.
+    // Standalone `--inspector-cmd` must consume every following argv token,
+    // with at least one required. A parser that accepts only
+    // `--inspector-cmd=<path>` or the env var breaks the documented multi-token
+    // form.
     assert!(
         script.contains("argv.indexOf(\"--inspector-cmd\")"),
         "inspector-smoke.mjs must parse the standalone --inspector-cmd option"
     );
-    // The non-interactive description must not claim --stored-auth-only
-    // (it is not used; the actual protections are MCP_AUTO_OPEN_ENABLED,
-    // non-TTY stdio, and the bounded connect timeout).
+    // The non-interactive description must not claim --stored-auth-only. It is
+    // not used; protections are MCP_AUTO_OPEN_ENABLED, non-TTY stdio, and the
+    // bounded connect timeout.
     assert!(
         !script.contains("--stored-auth-only"),
         "inspector-smoke.mjs must not claim --stored-auth-only"
     );
-    // The smoke must be a hard gate: any assertion failure or nonzero CLI
-    // exit leaves the script failing.
+    // The smoke is a hard gate. Any assertion failure or nonzero CLI exit must
+    // leave the script failing.
     assert!(
         script.contains("process.exitCode = 1"),
         "inspector-smoke.mjs must exit nonzero on assertion failure"
@@ -2662,8 +2623,8 @@ fn inspector_smoke_script_pins_inspector_and_covers_expected_surface() {
 #[test]
 fn readme_states_dual_protocol_compliance() {
     // The user-facing compliance claim must name both supported protocol
-    // versions (2025-11-25 legacy sessions + 2026-07-28 modern discovery)
-    // and the one complete local/CI MCP version gate command.
+    // versions (2025-11-25 legacy sessions and 2026-07-28 modern discovery)
+    // and the one complete local/CI MCP version-gate command.
     let readme = repo_file("README.md");
     assert!(
         readme.contains("2025-11-25") && readme.contains("2026-07-28"),

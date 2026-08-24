@@ -1,42 +1,49 @@
-//! Catalog metrics: the exact `tools/list` payload served by the MCP
-//! server, measured in compact JSON bytes (no HTTP/SSE headers, no
-//! pretty-print whitespace). The catalog comes from
-//! `serial_mcp::server::tool_catalog()`, so the measurement can never
-//! drift from what the router serves.
+//! Catalog metrics measure the exact `tools/list` payload served by the MCP
+//! server in compact JSON bytes. They exclude HTTP/SSE headers and pretty-print
+//! whitespace. The catalog comes from `serial_mcp::server::tool_catalog()`, so
+//! measurements match the router output.
 
 use serde::{Deserialize, Serialize};
 
-/// Byte metric definition (documented, fixed):
+/// Byte metrics use these fixed definitions:
 ///
-/// - per-tool bytes: `serde_json::to_string(tool)` length (compact).
-/// - input schema bytes: compact JSON of `tool.input_schema`.
-/// - output schema bytes: compact JSON of `tool.output_schema`, 0 when
+/// - Per-tool bytes: compact `serde_json::to_string(tool)` length.
+/// - Input schema bytes: compact JSON length of `tool.input_schema`.
+/// - Output schema bytes: compact JSON length of `tool.output_schema`, 0 when
 ///   absent (all tools carry one today).
-/// - description bytes: UTF-8 length of `tool.description`, 0 when absent.
-/// - aggregate bytes: compact JSON length of `{"tools":[...]}` — the
-///   serialized `tools/list` result body.
+/// - Description bytes: UTF-8 length of `tool.description`, 0 when absent.
+/// - Aggregate bytes: compact JSON length of `{"tools":[...]}`, the serialized
+///   `tools/list` result body.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CatalogMetrics {
     pub tool_count: usize,
-    /// Compact bytes of the whole `{"tools":[...]}` result.
+    /// Compact byte length of the whole `{"tools":[...]}` result.
     pub aggregate_bytes: usize,
-    /// Compact bytes of each tool's JSON, keyed by tool name.
+    /// Compact byte length of each tool's JSON, keyed by tool name.
     pub per_tool_bytes: Vec<ToolBytes>,
-    /// Top-largest tools by per-tool bytes (name + bytes), descending.
+    /// Up to five largest tools by per-tool byte count, in descending order.
     pub top_largest: Vec<ToolBytes>,
 }
 
+/// Byte counts for one tool in the catalog.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ToolBytes {
+    /// Tool name.
     pub name: String,
+    /// Compact JSON byte count for the tool.
     pub total_bytes: usize,
+    /// UTF-8 byte count for the tool description.
     pub description_bytes: usize,
+    /// Compact JSON byte count for the input schema.
     pub input_schema_bytes: usize,
+    /// Compact JSON byte count for the output schema.
     pub output_schema_bytes: usize,
 }
 
-/// Measure the live catalog. Deterministic: `Tool` serialization and
-/// schemars output are fully deterministic for a given build.
+/// Measure the live catalog.
+///
+/// `Tool` serialization and schemars output are deterministic for a given
+/// build.
 pub fn catalog_metrics() -> CatalogMetrics {
     let tools = serial_mcp::server::tool_catalog();
     let mut per_tool: Vec<ToolBytes> = tools
@@ -108,8 +115,7 @@ mod tests {
         let metrics = catalog_metrics();
         assert_eq!(metrics.tool_count, 25);
         assert_eq!(metrics.per_tool_bytes.len(), 25);
-        // The aggregate is larger than the sum of per-tool bytes (the
-        // envelope adds keys/array framing).
+        // Aggregate size includes envelope framing.
         let per_tool_sum: usize = metrics.per_tool_bytes.iter().map(|t| t.total_bytes).sum();
         assert!(
             metrics.aggregate_bytes > per_tool_sum,

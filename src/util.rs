@@ -1,8 +1,8 @@
 //! Small shared byte-slice utilities.
 
-/// Find the first occurrence of `needle` in `haystack`. Returns the byte
-/// index of the match, or `None` if the needle is empty, the haystack is
-/// shorter than the needle, or no match exists.
+/// Find the first occurrence of `needle` in `haystack`.
+///
+/// Returns `None` for an empty or longer needle, or when no match exists.
 pub(crate) fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     if needle.is_empty() || haystack.len() < needle.len() {
         return None;

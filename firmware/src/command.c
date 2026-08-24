@@ -4,24 +4,24 @@
  *
  * Command parser and executor for serial-mcp test firmware.
  *
- * Commands:
- *   ping                                  → pong
- *   spam <count> hex [last_data=".."] [delay=<ms>]
- *   spam stop                             → stop transmission, report bytes
- *   info                                  → board/build info
- *   rxbuf status                          → partial-line buffer contents
- *   rxbuf clear                           → clear partial-line buffer
- *   arm_cmd <delay_ms>                    → delay before next cmd execution
- *   trace on|off                          → echo each RX byte with seq number
- *   framing on|off                        → report line boundaries on parse
- *   slow on [<us>]                        → slow consumer mode (delay reads)
- *   slow off                             → normal consumer mode
- *   write cmd <id> <rest...>             → execute <rest> tagged with <id>
- *   binary on|off                        → binary trace mode
- *   txbuf status                         → TX ring buffer occupancy
- *   ack on|off                           → pre-execution ack per command
- *   hold on|off                          → stall firmware TX drain
- *   touch                                 → exit(42) — bootloader entry trigger
+ * Supported commands:
+ *   ping: return pong as a health response.
+ *   spam <count> hex [last_data=".."] [delay=<ms>]: send a hex payload.
+ *   spam stop: stop transmission and report bytes sent.
+ *   info: report board and build information.
+ *   rxbuf status|clear: inspect or clear the partial-line buffer.
+ *   arm_cmd <delay_ms>: delay the next command.
+ *   trace on|off: report received bytes with sequence numbers.
+ *   framing on|off: report committed input lines.
+ *   slow on [<us>]|off: delay command consumption.
+ *   write cmd <id> <rest...>: execute a tagged nested command.
+ *   binary on|off: enable or disable binary trace mode.
+ *   txbuf status: report TX ring-buffer occupancy.
+ *   ack on|off: enable or disable pre-execution acknowledgements.
+ *   hold on|off: pause or resume firmware TX draining.
+ *   touch: exit with status 42 for the bootloader-entry lifecycle test.
+ *   jsonout: send JSON lines for parser tests.
+ *   sendraw hex|text <data>: send raw payload without framing.
  */
 
 #include "command.h"
@@ -112,7 +112,6 @@ static void cmd_sendraw(struct app_state *state, char *args)
 		uint8_t byte;
 		char pair[3] = {0};
 		while (*data) {
-			/* skip whitespace */
 			while (*data == ' ')
 				data++;
 			if (!*data || !data[1])
@@ -129,7 +128,7 @@ static void cmd_sendraw(struct app_state *state, char *args)
 			data = "";
 		}
 		uart_drv_send_str(state->uart, data);
-		/* No \r\n appended */
+		/* Send raw text without appending a line terminator. */
 	} else {
 		uart_drv_send_str(state->uart,
 				  "ERR usage: sendraw hex|text <data>\r\n");
@@ -408,7 +407,7 @@ static void cmd_hold(struct app_state *state, char *arg)
 	} else if (strcmp(arg, "off") == 0) {
 		uart_drv_send_str(state->uart, "hold off\r\n");
 		state->uart->tx_hold = false;
-		/* Re-enable TX IRQ so pending data can drain. */
+		/* Re-enable TX interrupts so pending data can drain. */
 		uart_irq_tx_enable(state->uart->dev);
 	} else {
 		uart_drv_send_str(state->uart, "ERR usage: hold on|off\r\n");
@@ -417,8 +416,7 @@ static void cmd_hold(struct app_state *state, char *arg)
 
 static void cmd_jsonout(struct app_state *state)
 {
-	/* Emit JSON lines for parser testing.
-	   Each line is a complete JSON object terminated by \r\n. */
+	/* Send complete JSON objects with CRLF terminators for parser tests. */
 	uart_drv_printf(state->uart,
 			"{\"sensor\":\"temp\",\"value\":25.5,\"unit\":\"C\"}\r\n");
 	uart_drv_printf(state->uart,

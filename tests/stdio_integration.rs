@@ -1,4 +1,4 @@
-//! STDIO transport integration tests.
+//! Stdio transport integration tests.
 //!
 //! These tests spawn the `serial-mcp` binary as a child process,
 //! connect via stdin/stdout pipes using rmcp's `TokioChildProcess` transport,
@@ -41,12 +41,11 @@ async fn start_stdio_client() -> (
     (client, profiles_dir)
 }
 
-/// Start a stdio server child and connect an explicit client for one exact
-/// protocol version: `2026-07-28` uses the discover lifecycle
-/// (self-contained per-request `_meta`), `2025-11-25` the initialize
-/// lifecycle. The common [`common::VersionedClientHandler`] serves both
-/// modes with one return type. Returns the running client plus the tempdir
-/// that must stay alive for the client's lifetime.
+/// Start a stdio server child and connect a client using one exact protocol
+/// version. `2026-07-28` uses the discover lifecycle with self-contained
+/// per-request `_meta`; `2025-11-25` uses the initialize lifecycle. The common
+/// [`common::VersionedClientHandler`] serves both modes with one return type.
+/// The returned tempdir must remain alive for the client's lifetime.
 async fn start_stdio_protocol_client(
     protocol: TestProtocol,
 ) -> (
@@ -171,10 +170,10 @@ async fn stdio_2026_07_28_discovery_lifecycle_negotiates_exact_version() {
 
 #[tokio::test]
 async fn stdio_2026_07_28_listener_cancellation_completes_cleanly() {
-    // Modern `subscriptions/listen` over stdio: the acknowledgment carries
-    // the accepted filter, cancellation completes with a clean `Cancelled`
-    // end state, and the server keeps serving afterwards (no hang, no
-    // protocol error, child stays alive).
+    // Modern `subscriptions/listen` over stdio returns the accepted filter in
+    // its acknowledgment. Cancellation must complete with clean `Cancelled`
+    // state, and the server must keep serving without hanging or producing a
+    // protocol error while the child remains alive.
     let (client, _profiles_dir) = start_stdio_protocol_client(TestProtocol::V2026_07_28).await;
 
     let mut subscription = client
@@ -205,7 +204,7 @@ async fn stdio_2026_07_28_listener_cancellation_completes_cleanly() {
         "stdio listener cancellation completes with Cancelled"
     );
 
-    // The server is still healthy after the cancelled listener.
+    // The server remains healthy after listener cancellation.
     let info = client
         .peer_info()
         .expect("2026-07-28 peer info after cancel");
@@ -254,11 +253,9 @@ async fn stdio_2025_11_25_initialize_lifecycle_negotiates_exact_version() {
     client.cancel().await.ok();
 }
 
-// ── Version flag tests ────────────────────────────────────────────────
-//
-// These tests exercise the CLI --version / -V / version surface, which
-// prints a single line and exits before the MCP handshake. They use
-// std::process::Command directly, not the rmcp transport.
+// These tests cover the CLI `--version`, `-V`, and `version` behavior. Each
+// prints one line and exits before the MCP handshake. They invoke
+// `std::process::Command` directly instead of the rmcp transport.
 
 fn run_bin(args: &[&str]) -> (std::process::Output, String) {
     common::binaries::ensure_serial_mcp_built().expect("serial-mcp binary available");
@@ -278,7 +275,7 @@ fn stdio_version_flag_prints_version_string() {
         "expected exit 0, got {:?}",
         out.status
     );
-    // e.g. serial-mcp 0.7.1 (abc1234, x86_64-unknown-linux-gnu)
+    // Example output: serial-mcp 0.7.1 (abc1234, x86_64-unknown-linux-gnu)
     assert!(
         regex::Regex::new(r"^serial-mcp \d+\.\d+\.\d+ \(.+, .+\)\n$")
             .unwrap()
@@ -329,9 +326,9 @@ fn stdio_version_flag_takes_precedence_over_other_args() {
 
 #[test]
 fn stdio_version_flag_not_consumed_as_option_value() {
-    // `--bind --version`: `--version` is the value of `--bind`, not a
-    // version request. The bind parse fails on the bogus value and the
-    // process exits non-zero — it must NOT print the version string.
+    // With `--bind --version`, the parser treats `--version` as the `--bind`
+    // value rather than as a version request. The bogus bind value causes a
+    // non-zero exit, and the process must not print the version string.
     let (out, stdout) = run_bin(&["--bind", "--version"]);
     assert!(
         !out.status.success(),
@@ -346,8 +343,9 @@ fn stdio_version_flag_not_consumed_as_option_value() {
 
 #[test]
 fn stdio_version_flag_not_consumed_as_equal_form_option_value() {
-    // `--bind=--version`: value embedded via `=`, so the next token IS a
-    // flag position. `--version` after it should still print version.
+    // The command passes a `--bind=<value>` argument followed by a separate
+    // `--version` flag. The equal-form argument consumes its value, so the
+    // next token remains a flag and the version request still prints.
     let (out, stdout) = run_bin(&["--bind=0.0.0.0:8000", "--version"]);
     assert!(
         out.status.success(),
@@ -364,9 +362,9 @@ fn stdio_version_flag_not_consumed_as_equal_form_option_value() {
 
 #[test]
 fn stdio_version_flag_not_recognized_after_double_dash() {
-    // `-- --version`: everything after `--` is positional, not a flag.
-    // The process should error on the unexpected positional `--version`,
-    // not print the version.
+    // `-- --version` treats everything after `--` as positional rather than a
+    // flag. The process must reject unexpected positional `--version` instead
+    // of printing the version.
     let (out, stdout) = run_bin(&["--", "--version"]);
     assert!(
         !out.status.success(),
@@ -395,10 +393,10 @@ fn stdio_help_documents_profiles_path() {
 
 #[test]
 fn stdio_profiles_path_consumes_version_as_value() {
-    // `--profiles-path --version`: `--version` is the value of the option,
-    // not a version request — same rule as `--bind --version`. The binary
-    // must NOT print the version string. stdin is closed, so a stdio
-    // server that did start exits on EOF.
+    // With `--profiles-path --version`, the parser treats `--version` as the
+    // option value rather than as a version request, following the same rule
+    // as `--bind --version`. The binary must not print the version string.
+    // Stdin is closed, so a stdio server that starts exits on EOF.
     let out = std::process::Command::new(common::binaries::serial_mcp_bin())
         .args(["--profiles-path", "--version"])
         .env("RUST_LOG", "off")
@@ -411,8 +409,6 @@ fn stdio_profiles_path_consumes_version_as_value() {
         "must not print version when --version is the value of --profiles-path, got: {stdout:?}"
     );
 }
-
-// ── Capture CLI surface ─────────────────────────────────────────────────────
 
 #[test]
 fn stdio_help_documents_capture_options() {
@@ -437,9 +433,9 @@ fn stdio_help_documents_capture_options() {
 
 #[test]
 fn stdio_capture_dir_consumes_version_as_value() {
-    // `--capture-dir --version`: `--version` is the VALUE of --capture-dir
-    // (not a version request). The value is not an absolute path, so the
-    // process must exit with a startup error — never print the version.
+    // With `--capture-dir --version`, the parser treats `--version` as the
+    // option value rather than as a version request. The value is not an
+    // absolute path, so startup must fail without printing the version.
     let out = std::process::Command::new(common::binaries::serial_mcp_bin())
         .args(["--capture-dir", "--version"])
         .env("RUST_LOG", "off")
@@ -485,8 +481,8 @@ fn stdio_capture_quota_without_root_rejects_startup() {
 
 #[test]
 fn stdio_capture_relative_root_rejects_startup() {
-    // A relative --capture-dir must fail startup (absolute required), even
-    // when the directory exists relative to the child's cwd.
+    // A relative `--capture-dir` must fail startup because an absolute path is
+    // required, even when the directory exists relative to the child's cwd.
     let cwd = std::env::current_dir().expect("cwd");
     let rel = cwd.join("target/capture-cli-rel-test");
     std::fs::create_dir_all(&rel).unwrap();
@@ -527,7 +523,7 @@ fn stdio_capture_missing_root_rejects_startup() {
 #[test]
 fn stdio_capture_invalid_quota_relation_rejects_startup() {
     let dir = TempDir::new().expect("temp dir for capture root");
-    // per-file > total is invalid.
+    // A per-file limit greater than the total limit is invalid.
     let out = std::process::Command::new(common::binaries::serial_mcp_bin())
         .args([
             "--capture-dir",
@@ -544,7 +540,7 @@ fn stdio_capture_invalid_quota_relation_rejects_startup() {
         "per-file > total must reject startup, got {:?}",
         out.status
     );
-    // Zero limits are invalid too.
+    // Zero limits are invalid as well.
     let out = std::process::Command::new(common::binaries::serial_mcp_bin())
         .args([
             "--capture-dir",
@@ -603,8 +599,8 @@ fn stdio_capture_symlink_root_rejects_startup() {
 
 #[tokio::test]
 async fn stdio_server_starts_with_capture_dir() {
-    // A valid absolute --capture-dir must start the stdio server and the
-    // handshake must succeed.
+    // A valid absolute `--capture-dir` must allow the stdio server to start
+    // and complete its handshake.
     common::binaries::ensure_serial_mcp_built()
         .expect("serial-mcp binary available for stdio tests");
     let capture_dir = TempDir::new().expect("temp capture dir");

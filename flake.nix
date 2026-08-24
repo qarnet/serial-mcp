@@ -36,8 +36,8 @@
           };
         };
 
-        # Pinned via rust-toolchain.toml. Includes rust-src + rust-analyzer
-        # because we declare them in that file (see below).
+        # Pinned by rust-toolchain.toml; includes rust-src and rust-analyzer
+        # declared there.
         rustToolchain = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
 
         craneLib = (crane.mkLib pkgs).overrideToolchain rustToolchain;
@@ -52,44 +52,40 @@
             craneLib.filterCargoSources path type
             || pkgs.lib.hasPrefix "/schemas" relPath
             || pkgs.lib.hasPrefix "/example-configs" relPath
-            # Test fixtures read via CARGO_MANIFEST_DIR must survive the
-            # source filter: doc_drift reads README.md, server.json,
-            # CHANGELOG.md, docs/ (agent-config.md,
-            # development/FEATURES.md, future evaluations), the CI workflow
-            # (.github/workflows/ci.yml), conformance/expected-failures.yaml,
-            # scripts/inspector-smoke.mjs, and the historical rmcp 1.7
-            # fixture (compat/rmcp-1-client/Cargo.toml + Cargo.lock — Phase 4
-            # policy drift guards); config_schema_validation reads schemas/
-            # and example-configs/ and REQUIRES them — a pruned fixture fails
-            # the build. relPath keeps a leading "/", hence the explicit
-            # "/" in every prefix below; a directory must itself match the
-            # filter or cleanSource prunes its whole subtree, so dirs are
-            # included as whole trees to spare future fixture edits.
+            # Keep CARGO_MANIFEST_DIR fixtures in the filtered source:
+            # doc_drift reads README.md, server.json, CHANGELOG.md, docs/
+            # (agent-config.md, development/FEATURES.md, future evaluations),
+            # .github/workflows/ci.yml, conformance/expected-failures.yaml,
+            # scripts/inspector-smoke.mjs, and the historical rmcp 1.7 fixture
+            # (compat/rmcp-1-client/Cargo.toml + Cargo.lock; policy
+            # drift guards). config_schema_validation requires schemas/ and
+            # example-configs/; pruning either fixture fails the build.
+            # relPath has a leading "/", so every prefix below includes "/".
+            # A directory must match the filter or cleanSource prunes its
+            # subtree; include directories as whole trees for future fixture
+            # edits.
             #
-            # All four vendored schemas (including opencode.schema.json and
-            # the models.dev resource it refs) validate hermetically offline:
-            # the local validator registers the vendored models.dev document
-            # in memory under its original URI, so nothing here needs
-            # network access.
+            # All four vendored schemas, including opencode.schema.json and
+            # its models.dev resource, validate hermetically offline. The
+            # local validator registers models.dev in memory under its
+            # original URI; nothing here needs network access.
             || pkgs.lib.hasSuffix "README.md" relPath
             || pkgs.lib.hasSuffix "CHANGELOG.md" relPath
             || pkgs.lib.hasSuffix "server.json" relPath
             || pkgs.lib.hasSuffix "flake.nix" relPath
             || pkgs.lib.hasPrefix "/docs" relPath
-            # Workflow fixtures and registry-manifest tooling: doc_drift reads
-            # .github/workflows at runtime, and the builder unittest suite
-            # lives in scripts/. Both must survive the source filter — a
-            # pruned fixture fails the checks below and the CI doc_drift job.
-            # The prefix is the containing directory itself (/.github), not
-            # just the workflows subdir: cleanSource prunes any subtree whose
-            # directory does not match the filter.
+            # Keep workflow fixtures and registry-manifest tooling: doc_drift
+            # reads .github/workflows at runtime, and builder tests live in
+            # scripts/. A pruned fixture fails these checks and CI doc_drift.
+            # Match the containing directory (/.github), not only workflows;
+            # cleanSource prunes subtrees whose directory does not match.
             || pkgs.lib.hasPrefix "/.github" relPath
             || pkgs.lib.hasPrefix "/conformance" relPath
             || pkgs.lib.hasPrefix "/compat" relPath
             || pkgs.lib.hasPrefix "/scripts" relPath;
         };
 
-        # Common args shared by both the deps-only and final derivations.
+        # Arguments shared by dependency-only and final derivations.
         commonArgs = {
           inherit src;
           strictDeps = true;
@@ -101,12 +97,11 @@
           ];
         };
 
-        # Build *just* the dependencies. This output gets cached and reused
-        # as long as Cargo.lock doesn't change — so changes to your own code
-        # only rebuild your own crate.
+        # Build dependencies only. Cache and reuse output until Cargo.lock
+        # changes; own-code changes then rebuild only this crate.
         cargoArtifacts = craneLib.buildDepsOnly commonArgs;
 
-        # ─── mcp-publisher (pre-built binary from GitHub releases) ────────────
+        # mcp-publisher is a pre-built binary from GitHub releases.
         mcpPublisherVersion = "1.7.9";
         mcpPublisherSrc =
           {
@@ -136,9 +131,9 @@
             url = "https://github.com/modelcontextprotocol/registry/releases/download/v${mcpPublisherVersion}/mcp-publisher_${mcpPublisherSrc.suffix}.tar.gz";
             hash = mcpPublisherSrc.hash;
           };
-          # The tarball has no subdirectory; extract manually to avoid sourceRoot issues.
+          # Tarball has no subdirectory; extract manually to avoid sourceRoot issues.
           dontUnpack = true;
-          # Patch the ELF interpreter on Linux so glibc is found via the Nix store.
+          # Patch Linux ELF interpreter so glibc is found in the Nix store.
           nativeBuildInputs = pkgs.lib.optionals pkgs.stdenv.isLinux [ pkgs.autoPatchelfHook ];
           buildInputs = pkgs.lib.optionals pkgs.stdenv.isLinux [ pkgs.glibc ];
           installPhase = ''
@@ -151,10 +146,9 @@
         };
 
         # Source-matched MCP server executable for the dev shell. Referencing
-        # ${serial-mcp} forces the current source derivation to be realized
-        # during shell activation, so OpenCode can start the server directly
-        # instead of triggering a (potentially cold) `nix run` build inside
-        # its MCP initialization deadline.
+        # ${serial-mcp} realizes the current source derivation during shell
+        # activation, so OpenCode starts it directly instead of triggering a
+        # potentially cold `nix run` build during MCP initialization.
         serial-mcp-dev = pkgs.writeShellScriptBin "serial-mcp-dev" ''
           exec ${serial-mcp}/bin/serial-mcp "$@"
         '';
@@ -166,8 +160,8 @@
           }
         );
 
-        # ─── Cross-compilation: aarch64-unknown-linux-gnu ──────────────────
-        # Only meaningful when building from x86_64-linux.
+        # Cross-compilation target: aarch64-unknown-linux-gnu.
+        # Relevant only when building from x86_64-linux.
         pkgsCross = import nixpkgs {
           inherit system overlays;
           config = {
@@ -182,11 +176,11 @@
           inherit src;
           strictDeps = true;
 
-          # Tools that run on the BUILD machine (x86_64 here).
+          # Tools that run on the build machine (x86_64 here).
           nativeBuildInputs = with pkgs; [ pkg-config ];
           depsBuildBuild = [ pkgsCross.stdenv.cc ];
 
-          # Libraries linked into the TARGET binary (aarch64).
+          # Libraries linked into the target binary (aarch64).
           buildInputs = with pkgsCross; [
             udev
             openssl
@@ -195,13 +189,13 @@
           CARGO_BUILD_TARGET = "aarch64-unknown-linux-gnu";
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER = "${pkgsCross.stdenv.cc.targetPrefix}cc";
 
-          # pkg-config must look in the cross sysroot, not the host one.
+          # Point pkg-config at the cross sysroot, not the host sysroot.
           PKG_CONFIG_PATH = "${pkgsCross.udev.dev}/lib/pkgconfig";
           PKG_CONFIG_ALLOW_CROSS = "1";
         };
       in
       {
-        # `nix build`, `nix run github:qarnet/serial-mcp`
+        # `nix build`, `nix run github:qarnet/serial-mcp`.
         packages = {
           default = serial-mcp;
           serial-mcp = serial-mcp;
@@ -212,7 +206,7 @@
           jsonschema-cli = pkgs.jsonschema-cli;
         };
 
-        # `nix run .#<name>` — entry points for each binary.
+        # Use `nix run .#<name>` for binary entry points.
         apps = {
           default = flake-utils.lib.mkApp {
             drv = serial-mcp;
@@ -226,21 +220,22 @@
 
         # `nix develop`
         #
-        # Hybrid shell: nix-nrf-dev's mkNrfShell owns the Nordic environment
-        # (sdk-manager variables scoped to the west wrapper) and the multilib
-        # GCC for native_sim; crane/Rust inputs and project tools come from
-        # this flake.
+        # Hybrid shell: nix-nrf-dev's mkNrfShell owns the Nordic environment,
+        # scopes sdk-manager variables to the west wrapper, and supplies
+        # multilib GCC for native_sim. crane/Rust inputs and project tools
+        # come from this flake.
         devShells.default = nix-nrf-dev.lib.${system}.mkNrfShell {
           name = "serial-mcp";
           ncsVersion = "v3.3.0";
           withMultilib = true;
 
-          # Inherit nativeBuildInputs/buildInputs/env vars from the package.
+          # Inherit nativeBuildInputs, buildInputs, and environment variables
+          # from the package.
           inputsFrom = [ serial-mcp ];
 
-          # craneLib.devShell no longer injects the Rust toolchain into the
-          # shell; list it explicitly. Extras only useful at dev time, not
-          # for builds.
+          # craneLib.devShell no longer injects Rust toolchain; list it
+          # explicitly. The remaining packages are for development, not
+          # builds.
           packages =
             (with pkgs; [
               rustToolchain
@@ -264,20 +259,18 @@
 
         # `nix flake check`
         #
-        # Only the package build is checked here. fmt, clippy, and the test
-        # suite are all run by the build/test/clippy matrix in
-        # .github/workflows/ci.yml on 4 OSes (ubuntu-latest,
-        # ubuntu-24.04-arm, macos-14, windows-latest) plus the native-sim job.
-        # Re-running them via Nix duplicated that work (~10 min of redundant
-        # crate compilation + test execution) without adding coverage — the
-        # unique value of `nix flake check` is verifying the flake itself is
-        # valid and the nixpkgs derivation builds. Keep it to that.
+        # Check the package build here. fmt, clippy, and tests run in the
+        # build/test/clippy matrix in .github/workflows/ci.yml on 4 OSes
+        # (ubuntu-latest, ubuntu-24.04-arm, macos-14, windows-latest) plus
+        # native-sim. Repeating them in Nix adds ~10 min of crate compilation
+        # and test execution without coverage. The unique value here is
+        # validating the flake and nixpkgs derivation. Keep it to that.
         checks = {
           inherit serial-mcp;
 
-          # Executable proof the filtered source ships every workflow fixture
-          # doc_drift reads at runtime. If the source filter ever prunes
-          # .github/workflows again, `nix flake check` fails here.
+          # Prove filtered source ships every workflow fixture doc_drift reads
+          # at runtime. If the filter prunes .github/workflows, this check
+          # fails.
           workflow-fixtures-present = pkgs.runCommand "workflow-fixtures-present" { } ''
             test -f ${src}/.github/workflows/ci.yml
             test -f ${src}/.github/workflows/hardening.yml
@@ -289,9 +282,8 @@
             touch $out
           '';
 
-          # Offline, deterministic unittest suite for the registry manifest
-          # builder, run from the filtered source so it also proves scripts/
-          # survives the filter.
+          # Run deterministic offline registry-manifest builder tests from
+          # filtered source; this also proves scripts/ survives the filter.
           registry-manifest-builder-tests =
             pkgs.runCommand "registry-manifest-builder-tests"
               {

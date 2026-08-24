@@ -1,11 +1,9 @@
-//! Shared test harness for HTTP integration tests.
+//! Shared harness for HTTP integration tests.
 //!
-//! Spins up the real `SerialHandler` behind an `axum` server on an
-//! auto-assigned port and connects to it with the real `rmcp` HTTP client
-//! transport. The harness optionally pre-populates the
-//! [`ConnectionManager`] with an in-memory loopback connection so the
-//! HTTP surface can be exercised end-to-end without an OS-level serial
-//! port.
+//! Starts the real `SerialHandler` behind an `axum` server on an auto-assigned
+//! port and connects with the real `rmcp` HTTP client transport. It can
+//! pre-populate [`ConnectionManager`] with an in-memory loopback connection,
+//! allowing end-to-end HTTP tests without an OS-level serial port.
 
 #![allow(dead_code)]
 
@@ -16,9 +14,9 @@ pub mod spawned;
 
 /// Absolute path to the `serial-mcp` workspace root.
 ///
-/// Resolved at first call by reading `CARGO_MANIFEST_DIR` (always
-/// populated by cargo when running tests) and walking up to the
-/// directory that contains `Cargo.toml`.
+/// On first call, reads `CARGO_MANIFEST_DIR` (always populated by cargo when
+/// running tests), verifies that its directory contains `Cargo.toml`, and
+/// returns that path.
 pub fn workspace_root() -> &'static std::path::PathBuf {
     static WORKSPACE_ROOT: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
     WORKSPACE_ROOT.get_or_init(|| {
@@ -32,9 +30,9 @@ pub fn workspace_root() -> &'static std::path::PathBuf {
     })
 }
 
-/// Explicit expected tool list shared by the HTTP and stdio transport
-/// tests. Kept independent of the production `tool_catalog` so the
-/// transport tests verify the actual wire surface.
+/// Explicit expected tool list shared by the HTTP and stdio transport tests.
+/// It stays independent of the production `tool_catalog` so transport tests
+/// verify the actual wire surface.
 pub const EXPECTED_TOOLS: &[&str] = &[
     "list_ports",
     "list_connections",
@@ -88,10 +86,9 @@ use serial_mcp::serial::ConnectionManager;
 use serial_mcp::serial::PortProvider;
 use serial_mcp::SerialHandler;
 
-/// Static [`PortProvider`]: returns a fixed list of
-/// ports. `PortInfo.name` typically points at a real PTY slave so the full
-/// public `open` path and real serial I/O run while identity fields
-/// describe a synthetic USB device.
+/// Static [`PortProvider`] returning a fixed list of ports. `PortInfo.name`
+/// typically points at a real PTY slave, so the public `open` path and real
+/// serial I/O run while identity fields describe a synthetic USB device.
 #[derive(Debug, Clone)]
 pub struct StaticPortProvider {
     pub ports: Vec<serial_mcp::serial::PortInfo>,
@@ -109,7 +106,7 @@ impl StaticPortProvider {
     }
 
     /// Build a synthetic high-confidence USB `PortInfo` pointing at a real
-    /// port path (a PTY slave in tests).
+    /// port path, such as a PTY slave in tests.
     pub fn usb_port(
         name: &str,
         vid: u16,
@@ -133,7 +130,7 @@ impl StaticPortProvider {
         }
     }
 
-    /// Build a weak-identity `PortInfo` (no USB identity) pointing at a
+    /// Build a weak-identity `PortInfo` without USB identity, pointing at a
     /// real port path.
     pub fn weak_port(name: &str) -> serial_mcp::serial::PortInfo {
         serial_mcp::serial::PortInfo {
@@ -194,9 +191,9 @@ impl MutexPortProvider {
 pub struct TestServer {
     pub url: String,
     pub manager: Arc<ConnectionManager>,
-    /// The process-wide resource event hub shared by every handler instance
-    /// (and the optional port watcher). Tests may publish directly through
-    /// it (e.g. to force broadcast lag).
+    /// Process-wide resource event hub shared by every handler instance and
+    /// the optional port watcher. Tests may publish directly through it, for
+    /// example to force broadcast lag.
     pub hub: Arc<ResourceEventHub>,
     shutdown: CancellationToken,
     handle: tokio::task::JoinHandle<()>,
@@ -261,9 +258,9 @@ impl TestServer {
         });
         let capture_store = capture_store.unwrap_or_else(|| Arc::new(CaptureStore::disabled()));
         let hub = resource_hub.unwrap_or_else(|| Arc::new(ResourceEventHub::default()));
-        // ONE process-wide RX session registry per in-process server (ring +
-        // pump + shared cursor): cloned into every stateless HTTP handler
-        // factory so sequential modern reads share ring/cursor state.
+        // One process-wide RX session registry per in-process server (ring,
+        // pump, and shared cursor). Clone it into every stateless HTTP
+        // handler factory so sequential modern reads share ring/cursor state.
         let rx_sessions = Arc::new(serial_mcp::rx_session::RxSessionManager::new(
             Arc::new(serial_mcp::buffer_budget::AtomicBudget::new(
                 1 << 30,
@@ -296,7 +293,7 @@ impl TestServer {
         let router = axum::Router::new().nest_service("/mcp", service);
 
         // Optional proactive port watcher sharing the injected provider and
-        // the SAME hub as every handler instance (short interval in tests).
+        // the same hub as every handler instance. Tests use a short interval.
         let watcher = port_watcher_interval.map(|interval| {
             PortWatcher::start(
                 Arc::clone(&provider),
@@ -420,20 +417,20 @@ impl TestServerBuilder {
     }
 }
 
-/// No-op [`ClientHandler`] used by the standard test client. Old
-/// logging-message collection is gone with MCP logging removal; progress
-/// notifications are collected only through the dedicated
-/// [`ProgressNotificationCollector`] client.
+/// [`ClientHandler`] used by the standard test client without custom
+/// callbacks. MCP logging-message collection is gone; progress notifications
+/// are collected only through the dedicated [`ProgressNotificationCollector`]
+/// client.
 #[derive(Clone, Default)]
 pub struct TestClientHandler;
 
 impl ClientHandler for TestClientHandler {}
 
-/// One cloneable client handler that explicitly advertises one exact MCP
-/// protocol version (instead of relying on rmcp's default,
-/// `ProtocolVersion::LATEST`). One type serves both lifecycle modes so the
-/// common connect helpers share a single return type. `get_info()` returns
-/// default client info tagged with `self.protocol.version()` for every case.
+/// Cloneable client handler that explicitly advertises one exact MCP protocol
+/// version instead of relying on rmcp's default, `ProtocolVersion::LATEST`.
+/// One type serves both lifecycle modes, so the common connect helpers share a
+/// single return type. `get_info()` returns default client info tagged with
+/// `self.protocol.version()` for every case.
 #[derive(Clone)]
 pub struct VersionedClientHandler {
     protocol: TestProtocol,
@@ -452,7 +449,7 @@ impl ClientHandler for VersionedClientHandler {
     }
 }
 
-/// Which exact MCP protocol version a typed test client negotiates.
+/// Exact MCP protocol version negotiated by a typed test client.
 ///
 /// Variant names carry the exact version date so a future protocol revision
 /// cannot silently reclassify a case as "modern"/"legacy".
@@ -465,10 +462,10 @@ pub enum TestProtocol {
 }
 
 impl TestProtocol {
-    /// Every advertised version, in product-preferred order. The coverage
-    /// lock in `tests/protocol_compatibility.rs` compares this list against
-    /// the raw `server/discover` `supportedVersions` so a future production
-    /// policy row requires an explicit test case.
+    /// Every advertised version in product-preferred order. The coverage lock
+    /// in `tests/protocol_compatibility.rs` compares this list with the raw
+    /// `server/discover` `supportedVersions`, so a future production policy
+    /// row requires an explicit test case.
     pub const ALL: [Self; 2] = [Self::V2026_07_28, Self::V2025_11_25];
 
     /// The exact rmcp protocol version constant for this case.
@@ -479,9 +476,9 @@ impl TestProtocol {
         }
     }
 
-    /// The rmcp client lifecycle mode for this exact version:
-    /// `2026-07-28` uses discovery with only that preferred version;
-    /// `2025-11-25` uses the legacy initialize handshake.
+    /// The rmcp client lifecycle mode for this exact version. `2026-07-28`
+    /// uses discovery with only that preferred version; `2025-11-25` uses
+    /// the legacy initialize handshake.
     pub fn lifecycle(self) -> ClientLifecycleMode {
         match self {
             TestProtocol::V2026_07_28 => ClientLifecycleMode::Discover {
@@ -493,8 +490,8 @@ impl TestProtocol {
 }
 
 /// Connect an `rmcp` HTTP client to the given test server. Returns the
-/// running client service plus a unit receiver (kept for caller symmetry;
-/// there are no logging-message notifications anymore).
+/// running client service plus a unit receiver kept for caller symmetry;
+/// logging-message notifications are no longer collected.
 pub async fn connect_client(
     server: &TestServer,
 ) -> Result<(RunningService<RoleClient, TestClientHandler>, ())> {
@@ -502,8 +499,8 @@ pub async fn connect_client(
 }
 
 /// Connect an `rmcp` HTTP client to a server URL (in-process or
-/// spawned-binary). Returns the running client service plus a unit
-/// receiver (kept for caller symmetry).
+/// spawned-binary). Returns the running client service plus a unit receiver
+/// kept for caller symmetry.
 pub async fn connect_to_url(
     url: &str,
 ) -> Result<(RunningService<RoleClient, TestClientHandler>, ())> {
@@ -573,6 +570,8 @@ pub async fn connect_2025_11_25_to_url(
 }
 
 #[derive(Clone)]
+/// Client handler that forwards progress notifications to an unbounded
+/// channel for test assertions.
 pub struct ProgressNotificationCollector {
     progress_tx: mpsc::UnboundedSender<ProgressNotificationParam>,
 }
@@ -590,6 +589,8 @@ impl ClientHandler for ProgressNotificationCollector {
     }
 }
 
+/// Connect an `rmcp` HTTP client and return its progress-notification
+/// receiver.
 pub async fn connect_client_with_progress(
     server: &TestServer,
 ) -> Result<(
@@ -617,12 +618,12 @@ pub fn tool_request(name: &'static str, args: serde_json::Value) -> CallToolRequ
     CallToolRequestParams::new(name).with_arguments(args_object(args))
 }
 
-// ---- Unix PTY pair ----------------------------------------------------------
+// Unix PTY pair.
 //
-// `openpty` on Linux/macOS gives back a master fd and a slave fd whose
-// device path (`/dev/pts/N`) can be opened by `tokio_serial::SerialStream`
-// exactly like a real serial port. The test holds the master and plays
-// the role of the device.
+// `openpty` on Linux/macOS gives back a master fd and a slave fd whose device
+// path (`/dev/pts/N`) can be opened by `tokio_serial::SerialStream` exactly
+// like a real serial port. The test holds the master and plays the role of the
+// device.
 
 #[cfg(unix)]
 pub mod pty {
@@ -648,8 +649,9 @@ pub mod pty {
     impl PtyPair {
         pub fn open() -> Result<Self> {
             let OpenptyResult { master, slave } = openpty(None, None).context("openpty failed")?;
-            // Put the slave in raw mode so newlines / echo / etc. don't
-            // mangle the byte stream — the server expects a serial port.
+            // Put the slave in raw mode so newlines, echo, and related
+            // terminal processing do not modify the byte stream. The server
+            // expects a serial port.
             let mut termios = tcgetattr(&slave).context("tcgetattr")?;
             cfmakeraw(&mut termios);
             tcsetattr(&slave, SetArg::TCSANOW, &termios).context("tcsetattr")?;
@@ -673,7 +675,8 @@ pub mod pty {
             self.master.read(dst).await
         }
 
-        /// Read exactly `dst.len()` bytes from the device side or error.
+        /// Read exactly `dst.len()` bytes from the device side or return an
+        /// error.
         pub async fn read_device_exact(&mut self, dst: &mut [u8]) -> std::io::Result<()> {
             self.master.read_exact(dst).await.map(|_| ())
         }

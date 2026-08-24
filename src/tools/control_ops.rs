@@ -25,15 +25,14 @@ const DEFAULT_CAPTURE_BOOT_TIMEOUT_MS: u64 = 5000;
 
 /// Cancellation-safe release guard for the `capture_boot` reset pulse.
 ///
-/// Armed with the configured RELEASE state BEFORE the assertion (production
-/// `set_dtr_rts` sets DTR then RTS, so an RTS failure can leave DTR changed).
-/// On drop while armed, spawns a best-effort release using the configured
-/// release state THROUGH THE PUBLIC [`SerialConnection::set_dtr_rts`], so the
-/// cleanup queues on the per-connection control lock like any other
-/// line-control caller (the capture's own pulse guard drops right after this
-/// task is spawned — the task is independent, so there is no deadlock).
-/// Every explicit path attempts the release and disarms the guard only after
-/// success; an armed guard's drop is the ONLY retry path.
+/// Stores the configured release state before assertion. Production
+/// `set_dtr_rts` sets DTR then RTS, so an RTS failure can leave DTR changed.
+/// On drop while armed, it spawns a best-effort release through the public
+/// [`SerialConnection::set_dtr_rts`]. The cleanup queues on the per-connection
+/// control lock like any other line-control call. The pulse guard drops after
+/// this task is spawned, so the task cannot deadlock on that guard.
+/// Explicit paths disarm the guard only after a successful release. An armed
+/// guard's drop is the retry path.
 struct ResetReleaseGuard {
     connection: Arc<SerialConnection>,
     release_dtr: bool,
@@ -65,13 +64,13 @@ impl Drop for ResetReleaseGuard {
     }
 }
 
-/// Attempt the configured release, disarming the guard on success. On
-/// failure the guard stays armed so its drop still attempts cleanup; the
-/// caller decides whether to surface the failure as a tool error.
+/// Attempt the configured release and disarm the guard on success. On failure,
+/// keep the guard armed so its drop attempts cleanup. The caller decides
+/// whether to surface the failure as a tool error.
 ///
-/// A closed/disconnected port counts as released: the lines are gone with
-/// the port, so no cleanup is needed (this is what makes a close-during-
-/// capture return a clean `connection_closed` result instead of an error).
+/// A closed or disconnected port counts as released: its lines are gone, so no
+/// cleanup is needed. This lets close-during-capture return a clean
+/// `connection_closed` result instead of an error.
 async fn release_reset_lines(
     connection: &SerialConnection,
     dtr: bool,
@@ -86,7 +85,7 @@ async fn release_reset_lines(
             Ok(())
         }
         Err(crate::error::SerialError::ConnectionClosed(_)) => {
-            // Port is gone — nothing left to release.
+            // Port is gone; nothing remains to release.
             if let Some(g) = guard.as_ref() {
                 g.disarm();
             }
@@ -102,12 +101,12 @@ async fn release_reset_lines(
 
 /// Atomic boot capture: purge OS input, mark the RX live edge under the pump
 /// gate, optionally pulse DTR/RTS, then capture only post-mark bytes through
-/// the existing read pipeline with a PRIVATE cursor.
+/// the existing read pipeline with a private cursor.
 ///
 /// The shared `read` cursor is never moved and ring history stays readable.
 /// The result stays in memory (`max_buffered_bytes` bounds it); there is no
-/// file output. Line release is guaranteed on every path via
-/// `ResetReleaseGuard`.
+/// file output. Capture is transient and does not learn a profile. Line
+/// release is guaranteed on every path via `ResetReleaseGuard`.
 #[allow(clippy::too_many_arguments)]
 pub async fn capture_boot(
     connections: &Arc<ConnectionManager>,
@@ -123,7 +122,7 @@ pub async fn capture_boot(
         args.connection_id, args.reset, args.settle_ms, args.timeout_ms
     );
 
-    // ── 1. Validate everything BEFORE any line transition ─────────────────
+    // Validate all inputs before any line transition.
     let encoding = parse_encoding(&args.encoding)?;
     let connection = lookup_connection(connections, &args.connection_id).await?;
 
@@ -186,14 +185,14 @@ pub async fn capture_boot(
         connection.protocol_default(),
     );
 
-    // Construction validation BEFORE any reset: an invalid framing config
-    // must never touch lines or pulse the device.
+    // Validate framing construction before any reset. An invalid framing
+    // config must not touch lines or pulse the device.
     if let Some(ref cfg) = rx_framing {
         crate::framing::FrameDecoder::new(cfg, rx_parser.as_ref())
             .map_err(|e| format!("capture_boot.rx_framing: {e}"))?;
     }
 
-    // ── 2. Reserve output budget and get the RX session ───────────────────
+    // Reserve output budget and get the RX session.
     let _reservation = budget
         .try_reserve(max_buffered_bytes)
         .map_err(|e| map_budget_err("capture_boot.max_buffered_bytes", e))?;
@@ -208,24 +207,21 @@ pub async fn capture_boot(
 
     let has_reset = args.reset.is_some();
 
-    // ── 3. Serialize line control when a reset is configured. The lock is
-    //        scoped to the ASSERT/HOLD/RELEASE pulse only —
-    //        it is dropped below, before the settle and read phases, so
-    //        other line-control callers are not blocked for the whole
-    //        capture duration. ─────────────────────────────────────────────
+    // If reset is configured, hold the line-control lock only for the
+    // assert/hold/release pulse. Drop it before settle and read so other
+    // line-control callers are not blocked for the capture duration.
     let _pulse_control_guard = if has_reset {
         Some(connection.control_lock().lock().await)
     } else {
         None
     };
 
-    // ── 4. Pump gate: wait for any in-flight pump read+append; block the
-    //        pump until mark/reset setup completes ────────────────────────
+    // Acquire the pump gate after any in-flight read+append. Keep the pump
+    // blocked until purge, mark, and reset setup complete.
     let pump_guard = session.pump_gate_guard().await;
 
-    // ── 5. Purge unread OS input (bytes that predate capture but have not
-    //        yet entered the ring). Failure is a tool error BEFORE any line
-    //        assertion. ───────────────────────────────────────────────────
+    // Purge unread OS input that predates capture but has not entered the ring.
+    // Failure is a tool error before any line assertion.
     connection
         .flush_buffers(FlushTarget::Input)
         .await
@@ -238,12 +234,12 @@ pub async fn capture_boot(
         })?;
     let os_input_flushed = true;
 
-    // ── 6. Atomic mark at the live edge (pump is quiesced) ────────────────
+    // Mark the live edge atomically while the pump is quiesced.
     let mark_offset = session.ring().end_offset();
     let pre_mark_bytes = mark_offset;
 
-    // ── 7. Arm the release guard and assert reset lines while still
-    //        holding the pump gate ────────────────────────────────────────
+    // Arm the release guard before assertion, then assert reset lines while
+    // holding the pump gate.
     let mut release_guard = args.reset.as_ref().map(|reset| ResetReleaseGuard {
         connection: Arc::clone(&connection),
         release_dtr: reset.release_dtr,
@@ -263,11 +259,11 @@ pub async fn capture_boot(
             })?;
     }
 
-    // ── 8. Release the pump gate immediately so the pump captures bytes
-    //        during hold and line release ─────────────────────────────────
+    // Release the pump gate immediately so it captures bytes during hold and
+    // line release.
     drop(pump_guard);
 
-    // ── 9. Hold the reset state; ALWAYS release lines afterwards ─────────
+    // Hold the reset state, then release lines on every path.
     if let Some(reset) = &args.reset {
         let hold = tokio::time::sleep(Duration::from_millis(reset.hold_ms));
         tokio::pin!(hold);
@@ -275,10 +271,9 @@ pub async fn capture_boot(
         tokio::pin!(cancelled);
         tokio::select! {
             _ = &mut cancelled => {
-                // Cancellation during hold: release lines first, then route
-                // the already-cancelled token through the read path so the
-                // result is a structured `cancelled` outcome, not an
-                // ad-hoc error.
+                // Release lines before routing the already-cancelled token
+                // through the read path. This produces a structured
+                // `cancelled` outcome instead of an ad-hoc error.
                 if let Err(e) = release_reset_lines(&connection, reset.release_dtr, reset.release_rts, &mut release_guard).await {
                     warn!("capture_boot: release during cancellation failed (cleanup armed): {e}");
                 }
@@ -289,15 +284,14 @@ pub async fn capture_boot(
         }
     }
 
-    // ── 10. The control lock covered only the pulse; release it before the
-    //        settle and read phases. The release guard stays alive: on the
-    //        abrupt paths (assert/release failure, cancellation with a
-    //        failed release) it remains armed and its drop — which runs
-    //        AFTER this guard in the unwind order — queues the cleanup
-    //        through the public `set_dtr_rts` (control-lock serialized).
+    // Release the control lock after the pulse, before settle and read. The
+    // release guard stays alive. On abrupt paths such as assertion or release
+    // failure, or cancellation with failed release, it remains armed. Its
+    // drop runs after this guard during unwinding and queues cleanup through
+    // public `set_dtr_rts` under the control lock.
     drop(_pulse_control_guard);
 
-    // ── 11. Optional settle delay while the pump keeps appending ─────────
+    // Apply optional settle delay while the pump keeps appending.
     if let Some(ms) = args.settle_ms {
         if ms > 0 {
             let settle = tokio::time::sleep(Duration::from_millis(ms));
@@ -311,7 +305,7 @@ pub async fn capture_boot(
         }
     }
 
-    // ── 12. Consume from the mark with a PRIVATE cursor ──────────────────
+    // Consume from the mark with a private cursor.
     let (outcome, _final_private_cursor) = read_from_private_cursor(
         &session,
         mark_offset,
@@ -328,13 +322,13 @@ pub async fn capture_boot(
     )
     .await?;
 
-    // NOTE: no unconditional disarm here. The release guard is disarmed ONLY
-    // by a successful (or ConnectionClosed) `release_reset_lines`; if the
-    // cancellation path had to swallow a release failure, the guard remains
-    // armed so its drop retries the configured release state. That retry is
-    // the only guarantee for cleanup on that path.
+    // Do not disarm unconditionally here. `release_reset_lines` disarms the
+    // guard only after success or `ConnectionClosed`. If cancellation swallowed
+    // a release failure, the guard remains armed and its drop retries the
+    // configured release state. That retry is the cleanup guarantee for that
+    // path.
 
-    // ── 13. Build the nested ReadResult and record read logs like `read` ─
+    // Build the nested ReadResult and record read logs as `read` does.
     let result = build_read_result(
         outcome,
         args.connection_id.clone(),

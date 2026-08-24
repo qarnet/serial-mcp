@@ -1,7 +1,7 @@
 //! OS-level serial port enumeration: `PortTransport`, `PortInfo`, the
 //! `PortProvider` abstraction, the production `SystemPortProvider`, and the
 //! private OS enumeration/conversion and display/hardware-ID helpers.
-//! Standalone — no dependency on the `config` sibling.
+//! This module has no dependency on the `config` sibling.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -9,7 +9,7 @@ use serialport::{available_ports, SerialPortInfo, SerialPortType};
 
 use crate::error::Result;
 
-// ---- Port enumeration --------------------------------------------------------
+// Port enumeration.
 
 /// Transport type observed on the host OS for a serial port.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -46,28 +46,24 @@ pub struct PortInfo {
     pub description: String,
     /// Formatted hardware identifier string.
     pub hardware_id: Option<String>,
-    /// Transport type — `usb`, `pci`, `bluetooth`, or `unknown`.
+    /// Transport type: `usb`, `pci`, `bluetooth`, or `unknown`.
     pub transport: PortTransport,
-    /// USB Vendor ID. `None` for non-USB ports.
+    /// USB vendor ID. Omitted for non-USB ports.
     ///
-    /// `#[schemars(schema_with = ...)]` overrides schemars so it emits
-    /// `{"type": ["integer", "null"], "minimum": 0}` instead of the
-    /// non-standard `"format": "uint16"` keyword. The `uint16` format is not
-    /// part of the JSON Schema spec and is silently dropped by most
-    /// validators (logging a warning per call). Every `Option<uN>`/`uN`
-    /// field that derives `JsonSchema` MUST carry this override — see
-    /// `src/schema_helpers.rs` and the `serial::schema` regression tests.
+    /// `schema_with` makes schemars emit
+    /// `{"type": ["integer", "null"], "minimum": 0}` rather than the
+    /// non-standard `"format": "uint16"` keyword. Validators can drop that
+    /// format and warn. Use this override on every `uN` or `Option<uN>` field
+    /// deriving `JsonSchema`.
     ///
-    /// `#[serde(default)]` is required alongside `skip_serializing_if`:
-    /// schemars 1.2.2 does not see through `schema_with` to the `Option`
-    /// type, so without it this field would land in the schema's `required`
-    /// array even though non-USB ports omit it during serialization. The
-    /// default evaluates to `None` (skipped), so no `"default"` key is
-    /// emitted into the schema.
+    /// `#[serde(default)]` is required with `skip_serializing_if` here because
+    /// schemars 1.2.2 cannot infer the `Option` through `schema_with`. Without
+    /// it, this omitted field becomes required in the generated schema. The
+    /// default is `None`, so the schema emits no `"default"` value.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     #[schemars(schema_with = "crate::schema_helpers::option_uint_schema")]
     pub vid: Option<u16>,
-    /// USB Product ID. `None` for non-USB ports.
+    /// USB product ID. Omitted for non-USB ports.
     ///
     /// See `vid` for why the `#[schemars(schema_with = ...)]` override is
     /// required on every unsigned-integer field that derives `JsonSchema`,
@@ -84,7 +80,7 @@ pub struct PortInfo {
     /// USB product string.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub product: Option<String>,
-    /// USB interface index. `None` when not available or not a USB port.
+    /// USB interface index. Omitted when unavailable or for non-USB ports.
     ///
     /// See `vid` for why the `#[schemars(schema_with = ...)]` override is
     /// required on every unsigned-integer field that derives `JsonSchema`,
@@ -125,7 +121,7 @@ impl PortInfo {
     }
 }
 
-// ---- Port enumeration provider ----------------------------------------------
+// Port enumeration provider.
 
 /// Abstraction over OS port enumeration, so tools, resources, and the
 /// automatic profile-session machinery share one consistent view of live

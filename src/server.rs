@@ -31,11 +31,9 @@ use crate::prompts::{diagnose, interactive};
 use crate::tools::types::*;
 use crate::tools::{control_ops, io_ops, port_ops, utility_ops};
 
-/// Helper for cursor-based pagination over a vector of items.
+/// Paginate a vector using a base64-encoded UTF-8 offset cursor.
 ///
-/// `cursor` is interpreted as a base64-encoded UTF-8 string containing an offset
-/// number (e.g. "0", "1").  Returns the sliced items and an optional next
-/// cursor when more items remain.
+/// Returns one page and an optional cursor when more items remain.
 fn paginate<T: Clone>(
     all: &[T],
     cursor: Option<String>,
@@ -62,11 +60,11 @@ fn paginate<T: Clone>(
     (items, next_cursor)
 }
 
-/// Apply the SEP-2549 cache fields to a read-resource result exactly when the
-/// peer's negotiated protocol version carries the `ImmediatePrivate` cache
-/// policy (currently only `2026-07-28`); every other peer keeps the bare
-/// result. `ttlMs: 0`, `cacheScope: "private"` mark every `resources/read`
-/// response as immediately stale and client-private.
+/// Apply SEP-2549 cache fields to `resources/read` only for a policy row with
+/// `ImmediatePrivate` cache. Currently that is `2026-07-28`. Other peers,
+/// including unknown or future versions, get the bare result. `ttlMs: 0` and
+/// `cacheScope: "private"` mark the response immediately stale and
+/// client-private.
 fn read_result_with_cache_fields(
     result: ReadResourceResult,
     protocol_version: Option<ProtocolVersion>,
@@ -79,7 +77,7 @@ fn read_result_with_cache_fields(
     .into()
 }
 
-// ---- Handler ---------------------------------------------------------------
+// Handler
 
 #[derive(Clone)]
 pub struct SerialHandler {
@@ -101,10 +99,10 @@ pub struct SerialHandler {
     /// Process-wide injectable port enumeration used consistently by tools,
     /// resources, and automatic profile-session identity capture.
     port_provider: Arc<dyn PortProvider>,
-    /// Process-wide resource event hub backing modern `subscriptions/listen`.
-    /// One hub per server process, shared by every stdio/HTTP handler and
-    /// the port watcher (modern HTTP is stateless — a handler-local channel
-    /// would split publishers and listeners across handler instances).
+    /// Process-wide event hub for modern `subscriptions/listen`. One hub per
+    /// server process is shared by every stdio/HTTP handler and the port
+    /// watcher. Modern HTTP is stateless, so a handler-local channel would
+    /// split publishers and listeners.
     resource_events: Arc<ResourceEventHub>,
 }
 
@@ -202,11 +200,11 @@ impl SerialHandlerBuilder {
         self
     }
 
-    /// Consume the builder and produce a [`SerialHandler`].
+    /// Build a [`SerialHandler`].
     ///
-    /// Spawns the reconnect supervisor exactly once. When no
-    /// [`SerialHandlerBuilder::rx_sessions`] was injected, one manager is
-    /// constructed here for the standalone handler.
+    /// Starts one reconnect supervisor. If no
+    /// [`SerialHandlerBuilder::rx_sessions`] was injected, constructs a manager
+    /// for the standalone handler.
     pub fn build(self) -> SerialHandler {
         let SerialHandlerOptions {
             connections,
@@ -248,14 +246,13 @@ impl SerialHandler {
         SerialHandlerBuilder::default()
     }
 
-    /// Default handler: default connections, empty allowlist, default budget,
-    /// profiles loaded from the default path, reconnect supervisor spawned.
+    /// Create a handler with default connections, an empty allowlist, the
+    /// default budget, profiles from the default path, and a reconnect
+    /// supervisor.
     ///
-    /// Falls back to an ephemeral (non-persistent) store with a warning when
-    /// the default path cannot be resolved or contains invalid data — for
-    /// library/test convenience. Production `main.rs` does not use this
-    /// fallback: it resolves `--profiles-path` and fails startup on invalid
-    /// persistent data.
+    /// Falls back to an ephemeral store with a warning when the default path
+    /// cannot be resolved or contains invalid data. Production `main.rs`
+    /// resolves `--profiles-path` and fails startup on invalid persistent data.
     pub fn new() -> Self {
         let store = crate::profiles::default_profiles_path()
             .map_err(|e| format!("Cannot resolve default profiles path: {e}"))
@@ -295,7 +292,7 @@ impl SerialHandler {
     }
 
     #[tool(
-        description = "List all available serial ports with a profile-match preview. `profile_matches` parallels `ports` (same order) and tells you whether the server already knows each device: `selected` — a bare `open(port=...)` reuses that profile (name in `selected_profile`); `ambiguous` — equal-ranked profiles, pick one via `open_profile`; `duplicate` — another live port shares this device's identity, never auto-selected; `ineligible` — weak identity with explicitly matching candidates (`open_profile` for a deliberate choice); `none` — a bare open starts a fresh generated session. Call this FIRST, then open.",
+        description = "List serial ports with a profile-match preview. `profile_matches` has the same length and order as `ports`. Outcomes: `selected` means bare `open(port=...)` reuses the profile named by `selected_profile`; `ambiguous` means equal-ranked high-confidence profiles, so bare open stays transient and callers choose with `open_profile`; `duplicate` means another live port shares the identity and prevents automatic selection; `ineligible` means weak identity has explicitly matching candidates, so use `open_profile`; `none` means a high-confidence port starts a generated session while weaker identity starts a transient session. Call this first, then open.",
         title = "List Serial Ports",
         annotations(read_only_hint = true, open_world_hint = false)
     )]
@@ -304,7 +301,7 @@ impl SerialHandler {
     }
 
     #[tool(
-        description = "List all open serial connections held by this server",
+        description = "List all open serial connections held by this server.",
         title = "List Open Connections",
         annotations(read_only_hint = true, open_world_hint = false)
     )]
@@ -313,7 +310,7 @@ impl SerialHandler {
     }
 
     #[tool(
-        description = "Open a serial port. The common call is `open(port=...)` — baud defaults to 115200/8-N-1 and the server automatically reuses the most recently used profile for a known high-confidence device (see `list_ports` `profile_matches`) or creates a durable generated profile for a new one. Add fields only when the automatic choice is wrong: explicit fields (baud, framing/parser/protocol, ...) override the selected profile and are learned back into it. Use `open_profile` for explicit named selection.",
+        description = "Open a serial port. The common call is `open(port=...)`; baud defaults to 115200/8-N-1. For a known high-confidence device, the server reuses the most recently used profile (see `list_ports` `profile_matches`). It creates a durable generated profile only for a new high-confidence device. Weak, ambiguous, or duplicate identity stays transient and receives no automatic durable profile. The result's `profile` shows the choice. Explicit fields such as baud, framing, parser, or protocol override the selected profile and are learned back into it. Use `open_profile` for explicit named selection.",
         title = "Open Serial Port",
         annotations(destructive_hint = false, open_world_hint = false)
     )]
@@ -338,7 +335,7 @@ impl SerialHandler {
     }
 
     #[tool(
-        description = "Close an open serial port connection",
+        description = "Close an open serial port connection.",
         title = "Close Serial Port",
         annotations(destructive_hint = false, open_world_hint = false)
     )]
@@ -363,7 +360,7 @@ impl SerialHandler {
     }
 
     #[tool(
-        description = "Send data to a serial port (send-only). Prefer `transact` when the device responds — it writes and awaits the response in one call. `tx_framing` (line terminator, delimiter, length prefix, SLIP, COBS, start/end markers) and `protocol` presets (at_command, slip, json_lines, cobs, ndjson, nmea0183, modbus_ascii) apply only when the connection defaults don't fit; the nmea0183 preset auto-appends the *XX XOR checksum. When tx_framing is used, decoded_bytes reports the payload length before framing and bytes_written the total framed bytes.",
+        description = "Send data to a serial port (send-only); it sends without waiting for a response. For request/response traffic, use `transact`; it writes and awaits the response. `tx_framing` supports line terminator, delimiter, length prefix, SLIP, COBS, and start/end markers. `protocol` supports `at_command`, `slip`, `json_lines`, `cobs`, `ndjson`, `nmea0183`, and `modbus_ascii`. These overrides apply when connection defaults do not fit. The `nmea0183` preset automatically appends the `*XX` XOR checksum. With `tx_framing`, `decoded_bytes` is the payload length before framing and `bytes_written` is the total framed length.",
         title = "Write Serial Data",
         annotations(destructive_hint = true, open_world_hint = false)
     )]
@@ -380,7 +377,7 @@ impl SerialHandler {
     }
 
     #[tool(
-        description = "Write data, then await the response, in one call — the request/response primitive for AT/Modbus/GRBL-style traffic. Prefer `transact` over separate `write`+`read`. The read half starts at the live edge (`from: {\"type\":\"now\"}`) so it only awaits post-write bytes. Add `match` to stop on a prompt, `no_new_rx_timeout_ms`/`timeout_ms` for bounded waits; `protocol` fills framing defaults for both directions and explicit tx_framing/rx_framing/rx_parser override per direction.",
+        description = "Write data and await the response in one call. This is the request/response primitive for AT/Modbus/GRBL traffic; prefer it over separate `write` and `read`. The read half starts at the live edge (`from: {\"type\":\"now\"}`), so it awaits only post-write bytes. Use `match` to stop on a prompt and `no_new_rx_timeout_ms` or `timeout_ms` for bounded waits. `protocol` fills framing defaults for both directions; explicit `tx_framing`, `rx_framing`, and `rx_parser` override it per direction.",
         title = "Transact (Write + Read)",
         annotations(destructive_hint = true, open_world_hint = false)
     )]
@@ -410,7 +407,7 @@ impl SerialHandler {
     }
 
     #[tool(
-        description = "Read buffered serial data or wait for unsolicited data/patterns. Returns buffered-but-unread bytes from the connection's cursor immediately (like `cat`); use `from` to replay (`{\"type\":\"buffer_start\"}`), jump to the live edge (`{\"type\":\"now\"}`), or seek an absolute offset (`{\"type\":\"offset\",\"offset\":N}`); `{\"type\":\"cursor\"}` is the default. Use `match` to wait for a pattern (checks buffered history first, then waits). Framing (`rx_framing`), parser (`rx_parser`), and `protocol` presets apply only when connection defaults don't fit; with validate:true checksum-mismatched frames are dropped and counted. Set `no_new_rx_timeout_ms` to stop on silence. Results carry from_offset/next_offset/bytes_lost/buffered_remaining/start_offset/end_offset.",
+        description = "Read buffered serial data or wait for unsolicited data or patterns. Returns unread bytes from the connection cursor immediately (`cat` semantics). `from` selects the start: `from: {\"type\":\"cursor\"}` is the default, `from: {\"type\":\"now\"}` starts at the live edge, `from: {\"type\":\"buffer_start\"}` replays retained history, and `from: {\"type\":\"offset\",\"offset\":N}` seeks an absolute offset. `match` checks buffered history before waiting for new data. `rx_framing`, `rx_parser`, and `protocol` presets apply when connection defaults do not fit. With `validate:true`, checksum-mismatched frames are dropped and counted. Set `no_new_rx_timeout_ms` to stop on silence. Results include `from_offset`, `next_offset`, `bytes_lost`, `buffered_remaining`, `start_offset`, and `end_offset`.",
         title = "Read Serial Data",
         annotations(read_only_hint = true, open_world_hint = false)
     )]
@@ -434,7 +431,7 @@ impl SerialHandler {
     }
 
     #[tool(
-        description = "Discard buffered serial data. target=input clears OS read buffer and discards all unread buffered RX data; to skip past buffered data without destroying it, use `read` with `from: {\"type\":\"now\"}` to jump to the live edge. target=output clears the OS write queue. target=both flushes output first, then performs the input-target discard (OS read buffer + retained RX backlog).",
+        description = "Flush serial buffers. `target=input` clears the OS read buffer and discards unread retained RX data. To skip buffered data without destroying it, use `read` with `from: {\"type\":\"now\"}`. `target=output` clears the OS write queue. `target=both` flushes output first, then performs the input discard for the OS read buffer and retained RX backlog.",
         title = "Flush Serial Buffers",
         annotations(destructive_hint = true, open_world_hint = false)
     )]
@@ -463,7 +460,7 @@ impl SerialHandler {
     }
 
     #[tool(
-        description = "Set the DTR and RTS modem-control lines. Common patterns: pulse DTR low for Arduino auto-reset; hold both low to enter ESP32 bootloader.",
+        description = "Set the DTR and RTS modem-control lines. Common patterns are pulsing DTR low for Arduino auto-reset and holding both low to enter an ESP32 bootloader.",
         title = "Set DTR/RTS",
         annotations(
             destructive_hint = true,
@@ -482,7 +479,7 @@ impl SerialHandler {
     }
 
     #[tool(
-        description = "Change hardware/software flow control mode on an open connection. Use flow_control='none' to ignore RTS/CTS for this session.",
+        description = "Change hardware or software flow control on an open connection. Use `flow_control='none'` to ignore RTS/CTS for this session.",
         title = "Set Flow Control",
         annotations(
             destructive_hint = true,
@@ -502,7 +499,7 @@ impl SerialHandler {
     }
 
     #[tool(
-        description = "Assert a BREAK condition on the TX line for duration_ms milliseconds (default 250ms), then release it. Used to signal attention on some legacy serial protocols.",
+        description = "Assert BREAK on the TX line for `duration_ms` milliseconds (default 250ms), then release it. Some legacy serial protocols use this as an attention signal.",
         title = "Send BREAK",
         annotations(destructive_hint = true, open_world_hint = false)
     )]
@@ -520,7 +517,7 @@ impl SerialHandler {
     }
 
     #[tool(
-        description = "Inspect a connection's live configuration, RX ring state (size, offsets, cursor, buffered unread bytes, wrap loss), profile binding, and reconnect state. For diagnostics — not routine reads; read results already carry the offsets you need.",
+        description = "Inspect a connection's live configuration, RX ring state (size, offsets, cursor, unread bytes, and wrap loss), profile binding, and reconnect state. Use for diagnostics, not routine reads; read results already include offsets.",
         title = "Get Connection Status",
         annotations(read_only_hint = true, open_world_hint = false)
     )]
@@ -532,7 +529,7 @@ impl SerialHandler {
     }
 
     #[tool(
-        description = "Change baud rate, data bits, stop bits, parity, or flow control on a live connection without reopening. Omitted parameters are left unchanged. The change is learned into the bound profile (see result `profile`/`profile_persistence`).",
+        description = "Change baud rate, data bits, stop bits, parity, or flow control on a live connection without reopening. Omitted parameters stay unchanged. Changes are learned into the bound profile; see result `profile` and `profile_persistence`.",
         title = "Reconfigure Serial Port",
         annotations(destructive_hint = true, open_world_hint = false)
     )]
@@ -547,7 +544,7 @@ impl SerialHandler {
     }
 
     #[tool(
-        description = "List saved device profiles (selector, defaults, metadata, revision history). Cross-check with `list_ports` `profile_matches` to see which profiles match live devices before opening.",
+        description = "List saved device profiles with selectors, defaults, metadata, and revision history. Cross-check `list_ports` `profile_matches` to see which profiles match live devices before opening.",
         title = "List Profiles",
         annotations(read_only_hint = true, open_world_hint = false)
     )]
@@ -557,7 +554,7 @@ impl SerialHandler {
     }
 
     #[tool(
-        description = "Open a device by named profile (explicit selection). Use when `list_ports` shows `ambiguous`/`ineligible`/`duplicate` matches, when device identity is weak, or to override the automatic last-used choice. The selector must match exactly one live port; the profile's defaults apply.",
+        description = "Open a device by named profile. Use when `list_ports` reports `ambiguous`, `ineligible`, or `duplicate`, when identity is weak, or to override automatic last-used selection. The selector must match exactly one live port, and the profile's defaults apply.",
         title = "Open by Profile",
         annotations(destructive_hint = false, open_world_hint = false)
     )]
@@ -586,7 +583,7 @@ impl SerialHandler {
     }
 
     #[tool(
-        description = "Save a new profile by snapshotting an open connection's port identity and current serial configuration. Use this after opening a device to create a reusable profile that can be selected by name in later sessions.",
+        description = "Save a profile by snapshotting an open connection's port identity and current serial configuration. Use after opening a device to create a reusable profile selected by name in later sessions.",
         title = "Save Profile",
         annotations(destructive_hint = true, open_world_hint = false)
     )]
@@ -598,7 +595,7 @@ impl SerialHandler {
     }
 
     #[tool(
-        description = "Delete a profile by name, removing it from the profiles configuration file.",
+        description = "Delete a named profile from the profiles configuration file.",
         title = "Delete Profile",
         annotations(destructive_hint = true, open_world_hint = false)
     )]
@@ -610,7 +607,7 @@ impl SerialHandler {
     }
 
     #[tool(
-        description = "Restore a retained prior revision of a profile after a bad learned setting. `list_profiles` shows `revisions` (newest five snapshots); pass the profile's CURRENT revision as `expected_revision` to guard against concurrent modification. Restores as a NEW monotonic revision; bound connections stay on live state and become stale until reopened. Wrong expected_revision or an evicted target revision is a tool error that leaves the file unchanged.",
+        description = "Restore a retained prior profile revision after a bad learned setting. `list_profiles` shows `revisions`, the newest five snapshots. Pass the current profile revision as `expected_revision` to guard against concurrent modification. The restore creates a new monotonic revision. Bound connections keep live state and become stale until reopened. A wrong `expected_revision` or evicted target revision is a tool error and leaves the file unchanged.",
         title = "Roll Back Profile",
         annotations(destructive_hint = true, open_world_hint = false)
     )]
@@ -622,7 +619,7 @@ impl SerialHandler {
     }
 
     #[tool(
-        description = "Set defaults in two modes. Profile mode: `configure(profile=..., defaults=...)` writes a named profile in the profiles TOML (applied on future open_profile calls; overwrite=true replaces an existing profile). Connection mode: `configure(connection_id=..., defaults=...)` mutates framing/parser/protocol/reconnect_policy/max_buffered_bytes defaults on a live connection (does NOT persist to disk; reopen to apply rx_buffer_size, serial-line params, log_capacity, log_enabled). The `defaults` object carries the full desired state — omit fields to use their defaults.",
+        description = "Set defaults in two modes. Profile mode: `configure(profile=..., defaults=...)` writes a named profile to profiles TOML for future `open_profile` calls; `overwrite=true` replaces an existing profile. Connection mode: `configure(connection_id=..., defaults=...)` changes live framing, parser, protocol, reconnect_policy, and max_buffered_bytes defaults. It does not persist to disk; reopen to apply rx_buffer_size, serial-line parameters, log_capacity, or log_enabled. The `defaults` object is the full desired state; omitted fields use their defaults.",
         title = "Configure Defaults",
         annotations(destructive_hint = true, open_world_hint = false)
     )]
@@ -630,8 +627,8 @@ impl SerialHandler {
         &self,
         Parameters(args): Parameters<ConfigureArgs>,
     ) -> Result<Json<ConfigureResult>, String> {
-        // Connection mode mutates live defaults (detail changes). Profile
-        // mode has no live connection URI — no event.
+        // Connection mode mutates live defaults and changes the detail URI.
+        // Profile mode has no live connection URI, so it emits no event.
         let connection_id = args.connection_id.clone();
         let result = port_ops::configure(&self.connections, &self.profile_store, args).await?;
         if result.0.mode == "connection" {
@@ -644,7 +641,7 @@ impl SerialHandler {
     }
 
     #[tool(
-        description = "Retrieve the event log for an open serial connection. Returns timestamped JSONL entries for RX data, TX data, matches, errors, and lifecycle events. Use since_ms to filter by time and limit to cap the number of entries returned.",
+        description = "Retrieve an open connection's event log. Returns timestamped JSONL entries for RX, TX, matches, errors, and lifecycle events. Use `since_ms` to filter by time and `limit` to cap entries.",
         title = "Get Log",
         annotations(read_only_hint = true, open_world_hint = false)
     )]
@@ -656,7 +653,7 @@ impl SerialHandler {
     }
 
     #[tool(
-        description = "Clear the event log buffer for a connection. Resets the log to empty.",
+        description = "Clear a connection's event log buffer.",
         title = "Clear Log",
         annotations(destructive_hint = true, open_world_hint = false)
     )]
@@ -671,7 +668,7 @@ impl SerialHandler {
     }
 
     #[tool(
-        description = "Export the event log for a connection to a JSONL file inside the configured capture directory. Persistent capture is DISABLED unless the server started with --capture-dir <absolute-directory>. `path` is a portable .jsonl FILENAME relative to that root — never an arbitrary path: no separators, no subdirectories, no traversal, filename only (1-120 chars, ends .jsonl). The server never overwrites an existing file (no-clobber), rejects symlink targets, enforces per-file/total-byte/file-count quotas from a fresh scan under an advisory cross-process lock, and commits the complete bounded snapshot atomically. Pre-commit failure creates no file and changes no existing capture. Success returns exact event/byte counts, the canonical absolute final path, and post-commit quota usage; on Unix a post-commit root-directory sync failure is reported in `durability_warning` (the file IS committed and counted — it is never deleted).",
+        description = "Export a connection's event log to JSONL in the configured capture directory. Persistent capture is disabled unless the server started with `--capture-dir <absolute-directory>`. `path` is an ASCII 1-120 character `.jsonl` filename relative to that root, not a path: filename only, no separators, subdirectories, or traversal, and ending in `.jsonl`. The server never overwrites an existing file, rejects symlink targets, enforces per-file, total-byte, and file-count quotas from a fresh scan under an advisory cross-process lock, and atomically commits the complete bounded snapshot. Pre-commit failure creates no file and changes no existing capture. Success returns exact event and byte counts, the canonical absolute final path, and post-commit quota usage. On Unix, a post-commit root-directory sync failure is reported in `durability_warning`; the file is committed, counted, and never deleted.",
         title = "Export Log",
         annotations(destructive_hint = false, open_world_hint = false)
     )]
@@ -683,7 +680,7 @@ impl SerialHandler {
     }
 
     #[tool(
-        description = "Attempt to reconnect a disconnected serial connection. Rebuilds the port stream from the original configuration, preserving connection_id, counters, and log buffer. Succeeds immediately if already connected.",
+        description = "Reconnect a disconnected serial connection. Rebuilds the port stream from its original configuration while preserving connection_id, counters, and log buffer. Succeeds immediately when already connected.",
         title = "Reconnect",
         annotations(destructive_hint = false, open_world_hint = false)
     )]
@@ -699,7 +696,7 @@ impl SerialHandler {
     }
 
     #[tool(
-        description = "Atomic boot/reset capture: purges unread OS input, marks the RX live edge under the pump gate (no pre-mark byte can leak in), optionally pulses DTR/RTS (release guaranteed on completion, cancellation, or failure), then captures ONLY post-mark bytes through the existing match/framing/parser/timeout/silence pipeline. Uses a private read cursor — the shared `read` cursor and ring history are untouched. `reset=null` = arm-only capture for externally reset devices (lines never touched). Result is bounded in memory by the connection's max_buffered_bytes; no file output. `read.from_offset` equals `mark_offset` unless the ring wrapped (then `bytes_lost` reports it). Destructive: configured reset lines may reboot hardware.",
+        description = "Atomic boot/reset capture: purges unread OS input, marks the RX live edge under the pump gate so pre-mark bytes cannot leak in, optionally pulses DTR/RTS with release guaranteed on completion, cancellation, or failure, then captures only post-mark bytes through the existing match/framing/parser/timeout/silence pipeline. Uses a private read cursor; the shared `read` cursor and ring history stay untouched. `reset=null` arms capture for externally reset devices without touching lines. The result is bounded in memory by the connection's `max_buffered_bytes`; no file output. `read.from_offset` equals `mark_offset` unless the ring wraps, when `bytes_lost` reports loss. Destructive: configured reset lines may reboot hardware.",
         title = "Capture Boot Output",
         annotations(destructive_hint = true, open_world_hint = false)
     )]
@@ -723,7 +720,7 @@ impl SerialHandler {
     }
 
     #[tool(
-        description = "Compute a checksum over caller-supplied bytes. Algorithms: xor (NMEA-0183 *XX), lrc (Modbus ASCII). Input data is decoded from the given encoding (utf8/hex/base64) before checksumming. Returns the checksum as a hex string and a raw integer. LLMs cannot reliably compute checksums by hand — use this when hand-crafting binary frames for a protocol without a preset.",
+        description = "Compute a checksum over caller-supplied bytes. Algorithms are xor (NMEA-0183 `*XX`) and lrc (Modbus ASCII). Input is decoded from `utf8`, `hex`, or `base64` before checksumming. Returns a hex checksum string and raw integer. Use this when hand-crafting binary frames without a protocol preset.",
         title = "Compute Checksum",
         annotations(read_only_hint = true, open_world_hint = false)
     )]
@@ -735,16 +732,14 @@ impl SerialHandler {
     }
 }
 
-// ---- Tool catalog (tool logic extracted across src/tools/*.rs) -------------
+// Tool catalog. Tool logic lives in src/tools/*.rs.
 
-/// The full public MCP tool catalog exactly as served by `tools/list`.
+/// The public MCP tool catalog served by `tools/list`.
 ///
-/// Every `#[tool]` method's generated attribute is collected here so schema
-/// tests (`src/tools/mod.rs`) and the xtask `agent-eval` catalog metrics
-/// consume the SAME tool attributes the MCP router serves — no duplicated
-/// 25-tool enumeration can drift from the router. Keep this list in sync
-/// with the `#[tool]` methods above; `tool_catalog_has_exactly_twenty_five_tools`
-/// guards the count.
+/// This list uses the generated attributes from every `#[tool]` method. Schema
+/// tests (`src/tools/mod.rs`) and xtask `agent-eval` therefore measure the same
+/// attributes as the MCP router. Keep it in sync with the methods above;
+/// `tool_catalog_has_exactly_twenty_five_tools` guards the count.
 pub fn tool_catalog() -> Vec<rmcp::model::Tool> {
     vec![
         SerialHandler::list_ports_tool_attr(),
@@ -775,12 +770,11 @@ pub fn tool_catalog() -> Vec<rmcp::model::Tool> {
     ]
 }
 
-// ---- ServerHandler boilerplate ----------------------------------------------
+// ServerHandler implementation
 
-/// Capability set for one policy row: tools/resources/prompts/completions for
-/// every row; resource subscriptions only where the row's policy enables
-/// them. Deliberately omits MCP logging, list-change flags, tasks, and
-/// unrelated capabilities in every view.
+/// Build capabilities for one policy row. Every row enables
+/// tools/resources/prompts/completions. Resource subscriptions follow the row;
+/// logging, list-change flags, tasks, and unrelated capabilities stay disabled.
 fn capabilities_for(policy: &ProtocolPolicy) -> ServerCapabilities {
     let mut builder = ServerCapabilities::builder()
         .enable_tools()
@@ -793,9 +787,9 @@ fn capabilities_for(policy: &ProtocolPolicy) -> ServerCapabilities {
     builder.build()
 }
 
-/// Shared server info shape for one policy row: identity, instructions, the
-/// row's capability set, and the row's protocol version. All version/feature
-/// decisions come from the policy table — no hard-coded version helpers.
+/// Build server info from one policy row. Identity, instructions, capabilities,
+/// protocol version, and version/feature decisions all come from the policy
+/// table.
 fn server_info_for(policy: &ProtocolPolicy) -> ServerInfo {
     ServerInfo::new(capabilities_for(policy))
         .with_server_info(Implementation::new(
@@ -804,35 +798,33 @@ fn server_info_for(policy: &ProtocolPolicy) -> ServerInfo {
         ))
         .with_protocol_version(policy.version.clone())
         .with_instructions(
-            "Serial port MCP server. Normal workflow:\n\
-             1. Call `list_ports` and inspect `profile_matches` (parallel to `ports`): \
-             it previews which profile a bare `open(port=...)` would reuse.\n\
-             2. Normally call bare `open` with the port only — baud defaults to \
-             115200/8-N-1 and the server automatically reuses the most recently used \
-             high-confidence profile for a known device or creates a durable generated \
-              profile for a new one (both observable in the result's `profile`).\n\
-               3. Use `transact` for command/response, `read` for buffered or unsolicited \
-              data (with `match` to wait for a pattern), `write` for send-only.\n\
-              4. For boot/reset capture (Arduino auto-reset, power-cycle banner, boot \
-             prompt) use `capture_boot` — one call that atomically marks the live edge, \
-             optionally pulses DTR/RTS, and captures only post-mark bytes (private \
-             cursor; in-memory only). `reset=null` arms capture for externally reset \
-             devices.\n\
-              5. After durable changes inspect `profile` / `profile_persistence` on the \
-             result, or `get_status` for the live binding.\n\
-              6. Use `open_profile` only for explicit choice or weak identity; \
-             `rollback_profile` restores a retained configuration after a bad learned \
-             change.\n\
-              7. Escalate to framing/parser, cursor replay, reconnect, line control, and \
-             log tools only when the common path needs them. `export_log` persists the \
-             event log as JSONL only when the server started with `--capture-dir`; it \
-             takes a portable filename (never a path), never overwrites, and is \
-             quota-bounded.\n\
-              8. Optional wakeup: modern clients may call `subscriptions/listen` with \
-             resource URIs (`serial://ports`, `serial://connections`, or \
-             `serial://connections/{id}[/raw|/log]`) to be notified when those resources \
-             change. Notifications are hints only — `read` remains the primary lossless \
-             data path.\n\
+            "Serial port MCP server. Workflow:\n\
+             1. Call `list_ports` and inspect `profile_matches`, which parallels \
+             `ports` and previews which profile bare `open(port=...)` would reuse.\n\
+             2. Normally call bare `open` with only the port. Baud defaults to \
+             115200/8-N-1. The server reuses the most recently used high-confidence \
+             profile for a known device. It creates a durable generated profile only \
+             for a new high-confidence device. Weak, ambiguous, or duplicate identity \
+             uses a transient session. The result reports the choice in `profile`.\n\
+             3. Use `transact` for command/response, `read` for buffered or unsolicited \
+             data with `match` when needed, and `write` for send-only.\n\
+             4. Use `capture_boot` for boot/reset capture such as an Arduino reset, \
+             power-cycle banner, or boot prompt. It marks the live edge atomically, \
+             can pulse DTR/RTS, and captures only post-mark bytes with a private \
+             cursor in memory. `reset=null` arms capture for externally reset devices.\n\
+             5. After durable changes, inspect `profile` and `profile_persistence`, or \
+             use `get_status` to inspect the live binding.\n\
+             6. Use `open_profile` for explicit choice or weak identity. Use \
+             `rollback_profile` to restore a retained configuration after a bad \
+             learned change.\n\
+             7. Use framing/parser, cursor replay, reconnect, line-control, and log \
+             tools only when needed. `export_log` persists JSONL only when the server \
+             started with `--capture-dir`; it accepts a portable filename, not a path, \
+             never overwrites, and enforces quotas.\n\
+             8. Modern clients may call `subscriptions/listen` with resource URIs \
+             (`serial://ports`, `serial://connections`, or \
+             `serial://connections/{id}[/raw|/log]`) for change hints. Notifications \
+             carry no data; `read` remains the primary lossless data path.\n\
              Resources: serial://ports (same preview as list_ports), serial://connections, \
              serial://connections/{id}. Prompts: diagnose_port, interactive_terminal."
                 .to_string(),
@@ -845,12 +837,12 @@ impl Default for SerialHandler {
     }
 }
 
-// ---- Prompt templates ------------------------------------------------------
+// Prompt templates
 
-// ---- Completion helper ------------------------------------------------------
+// Completion helper
 
 impl SerialHandler {
-    /// Generate completion suggestions for tool/resource arguments.
+    /// Generate completion suggestions for tool and resource arguments.
     async fn get_completions(&self, r#ref: &Reference, argument: &ArgumentInfo) -> Vec<String> {
         match r#ref {
             Reference::Resource(resource_ref) => {
@@ -880,11 +872,11 @@ impl SerialHandler {
 
 #[prompt_router]
 impl SerialHandler {
-    /// Walk through diagnosing an unknown serial port: try common baud
-    /// rates, send a benign probe, observe response, narrow down config.
+    /// Plan diagnosis for an unknown serial port by trying common baud rates,
+    /// sending a benign probe, and narrowing the configuration.
     #[prompt(
         name = "diagnose_port",
-        description = "Step-by-step plan to identify an unknown serial device on a given port"
+        description = "Identify an unknown serial device on a given port"
     )]
     async fn diagnose_port_prompt(
         &self,
@@ -894,9 +886,8 @@ impl SerialHandler {
         Ok(diagnose::build_diagnose_prompt(args))
     }
 
-    /// Guide an interactive serial REPL session against an already-open
-    /// connection, using `write` / `read(match=...)` or `transact` to drive
-    /// a command/response loop.
+    /// Guide an interactive serial REPL over an open connection using `write`,
+    /// `read(match=...)`, or `transact`.
     #[prompt(
         name = "interactive_terminal",
         description = "Run a REPL-style command/response session over an open serial connection"
@@ -910,20 +901,18 @@ impl SerialHandler {
     }
 }
 
-// NOTE: no `#[prompt_handler]` here — that macro *unconditionally replaces*
-// any `list_prompts`/`get_prompt` in the annotated block with generated
-// versions that leave the SEP-2549 cache fields unset (rmcp-macros 3.1.0,
-// unlike `#[tool_handler]`, does not honor existing methods). The two
-// methods are therefore written explicitly below using the SAME
-// `Self::prompt_router()` the macro would use.
+// Do not add `#[prompt_handler]` here. rmcp-macros 3.1.0 unconditionally
+// replaces `list_prompts` and `get_prompt` in an annotated block and leaves
+// SEP-2549 cache fields unset. Unlike `#[tool_handler]`, it does not honor
+// existing methods. The two methods below therefore use the same
+// `Self::prompt_router()` explicitly.
 #[tool_handler]
 impl ServerHandler for SerialHandler {
     fn get_info(&self) -> ServerInfo {
-        // Preferred-policy view. rmcp intersects `subscriptions/listen`
-        // filters against `get_info().capabilities`, so this must advertise
-        // the preferred (`2026-07-28`) resource-subscription capability;
-        // `initialize()` still returns the legacy row's view explicitly for
-        // `2025-11-25` clients.
+        // rmcp intersects `subscriptions/listen` filters with
+        // `get_info().capabilities`, so this view advertises the preferred
+        // `2026-07-28` resource-subscription capability. `initialize()` still
+        // returns the legacy row's view for `2025-11-25` clients.
         server_info_for(crate::mcp_protocol::preferred_policy())
     }
 
@@ -933,20 +922,19 @@ impl ServerHandler for SerialHandler {
         context: RequestContext<RoleServer>,
     ) -> Result<InitializeResult, McpError> {
         // Exact policy lookup admits only the `InitializeSession` lifecycle.
-        // Modern `2026-07-28` clients negotiate via `server/discover`; a
-        // modern `initialize` (and any unknown/unsupported version) is
-        // rejected BEFORE peer bookkeeping so no session state is
-        // established for it. rmcp maps the handler's METHOD_NOT_FOUND
-        // through the transport routing of the request.
+        // Modern `2026-07-28` clients negotiate through `server/discover`.
+        // Modern `initialize` and unknown or unsupported versions are rejected
+        // before peer bookkeeping, so no session state is established. rmcp
+        // maps the handler's METHOD_NOT_FOUND through transport routing.
         let Some(policy) = crate::mcp_protocol::policy_for(&request.protocol_version) else {
             return Err(McpError::method_not_found::<InitializeResultMethod>());
         };
         if policy.lifecycle != ProtocolLifecycle::InitializeSession {
             return Err(McpError::method_not_found::<InitializeResultMethod>());
         }
-        // Preserve rmcp peer bookkeeping: the session worker's peer_info()
-        // must reflect this client's initialize parameters so subsequent
-        // requests route with the negotiated (legacy) protocol version.
+        // Preserve rmcp peer bookkeeping. The session worker's peer_info()
+        // must contain this client's initialize parameters so later requests
+        // use the negotiated legacy protocol version.
         context.peer.set_peer_info(request.clone());
         info!("Serial MCP server initialized");
         Ok(server_info_for(policy))
@@ -970,13 +958,11 @@ impl ServerHandler for SerialHandler {
         &self,
         requested: &SubscriptionFilter,
     ) -> Option<SubscriptionFilter> {
-        // Accept only valid, deduplicated resource subscriptions, preserving
-        // first-request order. All three list-change flags are stripped
-        // (serial-mcp never emits list-change notifications). Templates,
-        // malformed/empty ids, and unknown URIs are rejected by
-        // `is_subscribable_uri`. An empty accepted resource list becomes
-        // `None` inside the filter (no fake URI); the handler itself always
-        // remains available so rmcp acknowledges with the accepted filter.
+        // Keep valid, deduplicated resource URIs in first-request order.
+        // Strip all three list-change flags because serial-mcp never emits
+        // them. Reject templates, malformed or empty ids, and unknown URIs via
+        // `is_subscribable_uri`. An empty resource list becomes `None`; return
+        // an available handler so rmcp can acknowledge the accepted filter.
         let mut seen = std::collections::HashSet::new();
         let mut accepted_uris = Vec::new();
         if let Some(requested_uris) = requested.resource_subscriptions.as_ref() {
@@ -994,14 +980,12 @@ impl ServerHandler for SerialHandler {
     }
 
     async fn listen(&self, context: SubscriptionContext) -> Result<(), McpError> {
-        // 1. Snapshot the accepted URI set (first-occurrence order).
-        //
-        // rmcp computes the accepted filter as
+        // Snapshot accepted URIs in first-occurrence order. rmcp computes the
+        // accepted filter as
         // `requested.intersection(&candidate).intersection(&advertised)`,
-        // both left-biased over the REQUESTED list, so a duplicate requested
-        // URI may be echoed into `context.accepted()`. Deduplicate again
-        // here (first-occurrence order) so normal matching and lag recovery
-        // never emit duplicate hints because the request repeated a URI.
+        // left-biased over the requested list, so context.accepted() may echo
+        // duplicates. Deduplicate again so matching and lag recovery emit no
+        // duplicate hints.
         let accepted: Vec<String> = {
             let mut seen = std::collections::HashSet::new();
             context
@@ -1013,35 +997,32 @@ impl ServerHandler for SerialHandler {
                 .filter(|uri| seen.insert(uri.clone()))
                 .collect()
         };
-        // 2. One receiver per listener.
+        // Each listener gets its own receiver.
         let mut receiver = self.resource_events.subscribe();
         let cancelled = context.cancelled();
         tokio::pin!(cancelled);
         loop {
             tokio::select! {
-                // 3. Cancellation completes the stream cleanly.
+                // Cancellation completes the stream cleanly.
                 _ = &mut cancelled => return Ok(()),
                 result = receiver.recv() => {
                     match result {
-                        // 4+5. Matching update -> notify; unrelated events
-                        // are ignored.
+                        // Notify matching updates and ignore unrelated events.
                         Ok(ResourceEvent::Updated(uri)) => {
                             if accepted.contains(&uri) {
                                 if let Err(error) =
                                     context.sink().notify_resource_updated(uri).await
                                 {
-                                    // Genuine sink failure (peer gone or
-                                    // subscription ended): terminate cleanly,
-                                    // no retry loop.
+                                    // The peer or subscription ended. Stop
+                                    // without retrying.
                                     tracing::debug!("listen: sink terminated: {error}");
                                     return Ok(());
                                 }
                             }
                         }
-                        // 6. Lag: conservatively notify every accepted URI
-                        // once, in accepted order. Never blocks the
-                        // publisher or pump (the hub is bounded and publish
-                        // is synchronous).
+                        // On lag, notify each accepted URI once in order. The
+                        // bounded hub and synchronous publish keep publishers
+                        // and the pump non-blocking.
                         Err(broadcast::error::RecvError::Lagged(_)) => {
                             for uri in &accepted {
                                 if let Err(error) =
@@ -1054,7 +1035,7 @@ impl ServerHandler for SerialHandler {
                                 }
                             }
                         }
-                        // 7. Closed hub: complete successfully.
+                        // A closed hub completes successfully.
                         Err(broadcast::error::RecvError::Closed) => return Ok(()),
                     }
                 }
@@ -1078,7 +1059,9 @@ impl ServerHandler for SerialHandler {
 
         let all = vec![
             Resource::new(URI_PORTS, "Available serial ports")
-                .with_description("JSON list of serial ports the OS currently exposes.".to_string())
+                .with_description(
+                    "JSON list of serial ports currently exposed by the OS.".to_string(),
+                )
                 .with_mime_type("application/json".to_string())
                 .with_size(port_count)
                 .with_annotations(
@@ -1120,7 +1103,7 @@ impl ServerHandler for SerialHandler {
                 "Open serial connection by id",
             )
             .with_description(
-                "Per-connection state. Substitute {id} with a connection_id returned by the open tool."
+                "Per-connection state. Replace {id} with a connection_id returned by open."
                     .to_string(),
             )
             .with_mime_type("application/json".to_string())
@@ -1134,7 +1117,7 @@ impl ServerHandler for SerialHandler {
                 "Raw binary data from a serial connection",
             )
             .with_description(
-                "Base64-encoded bytes read from the connection. This resource consumes up to 256 pending bytes; substitute {id} with a connection_id."
+                "Base64-encoded bytes from the connection. Reading consumes up to 256 pending bytes. Replace {id} with a connection_id."
                     .to_string(),
             )
             .with_mime_type("application/octet-stream".to_string())
@@ -1148,7 +1131,7 @@ impl ServerHandler for SerialHandler {
                 "Event log for a serial connection",
             )
             .with_description(
-                "JSONL event log for the connection. Substitute {id} with a connection_id. Each line is a JSON object with timestamp, direction, and event fields."
+                "JSONL event log for the connection. Replace {id} with a connection_id. Each line is a JSON object with timestamp, direction, and event fields."
                     .to_string(),
             )
             .with_mime_type("application/x-ndjson".to_string())
@@ -1291,14 +1274,12 @@ impl ServerHandler for SerialHandler {
         Ok(CompleteResult::new(completion))
     }
 
-    // Explicit `tools/list` / `prompts/list` handlers. The
-    // `#[tool_handler]` macro generates `list_tools` when absent but leaves
-    // the SEP-2549 cache fields unset, and `#[prompt_handler]` replaces any
-    // `list_prompts` outright; the explicit versions serve the SAME routers
-    // (exact deterministic catalog, titles, schemas, prompt definitions)
-    // with cursor pagination and set `ttlMs: 0` / `cacheScope: "private"`
-    // only for the exact protocol policy that enables immediate-private
-    // caching (currently `2026-07-28`).
+    // Explicit `tools/list` and `prompts/list` handlers. The
+    // `#[tool_handler]` macro generates `list_tools` when absent without
+    // SEP-2549 cache fields, while `#[prompt_handler]` replaces `list_prompts`.
+    // These methods use the same routers, catalog, titles, schemas, and prompt
+    // definitions, add cursor pagination, and set `ttlMs: 0` /
+    // `cacheScope: "private"` only for the `2026-07-28` immediate-private row.
     async fn list_tools(
         &self,
         request: Option<PaginatedRequestParams>,
@@ -1315,9 +1296,9 @@ impl ServerHandler for SerialHandler {
         Ok(result)
     }
 
-    /// Route `prompts/get` through the same `prompt_router` the
-    /// `#[prompt_handler]` macro would use (hand-written because that macro
-    /// replaces the method unconditionally — see the impl attribute note).
+    /// Route `prompts/get` through the same `prompt_router` used by
+    /// `#[prompt_handler]`. This stays hand-written because that macro replaces
+    /// the method; see the impl attribute note.
     async fn get_prompt(
         &self,
         request: GetPromptRequestParams,
@@ -1349,7 +1330,7 @@ impl ServerHandler for SerialHandler {
     }
 }
 
-// ---- Resource URI handling --------------------------------------------------
+// Resource URI handling
 
 use crate::resources::{
     parse_resource_uri, ConnectionsResource, ResourceUriKind, URI_CONNECTIONS,
@@ -1533,7 +1514,7 @@ mod tests {
         );
     }
 
-    // ---- Dual MCP lifecycle -----------------------------------------------
+    // Dual MCP lifecycle
 
     #[tokio::test]
     async fn supported_protocol_versions_are_exact_modern_then_legacy() {
@@ -1608,7 +1589,7 @@ mod tests {
             assert_eq!(object["tools"], serde_json::json!({}));
             assert_eq!(object["prompts"], serde_json::json!({}));
         }
-        // resources: preferred carries only `subscribe`, legacy only nothing —
+        // resources: preferred carries only `subscribe`, legacy carries none;
         // neither advertises `listChanged`.
         let modern = serde_json::to_value(
             server_info_for(crate::mcp_protocol::preferred_policy()).capabilities,
@@ -1665,7 +1646,7 @@ mod tests {
             .resource_subscriptions([
                 "serial://ports",
                 "serial://connections",
-                "serial://ports", // duplicate — first order preserved
+                "serial://ports", // duplicate; first order preserved
                 "serial://connections/abc-123",
                 "serial://connections/{id}", // template -> stripped
                 "serial://connections/",     // empty id -> stripped

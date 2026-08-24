@@ -61,7 +61,7 @@ pub struct AutomaticResolution {
     /// The uniquely most-recently-used matching profile, when one exists.
     pub selected: Option<Profile>,
     /// `true` when candidates exist but no unique winner (equal top
-    /// `last_used_at_ms`) — the caller must use a transient session.
+    /// `last_used_at_ms`). The caller must use a transient session.
     pub ambiguous: bool,
     /// Names of all candidate profiles that matched the target identity.
     pub candidates: Vec<String>,
@@ -130,10 +130,10 @@ impl ProfileStore {
     /// preview.
     ///
     /// Persistent stores: acquires the advisory file lock, reloads the file
-    /// from disk (never cache-only — another process may have changed
-    /// profiles), republishes the cache, and returns the fresh snapshot in
-    /// ONE transaction, so a `list_ports` call performs a single lock/reload
-    /// regardless of how many ports it previews. Ephemeral stores: returns
+    /// from disk rather than using only the cache because another process may
+    /// have changed profiles, republishes the cache, and returns the fresh
+    /// snapshot in one transaction, so a `list_ports` call performs one
+    /// lock/reload regardless of how many ports it previews. Ephemeral stores: returns
     /// the in-memory cache. Corrupt store data is an error (the tool
     /// surfaces it rather than silently claiming no matches).
     pub async fn list_fresh(&self) -> Result<Vec<Profile>, String> {
@@ -188,9 +188,9 @@ impl ProfileStore {
 
     /// Fresh automatic resolution for one high-confidence target port.
     ///
-    /// Acquires the file lock, reloads the profile file from disk (never
-    /// cache-only — another process may have changed profiles), republishes
-    /// the cache, and resolves candidates whose selectors carry the target's
+    /// Acquires the file lock, reloads the profile file from disk rather than
+    /// using only the cache because another process may have changed profiles,
+    /// republishes the cache, and resolves candidates whose selectors carry the target's
     /// high identity fields. Returns the unique most-recently-used profile,
     /// or an ambiguity marker when no unique winner exists.
     ///
@@ -278,7 +278,7 @@ impl ProfileStore {
     }
 
     /// Mark a profile as used: increment `use_count` and update
-    /// `last_used_at_ms`. Does NOT bump the configuration revision or add
+    /// `last_used_at_ms`. Does not bump the configuration revision or add
     /// history. The timestamp is monotonically greater than any profile's
     /// existing `last_used_at_ms` (`max(now, max_existing + 1)`) so this
     /// server never creates same-millisecond ranking ties. Returns the
@@ -319,7 +319,7 @@ impl ProfileStore {
     /// 1. Requires the profile to exist.
     /// 2. Requires its current metadata revision to equal `expected_revision`.
     /// 3. When `defaults` already equal the current defaults, returns the
-    ///    unchanged profile with `changed = false` and does NOT rewrite the
+    ///    unchanged profile with `changed = false` and does not rewrite the
     ///    file, bump the revision, or touch history/timestamps.
     /// 4. Otherwise pushes the current selector/defaults into the bounded
     ///    history, preserves selector + usage/creation/generated metadata,
@@ -327,8 +327,8 @@ impl ProfileStore {
     ///    and returns the resulting profile.
     ///
     /// A revision mismatch is an explicit conflict error naming the profile,
-    /// expected revision, and actual revision — never a silent last-writer
-    /// overwrite.
+    /// expected revision, and actual revision. It never silently overwrites a
+    /// newer revision.
     pub async fn update_learned_defaults(
         &self,
         profile_name: String,
@@ -384,7 +384,7 @@ impl ProfileStore {
     /// Requires the current revision to equal `expected_revision`, then:
     ///
     /// 1. finds the requested prior snapshot (a missing/evicted revision is
-    ///    a tool error — nothing changes),
+    ///    a tool error because nothing changes),
     /// 2. pushes the current selector/defaults into the bounded history,
     /// 3. restores the target snapshot's selector/defaults,
     /// 4. sets the new revision to `current + 1` (never backward),
@@ -497,8 +497,8 @@ impl ProfileStore {
     /// [`tokio::task::spawn_blocking`] while holding the process-local
     /// mutation mutex and the advisory file lock, on a fresh read of the
     /// file. The in-memory cache is replaced from inside the blocking
-    /// transaction — immediately after the durable write succeeds and
-    /// before the advisory lock is released — so a cancelled/dropped
+    /// transaction immediately after the durable write succeeds and before
+    /// the advisory lock is released. A cancelled/dropped
     /// awaiting task cannot leave disk updated but cache stale: the
     /// blocking task finishes the cache publication regardless, and any
     /// later mutation is serialized behind the advisory lock. Any failure
@@ -517,7 +517,7 @@ impl ProfileStore {
         .await
     }
 
-    /// Like [`Self::run_mutation`], but the apply closure may decide NOT to
+    /// Like [`Self::run_mutation`], but the apply closure may decide not to
     /// write: returning `Ok((value, None))` leaves both the file and the
     /// cache untouched (used by the learned-update no-op path so `NotNeeded`
     /// truly does not rewrite the file).
@@ -554,8 +554,8 @@ impl ProfileStore {
                                 // No-op (no file write): the transaction
                                 // already loaded the fresh disk state under
                                 // the advisory lock, so publish it to the
-                                // shared cache — a concurrent external
-                                // writer's metadata changes must become
+                                // shared cache. A concurrent external writer's
+                                // metadata changes must become
                                 // visible to later cache reads without this
                                 // transaction rewriting the file.
                                 *cache.blocking_write() = current;
@@ -590,13 +590,11 @@ impl ProfileStore {
     }
 }
 
-// ---- Read / write / lock primitives (blocking) ----------------------------
-
 /// Read and validate the profile file. A missing file is an empty
 /// current-version store. Legacy unversioned files parse as v1 and migrate
 /// in memory (missing metadata/revision fields get their defaults). Any
 /// parse error, `schema_version == 0`, or version newer than the current
-/// one is an error — never an empty store.
+/// one is an error, not an empty store.
 fn load_validated(path: &Path) -> Result<Vec<Profile>, String> {
     let content = match std::fs::read_to_string(path) {
         Ok(c) => c,
@@ -685,8 +683,6 @@ fn write_atomic(path: &Path, profiles: &[Profile]) -> Result<(), String> {
         .map_err(|e| format!("Failed to commit profiles: {e}"))?;
     Ok(())
 }
-
-// ---- Pure read-modify-write operations ------------------------------------
 
 fn create_metadata(now: u64) -> ProfileMetadata {
     ProfileMetadata {
@@ -963,8 +959,8 @@ baud_rate = 115200
     }
 
     /// The obsolete `poll_interval_ms` key (removed with the deleted RX
-    /// subscription tools) must still load from an existing profile file —
-    /// serde ignores the unknown field — and a real durable mutation rewrites
+    /// subscription tools) must still load from an existing profile file.
+    /// Serde ignores the unknown field, and a real durable mutation rewrites
     /// the file without it. No schema-version bump.
     #[tokio::test]
     async fn obsolete_poll_interval_ms_loads_and_is_dropped_on_mutation() {
@@ -1263,8 +1259,6 @@ use_count = 3
         // http_integration `relative_profiles_path` test.
     }
 
-    // ── Automatic resolution, generated create, mark_used ────────────────
-
     fn high_usb_port(name: &str, serial: &str, interface: Option<u8>) -> PortInfo {
         PortInfo {
             name: name.into(),
@@ -1314,8 +1308,8 @@ use_count = 3
         let store = ProfileStore::open(path).unwrap();
         let target = high_usb_port("/dev/ttyACM0", "SN-1", None);
 
-        // Empty selector profile matches any port via matches(), but must
-        // NOT be an automatic candidate for a high-confidence device.
+        // Empty selector profile matches any port via matches(), but must not
+        // be an automatic candidate for a high-confidence device.
         store
             .upsert(
                 Profile {
@@ -1553,7 +1547,7 @@ use_count = 0
     #[tokio::test]
     async fn mark_used_bumps_usage_only_and_is_monotonic() {
         // Prewritten metadata (revision 3, use_count 7, history) so the
-        // assertions prove mark_used touches ONLY usage fields.
+        // assertions prove mark_used touches only usage fields.
         let (_dir, path) = temp_path();
         std::fs::write(
             &path,
@@ -1619,8 +1613,6 @@ vid = 0x1234
         let err = store.mark_used("no-such").await.unwrap_err();
         assert!(err.contains("not found"), "got: {err}");
     }
-
-    // ── Learned CAS updates, no-op detection, rollback ────────────────────
 
     #[tokio::test]
     async fn update_learned_defaults_bumps_revision_and_preserves_selector_and_generated_metadata()
@@ -1698,7 +1690,7 @@ use_count = 4
     async fn learned_noop_publishes_fresh_metadata_from_other_writer_without_rewriting_file() {
         use std::os::unix::fs::MetadataExt;
         let (_dir, path) = temp_path();
-        // Store A is opened FIRST — its cache predates everything the
+        // Store A is opened first. Its cache predates everything the
         // writer (store B, simulating another process) does on disk.
         let store_a = ProfileStore::open(path.clone()).unwrap();
         let store_b = ProfileStore::open(path.clone()).unwrap();
@@ -1724,8 +1716,7 @@ use_count = 4
 
         // Store A performs a learned no-op (defaults already equal). The
         // CAS must succeed against the fresh disk revision and the cache
-        // must be republished from the fresh read — WITHOUT rewriting the
-        // file.
+        // must be republished from the fresh read without rewriting the file.
         let learned = store_a
             .update_learned_defaults(
                 "dev".into(),
@@ -1779,7 +1770,7 @@ use_count = 4
         let before = store.get("dev").await.unwrap();
 
         // Identical defaults → changed=false; revision/history/timestamps
-        // untouched AND the file is not rewritten (rename would change the
+        // untouched and the file is not rewritten (rename would change the
         // inode).
         let learned = store
             .update_learned_defaults(
@@ -1886,7 +1877,7 @@ use_count = 4
             )
             .await
             .unwrap();
-        // History: [rev1(9600), rev2(19200)] — wait, update_defaults bumps
+        // History: [rev1(9600), rev2(19200)]. update_defaults bumps
         // metadata and pushes the prior state; verify the layout first.
         let p = store.get("dev").await.unwrap();
         assert_eq!(p.metadata.revision, 2);
@@ -2050,7 +2041,7 @@ use_count = 9
 
     #[tokio::test]
     async fn resolve_automatic_observes_other_writers_via_fresh_read() {
-        // The fresh-read path must see profiles written by a DIFFERENT
+        // The fresh-read path must see profiles written by a different
         // store instance (simulating another process), not a stale cache.
         let (_dir, path) = temp_path();
         let store = ProfileStore::open(path.clone()).unwrap();
@@ -2082,7 +2073,7 @@ use_count = 9
     #[tokio::test]
     async fn cancelled_upsert_still_publishes_cache_and_disk() {
         // Regression: a persistent mutation whose awaiting task is dropped
-        // (tool cancellation) must still complete its disk write AND its
+        // (tool cancellation) must still complete its disk write and its
         // cache publication, because both happen inside the blocking
         // transaction before the advisory lock is released.
         let (_dir, path) = temp_path();

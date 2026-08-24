@@ -2,7 +2,7 @@
  * Copyright (c) 2025 serial-mcp contributors
  * SPDX-License-Identifier: MIT
  *
- * UART0 driver with line-buffered RX and ringbuf TX.
+ * UART driver with line-buffered RX and ring-buffered TX.
  */
 
 #include "uart_drv.h"

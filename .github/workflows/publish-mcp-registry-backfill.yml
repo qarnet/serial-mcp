@@ -4,11 +4,11 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: Strict SemVer version to backfill (must already have a published GitHub release v<version>)
+        description: Strict SemVer version to backfill; it must already have a published GitHub release v<version>
         required: true
         type: string
 
-# Read-only + OIDC only. No repository write credential, no secrets.
+# Read-only plus OIDC. No repository write credential or secrets.
 permissions:
   contents: read
   id-token: write

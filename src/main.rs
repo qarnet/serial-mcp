@@ -51,14 +51,13 @@ fn print_version_and_exit() {
     std::process::exit(0);
 }
 
-/// Options that consume the following token as their value (so a
-/// `--version` token immediately after one is that option's value, not a
-/// version request). **CROSS-REFERENCE:** must stay in sync with the
-/// `opt_value_from_str("--<opt>")` calls in `parse_args` below — adding a
+/// Options that consume the following token as their value. A `--version`
+/// token immediately after one is that option's value, not a version request.
+/// Cross-reference: this list must stay in sync with the
+/// `opt_value_from_str("--<opt>")` calls in `parse_args` below. Adding a
 /// value-taking option there without adding it here lets `--version`
-/// detection silently drift (a `--<new-opt> --version` would misfire as a
-/// version request). Removing one here without removing the call has the
-/// inverse effect.
+/// detection drift, so `--<new-opt> --version` could be misread as a version
+/// request. Removing one here without removing the call has the inverse effect.
 const VALUE_TAKING_OPTIONS: &[&str] = &[
     "--transport",
     "--allowlist",
@@ -72,10 +71,10 @@ const VALUE_TAKING_OPTIONS: &[&str] = &[
     "--capture-max-files",
 ];
 
-/// Scan argv for a version flag (`-V` / `--version`) that is NOT in the
-/// value position of a preceding value-taking option and NOT after a `--`
-/// separator. A token like `--bind --version` means `--version` is the
-/// value of `--bind`, not a version request.
+/// Scan argv for a version flag (`-V` / `--version`) that is not in the value
+/// position of a preceding value-taking option and not after a `--` separator.
+/// A token like `--bind --version` means `--version` is the value of `--bind`,
+/// not a version request.
 #[allow(clippy::while_let_on_iterator)] // needs manual next() to skip option values
 fn argv_has_version_flag() -> bool {
     let mut args = std::env::args().skip(1);
@@ -90,9 +89,8 @@ fn argv_has_version_flag() -> bool {
             // Everything after `--` is positional, not a flag.
             return false;
         }
-        // `--opt=value` form: the value is embedded, so the next token is
-        // NOT consumed as a value. Only the bare `--opt` form sets
-        // expect_value.
+        // `--opt=value` form: the value is embedded, so the next token is not
+        // consumed as a value. Only the bare `--opt` form sets `expect_value`.
         let is_bare_value_taking = VALUE_TAKING_OPTIONS.iter().any(|opt| arg == *opt);
         if is_bare_value_taking {
             expect_value = true;
@@ -106,12 +104,12 @@ fn argv_has_version_flag() -> bool {
 }
 
 fn parse_args() -> Result<Args, pico_args::Error> {
-    // Short-circuit version requests before parsing, so they are not
-    // rejected as unexpected arguments by pargs.finish().
+    // Short-circuit version requests before parsing so pargs.finish() does not
+    // reject them as unexpected arguments.
     //
-    // Scan argv with value-position awareness: a token is only treated as
-    // a version flag if it is not the value of a preceding value-taking
-    // option and not after a `--` separator. This prevents
+    // Scan argv with value-position awareness. A token is treated as a version
+    // flag only when it is not the value of a preceding value-taking option
+    // and not after a `--` separator. This prevents
     // `serial-mcp --bind --version` from printing the version instead of
     // erroring (`--version` is the value of `--bind`).
     if argv_has_version_flag() {
@@ -171,10 +169,10 @@ Examples:
         std::process::exit(0);
     }
 
-    // Value-taking options parsed below. CROSS-REFERENCE: every
-    // `opt_value_from_str("--<opt>")` call here MUST have a matching entry
-    // in `VALUE_TAKING_OPTIONS` above, or `argv_has_version_flag` will
-    // misclassify a `--<opt> --version` invocation.
+    // Value-taking options parsed below. Cross-reference: every
+    // `opt_value_from_str("--<opt>")` call here must have a matching entry in
+    // `VALUE_TAKING_OPTIONS` above, or `argv_has_version_flag` will misclassify
+    // a `--<opt> --version` invocation.
     let transport_str: Option<String> = pargs.opt_value_from_str("--transport")?;
     let transport = match transport_str.as_deref() {
         Some("http") => Transport::Http,
@@ -243,9 +241,9 @@ Examples:
         std::process::exit(1);
     }
 
-    // Capture quota options are meaningless without a capture root; an
-    // explicitly supplied quota without `--capture-dir` is a startup error
-    // (never a silent disable).
+    // Capture quota options are meaningless without a capture root. An
+    // explicitly supplied quota without `--capture-dir` is a startup error,
+    // not a silent disable.
     let quotas_supplied = capture_max_file_bytes.is_some()
         || capture_max_total_bytes.is_some()
         || capture_max_files.is_some();
@@ -310,7 +308,7 @@ async fn run_stdio(
 ) -> Result<(), Box<dyn std::error::Error>> {
     info!("Starting Serial MCP Server v{}", env!("CARGO_PKG_VERSION"));
     let connections = Arc::new(ConnectionManager::new());
-    // ONE process-wide RX session registry per server (ring + pump + shared
+    // One process-wide RX session registry per server (ring + pump + shared
     // cursor): stateless HTTP creates a fresh handler per request, so every
     // handler must share the same manager.
     let rx_sessions = Arc::new(RxSessionManager::new(Arc::clone(&budget), Arc::clone(&hub)));
@@ -361,7 +359,7 @@ async fn run_http(
 
     let shutdown = tokio_util::sync::CancellationToken::new();
     let manager = Arc::new(ConnectionManager::new());
-    // ONE process-wide RX session registry per server (ring + pump + shared
+    // One process-wide RX session registry per server (ring + pump + shared
     // cursor): cloned into every stateless HTTP handler factory so
     // sequential reads share ring/cursor state across requests.
     let rx_sessions = Arc::new(RxSessionManager::new(Arc::clone(&budget), Arc::clone(&hub)));
@@ -389,20 +387,19 @@ async fn run_http(
         LocalSessionManager::default().into(),
         // Exact protocol policy: `2026-07-28` modern stateless lifecycle
         // plus `2025-11-25` initialized sessions. Strict validation
-        // (`stateless_protocol_metadata_required`) rejects statelessly
-        // routed modern requests missing required protocol signals — a
-        // request carrying modern per-request `_meta` but no
-        // `MCP-Protocol-Version` header gets HTTP 400 / JSON-RPC -32020
-        // before tool dispatch — while valid initialized `2025-11-25`
-        // sessions remain supported. Requests missing both signals are
-        // classified legacy by rmcp and rejected earlier (HTTP 422),
-        // never reaching this validator.
+        // (`stateless_protocol_metadata_required`) rejects statelessly routed
+        // modern requests missing required protocol signals. A request
+        // carrying modern per-request `_meta` but no `MCP-Protocol-Version`
+        // header gets HTTP 400 / JSON-RPC -32020 before tool dispatch. Valid
+        // initialized `2025-11-25` sessions remain supported. Requests
+        // missing both signals are classified legacy by rmcp and rejected
+        // earlier (HTTP 422), never reaching this validator.
         StreamableHttpServerConfig::default()
             .with_cancellation_token(shutdown.child_token())
             .with_stateless_protocol_metadata_required(true),
     );
 
-    // One proactive port hotplug watcher per process, sharing the SAME
+    // One proactive port hotplug watcher per process, sharing the same
     // SystemPortProvider and hub as every handler instance.
     let watcher = PortWatcher::start(
         port_provider,
@@ -460,8 +457,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Resolve the profile store path. Without --profiles-path the OS user
     // config path is the default; an unavailable config directory is a
     // startup error (no silent cwd fallback). Invalid persistent data
-    // (corrupt file, unsupported future schema version) also fails
-    // startup — never an empty store.
+    // (corrupt file, unsupported future schema version) also fails startup,
+    // never an empty store.
     let profiles_path = match args.profiles_path {
         Some(p) => p,
         None => serial_mcp::profiles::default_profiles_path().unwrap_or_else(|e| {
@@ -506,7 +503,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
-    // ONE shared port provider + ONE process-wide resource event hub per
+    // One shared port provider and one process-wide resource event hub per
     // server process: cloned into every handler factory and the port
     // watcher in both transports.
     let port_provider: Arc<dyn PortProvider> = Arc::new(SystemPortProvider);

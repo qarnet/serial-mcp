@@ -1,18 +1,16 @@
-//! Shared helpers that resolve the on-disk path of the `serial-mcp`
-//! binary used by integration tests that spawn it as a child process.
+//! Shared helpers for resolving the on-disk path of the `serial-mcp` binary
+//! used by integration tests that spawn it as a child process.
 //!
-//! Two resolution rules, in order:
+//! Resolution follows two rules, in order:
 //!
-//! 1. Environment override: `SERIAL_MCP_BIN`. When set to a non-empty
-//!    string, the path is taken verbatim. This lets CI and developers
-//!    point at a pre-built artifact, or a release-mode build, without
-//!    re-invoking cargo.
+//! 1. Environment override: `SERIAL_MCP_BIN`. When set to a non-empty string,
+//!    the path is taken verbatim. This lets CI and developers point at a
+//!    pre-built artifact or release-mode build without re-invoking cargo.
 //!
 //! 2. Workspace default: `<CARGO_MANIFEST_DIR>/target/debug/serial-mcp`.
-//!    If the file is missing, the test process invokes
-//!    `cargo build --bin serial-mcp` from the workspace root and reuses
-//!    the result. Cargo's own target-directory lock serializes concurrent
-//!    build attempts.
+//!    If the file is missing, the test process invokes `cargo build --bin serial-mcp`
+//!    from the workspace root and reuses the result. Cargo's own target-directory
+//!    lock serializes concurrent build attempts.
 //!
 //! These helpers are synchronous. Spawning the binary remains the caller's
 //! responsibility.
@@ -42,9 +40,9 @@ pub fn default_serial_mcp_bin() -> PathBuf {
 
 /// Resolve the path to the `serial-mcp` binary the tests should spawn.
 ///
-/// Honors `SERIAL_MCP_BIN` if set, otherwise returns the workspace
-/// default. Does **not** trigger a build — call [`ensure_serial_mcp_built`]
-/// separately if you need the artifact to exist on disk.
+/// Uses `SERIAL_MCP_BIN` if set; otherwise returns the workspace default. It
+/// does not trigger a build; call [`ensure_serial_mcp_built`] separately if
+/// the artifact must exist on disk.
 pub fn serial_mcp_bin() -> PathBuf {
     if let Ok(value) = std::env::var(SERIAL_MCP_BIN_ENV) {
         let trimmed = value.trim();
@@ -57,15 +55,15 @@ pub fn serial_mcp_bin() -> PathBuf {
 
 /// Build the `serial-mcp` binary if it is not already on disk.
 ///
-/// Returns the resolved path (identical to [`serial_mcp_bin`]). The
-/// Existing artifacts are reused; otherwise cargo builds the binary.
+/// Returns the resolved path, identical to [`serial_mcp_bin`]. Existing
+/// artifacts are reused; otherwise cargo builds the binary.
 pub fn ensure_serial_mcp_built() -> Result<PathBuf> {
     static BUILT: OnceLock<()> = OnceLock::new();
     let bin = serial_mcp_bin();
     if bin.is_file() {
         return Ok(bin);
     }
-    // Mark that this process entered the auto-build path. Cargo's target-dir
+    // Record that this process entered the auto-build path. Cargo's target-dir
     // lock serializes concurrent cargo processes; every caller still checks
     // its own build result.
     BUILT.get_or_init(|| ());

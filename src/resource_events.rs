@@ -2,25 +2,25 @@
 //!
 //! Three pieces:
 //!
-//! - [`ResourceEvent`] / [`ResourceEventHub`] — a bounded `tokio` broadcast
-//!   hub shared by every stdio/HTTP handler and the port watcher. Publish is
-//!   synchronous and never awaits; notifications are availability hints, not
+//! - [`ResourceEvent`] / [`ResourceEventHub`]: a bounded `tokio` broadcast hub
+//!   shared by every stdio/HTTP handler and the port watcher. Publish is
+//!   synchronous and never awaits. Notifications are availability hints, not
 //!   a byte ledger.
-//! - subscribable-URI helpers built on `resources::parse_resource_uri` —
-//!   only `serial://ports`, `serial://connections`, and recognized concrete
+//! - Subscribable-URI helpers built on `resources::parse_resource_uri`: only
+//!   `serial://ports`, `serial://connections`, and recognized concrete
 //!   connection detail/raw/log URIs are subscribable. Templates, malformed
 //!   IDs, unknown schemes, and empty IDs are rejected.
-//! - [`PortWatcher`] — one process-wide polling watcher around the shared
+//! - [`PortWatcher`]: one process-wide polling watcher around the shared
 //!   `PortProvider` that publishes `Updated(serial://ports)` when the
 //!   canonicalized port snapshot changes.
 //!
 //! Ownership rules:
 //!
 //! - one hub per server process, cloned into every handler factory and the
-//!   watcher (modern HTTP is stateless — a handler-local channel would split
-//!   publishers and listeners across handler instances and lose updates);
+//!   watcher. Modern HTTP is stateless, so a handler-local channel would split
+//!   publishers and listeners across handler instances and lose updates;
 //! - each `subscriptions/listen` request owns exactly one receiver;
-//! - publication happens only AFTER the observable state commit (e.g. ring
+//! - publication happens only after the observable state commit (for example, ring
 //!   append) and never blocks the publisher, the RX pump, another listener,
 //!   or serial tools.
 
@@ -46,7 +46,7 @@ pub const DEFAULT_HUB_CAPACITY: usize = 256;
 /// Production port-watcher poll interval (fixed decision).
 pub const PORT_WATCHER_INTERVAL: Duration = Duration::from_secs(1);
 
-/// One resource-update event. Notifications carry only the URI — serial
+/// One resource-update event. Notifications carry only the URI. Serial
 /// payloads never travel in notifications; `read` remains the data path.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ResourceEvent {
@@ -127,8 +127,8 @@ impl ResourceEventHub {
         }
     }
 
-    /// Publish all three per-connection hints (detail, raw, log) — used by
-    /// the RX pump after a successful ring append.
+    /// Publish all three per-connection hints (detail, raw, log). The RX pump
+    /// uses this after a successful ring append.
     pub fn publish_connection_changed(&self, connection_id: &str) {
         self.publish_connection_detail_changed(connection_id);
         self.publish_connection_raw_changed(connection_id);
@@ -141,8 +141,6 @@ impl Default for ResourceEventHub {
         Self::new(DEFAULT_HUB_CAPACITY)
     }
 }
-
-// ---- Subscribable-URI helpers ----------------------------------------------
 
 /// Reject connection ids that cannot form a recognized concrete URI: empty
 /// ids, template placeholders (`{id}`), and ids that would change how the
@@ -201,8 +199,6 @@ pub fn is_subscribable_uri(uri: &str) -> bool {
     }
 }
 
-// ---- Port hotplug watcher ---------------------------------------------------
-
 /// One process-wide polling port watcher.
 ///
 /// Canonicalizes every successful snapshot (sorted full `PortInfo` identity
@@ -253,7 +249,7 @@ async fn port_watcher_loop(
 ) {
     let mut baseline: Option<Vec<PortInfo>> = None;
     loop {
-        // Enumerate immediately, BEFORE any sleep: the first successful
+        // Enumerate immediately, before any sleep: the first successful
         // baseline is captured as soon as the watcher task starts, so a
         // port change between server startup and the first poll can never
         // become the (silent) baseline. Waits happen between subsequent
@@ -262,7 +258,7 @@ async fn port_watcher_loop(
             Ok(ports) => apply_snapshot(&mut baseline, ports, &hub),
             Err(e) => {
                 // Enumeration failure: warn and keep the prior successful
-                // baseline so recovery compares against it. If the FIRST
+                // baseline so recovery compares against it. If the first
                 // call fails, the next success establishes the baseline
                 // without notification.
                 warn!("port watcher: enumeration failed: {e}");
@@ -368,8 +364,6 @@ mod tests {
         }
     }
 
-    // ── Hub semantics ─────────────────────────────────────────────────────
-
     #[test]
     fn hub_publishes_to_independent_receivers() {
         let hub = ResourceEventHub::new(16);
@@ -445,8 +439,6 @@ mod tests {
         }
     }
 
-    // ── URI helpers ───────────────────────────────────────────────────────
-
     #[test]
     fn uri_helpers_accept_only_concrete_subscribable_uris() {
         // Accepted: static lists + concrete connection URIs.
@@ -489,8 +481,6 @@ mod tests {
             assert!(log_uri(id).is_none(), "must reject id {id:?}");
         }
     }
-
-    // ── Watcher snapshot logic (pure) ─────────────────────────────────────
 
     #[test]
     fn first_success_establishes_baseline_without_event() {
@@ -564,8 +554,6 @@ mod tests {
         );
     }
 
-    // ── Watcher loop (integration, short interval) ────────────────────────
-
     /// Mutable test provider: the test swaps the snapshot and injects
     /// enumeration failures.
     struct MutPortProvider {
@@ -602,8 +590,8 @@ mod tests {
 
     #[tokio::test]
     async fn watcher_captures_immediate_baseline_before_first_interval() {
-        // The FIRST poll must run immediately when the watcher task starts
-        // — never after one interval. Proven with an interval far longer
+        // The first poll must run immediately when the watcher task starts,
+        // never after one interval. An interval far longer
         // than the mutation window: the baseline is captured during the
         // yield below (no interval elapses), a mutation issued right after
         // it emits an update. A sleep-first loop would swallow that mutation
@@ -619,7 +607,7 @@ mod tests {
             Duration::from_millis(1000), // one second: no interval may elapse here
         );
 
-        // Yield so the spawned watcher runs its FIRST (immediate) poll and
+        // Yield so the spawned watcher runs its first (immediate) poll and
         // establishes the baseline [a] without sleeping an interval.
         tokio::task::yield_now().await;
         tokio::task::yield_now().await;
@@ -628,7 +616,7 @@ mod tests {
             Err(broadcast::error::TryRecvError::Empty)
         ));
 
-        // Mutate immediately — well before the first 1s interval would have
+        // Mutate immediately, well before the first 1s interval would have
         // elapsed. The mutation must emit an update (baseline was [a], not
         // the mutated set).
         provider.set_ports(vec![
@@ -657,7 +645,7 @@ mod tests {
             Duration::from_millis(15),
         );
 
-        // The FIRST poll runs immediately (no interval wait): yield lets the
+        // The first poll runs immediately (no interval wait): yield lets the
         // spawned watcher establish the baseline [a] right away.
         tokio::task::yield_now().await;
         tokio::task::yield_now().await;
@@ -692,7 +680,7 @@ mod tests {
         ));
 
         // Recovery compares against the retained baseline: reorder of the
-        // retained snapshot is NOT a change...
+        // retained snapshot is not a change...
         provider.set_fail(false);
         provider.set_ports(vec![
             usb_port("/dev/ttyUSB1", "SN-2"),

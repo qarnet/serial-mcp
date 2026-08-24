@@ -2,7 +2,7 @@
 //! running on `native_sim` (POSIX emulator, PTY-backed UART).
 //!
 //! Each test spawns its own `zephyr.exe` instance with a fresh PTY.
-//! No shared state — `--test-threads=N` is safe.
+//! Tests do not share state, so `--test-threads=N` is safe.
 //!
 //! ```sh
 //! cargo test --test native_sim_validation -- --ignored
@@ -16,8 +16,6 @@ use serde_json::json;
 
 use crate::common::firmware::NativeSimFirmware;
 use crate::common::{args_object, connect_client, tool_request, TestServer};
-
-// ── MCP helper functions ─────────────────────────────────────────────────────
 
 const BAUD_RATE: u32 = 115200;
 const NAME: &str = "native-sim-uart";
@@ -121,7 +119,7 @@ async fn write_raw(
     assert_ne!(result.is_error, Some(true), "write failed: {result:?}");
 }
 
-/// Read unstructured data string via the `read` tool.
+/// Read data as a string from the `read` tool.
 async fn read_str(
     client: &rmcp::service::RunningService<
         rmcp::service::RoleClient,
@@ -151,7 +149,7 @@ async fn read_str(
         .unwrap_or_default()
 }
 
-/// Read until `expected` substring is found.
+/// Read until `expected` appears.
 async fn read_until(
     client: &rmcp::service::RunningService<
         rmcp::service::RoleClient,
@@ -182,7 +180,7 @@ async fn flush_both(
         .expect("flush call");
 }
 
-/// Hex-encode raw bytes for `sendraw hex` commands.
+/// Encode raw bytes as hex for `sendraw hex` commands.
 fn bytes_to_hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02X}")).collect()
 }
@@ -205,8 +203,8 @@ async fn close_connection(
     assert_ne!(result.is_error, Some(true), "close failed: {result:?}");
 }
 
-/// Read until the firmware's boot banner ("serial-mcp test firmware ready")
-/// then flush. Ensures we start from a clean, known state.
+/// Read the firmware boot banner ("serial-mcp test firmware ready"), then
+/// flush input and output so each test starts from a known state.
 async fn sync_boot(
     client: &rmcp::service::RunningService<
         rmcp::service::RoleClient,
@@ -235,9 +233,7 @@ async fn sync_boot(
     flush_both(client, connection_id).await;
 }
 
-// ── Test 1: ping roundtrip ───────────────────────────────────────────────────
-
-/// Verify the firmware is alive: `ping` → `pong`.
+/// Verify the firmware responds to `ping` with `pong`.
 #[tokio::test]
 #[ignore = "requires native_sim firmware binary"]
 async fn native_ping_roundtrip() {
@@ -279,10 +275,8 @@ async fn native_ping_roundtrip() {
     drop(fw);
 }
 
-// ── Test 2: pending read then write ping ─────────────────────────────────────
-
-/// read with match waits first, then a later write still reaches the
-/// firmware promptly.
+/// A matching read waits first, then a later write still reaches the firmware
+/// promptly.
 #[tokio::test]
 #[ignore = "requires native_sim firmware binary"]
 async fn native_pending_read_then_write_ping_roundtrip() {
@@ -335,10 +329,7 @@ async fn native_pending_read_then_write_ping_roundtrip() {
     drop(fw);
 }
 
-// ── Test 3: split writes preserve command order ──────────────────────────────
-
-/// Split write calls must stay ordered so the firmware still sees one
-/// valid command.
+/// Split write calls stay ordered so the firmware sees one valid command.
 #[tokio::test]
 #[ignore = "requires native_sim firmware binary"]
 async fn native_split_writes_preserve_command_order() {
@@ -387,10 +378,8 @@ async fn native_split_writes_preserve_command_order() {
     drop(fw);
 }
 
-// ── Test 4: framing reports single split command ─────────────────────────────
-
-/// Framing mode should report one committed line even when the command
-/// arrives through multiple write calls.
+/// Line framing reports one committed line when the command arrives through
+/// multiple write calls.
 #[tokio::test]
 #[ignore = "requires native_sim firmware binary"]
 async fn native_framing_reports_single_split_command() {
@@ -450,9 +439,7 @@ async fn native_framing_reports_single_split_command() {
     drop(fw);
 }
 
-// ── Test 5: trace reports exact split byte sequence ──────────────────────────
-
-/// Trace mode should expose exact RX byte order for split writes,
+/// Trace mode exposes exact RX byte order for split writes,
 /// including CRLF terminator bytes.
 #[tokio::test]
 #[ignore = "requires native_sim firmware binary"]
@@ -522,9 +509,7 @@ async fn native_trace_reports_exact_split_byte_sequence() {
     drop(fw);
 }
 
-// ── Test 6: read match on spam completion ────────────────────────────────────
-
-/// read(match=...) stops on "Spam complete" after a 1024-byte hex spam.
+/// A matching read stops on "Spam complete" after 1024-byte hex spam.
 #[tokio::test]
 #[ignore = "requires native_sim firmware binary"]
 async fn native_read_match_on_spam_complete() {
@@ -577,10 +562,8 @@ async fn native_read_match_on_spam_complete() {
     drop(fw);
 }
 
-// ── Test 9: buffer budget under hex flood ────────────────────────────────────
-
-/// read(max_buffered_bytes=256) stops cleanly with max_buffered_bytes
-/// while a hex flood is in progress.
+/// Set the connection's `max_buffered_bytes` default through `configure`, then
+/// verify that `read` stops cleanly at that limit during a hex flood.
 #[tokio::test]
 #[ignore = "requires native_sim firmware binary"]
 async fn native_read_buffer_budget_stops_under_flood() {
@@ -592,17 +575,14 @@ async fn native_read_buffer_budget_stops_under_flood() {
     let id = open_pty(&client, &pty_path).await;
     sync_boot(&client, &id).await;
 
-    // Write first so the ring fills with spam data, then read drains it up
-    // to max_buffered_bytes. Under the ring model, read starts from the
-    // current cursor; writing first ensures the data is buffered before read
-    // starts.
+    // Write first so the ring contains spam before read starts. Under the ring
+    // model, read starts at the current cursor and drains buffered data.
     write_cmd(&client, &id, "spam 65536 hex").await;
-    // Give the firmware time to generate enough data to fill the read buffer.
-    // Under ring semantics, the read drains buffered data and may return with
-    // either "drained" or "max_buffered_bytes" depending on timing.
+    // Give the firmware time to generate enough data. Timing may produce
+    // either "drained" or "max_buffered_bytes".
     tokio::time::sleep(Duration::from_millis(1000)).await;
 
-    // Configure max_buffered_bytes=256 on the connection.
+    // Set the connection default before calling read.
     client
         .peer()
         .call_tool(tool_request(
@@ -641,7 +621,7 @@ async fn native_read_buffer_budget_stops_under_flood() {
         data.len()
     );
 
-    // Stop the flood.
+    // Stop the firmware flood.
     write_cmd(&client, &id, "spam stop").await;
     tokio::time::sleep(Duration::from_millis(100)).await;
 
@@ -650,13 +630,9 @@ async fn native_read_buffer_budget_stops_under_flood() {
     drop(fw);
 }
 
-// ── Test 12: bootloader touch command → exit(42) ──────────────────────────────
-
-/// Send the "touch" command over the PTY command channel. Firmware
-/// should respond with "touch exit(42)" and then call exit(42).
-/// This validates the end-to-end path that a bootloader-entry
-/// trigger (sent via serial-mcp `write`) causes the expected
-/// firmware-side behaviour.
+/// Send "touch" over the PTY command channel. Firmware responds with
+/// "touch exit(42)" and exits with code 42. This validates the end-to-end
+/// path from serial-mcp `write` to the firmware bootloader-entry trigger.
 #[tokio::test]
 #[ignore = "requires native_sim firmware binary"]
 async fn native_bootloader_touch_exits_42() {
@@ -669,7 +645,6 @@ async fn native_bootloader_touch_exits_42() {
     let id = open_pty(&client, &pty_path).await;
     sync_boot(&client, &id).await;
 
-    // Send the "touch" command
     client
         .peer()
         .call_tool(tool_request(
@@ -683,7 +658,6 @@ async fn native_bootloader_touch_exits_42() {
         .await
         .expect("write touch command");
 
-    // Give firmware time to process and call exit(42)
     for _ in 0..20 {
         tokio::time::sleep(Duration::from_millis(100)).await;
         if let Some(code) = fw.try_exit_code() {
@@ -699,8 +673,6 @@ async fn native_bootloader_touch_exits_42() {
     client.cancel().await.ok();
     panic!("firmware did not exit within 2s after touch command");
 }
-
-// ── Test 13: list_ports returns valid JSON with an opened PTY ──────────────────
 
 #[tokio::test]
 #[ignore = "requires native_sim firmware binary"]
@@ -728,14 +700,12 @@ async fn native_list_ports_after_open() {
         "expected at least one port in list: {s:?}"
     );
 
-    // The PTY might not be enumerated by serialport::available_ports()
-    // on all platforms, but list_ports must return valid JSON.
+    // The PTY may not appear in serialport::available_ports() on every
+    // platform; list_ports must still return valid JSON.
     close_connection(&client, &id).await;
     client.cancel().await.ok();
     drop(fw);
 }
-
-// ── Test 14: list_ports returns rich device identity ──────────────────────────
 
 #[tokio::test]
 #[ignore = "requires native_sim firmware binary"]
@@ -760,7 +730,6 @@ async fn native_list_ports_includes_identity_fields() {
     let ports = s["ports"].as_array().expect("ports is array");
 
     for port in ports {
-        // Every port must have at least these fields.
         assert!(port["name"].is_string(), "port missing name: {port:?}");
         assert!(
             port["display_name"].is_string(),
@@ -776,7 +745,7 @@ async fn native_list_ports_includes_identity_fields() {
             "unexpected transport '{transport}' in {port:?}"
         );
 
-        // USB-specific fields should be null for non-USB transports.
+        // Non-USB transports report null USB-specific fields.
         if transport != "usb" {
             assert!(
                 port["vid"].is_null(),
@@ -798,8 +767,6 @@ async fn native_list_ports_includes_identity_fields() {
     drop(fw);
 }
 
-// ── Test 15: flush preserves data integrity ────────────────────────────────────
-
 #[tokio::test]
 #[ignore = "requires native_sim firmware binary"]
 async fn native_flush_after_write() {
@@ -812,7 +779,7 @@ async fn native_flush_after_write() {
     let id = open_pty(&client, &pty_path).await;
     sync_boot(&client, &id).await;
 
-    // Write a command, flush output, then read — the pong should arrive.
+    // Write a command, flush output, then use a matching read for pong.
     // Under ring semantics, use match-based read to reliably wait for pong.
     write_cmd(&client, &id, "ping").await;
 
@@ -848,8 +815,6 @@ async fn native_flush_after_write() {
     drop(fw);
 }
 
-// ── get_status on PTY ───────────────────────────────────────────────────────
-
 #[tokio::test]
 #[ignore = "requires native_sim firmware binary"]
 async fn native_get_status_after_write_increments_tx_counter() {
@@ -862,7 +827,7 @@ async fn native_get_status_after_write_increments_tx_counter() {
     let id = open_pty(&client, &pty_path).await;
     sync_boot(&client, &id).await;
 
-    // sync_boot only reads boot output — tx may be 0, rx > 0
+    // sync_boot reads boot output only, so tx may be 0 while rx is positive.
     let result = client
         .peer()
         .call_tool(tool_request("get_status", json!({ "connection_id": id })))
@@ -874,7 +839,7 @@ async fn native_get_status_after_write_increments_tx_counter() {
     let rx0 = s["rx_bytes"].as_u64().unwrap();
     assert!(rx0 > 0, "rx after boot: {s:?}");
 
-    // Write + read should increase both counters
+    // Write and read should increase both counters.
     write_cmd(&client, &id, "ping").await;
     let result = client
         .peer()
@@ -915,8 +880,6 @@ async fn native_get_status_after_write_increments_tx_counter() {
     drop(fw);
 }
 
-// ── reconfigure on PTY ──────────────────────────────────────────────────────
-
 #[tokio::test]
 #[ignore = "requires native_sim firmware binary"]
 async fn native_reconfigure_baud_rate_persists() {
@@ -929,7 +892,7 @@ async fn native_reconfigure_baud_rate_persists() {
     let id = open_pty(&client, &pty_path).await;
     sync_boot(&client, &id).await;
 
-    // Change baud to 38400
+    // Change baud to 38400.
     let result = client
         .peer()
         .call_tool(tool_request(
@@ -942,7 +905,7 @@ async fn native_reconfigure_baud_rate_persists() {
     let s = result.structured_content.unwrap();
     assert_eq!(s["baud_rate"], json!(38400), "{s:?}");
 
-    // Verify via get_status
+    // Verify through get_status.
     let result = client
         .peer()
         .call_tool(tool_request("get_status", json!({ "connection_id": id })))
@@ -951,7 +914,7 @@ async fn native_reconfigure_baud_rate_persists() {
     let s = result.structured_content.unwrap();
     assert_eq!(s["baud_rate"], json!(38400), "baud should persist: {s:?}");
 
-    // Connection still works — ping roundtrip
+    // Verify the connection still works with a ping roundtrip.
     write_cmd(&client, &id, "ping").await;
     let result = client
         .peer()
@@ -972,7 +935,7 @@ async fn native_reconfigure_baud_rate_persists() {
         .unwrap();
     assert_ne!(result.is_error, Some(true), "{result:?}");
 
-    // Reconfigure back to 115200
+    // Restore 115200.
     client
         .peer()
         .call_tool(tool_request(
@@ -987,8 +950,6 @@ async fn native_reconfigure_baud_rate_persists() {
     drop(fw);
 }
 
-// ── Test 19: ack command provides pre-execution acknowledgment ───────────────
-
 #[tokio::test]
 #[ignore = "requires native_sim firmware binary"]
 async fn native_ack_command_provides_pre_execution_ack() {
@@ -1001,7 +962,7 @@ async fn native_ack_command_provides_pre_execution_ack() {
     let id = open_pty(&client, &pty_path).await;
     sync_boot(&client, &id).await;
 
-    // Enable acks — use match-based read to wait for confirmation.
+    // Enable acknowledgments and use a matching read for confirmation.
     write_cmd(&client, &id, "ack on").await;
     {
         let r = client
@@ -1027,7 +988,7 @@ async fn native_ack_command_provides_pre_execution_ack() {
         );
     }
 
-    // Write ping, read ack + pong together via match.
+    // Read the acknowledgment and pong from one matching read.
     write_cmd(&client, &id, "ping").await;
     {
         let r = client
@@ -1054,7 +1015,7 @@ async fn native_ack_command_provides_pre_execution_ack() {
         );
     }
 
-    // Second ping — ack increments.
+    // The second ping increments the acknowledgment sequence.
     write_cmd(&client, &id, "ping").await;
     {
         let r = client
@@ -1078,7 +1039,7 @@ async fn native_ack_command_provides_pre_execution_ack() {
         assert!(data2.contains("ack 1"), "ack seq should increment: {data2}");
     }
 
-    // Disable acks, verify no more ack prefix.
+    // Disable acknowledgments and verify that no prefix remains.
     write_cmd(&client, &id, "ack off").await;
     {
         let r = client
@@ -1131,8 +1092,6 @@ async fn native_ack_command_provides_pre_execution_ack() {
     drop(fw);
 }
 
-// ── Test 20: txbuf status reports pending TX ──────────────────────────────────
-
 #[tokio::test]
 #[ignore = "requires native_sim firmware binary"]
 async fn native_txbuf_status_reports_pending() {
@@ -1145,7 +1104,7 @@ async fn native_txbuf_status_reports_pending() {
     let id = open_pty(&client, &pty_path).await;
     sync_boot(&client, &id).await;
 
-    // Idle: txbuf should show 0. Use match-based read under ring semantics.
+    // When idle, txbuf reports 0. Use a matching read under ring semantics.
     write_cmd(&client, &id, "txbuf status").await;
     {
         let r = client
@@ -1172,7 +1131,7 @@ async fn native_txbuf_status_reports_pending() {
         );
     }
 
-    // Enable TX hold, then release. Verify pong still works roundtrip.
+    // Enable and release TX hold, then verify a ping roundtrip.
     write_cmd(&client, &id, "hold on").await;
     {
         let r = client
@@ -1248,7 +1207,7 @@ async fn native_txbuf_status_reports_pending() {
         );
     }
 
-    // Verify idle again.
+    // Verify idle state again.
     flush_both(&client, &id).await;
     write_cmd(&client, &id, "txbuf status").await;
     {
@@ -1281,8 +1240,6 @@ async fn native_txbuf_status_reports_pending() {
     drop(fw);
 }
 
-// ── Test 21: flush(input) clears host RX ─────────────────────────────────────
-
 #[tokio::test]
 #[ignore = "requires native_sim firmware binary"]
 async fn native_flush_input_clears_host_rx() {
@@ -1295,7 +1252,7 @@ async fn native_flush_input_clears_host_rx() {
     let id = open_pty(&client, &pty_path).await;
     sync_boot(&client, &id).await;
 
-    // Spam a modest amount, then flush input.
+    // Generate a modest amount of spam, then flush input.
     write_cmd(&client, &id, "spam 2000 hex").await;
     read_until(&client, &id, "spam start", 2000).await;
     tokio::time::sleep(Duration::from_millis(300)).await;
@@ -1313,7 +1270,7 @@ async fn native_flush_input_clears_host_rx() {
     write_cmd(&client, &id, "spam stop").await;
     read_until(&client, &id, "Spam stopped", 2000).await;
 
-    // Read after flush input — should be minimal.
+    // Read after flushing input; only a small amount should remain.
     let result = client
         .peer()
         .call_tool(tool_request(
@@ -1344,8 +1301,6 @@ async fn native_flush_input_clears_host_rx() {
     drop(fw);
 }
 
-// ── Test 22: flush during arm_cmd delay ──────────────────────────────────────
-
 #[tokio::test]
 #[ignore = "requires native_sim firmware binary"]
 async fn native_flush_during_arm_cmd_delay() {
@@ -1358,7 +1313,7 @@ async fn native_flush_during_arm_cmd_delay() {
     let id = open_pty(&client, &pty_path).await;
     sync_boot(&client, &id).await;
 
-    // Arm a 500ms delay for the next command. Use match-based read.
+    // Arm a 500ms delay for the next command and wait for confirmation.
     write_cmd(&client, &id, "arm_cmd 500").await;
     {
         let r = client
@@ -1385,15 +1340,14 @@ async fn native_flush_during_arm_cmd_delay() {
         );
     }
 
-    // Write ping — it will sleep 500ms before executing.
+    // Firmware waits 500ms before executing ping.
     write_cmd(&client, &id, "ping").await;
 
     // Flush during the sleep window.
     tokio::time::sleep(Duration::from_millis(100)).await;
     flush_both(&client, &id).await;
 
-    // Pong should arrive after the delay, despite the flush. Match-based read
-    // waits for pong to appear.
+    // Flush during the delay, then use a matching read for pong.
     {
         let r = client
             .peer()
@@ -1424,20 +1378,15 @@ async fn native_flush_during_arm_cmd_delay() {
     drop(fw);
 }
 
-// ── TX flush semantics: fully delivered / partially queued
-//
-// These tests cover two of the three TX flush cases:
-//   1. fully delivered TX  — covered below;
-//   2. partially queued TX — covered below;
-//   3. flushed-before-delivery — covered in src/tx_session.rs unit tests via
-//      a QueuedTxIo mock SerialIo backend (a PTY cannot reproduce this case
-//      because it delivers every write() byte into its kernel buffer
-//      immediately, so the host's tcflush(TCOFLUSH) cannot recall bytes that
-//      have already left serialport's output buffer).
+// PTY tests cover fully delivered and partially queued TX. Unit tests in
+// src/tx_session.rs cover flushed-before-delivery with a QueuedTxIo mock
+// SerialIo backend. A PTY cannot reproduce that case: each write() byte
+// reaches its kernel buffer immediately, so tcflush(TCOFLUSH) cannot recall
+// bytes that already left serialport's output buffer.
 
-/// Case 1: a fully-delivered command (ping → pong) is unaffected by a
-/// subsequent flush(output). Proves flush(output) does not retroactively
-/// disturb already-consumed bytes or later writes.
+/// A fully delivered command (`ping` then `pong`) is unaffected by a later
+/// `flush(output)`. This proves flush does not retroactively disturb consumed
+/// bytes or later writes.
 #[tokio::test]
 #[ignore = "requires native_sim firmware binary"]
 async fn native_flush_output_after_full_delivery_is_safe() {
@@ -1450,8 +1399,7 @@ async fn native_flush_output_after_full_delivery_is_safe() {
     let id = open_pty(&client, &pty_path).await;
     sync_boot(&client, &id).await;
 
-    // First ping fully delivered: write, then wait for pong so firmware has
-    // consumed the command and replied. Match-based read under ring semantics.
+    // Wait for pong so firmware has consumed the first command and replied.
     write_cmd(&client, &id, "ping").await;
     {
         let r = client
@@ -1478,8 +1426,8 @@ async fn native_flush_output_after_full_delivery_is_safe() {
         );
     }
 
-    // Now flush output. With the first command already consumed, this must
-    // not affect any already-delivered bytes.
+    // The first command is consumed, so flushing output must not affect its
+    // delivered bytes.
     let flush = client
         .peer()
         .call_tool(tool_request(
@@ -1490,8 +1438,8 @@ async fn native_flush_output_after_full_delivery_is_safe() {
         .expect("flush call");
     assert_ne!(flush.is_error, Some(true), "flush output: {flush:?}");
 
-    // Second ping must still arrive — proves flush(output) did not break the
-    // stream or drop a later, independent write.
+    // A second ping must still arrive; this checks that flush did not break
+    // the stream or drop a later independent write.
     write_cmd(&client, &id, "ping").await;
     {
         let r = client
@@ -1523,13 +1471,11 @@ async fn native_flush_output_after_full_delivery_is_safe() {
     drop(fw);
 }
 
-/// Case 2: a command written without a line terminator is held in firmware's
-/// partial-line cmd_buf and is NOT executed. Writing the remainder plus
-/// terminator then drives the assembled command to completion. Proves
-/// partially-queued TX state is observable in behavior (buffered → resumed),
-/// not just in a probe. A probe-via-`rxbuf status` is unusable here because
-/// the probe bytes themselves get appended to cmd_buf and corrupt the very
-/// partial line being observed, so we assert on behavior instead.
+/// A command without a line terminator remains in firmware's partial-line
+/// `cmd_buf` and is not executed. Writing the remainder and terminator
+/// completes the command. The test observes partially queued TX through
+/// behavior, not a probe. `rxbuf status` is unusable here because its probe
+/// bytes would append to `cmd_buf` and corrupt the partial line.
 #[tokio::test]
 #[ignore = "requires native_sim firmware binary"]
 async fn native_partial_line_buffered_then_completed() {
@@ -1542,24 +1488,23 @@ async fn native_partial_line_buffered_then_completed() {
     let id = open_pty(&client, &pty_path).await;
     sync_boot(&client, &id).await;
 
-    // Write a partial command (no terminator). Firmware should buffer it in
-    // cmd_buf without executing — no pong yet.
+    // Write a partial command without a terminator. Firmware buffers it in
+    // cmd_buf without executing it, so no pong should appear.
     write_raw(&client, &id, "pi").await;
-    // Settle so the bytes are scanned into cmd_buf, then drain any stray
-    // output so the next observation is clean.
+    // Let firmware scan the bytes into cmd_buf, then drain stray output.
     tokio::time::sleep(Duration::from_millis(80)).await;
     flush_both(&client, &id).await;
 
-    // Confirm the partial command did NOT execute: a short read should not
-    // contain pong. (Firmware only executes on a line terminator.)
+    // A short read must not contain pong because firmware executes only on a
+    // line terminator.
     let pre = read_str(&client, &id, 400).await;
     assert!(
         !pre.contains("pong"),
         "partial command without terminator must not execute, got pong in: {pre}"
     );
 
-    // Complete the line: "ng\r\n". Firmware assembles "pi" + "ng" → "ping"
-    // and executes it, emitting pong.
+    // Complete the line with "ng\r\n". Firmware assembles "pi" and "ng" as
+    // "ping", then executes it and emits pong.
     write_raw(&client, &id, "ng\r\n").await;
     let pong = read_until(&client, &id, "pong", 2000).await;
     assert!(
@@ -1571,8 +1516,6 @@ async fn native_partial_line_buffered_then_completed() {
     client.cancel().await.ok();
     drop(fw);
 }
-
-// ── Test 23: regex match finds pong ────────────────────────────────────────
 
 #[tokio::test]
 #[ignore = "requires native_sim firmware binary"]
@@ -1624,8 +1567,6 @@ async fn native_read_regex_matches_pong() {
     drop(fw);
 }
 
-// ── Test 24: glob match per-line finds pong line ───────────────────────────
-
 #[tokio::test]
 #[ignore = "requires native_sim firmware binary"]
 async fn native_read_glob_matches_pong_line() {
@@ -1676,8 +1617,6 @@ async fn native_read_glob_matches_pong_line() {
     drop(fw);
 }
 
-// ── Test 25: reconnect tool works on an open connection ──────────────────
-
 #[tokio::test]
 #[ignore = "requires native_sim firmware binary"]
 async fn native_auto_reconnect_preserves_connection() {
@@ -1721,10 +1660,10 @@ async fn native_auto_reconnect_preserves_connection() {
     let s = status.structured_content.expect("status");
     assert_eq!(s["state"], json!("open"));
 
-    // Sync boot banner first so we start from a known state.
+    // Sync the boot banner so the test starts from a known state.
     sync_boot(&client, &id).await;
 
-    // Initial data test — match-based read under ring semantics.
+    // Verify initial data with a matching read under ring semantics.
     write_raw(&client, &id, "ping\r\n").await;
     {
         let r = client
@@ -1751,7 +1690,7 @@ async fn native_auto_reconnect_preserves_connection() {
         );
     }
 
-    // Reconnect while already connected — succeeds immediately.
+    // Reconnecting while already connected succeeds immediately.
     let result = client
         .peer()
         .call_tool(tool_request("reconnect", json!({"connection_id": id})))
@@ -1775,7 +1714,7 @@ async fn native_auto_reconnect_preserves_connection() {
         "expected open after reconnect, got: {s:?}"
     );
 
-    // Verify data flows again after reconnect.
+    // Verify data flow after reconnect.
     flush_both(&client, &id).await;
     write_raw(&client, &id, "ping\r\n").await;
     {
@@ -1809,8 +1748,6 @@ async fn native_auto_reconnect_preserves_connection() {
     drop(fw);
 }
 
-// ── Test 26: line framing splits multi-line output into frames ─────────────
-
 #[tokio::test]
 #[ignore = "requires native_sim firmware binary"]
 async fn native_read_line_framing_splits_lines() {
@@ -1825,14 +1762,14 @@ async fn native_read_line_framing_splits_lines() {
     // Drain boot output so read only sees our commands.
     flush_both(&client, &id).await;
 
-    // Write commands first — under ring semantics, read drains buffered data.
+    // Write commands first; ring reads drain buffered data.
     write_cmd(&client, &id, "ping").await;
     tokio::time::sleep(Duration::from_millis(100)).await;
     write_cmd(&client, &id, "info").await;
     // Give firmware a moment to process both commands.
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    // Read with line framing — captures everything after the flush.
+    // Read with line framing after the flush.
     let result = client
         .peer()
         .call_tool(tool_request(
@@ -1855,7 +1792,7 @@ async fn native_read_line_framing_splits_lines() {
         "expected at least 2 frames (pong, info), got {}: {frames:?}",
         frames.len()
     );
-    // Search for the pong frame — it may not be frames[0] due to command echoes.
+    // Find the pong frame; command echoes may precede it.
     let pong_frame = frames
         .iter()
         .find(|f| f["data"].as_str().unwrap_or("").contains("pong"))
@@ -1866,8 +1803,6 @@ async fn native_read_line_framing_splits_lines() {
     client.cancel().await.ok();
     drop(fw);
 }
-
-// ── Test 27: JSON parser decodes jsonout command output ───────────────────
 
 #[tokio::test]
 #[ignore = "requires native_sim firmware binary"]
@@ -1881,7 +1816,7 @@ async fn native_read_json_parser_decodes_jsonout() {
     sync_boot(&client, &id).await;
     flush_both(&client, &id).await;
 
-    // Write first — ring reads drain buffered data.
+    // Write first; ring reads drain buffered data.
     write_cmd(&client, &id, "jsonout").await;
     tokio::time::sleep(Duration::from_millis(100)).await;
 
@@ -1915,7 +1850,7 @@ async fn native_read_json_parser_decodes_jsonout() {
         frames.len()
     );
 
-    // Each JSON frame should have inline sensor fields.
+    // Each JSON frame has inline sensor fields.
     for frame in &json_frames {
         let parsed = frame["parsed"].as_object().expect("parsed object");
         assert_eq!(
@@ -1926,7 +1861,7 @@ async fn native_read_json_parser_decodes_jsonout() {
         assert!(parsed["sensor"].is_string(), "missing sensor: {parsed:?}");
     }
 
-    // Verify specific sensor values (inline, not nested under "value" key).
+    // Verify sensor values are inline rather than nested under "value".
     let f0 = &json_frames[0]["parsed"];
     assert_eq!(f0["sensor"], json!("temp"));
     assert!((f0["value"].as_f64().unwrap() - 25.5).abs() < 0.01);
@@ -1935,8 +1870,6 @@ async fn native_read_json_parser_decodes_jsonout() {
     client.cancel().await.ok();
     drop(fw);
 }
-
-// ── Test 28: AT command parser treats pong as data line ────────────────────
 
 #[tokio::test]
 #[ignore = "requires native_sim firmware binary"]
@@ -1950,7 +1883,7 @@ async fn native_read_at_parser_parses_pong() {
     sync_boot(&client, &id).await;
     flush_both(&client, &id).await;
 
-    // Write first — ring reads drain buffered data.
+    // Write first; ring reads drain buffered data.
     write_cmd(&client, &id, "ping").await;
     tokio::time::sleep(Duration::from_millis(100)).await;
 
@@ -1974,7 +1907,7 @@ async fn native_read_at_parser_parses_pong() {
     let frames = s["frames"].as_array().expect("frames array");
     assert!(!frames.is_empty(), "expected at least one frame");
 
-    // Find the AT-parsed frame (may not be frames[0] due to command echoes).
+    // Find the AT-parsed frame; command echoes may precede it.
     let at_frame = frames
         .iter()
         .find(|f| f["parsed"]["parser"] == json!("at_command"))
@@ -1995,8 +1928,6 @@ async fn native_read_at_parser_parses_pong() {
     client.cancel().await.ok();
     drop(fw);
 }
-
-// ── Test 30: max_frames stops read after N frames ─────────────────────
 
 #[tokio::test]
 #[ignore = "requires native_sim firmware binary"]
@@ -2032,8 +1963,8 @@ async fn native_read_framing_max_frames_stops() {
         })
     };
 
-    // Send 3 commands that each produce one line of output.
-    // read should stop after capturing 2 frames.
+    // Send three commands that each produce one output line. Read should stop
+    // after capturing two frames.
     tokio::time::sleep(Duration::from_millis(100)).await;
     write_cmd(&client, &id, "ping").await;
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -2057,8 +1988,6 @@ async fn native_read_framing_max_frames_stops() {
     drop(fw);
 }
 
-// ── Test 31: framing + match combined returns both ────────────────────
-
 #[tokio::test]
 #[ignore = "requires native_sim firmware binary"]
 async fn native_read_framing_plus_match_combined() {
@@ -2071,7 +2000,7 @@ async fn native_read_framing_plus_match_combined() {
     sync_boot(&client, &id).await;
     flush_both(&client, &id).await;
 
-    // Write first, then read with both framing (line) and match on "pong".
+    // Write first, then read with line framing and a match on "pong".
     // Under ring semantics, the read drains buffered data and match forces
     // waiting until the pattern is found.
     write_cmd(&client, &id, "ping").await;
@@ -2102,14 +2031,14 @@ async fn native_read_framing_plus_match_combined() {
     let s = result.structured_content.expect("structured");
     assert_eq!(s["stop_reason"], json!("match_found"), "{s:?}");
     assert_eq!(s["matched"], json!(true));
-    // With framing+match combined, the match may fire on raw bytes before
-    // any frames are decoded. The frames array may be null or empty.
+    // The match may fire on raw bytes before framing decodes them, so frames
+    // may be null or empty.
     let empty_frames = vec![];
     let frames = s
         .get("frames")
         .and_then(|v| v.as_array())
         .unwrap_or(&empty_frames);
-    // Search for pong in the raw data or frames — either is acceptable.
+    // Pong may appear in raw data or in a frame.
     let has_pong = s["data"].as_str().is_some_and(|d| d.contains("pong"))
         || frames
             .iter()
@@ -2120,8 +2049,6 @@ async fn native_read_framing_plus_match_combined() {
     client.cancel().await.ok();
     drop(fw);
 }
-
-// ── Connection-default e2e tests ─────────────────────────────────────────────
 
 #[tokio::test]
 #[ignore = "requires native_sim firmware binary"]
@@ -2141,7 +2068,7 @@ async fn native_open_protocol_default_drives_write_and_read() {
     sync_boot(&client, &id).await;
     flush_both(&client, &id).await;
 
-    // Write first — ring reads drain buffered data.
+    // Write first; ring reads drain buffered data.
     client
         .peer()
         .call_tool(tool_request(
@@ -2169,7 +2096,7 @@ async fn native_open_protocol_default_drives_write_and_read() {
     let s = result.structured_content.expect("structured");
     let frames = s["frames"].as_array().expect("frames array");
     assert!(!frames.is_empty(), "expected at least one frame");
-    // Search for AT-parsed pong frame (connection default provides at_command).
+    // Find the AT-parsed pong frame from the connection default.
     let pong_frame = frames
         .iter()
         .find(|f| {
@@ -2217,7 +2144,7 @@ async fn native_explicit_rx_framing_beats_connection_default() {
     sync_boot(&client, &id).await;
     flush_both(&client, &id).await;
 
-    // Write first — ring reads drain buffered data.
+    // Write first; ring reads drain buffered data.
     write_cmd(&client, &id, "ping").await;
     tokio::time::sleep(Duration::from_millis(100)).await;
 
@@ -2239,7 +2166,7 @@ async fn native_explicit_rx_framing_beats_connection_default() {
     let frames = s["frames"].as_array().expect("frames array");
     assert!(!frames.is_empty(), "expected at least one frame");
 
-    // Search for AT-parsed frame (may not be frames[0]).
+    // Find the AT-parsed frame; it may not be frames[0].
     let at_frame = frames
         .iter()
         .find(|f| f["parsed"]["parser"] == json!("at_command"))
@@ -2258,15 +2185,12 @@ async fn native_explicit_rx_framing_beats_connection_default() {
     drop(fw);
 }
 
-// save_profile snapshots not tested on native_sim — save_profile requires
-// port_info (USB identity) which the software PTY does not provide.
-// The save_profile wiring (port_ops.rs) copies the four defaults from the
-// connection; the struct-level snapshot is exercised by the
-// ProfileDefaults roundtrip test in src/profiles.rs tests.
+// native_sim does not exercise save_profile because direct PTY opens may lack
+// OS-enumerated PortInfo, which save_profile requires. save_profile snapshots
+// current connection defaults; the ProfileDefaults roundtrip test in
+// src/profiles.rs covers struct-level serialization.
 
-// ── Framing-mode e2e coverage tests ──────────────────────────────────────────
-
-/// Prove SLIP RX decode over the real software-serial path.
+/// Verify SLIP RX decoding over the real software-serial path.
 #[tokio::test]
 #[ignore = "requires native_sim firmware binary"]
 async fn native_read_slip_decodes_frame() {
@@ -2298,7 +2222,7 @@ async fn native_read_slip_decodes_frame() {
     };
 
     tokio::time::sleep(Duration::from_millis(100)).await;
-    // Firmware emits raw bytes: END + "pong" + END
+    // Firmware emits END, "pong", END.
     write_cmd(&client, &id, "sendraw hex C0706F6E67C0").await;
 
     let result = read_handle.await.unwrap().expect("read task");
@@ -2314,8 +2238,8 @@ async fn native_read_slip_decodes_frame() {
     drop(fw);
 }
 
-/// Prove SLIP malformed escape surfaces as a partial result with
-/// stop_reason=framing_error (was: is_error tool error).
+/// Verify a malformed SLIP escape returns a partial result with
+/// `stop_reason=framing_error`, not a tool error.
 #[tokio::test]
 #[ignore = "requires native_sim firmware binary"]
 async fn native_read_slip_malformed_escape_returns_partial_result() {
@@ -2347,7 +2271,7 @@ async fn native_read_slip_malformed_escape_returns_partial_result() {
     };
 
     tokio::time::sleep(Duration::from_millis(100)).await;
-    // Firmware emits: END, ESC, invalid byte 0x41, END
+    // Firmware emits END, ESC, invalid byte 0x41, END.
     write_cmd(&client, &id, "sendraw hex C0DB41C0").await;
 
     let result = read_handle.await.unwrap().expect("read task");
@@ -2363,7 +2287,7 @@ async fn native_read_slip_malformed_escape_returns_partial_result() {
         data.chars().all(|c| c.is_ascii_hexdigit() || c == ' '),
         "data should be hex-encoded: {data}"
     );
-    // frames may be null when no valid frames exist before the decode error
+    // The frames field may be null when no valid frame precedes the error.
     assert!(
         s["frames"].is_array() || s["frames"].is_null(),
         "frames should be array or null: {:?}",
@@ -2375,7 +2299,7 @@ async fn native_read_slip_malformed_escape_returns_partial_result() {
     drop(fw);
 }
 
-/// Prove delimiter RX framing over the real serial path.
+/// Verify delimiter RX framing over the real serial path.
 #[tokio::test]
 #[ignore = "requires native_sim firmware binary"]
 async fn native_read_delimiter_framing_decodes() {
@@ -2411,7 +2335,7 @@ async fn native_read_delimiter_framing_decodes() {
     };
 
     tokio::time::sleep(Duration::from_millis(100)).await;
-    // Firmware emits raw bytes: |pong| (delimited by pipe chars)
+    // Firmware emits |pong|, delimited by pipe characters.
     write_cmd(&client, &id, "sendraw hex 7C706F6E677C").await;
 
     let result = read_handle.await.unwrap().expect("read task");
@@ -2419,7 +2343,7 @@ async fn native_read_delimiter_framing_decodes() {
     let s = result.structured_content.expect("structured");
     let frames = s["frames"].as_array().expect("frames array");
     assert!(!frames.is_empty(), "expected at least one frame");
-    // First byte is "|" → empty frame[0], then "pong|" → frame[1] = "pong"
+    // The first "|" produces an empty frame; "pong|" produces frame[1].
     assert!(
         frames.len() >= 2,
         "expected at least 2 frames, got {}",
@@ -2433,7 +2357,7 @@ async fn native_read_delimiter_framing_decodes() {
     drop(fw);
 }
 
-/// Prove length-prefixed RX framing over the real serial path.
+/// Verify length-prefixed RX framing over the real serial path.
 #[tokio::test]
 #[ignore = "requires native_sim firmware binary"]
 async fn native_read_length_prefixed_framing_decodes() {
@@ -2445,8 +2369,8 @@ async fn native_read_length_prefixed_framing_decodes() {
     let id = open_pty(&client, &pty_path).await;
     sync_boot(&client, &id).await;
     flush_both(&client, &id).await;
-    // Jump to live_edge so we know exactly where new data starts.
-    // read with from: "now" moves the cursor to the live edge, then times out.
+    // Move to live_edge so new data starts at a known position. A read with
+    // `from: {"type":"now"}` moves the cursor to the live edge, then times out.
     client
         .peer()
         .call_tool(tool_request(
@@ -2456,11 +2380,10 @@ async fn native_read_length_prefixed_framing_decodes() {
         .await
         .expect("read from now");
 
-    // Write the sendraw command. Under the ring model, the firmware's command
-    // echo corrupts the length-prefixed framing decoder (the first byte of
-    // the echo is interpreted as a prefix length). Read the raw hex data
-    // and verify the payload is present. The length-prefixed decoder
-    // is exercised in src/framing/decoder.rs unit tests.
+    // The firmware command echo corrupts length-prefixed decoding under the
+    // ring model because its first byte is interpreted as a prefix length.
+    // Read raw hex data and verify the payload. The length-prefixed decoder
+    // is covered by unit tests in src/framing/decoder.rs.
     write_cmd(&client, &id, "sendraw hex 04706F6E67").await;
     tokio::time::sleep(Duration::from_millis(500)).await;
 
@@ -2479,8 +2402,8 @@ async fn native_read_length_prefixed_framing_decodes() {
         .expect("read call");
     assert_ne!(result.is_error, Some(true), "{result:?}");
     let s = result.structured_content.expect("structured");
-    // The raw payload bytes 0x04 0x70 0x6F 0x6E 0x67 should appear
-    // somewhere in the hex output (possibly after the command echo).
+    // The raw payload bytes 0x04 0x70 0x6F 0x6E 0x67 should appear in the
+    // hex output, possibly after the command echo.
     let data = s["data"].as_str().expect("data field");
     let expected_hex = "04 70 6f 6e 67";
     assert!(
@@ -2493,7 +2416,7 @@ async fn native_read_length_prefixed_framing_decodes() {
     drop(fw);
 }
 
-/// Prove start_end RX framing over the real serial path.
+/// Verify start_end RX framing over the real serial path.
 #[tokio::test]
 #[ignore = "requires native_sim firmware binary"]
 async fn native_read_start_end_framing_decodes() {
@@ -2548,7 +2471,7 @@ async fn native_read_start_end_framing_decodes() {
 /// Decode the firmware trace read payload back into raw bytes.
 ///
 /// The firmware's `trace on` mode emits one `RX[n]=0xXX\r\n` line per
-/// received byte (valid UTF-8 text — no encoding fallback applies), so each
+/// received byte as valid UTF-8 text; no encoding fallback applies. Each
 /// line's `=0x` suffix is parsed as a single hex byte; lines without a valid
 /// `=0x` pair (e.g. the firmware's own command echoes) are skipped.
 fn extract_trace_bytes(data: &str) -> Vec<u8> {
@@ -2566,7 +2489,7 @@ fn extract_trace_bytes(data: &str) -> Vec<u8> {
     bytes
 }
 
-/// Prove TX framing via firmware's trace on (observes exact received bytes).
+/// Verify TX framing through firmware trace output, which exposes received bytes.
 #[tokio::test]
 #[ignore = "requires native_sim firmware binary"]
 async fn native_write_tx_framing_modes_observed_via_trace() {
@@ -2652,7 +2575,7 @@ async fn native_write_tx_framing_modes_observed_via_trace() {
     drop(fw);
 }
 
-/// Prove explicit line endings via sendraw hex payloads.
+/// Verify explicit line endings with sendraw hex payloads.
 #[tokio::test]
 #[ignore = "requires native_sim firmware binary"]
 async fn native_read_explicit_line_endings_split_correctly() {
@@ -2665,7 +2588,7 @@ async fn native_read_explicit_line_endings_split_correctly() {
     sync_boot(&client, &id).await;
     flush_both(&client, &id).await;
 
-    // lf: retains CR. Write first under ring semantics.
+    // lf retains CR. Write first under ring semantics.
     {
         let ending = "lf";
         write_cmd(&client, &id, "sendraw hex 616C7068610D0A626574610A").await;
@@ -2763,7 +2686,8 @@ async fn native_read_explicit_line_endings_split_correctly() {
     drop(fw);
 }
 
-/// Prove connection usable after SLIP decode error (per-call decoder reset).
+/// Verify the connection remains usable after a SLIP decode error; each call
+/// creates a fresh decoder.
 #[tokio::test]
 #[ignore = "requires native_sim firmware binary"]
 async fn native_read_slip_recovers_after_error_on_next_call() {
@@ -2776,7 +2700,7 @@ async fn native_read_slip_recovers_after_error_on_next_call() {
     sync_boot(&client, &id).await;
     flush_both(&client, &id).await;
 
-    // Read #1: malformed SLIP → error.
+    // Read #1: malformed SLIP produces a framing error.
     {
         let read_handle = {
             let peer = client.peer().clone();
@@ -2809,7 +2733,7 @@ async fn native_read_slip_recovers_after_error_on_next_call() {
         );
     }
 
-    // Read #2: valid SLIP → success.
+    // Read #2: valid SLIP succeeds.
     {
         let read_handle = {
             let peer = client.peer().clone();
@@ -2847,9 +2771,8 @@ async fn native_read_slip_recovers_after_error_on_next_call() {
     drop(fw);
 }
 
-// ── Preset e2e tests (cobs / ndjson / nmea0183 / modbus_ascii) ──────────────
-
-/// Prove COBS RX decode via the `cobs` preset over the software-serial path.
+/// Verify COBS RX decoding through the `cobs` preset over the software-serial
+/// path.
 #[tokio::test]
 #[ignore = "requires native_sim firmware binary"]
 async fn native_read_cobs_preset_decodes_frame() {
@@ -2900,8 +2823,8 @@ async fn native_read_cobs_preset_decodes_frame() {
     drop(fw);
 }
 
-/// Prove NDJSON RX decode via the `ndjson` preset: two JSON objects,
-/// blank line skipped.
+/// Verify NDJSON RX decoding through the `ndjson` preset: two JSON objects and
+/// one skipped blank line.
 #[tokio::test]
 #[ignore = "requires native_sim firmware binary"]
 async fn native_read_ndjson_preset_decodes_json_frames() {
@@ -2962,7 +2885,7 @@ async fn native_read_ndjson_preset_decodes_json_frames() {
     drop(fw);
 }
 
-/// Prove NDJSON skip_empty skips blank and whitespace-only lines end-to-end.
+/// Verify NDJSON `skip_empty` skips blank and whitespace-only lines end to end.
 #[tokio::test]
 #[ignore = "requires native_sim firmware binary"]
 async fn native_read_ndjson_preset_skips_empty_lines() {
@@ -3025,12 +2948,13 @@ async fn native_read_ndjson_preset_skips_empty_lines() {
     drop(fw);
 }
 
-/// Prove NMEA-0183 RX decode via the `nmea0183` preset with checksum validation.
+/// Verify NMEA-0183 RX decoding through the `nmea0183` preset with checksum
+/// validation.
 #[tokio::test]
 #[ignore = "requires native_sim firmware binary"]
 async fn native_read_nmea0183_preset_decodes_parsed_frame() {
-    /// XOR checksum helper (the `checksums` module is pub(crate), not visible
-    /// from integration tests).
+    /// Compute an XOR checksum because the `checksums` module is `pub(crate)`
+    /// and unavailable to integration tests.
     fn xor(bytes: &[u8]) -> u8 {
         bytes.iter().fold(0u8, |acc, b| acc ^ b)
     }
@@ -3087,7 +3011,8 @@ async fn native_read_nmea0183_preset_decodes_parsed_frame() {
     drop(fw);
 }
 
-/// Prove Modbus ASCII RX decode via the `modbus_ascii` preset with LRC validation.
+/// Verify Modbus ASCII RX decoding through the `modbus_ascii` preset with LRC
+/// validation.
 #[tokio::test]
 #[ignore = "requires native_sim firmware binary"]
 async fn native_read_modbus_ascii_preset_decodes_parsed_frame() {
@@ -3148,13 +3073,11 @@ async fn native_read_modbus_ascii_preset_decodes_parsed_frame() {
     drop(fw);
 }
 
-// ── capture_boot arm-only over the real firmware pipeline ───────────────────
-//
 // native_sim's PTY UART has no modem-line callbacks, so DTR/RTS assertion
-// cannot be observed here (the atomic reset proof lives in the controlled
-// backend in http_integration.rs). Arm-only capture (reset=null) needs no
-// line control and exercises the real always-on pump + ring pipeline:
-// post-arm command output is captured, pre-arm boot banner bytes never are.
+// cannot be observed here. The controlled backend in http_integration.rs
+// covers the atomic reset behavior. Arm-only capture (`reset=null`) needs no
+// line control and exercises the always-on pump and ring pipeline. It captures
+// post-arm command output and excludes pre-arm boot banner bytes.
 
 #[tokio::test]
 #[ignore = "requires native_sim firmware binary"]

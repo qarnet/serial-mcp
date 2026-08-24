@@ -4,13 +4,12 @@
  *
  * Main entry point for serial-mcp test firmware.
  *
- * Runs on the Zephyr `native_sim` POSIX emulator. The command channel
- * rides on the PTY-backed uart0 device that `native_sim` exposes. The
- * PTY path is printed to stdout at boot so the host can `open` it via
+ * Runs on the Zephyr `native_sim` POSIX emulator. The command channel uses
+ * the PTY-backed UART selected by DT_CHOSEN(zephyr_console). native_sim
+ * prints the PTY path to stdout at boot so the host can open it through
  * serial-mcp's `open` tool.
  *
- * The `touch` command triggers exit(42) — used by the bootloader
- * touch test to validate the end-to-end firmware trigger path.
+ * The `touch` command exits with status 42 for the bootloader-entry test.
  */
 
 #include "command.h"

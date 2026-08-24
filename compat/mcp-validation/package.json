@@ -2,7 +2,7 @@
   "name": "mcp-validation",
   "version": "0.0.0",
   "private": true,
-  "description": "Lockfile-pinned MCP validation tooling (official conformance + Inspector). Installed with `npm ci --ignore-scripts`; lifecycle scripts are never executed and packages are never resolved dynamically via npx.",
+  "description": "Lockfile-only MCP validation tools: official conformance and Inspector. Install with `npm ci --ignore-scripts`; lifecycle scripts never run and packages never resolve dynamically via npx.",
   "dependencies": {
     "@modelcontextprotocol/conformance": "0.2.0-alpha.10",
     "@modelcontextprotocol/inspector": "2.0.0"

@@ -1,19 +1,16 @@
 //! Frame boundary detection and protocol parsing for RX and TX streams.
 //!
-//! Provides a [`FrameDecoder`] that splits a byte stream into structured
-//! frames using line, delimiter, length-prefixed, start/end marker, SLIP, or
-//! COBS framing. Optional parsers interpret frame content as AT commands,
-//! JSON lines, shell prompts, raw data, NMEA-0183, or Modbus ASCII. Used by
-//! `read`, the `transact` read half, and `capture_boot`.
+//! [`FrameDecoder`] splits byte streams into line, delimiter, length-prefixed,
+//! start/end marker, SLIP, or COBS frames. Optional parsers interpret frame
+//! content as AT commands, JSON lines, shell prompts, raw data, NMEA-0183, or
+//! Modbus ASCII. Used by `read`, `transact`, and `capture_boot`.
 //!
-//! Also provides TX framing via [`TxFramingMode`] which encodes payloads
-//! with frame boundaries matching the RX modes. Used on `write` and the
-//! `transact` write half.
+//! [`TxFramingMode`] applies TX frame boundaries corresponding to RX framing
+//! modes for `write` and `transact`.
 //!
-//! The implementation is split into focused submodules: configuration types
-//! and preset expansion (`config`), TX codecs and byte helpers (`codecs`),
-//! the RX decoder state machine (`decoder`), and frame-content parsers
-//! (`parsers`). Public types are re-exported at `crate::framing::*`.
+//! Modules contain configuration and presets (`config`), TX codecs and byte
+//! helpers (`codecs`), decoder state (`decoder`), and frame parsers (`parsers`).
+//! Public types are re-exported from `crate::framing`.
 
 mod codecs;
 mod config;

@@ -1,15 +1,15 @@
 //! Modern `subscriptions/listen` resource subscriptions.
 //!
-//! Real in-process HTTP MCP transport with typed modern `2026-07-28`
-//! clients (stateless — every request may hit a fresh handler instance, so
-//! receiving shared updates proves the process-wide event hub). Watcher
+//! These tests use real in-process HTTP MCP transport with typed modern
+//! `2026-07-28` clients. Each request may reach a fresh handler instance, so
+//! receiving shared updates proves the process-wide event hub. Watcher
 //! behavior is driven through an injected mutable [`MutexPortProvider`] with
 //! a short poll interval.
 //!
-//! Notifications are availability hints only: this suite asserts the
-//! notification URIs and that the referenced state (ring bytes, cursor,
-//! resources) is immediately observable through the public tools — never
-//! private Arc identity or helper call counts.
+//! Notifications are availability hints only. This suite asserts notification
+//! URIs and verifies that referenced state (ring bytes, cursor, and resources)
+//! is immediately observable through public tools rather than private `Arc`
+//! identity or helper call counts.
 
 mod common;
 
@@ -24,8 +24,8 @@ use serde_json::json;
 use common::controlled::controlled_connection;
 use common::{connect_2025_11_25_client, connect_2026_07_28_client, TestServer};
 
-/// Start a server around a fresh manager plus a controlled (in-memory)
-/// connection, returning `(server, connection_id, rx-injector state)`.
+/// Start a server around a fresh manager and controlled in-memory connection.
+/// Return `(server, connection_id, rx-injector state)`.
 async fn controlled_server() -> (TestServer, String, Arc<common::controlled::ControlledState>) {
     let manager = Arc::new(serial_mcp::serial::ConnectionManager::new());
     let (conn, state) = controlled_connection("/dev/controlled", 65536);
@@ -51,8 +51,8 @@ async fn start_pump(
     assert_eq!(result.is_error, Some(false), "{result:?}");
 }
 
-/// Receive exactly `n` resource-updated notifications, returning their URIs
-/// in arrival order. Hangs guarded.
+/// Receive exactly `n` resource-updated notifications and return their URIs in
+/// arrival order. The timeout guards against hangs.
 async fn collect_updates(sub: &mut Subscription, n: usize) -> Vec<String> {
     let mut uris = Vec::new();
     for _ in 0..n {
@@ -69,8 +69,8 @@ async fn collect_updates(sub: &mut Subscription, n: usize) -> Vec<String> {
     uris
 }
 
-/// Assert that a received URI set equals the expected set (order-insensitive
-/// — hints are availability signals, not a ledger).
+/// Assert that a received URI set equals the expected set without considering
+/// order. Hints are availability signals, not a ledger.
 fn assert_hint_set(received: Vec<String>, expected: &[&str]) {
     let mut received: Vec<&str> = received.iter().map(String::as_str).collect();
     let mut expected: Vec<&str> = expected.to_vec();
@@ -79,8 +79,9 @@ fn assert_hint_set(received: Vec<String>, expected: &[&str]) {
     assert_eq!(received, expected, "expected URI hints");
 }
 
-/// Assert that NO notification arrives within `window` (bounded wall-clock
-/// window over short intervals — the watcher/hub paths under test).
+/// Assert that no notification arrives within `window`. This bounds a
+/// wall-clock window over short intervals in the watcher and hub paths under
+/// test.
 async fn assert_no_notification(sub: &mut Subscription, window: Duration) {
     match tokio::time::timeout(window, sub.next()).await {
         Err(_) => {}
@@ -89,10 +90,6 @@ async fn assert_no_notification(sub: &mut Subscription, window: Duration) {
         Ok(Err(e)) => panic!("subscription error: {e}"),
     }
 }
-
-// =============================================================================
-// Discovery + capability split
-// =============================================================================
 
 #[tokio::test]
 async fn discovery_2026_07_28_advertises_subscriptions_2025_11_25_initialize_does_not() -> Result<()>
@@ -135,10 +132,6 @@ async fn discovery_2026_07_28_advertises_subscriptions_2025_11_25_initialize_doe
     Ok(())
 }
 
-// =============================================================================
-// Accepted filter
-// =============================================================================
-
 #[tokio::test]
 async fn acknowledgement_contains_only_accepted_valid_resource_uris_in_first_occurrence_order(
 ) -> Result<()> {
@@ -149,12 +142,12 @@ async fn acknowledgement_contains_only_accepted_valid_resource_uris_in_first_occ
         .resource_subscriptions([
             "serial://ports",
             "serial://connections",
-            "serial://ports",            // duplicate — first order preserved
-            "serial://connections/{id}", // template -> stripped
-            "serial://connections/",     // empty id -> stripped
-            "https://example.com/x",     // unknown scheme -> stripped
+            "serial://ports", // Duplicate preserves first-occurrence order.
+            "serial://connections/{id}", // Template must be stripped.
+            "serial://connections/", // Empty identifier must be stripped.
+            "https://example.com/x", // Unknown scheme must be stripped.
             "serial://connections/abc-123",
-            "serial://other", // unknown URI -> stripped
+            "serial://other", // Unknown URI must be stripped.
         ])
         .tools_list_changed()
         .prompts_list_changed()
@@ -169,8 +162,8 @@ async fn acknowledgement_contains_only_accepted_valid_resource_uris_in_first_occ
         "serial://connections/abc-123".to_string(),
     ];
 
-    // The deduplicated accepted set (server-side contract, first-occurrence
-    // order).
+    // The server-side contract is a deduplicated accepted set in
+    // first-occurrence order.
     assert_eq!(
         {
             let mut seen = std::collections::HashSet::new();
@@ -186,7 +179,7 @@ async fn acknowledgement_contains_only_accepted_valid_resource_uris_in_first_occ
         "acknowledged URIs, deduplicated, equal the accepted set in first-occurrence order"
     );
 
-    // No invalid/unsupported URI may leak into the raw acknowledged Vec.
+    // No invalid or unsupported URI may leak into the raw acknowledged Vec.
     let acknowledged_uris = acknowledged
         .resource_subscriptions
         .as_deref()
@@ -198,11 +191,11 @@ async fn acknowledgement_contains_only_accepted_valid_resource_uris_in_first_occ
         );
     }
 
-    // rmcp computes the final accepted filter via
-    // `requested.intersection(&candidate).intersection(&advertised)`, both
-    // left-biased over the REQUESTED list — so a repeated requested VALID
-    // URI may legitimately appear more than once in the raw acknowledged
-    // Vec. The server-side contract (accepted_subscription_filter) and the
+    // rmcp computes the final accepted filter with
+    // `requested.intersection(&candidate).intersection(&advertised)`. The
+    // intersections are left-biased over the requested list, so a repeated
+    // requested valid URI may legitimately appear more than once in the raw
+    // acknowledged Vec. The server-side `accepted_subscription_filter` and
     // listen loop both deduplicate, so the echo is harmless.
     assert!(
         acknowledged_uris.contains(&"serial://ports".to_string()),
@@ -225,7 +218,8 @@ async fn acknowledgement_with_no_valid_resources_is_an_empty_accepted_filter() -
     let server = TestServer::start().await;
     let (client, _) = connect_2026_07_28_client(&server).await?;
 
-    // Everything invalid: acknowledged resource list is None (no fake URI).
+    // With every requested URI invalid, the acknowledged resource list is
+    // None rather than a fake URI.
     let mut sub = client
         .peer()
         .listen(
@@ -240,8 +234,8 @@ async fn acknowledgement_with_no_valid_resources_is_an_empty_accepted_filter() -
     );
     sub.cancel().await?;
 
-    // Nothing requested at all: same empty accepted filter; the listen
-    // still acknowledges (handler stays available).
+    // With nothing requested, the accepted filter is also empty. Listen still
+    // acknowledges because the handler remains available.
     let mut sub = client.peer().listen(SubscriptionFilter::new()).await?;
     assert!(sub.acknowledged().resource_subscriptions.is_none());
     sub.cancel().await?;
@@ -269,20 +263,17 @@ async fn listen_2025_11_25_is_method_not_found() -> Result<()> {
     Ok(())
 }
 
-// =============================================================================
-// RX append + cursor semantics
-// =============================================================================
-
 #[tokio::test]
 async fn rx_append_notification_arrives_only_after_bytes_readable_and_does_not_move_cursor(
 ) -> Result<()> {
     let (server, connection_id, state) = controlled_server().await;
     let (client, _) = connect_2026_07_28_client(&server).await?;
 
-    // Start the pump with a drained read (no data yet; shared cursor stays 0).
+    // Start the pump with a drained read. No data is available, so the shared
+    // cursor stays at 0.
     start_pump(&client, &connection_id).await;
 
-    // Subscribe to the connection's detail URI.
+    // Subscribe to the connection detail URI.
     let detail_uri = format!("serial://connections/{connection_id}");
     let mut sub = client
         .peer()
@@ -293,17 +284,17 @@ async fn rx_append_notification_arrives_only_after_bytes_readable_and_does_not_m
         )
         .await?;
 
-    // Nothing pending before any RX.
+    // No data is pending before RX.
     assert_no_notification(&mut sub, Duration::from_millis(200)).await;
 
-    // Inject bytes; the pump appends and only then publishes.
+    // Inject bytes. The pump appends them before publishing the notification.
     state.inject_rx(b"first");
     let uris = collect_updates(&mut sub, 1).await;
     assert_hint_set(uris, &[&detail_uri]);
 
-    // The bytes are readable immediately and the shared read cursor was NOT
-    // moved by the notification: a read from the cursor (still 0 — no read
-    // consumed anything) returns the appended bytes from offset 0.
+    // The bytes are readable immediately, and the notification does not move
+    // the shared read cursor. The cursor remains 0 because no read consumed
+    // data, so a read from the cursor returns appended bytes from offset 0.
     let read = client
         .peer()
         .call_tool(common::tool_request(
@@ -328,7 +319,7 @@ async fn read_works_without_any_listener() -> Result<()> {
     let (server, connection_id, state) = controlled_server().await;
     let (client, _) = connect_2026_07_28_client(&server).await?;
 
-    // No subscription exists anywhere; the read path must be fully usable.
+    // No subscription exists, so the read path must remain fully usable.
     start_pump(&client, &connection_id).await;
     state.inject_rx(b"unsolicited");
     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -350,10 +341,6 @@ async fn read_works_without_any_listener() -> Result<()> {
     client.cancel().await.ok();
     Ok(())
 }
-
-// =============================================================================
-// Listener independence + shared hub
-// =============================================================================
 
 #[tokio::test]
 async fn two_stateless_listeners_receive_same_update_independently() -> Result<()> {
@@ -385,9 +372,10 @@ async fn two_stateless_listeners_receive_same_update_independently() -> Result<(
     let b_uris = collect_updates(&mut sub_b, 1).await;
     assert_hint_set(a_uris, &[&detail_uri]);
     assert_hint_set(b_uris, &[&detail_uri]);
-    // Both see the same bytes after their own notification. The shared read
-    // cursor is process-wide (covered by `stateless_requests_share_session_ring_and_cursor`),
-    // so each client replays the same absolute offset non-destructively.
+    // Both clients see the same bytes after their own notification. The
+    // shared read cursor is process-wide (covered by
+    // `stateless_requests_share_session_ring_and_cursor`), so each client
+    // replays the same absolute offset non-destructively.
     for client in [&client_a, &client_b] {
         let read = client
             .peer()
@@ -433,21 +421,22 @@ async fn cancelling_one_listener_leaves_the_other_active() -> Result<()> {
         )
         .await?;
 
-    // Cancel A; B must keep receiving.
+    // Cancelling A must leave B active.
     sub_a.cancel().await?;
     assert_eq!(sub_a.end(), Some(&SubscriptionEnd::Cancelled));
 
     state.inject_rx(b"b-only");
     let b_uris = collect_updates(&mut sub_b, 1).await;
     assert_hint_set(b_uris, &[&detail_uri]);
-    // A's stream is over: next() completes (None), never a hang or error.
+    // A's stream is over: `next()` completes with `None`, without hanging or
+    // returning an error.
     let ended = tokio::time::timeout(Duration::from_secs(5), sub_a.next())
         .await
         .expect("A subscription must terminate after cancel")
         .expect("no service error after cancel");
     assert!(ended.is_none(), "A subscription ended, got {ended:?}");
 
-    // B is still live: another RX yields another update.
+    // B remains live, so another RX yields another update.
     state.inject_rx(b"b-again");
     let b_uris = collect_updates(&mut sub_b, 1).await;
     assert_hint_set(b_uris, &[&detail_uri]);
@@ -464,8 +453,8 @@ async fn listener_ignores_unrelated_events() -> Result<()> {
     let (client, _) = connect_2026_07_28_client(&server).await?;
     start_pump(&client, &connection_id).await;
 
-    // Listen ONLY to serial://ports. RX appends publish detail/raw/log —
-    // never ports — so no notification may arrive.
+    // Listen to `serial://ports` only. RX appends publish detail, raw, and log
+    // hints, not ports hints, so no notification should arrive.
     let mut sub = client
         .peer()
         .listen(
@@ -488,14 +477,10 @@ async fn listener_ignores_unrelated_events() -> Result<()> {
     Ok(())
 }
 
-// =============================================================================
-// Lag recovery
-// =============================================================================
-
 #[tokio::test]
 async fn forced_hub_lag_yields_conservative_per_uri_recovery_without_blocking_publisher(
 ) -> Result<()> {
-    // Tiny hub so a burst of synchronous publishes forces broadcast lag.
+    // A tiny hub makes a synchronous publish burst force broadcast lag.
     let hub = Arc::new(serial_mcp::resource_events::ResourceEventHub::new(2));
     let manager = Arc::new(serial_mcp::serial::ConnectionManager::new());
     let server = TestServer::builder(manager)
@@ -513,18 +498,18 @@ async fn forced_hub_lag_yields_conservative_per_uri_recovery_without_blocking_pu
         )
         .await?;
 
-    // Burst of synchronous publishes with NO await between them: the
-    // current-thread runtime cannot schedule the server's listen task, so
-    // its receiver (capacity 2) is guaranteed to lag. publish_updated is
-    // synchronous and never blocks — this loop cannot stall.
+    // No await occurs between publishes, so the current-thread runtime cannot
+    // schedule the server's listen task and its capacity-2 receiver must lag.
+    // `publish_updated` is synchronous and never blocks, so this loop cannot
+    // stall.
     for i in 0..10 {
         hub.publish_updated("serial://ports");
         hub.publish_updated("serial://connections/evt");
         let _ = i;
     }
 
-    // Recovery: exactly one update per ACCEPTED URI, in accepted order —
-    // not a flood, and never a deadlock of the publisher/pump.
+    // Recovery emits exactly one update per accepted URI in accepted order. It
+    // must not flood the listener or deadlock the publisher or pump.
     let uris = collect_updates(&mut sub, 2).await;
     assert_eq!(
         uris,
@@ -548,10 +533,10 @@ async fn forced_hub_lag_yields_conservative_per_uri_recovery_without_blocking_pu
 #[tokio::test]
 async fn repeated_requested_uri_does_not_cause_duplicate_lag_recovery_notifications() -> Result<()>
 {
-    // rmcp echoes a repeated requested URI into the acknowledged
-    // filter (left-biased requested.intersection(candidate)); the listen
-    // loop deduplicates again, so lag recovery must notify each accepted
-    // URI exactly once even when the request repeated it.
+    // rmcp echoes a repeated requested URI into the acknowledged filter
+    // through the left-biased `requested.intersection(&candidate)`. The listen
+    // loop deduplicates again, so lag recovery must notify each accepted URI
+    // exactly once when the request repeats it.
     let hub = Arc::new(serial_mcp::resource_events::ResourceEventHub::new(2));
     let manager = Arc::new(serial_mcp::serial::ConnectionManager::new());
     let server = TestServer::builder(manager)
@@ -573,16 +558,16 @@ async fn repeated_requested_uri_does_not_cause_duplicate_lag_recovery_notificati
         )
         .await?;
 
-    // Force broadcast lag with a synchronous publish burst (current-thread
-    // runtime cannot schedule the listen task mid-loop).
+    // Force broadcast lag with a synchronous publish burst. The current-thread
+    // runtime cannot schedule the listen task during the loop.
     for _ in 0..10 {
         hub.publish_ports_changed();
         hub.publish_connections_changed();
     }
 
-    // Recovery: exactly one notification per DISTINCT accepted URI, in
-    // first-occurrence order — the repeated "serial://ports" request must
-    // not produce a second ports notification.
+    // Recovery emits exactly one notification per distinct accepted URI in
+    // first-occurrence order. The repeated "serial://ports" request must not
+    // produce a second ports notification.
     let uris = collect_updates(&mut sub, 2).await;
     assert_eq!(
         uris,
@@ -593,9 +578,9 @@ async fn repeated_requested_uri_does_not_cause_duplicate_lag_recovery_notificati
         "lag recovery notifies each distinct accepted URI once, first-occurrence order"
     );
 
-    // Normal matching also never duplicates: one ports publish -> one
-    // notification (the sink's accepted filter still contains the echoed
-    // duplicate, but the listen loop's deduplicated set drives emission).
+    // Normal matching also emits one notification per ports publish. The
+    // sink's accepted filter still contains the echoed duplicate, but the
+    // listen loop emits from its deduplicated set.
     hub.publish_ports_changed();
     let uris = collect_updates(&mut sub, 1).await;
     assert_hint_set(uris, &["serial://ports"]);
@@ -607,18 +592,19 @@ async fn repeated_requested_uri_does_not_cause_duplicate_lag_recovery_notificati
 
 #[tokio::test]
 async fn stateless_requests_share_session_ring_and_cursor() -> Result<()> {
-    // Modern HTTP is stateless — every request is served by a fresh handler
-    // instance. The process-wide RxSessionManager makes the session, ring,
-    // and shared read cursor visible across distinct requests (public
-    // behavior, not Arc identity).
+    // Modern HTTP is stateless: each request uses a fresh handler instance.
+    // The process-wide RxSessionManager makes the session, ring, and shared
+    // read cursor visible across distinct requests. This tests public behavior
+    // rather than `Arc` identity.
     let (server, connection_id, state) = controlled_server().await;
     let (client, _) = connect_2026_07_28_client(&server).await?;
 
-    // Request 1 (handler instance A): start the pump; nothing to drain.
+    // Request 1 uses handler instance A to start the pump. Nothing is available
+    // to drain.
     start_pump(&client, &connection_id).await;
 
-    // Request 2 (handler instance B): get_status sees the SAME session —
-    // no fresh empty ring.
+    // Request 2 uses handler instance B. `get_status` must see the same session
+    // rather than a fresh empty ring.
     let status = client
         .peer()
         .call_tool(common::tool_request(
@@ -633,12 +619,12 @@ async fn stateless_requests_share_session_ring_and_cursor() -> Result<()> {
         "session created by a previous stateless request must be visible"
     );
 
-    // Inject bytes; the shared pump appends to the shared ring.
+    // Inject bytes. The shared pump appends them to the shared ring.
     state.inject_rx(b"shared-ring");
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    // Request 3: the shared ring advanced; the shared cursor is untouched
-    // (still 0), so the bytes are buffered-but-unread.
+    // Request 3 verifies that the shared ring advanced while the shared cursor
+    // stayed at 0, leaving the bytes buffered but unread.
     let status = client
         .peer()
         .call_tool(common::tool_request(
@@ -652,7 +638,7 @@ async fn stateless_requests_share_session_ring_and_cursor() -> Result<()> {
     assert_eq!(s["rx_buffered_unread"], json!(11), "shared cursor still 0");
     assert_eq!(s["rx_cursor"], json!(0));
 
-    // Request 4: reading from the shared cursor consumes the bytes.
+    // Request 4 reads from the shared cursor and consumes the bytes.
     let read = client
         .peer()
         .call_tool(common::tool_request(
@@ -666,8 +652,8 @@ async fn stateless_requests_share_session_ring_and_cursor() -> Result<()> {
     assert_eq!(structured["data"], json!("shared-ring"));
     assert_eq!(structured["from_offset"], json!(0));
 
-    // Request 5: the shared cursor ADVANCED (the read moved it) — the next
-    // request observes the moved cursor, not a fresh one.
+    // Request 5 verifies that the read advanced the shared cursor. The next
+    // request must observe the moved cursor rather than a fresh one.
     let status = client
         .peer()
         .call_tool(common::tool_request(
@@ -684,7 +670,7 @@ async fn stateless_requests_share_session_ring_and_cursor() -> Result<()> {
     );
     assert_eq!(s["rx_buffered_unread"], json!(0));
 
-    // Request 6: another read from the cursor returns nothing (drained).
+    // Request 6 reads from the drained cursor and returns nothing.
     let read2 = client
         .peer()
         .call_tool(common::tool_request(
@@ -701,19 +687,15 @@ async fn stateless_requests_share_session_ring_and_cursor() -> Result<()> {
     Ok(())
 }
 
-// =============================================================================
-// Open/close + state/log operation hints
-// =============================================================================
-
 #[tokio::test]
 async fn open_and_close_emit_expected_uri_hints() -> Result<()> {
-    // Cross-platform regression: public `open`/`close` emit the expected
-    // resource hints through the real HTTP MCP surface, with the OS serial
-    // layer replaced by an injected in-memory connection opener. No PTY
-    // dependence (Linux PTYs are Linux-only; opening a macOS tty fails with
-    // ENOTTY). The opener builds its connection from the exact config the
-    // public `open` path resolves, so allowlist, identity, profile-session,
-    // and hint behavior are all exercised unchanged.
+    // This cross-platform regression exercises resource hints from public
+    // `open` and `close` through the real HTTP MCP surface. An injected
+    // in-memory connection opener replaces the OS serial layer, so the test
+    // has no PTY dependence: Linux PTYs are Linux-only, and opening a macOS
+    // tty fails with ENOTTY. The opener builds its connection from the exact
+    // config resolved by public `open`, so allowlist, identity,
+    // profile-session, and hint behavior remain covered.
     let opener = common::controlled::ControlledConnectionOpener::new();
     let manager = Arc::new(serial_mcp::serial::ConnectionManager::with_opener(opener));
     let port = "/dev/controlled-open-close";
@@ -755,11 +737,12 @@ async fn open_and_close_emit_expected_uri_hints() -> Result<()> {
         .expect("connection_id string")
         .to_string();
 
-    // open -> serial://connections (detail URI unknown until now).
+    // Opening emits `serial://connections`; the detail URI is unknown until
+    // the response arrives.
     let uris = collect_updates(&mut conn_sub, 1).await;
     assert_hint_set(uris, &["serial://connections"]);
 
-    // Now subscribe to the concrete detail URI and close.
+    // Subscribe to the concrete detail URI before closing.
     let detail_uri = format!("serial://connections/{connection_id}");
     let mut detail_sub = client
         .peer()
@@ -780,8 +763,8 @@ async fn open_and_close_emit_expected_uri_hints() -> Result<()> {
         .expect("close call");
     assert_eq!(close.is_error, Some(false), "{close:?}");
 
-    // close -> serial://connections on the list subscription + the closed
-    // detail URI on the detail subscription (both are hints).
+    // Closing emits `serial://connections` on the list subscription and the
+    // closed detail URI on the detail subscription. Both are hints.
     let list_uris = collect_updates(&mut conn_sub, 1).await;
     assert_hint_set(list_uris, &["serial://connections"]);
     let detail_uris = collect_updates(&mut detail_sub, 1).await;
@@ -822,7 +805,7 @@ async fn state_and_log_operations_emit_expected_uri_hints() -> Result<()> {
         )
         .await?;
 
-    // write -> detail (state changed).
+    // Writing emits a detail hint because state changed.
     let write = client
         .peer()
         .call_tool(common::tool_request(
@@ -834,7 +817,7 @@ async fn state_and_log_operations_emit_expected_uri_hints() -> Result<()> {
     assert_eq!(write.is_error, Some(false), "{write:?}");
     assert_hint_set(collect_updates(&mut sub, 1).await, &[&detail_uri]);
 
-    // transact -> detail (write half changed state).
+    // Transacting emits a detail hint because its write half changes state.
     let transact = client
         .peer()
         .call_tool(common::tool_request(
@@ -846,7 +829,7 @@ async fn state_and_log_operations_emit_expected_uri_hints() -> Result<()> {
     assert_eq!(transact.is_error, Some(false), "{transact:?}");
     assert_hint_set(collect_updates(&mut sub, 1).await, &[&detail_uri]);
 
-    // send_break -> detail.
+    // Sending a break emits a detail hint.
     let brk = client
         .peer()
         .call_tool(common::tool_request(
@@ -858,7 +841,7 @@ async fn state_and_log_operations_emit_expected_uri_hints() -> Result<()> {
     assert_eq!(brk.is_error, Some(false), "{brk:?}");
     assert_hint_set(collect_updates(&mut sub, 1).await, &[&detail_uri]);
 
-    // set_dtr_rts -> detail.
+    // Setting DTR and RTS emits a detail hint.
     let lines = client
         .peer()
         .call_tool(common::tool_request(
@@ -870,7 +853,7 @@ async fn state_and_log_operations_emit_expected_uri_hints() -> Result<()> {
     assert_eq!(lines.is_error, Some(false), "{lines:?}");
     assert_hint_set(collect_updates(&mut sub, 1).await, &[&detail_uri]);
 
-    // reconfigure -> detail.
+    // Reconfiguring emits a detail hint.
     let reconf = client
         .peer()
         .call_tool(common::tool_request(
@@ -882,7 +865,7 @@ async fn state_and_log_operations_emit_expected_uri_hints() -> Result<()> {
     assert_eq!(reconf.is_error, Some(false), "{reconf:?}");
     assert_hint_set(collect_updates(&mut sub, 1).await, &[&detail_uri]);
 
-    // set_flow_control -> detail.
+    // Setting flow control emits a detail hint.
     let flow = client
         .peer()
         .call_tool(common::tool_request(
@@ -894,7 +877,7 @@ async fn state_and_log_operations_emit_expected_uri_hints() -> Result<()> {
     assert_eq!(flow.is_error, Some(false), "{flow:?}");
     assert_hint_set(collect_updates(&mut sub, 1).await, &[&detail_uri]);
 
-    // configure (connection mode) -> detail.
+    // Configuring connection defaults emits a detail hint.
     let cfg = client
         .peer()
         .call_tool(common::tool_request(
@@ -906,7 +889,7 @@ async fn state_and_log_operations_emit_expected_uri_hints() -> Result<()> {
     assert_eq!(cfg.is_error, Some(false), "{cfg:?}");
     assert_hint_set(collect_updates(&mut sub, 1).await, &[&detail_uri]);
 
-    // reconnect -> detail (state change).
+    // Reconnecting emits a detail hint because state changed.
     let reconn = client
         .peer()
         .call_tool(common::tool_request(
@@ -918,7 +901,7 @@ async fn state_and_log_operations_emit_expected_uri_hints() -> Result<()> {
     assert_eq!(reconn.is_error, Some(false), "{reconn:?}");
     assert_hint_set(collect_updates(&mut sub, 1).await, &[&detail_uri]);
 
-    // clear_log -> log URI only.
+    // Clearing the log emits only a log URI hint.
     let cleared = client
         .peer()
         .call_tool(common::tool_request(
@@ -930,7 +913,8 @@ async fn state_and_log_operations_emit_expected_uri_hints() -> Result<()> {
     assert_eq!(cleared.is_error, Some(false), "{cleared:?}");
     assert_hint_set(collect_updates(&mut sub, 1).await, &[&log_uri]);
 
-    // flush(both) -> detail + raw (ring state changed).
+    // Flushing both targets emits detail and raw hints because ring state
+    // changed.
     let flushed = client
         .peer()
         .call_tool(common::tool_request(
@@ -947,22 +931,18 @@ async fn state_and_log_operations_emit_expected_uri_hints() -> Result<()> {
     Ok(())
 }
 
-// =============================================================================
-// Port hotplug watcher (public boundary)
-// =============================================================================
-
-/// Distinct port identities for watcher tests.
+/// Return a distinct port identity for watcher tests.
 fn watcher_port(name: &str, serial: &str) -> serial_mcp::serial::PortInfo {
     common::StaticPortProvider::usb_port(name, 0xABCD, 0x1234, serial, Some("Watch Device"), None)
 }
 
 #[tokio::test]
 async fn port_watcher_baseline_is_captured_immediately_not_after_first_interval() -> Result<()> {
-    // With a 1s poll interval, the baseline must be captured by the FIRST
-    // (immediate) poll — never after one interval elapses. A mutation issued
-    // right after connect/listen (well before the first 1s interval) must
-    // therefore emit an update; a sleep-first loop would swallow it as the
-    // silent baseline and this test would time out.
+    // With a 1s poll interval, the baseline must be captured by the first
+    // immediate poll rather than after one interval elapses. A mutation issued
+    // right after connect/listen, before the first 1s interval, must therefore
+    // emit an update. A sleep-first loop would swallow it as the silent
+    // baseline, causing this test to time out.
     let a = watcher_port("/dev/ttyWatch0", "SN-A");
     let b = watcher_port("/dev/ttyWatch1", "SN-B");
 
@@ -984,9 +964,9 @@ async fn port_watcher_baseline_is_captured_immediately_not_after_first_interval(
         )
         .await?;
 
-    // Mutate immediately — the watcher's immediate first poll already
-    // established the baseline during connect/listen. The update arrives at
-    // the second poll (~1s); a sleep-first baseline would never emit it.
+    // Mutate immediately. The watcher's first immediate poll already
+    // established the baseline during connect/listen, so the update arrives at
+    // the second poll (~1s). A sleep-first baseline would never emit it.
     provider.set_ports(vec![a.clone(), b.clone()]);
     let uris = collect_updates(&mut sub, 1).await;
     assert_hint_set(uris, &["serial://ports"]);
@@ -1021,25 +1001,26 @@ async fn port_watcher_emits_update_on_mutation_and_none_on_reorder_unchanged_or_
         )
         .await?;
 
-    // The FIRST poll runs immediately at watcher start (baseline captured
-    // during connect/listen — no interval wait). No spurious event while it
-    // lands, then the mutation-after-baseline checks below.
+    // The first poll runs immediately at watcher start, capturing the
+    // baseline during connect/listen without an interval wait. No spurious
+    // event should arrive while it settles; mutation-after-baseline checks
+    // follow.
     assert_no_notification(&mut sub, Duration::from_millis(80)).await;
 
-    // Unchanged: no event.
+    // An unchanged snapshot emits no event.
     assert_no_notification(&mut sub, Duration::from_millis(80)).await;
 
-    // Reorder (OS enumeration order changed, same devices): no event.
+    // Reorder changes OS enumeration order but not devices, so no event.
     provider.set_ports(vec![b.clone(), a.clone()]);
     assert_no_notification(&mut sub, Duration::from_millis(250)).await;
 
-    // Add a device: exactly one ports update.
+    // Adding a device emits exactly one ports update.
     provider.set_ports(vec![a.clone(), b.clone(), c.clone()]);
     let uris = collect_updates(&mut sub, 1).await;
     assert_hint_set(uris, &["serial://ports"]);
 
-    // Identity change (same path, new serial): one update. The retained
-    // baseline is now [a2, b, c] (three devices).
+    // Changing identity with the same path and a new serial emits one update.
+    // The retained baseline is now [a2, b, c] (three devices).
     provider.set_ports(vec![
         watcher_port("/dev/ttyWatch0", "SN-A2"),
         b.clone(),
@@ -1048,12 +1029,13 @@ async fn port_watcher_emits_update_on_mutation_and_none_on_reorder_unchanged_or_
     let uris = collect_updates(&mut sub, 1).await;
     assert_hint_set(uris, &["serial://ports"]);
 
-    // Enumeration failure: no event, prior successful baseline retained.
+    // Enumeration failure emits no event and retains the prior successful
+    // baseline.
     provider.set_fail(true);
     assert_no_notification(&mut sub, Duration::from_millis(250)).await;
 
-    // Recovery compares against the retained baseline: an unchanged
-    // snapshot after the error is NOT a change...
+    // Recovery compares against the retained baseline, so an unchanged
+    // snapshot after the error is not a change.
     provider.set_fail(false);
     provider.set_ports(vec![
         watcher_port("/dev/ttyWatch0", "SN-A2"),
@@ -1062,7 +1044,7 @@ async fn port_watcher_emits_update_on_mutation_and_none_on_reorder_unchanged_or_
     ]);
     assert_no_notification(&mut sub, Duration::from_millis(250)).await;
 
-    // ...and neither is a pure reorder of the retained snapshot...
+    // A pure reorder of the retained snapshot is not a change either.
     provider.set_ports(vec![
         c.clone(),
         b.clone(),
@@ -1076,7 +1058,7 @@ async fn port_watcher_emits_update_on_mutation_and_none_on_reorder_unchanged_or_
     ]);
     assert_no_notification(&mut sub, Duration::from_millis(250)).await;
 
-    // ...but a real change after recovery IS an event.
+    // A real change after recovery is an event.
     provider.set_ports(vec![b.clone(), c.clone()]);
     let uris = collect_updates(&mut sub, 1).await;
     assert_hint_set(uris, &["serial://ports"]);

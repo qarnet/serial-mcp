@@ -1,21 +1,21 @@
-# Development Notes
+# Development notes
 
-Index of active development documentation. Consumed implementation plans and
-phase handoffs are removed after their work completes; commits preserve that
-history, while durable behavior lives in `AGENTS.md`, the changelog, and the
-focused documents below.
+Index of active development documentation. Remove consumed implementation plans
+and phase handoffs after their work completes. Git history preserves that
+history. Durable behavior lives in `AGENTS.md`, the changelog, and the focused
+documents below.
 
-| Doc | What it is |
+| Document | Purpose |
 |---|---|
-| [FEATURES.md](FEATURES.md) | Active roadmap + tech debt. Shipped items live in [CHANGELOG.md](../../CHANGELOG.md) and [AGENTS.md](../../AGENTS.md), not here. |
-| [mcp-version-compatibility-policy.md](mcp-version-compatibility-policy.md) | Durable MCP protocol compatibility contract: supported versions, permanent `2025-11-25` retention, admission checklist, proof layers, and the one-command compatibility gate. |
-| [protocol-matrix.md](protocol-matrix.md) | Support/status matrix for every protocol with a cited spec in `resources/`. |
-| [agent-interface-baseline.json](agent-interface-baseline.json) | Committed historical evaluator baseline (26 tools, 258964 bytes), kept so `xtask agent-eval --baseline` can diff the live catalog against it. |
-| [agent-interface-evaluation.md](agent-interface-evaluation.md) | Consolidated, current evaluator report: 25-tool catalog, accepted/rejected interface decisions with thresholds, limitations. |
-| [safe-continuous-capture-design.md](safe-continuous-capture-design.md) | Design for continuous disk capture — **NOT implemented**; recommendation is to wait for concrete task evidence. The shipped foundation (bounded `export_log` store) is documented in [persistent-capture.md](../persistent-capture.md) and AGENTS.md. |
-| [windows-serial-e2e-investigation.md](windows-serial-e2e-investigation.md) | Windows serial E2E decision record: deferred — no privileged virtual-port driver install on GitHub-hosted runners; needs a pre-provisioned signed-driver runner or an approved design. |
+| [FEATURES.md](FEATURES.md) | Active roadmap and technical debt. Shipped items are in [CHANGELOG.md](../../CHANGELOG.md) and [AGENTS.md](../../AGENTS.md), not here. |
+| [mcp-version-compatibility-policy.md](mcp-version-compatibility-policy.md) | MCP compatibility contract: supported versions, permanent `2025-11-25` retention, admission checklist, proof layers, and the one-command compatibility gate. |
+| [protocol-matrix.md](protocol-matrix.md) | Support and status matrix for protocols with a cited spec in `resources/`. |
+| [agent-interface-baseline.json](agent-interface-baseline.json) | Committed historical evaluator baseline with 26 tools and 258964 bytes. `xtask agent-eval --baseline` compares the live catalog with it. |
+| [agent-interface-evaluation.md](agent-interface-evaluation.md) | Current evaluator report with the 25-tool catalog, interface decisions, thresholds, and limitations. |
+| [safe-continuous-capture-design.md](safe-continuous-capture-design.md) | Future continuous disk capture design. It is not implemented. Wait for concrete task evidence. The shipped bounded `export_log` store is documented in [persistent-capture.md](../persistent-capture.md) and `AGENTS.md`. |
+| [windows-serial-e2e-investigation.md](windows-serial-e2e-investigation.md) | Windows serial E2E decision record. Deferred because GitHub-hosted runners do not install privileged virtual-port drivers. A pre-provisioned signed-driver runner or an approved design is required. |
 
-Reproduce the evaluation:
+## Reproduce the evaluation
 
 ```bash
 cargo run --manifest-path xtask/Cargo.toml -- agent-eval \

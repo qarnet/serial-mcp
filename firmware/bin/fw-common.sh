@@ -20,8 +20,8 @@ _fw_build_dir() {
   fi
 }
 
-# Guard: ensure the NCS/Zephyr dev shell environment is loaded.
-# Exits with a clear message when west or ZEPHYR_BASE is missing.
+# Require the NCS/Zephyr dev-shell environment.
+# Fail with a clear message when west or ZEPHYR_BASE is missing.
 _fw_require_env() {
   local missing=""
 

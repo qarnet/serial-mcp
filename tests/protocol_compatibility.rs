@@ -1,24 +1,24 @@
-//! MCP protocol compatibility matrix, indexed by exact MCP protocol version:
-//! `2026-07-28` discovery / stateless lifecycle vs `2025-11-25` initialize /
-//! session lifecycle.
+//! MCP protocol compatibility matrix indexed by exact protocol version.
+//! It covers the `2026-07-28` discovery/stateless lifecycle and the
+//! `2025-11-25` initialize/session lifecycle.
 //!
-//! Two proof layers:
+//! The tests use two independent proof layers:
 //!
-//! - **Typed matrix** (in-process [`TestServer`]): real `rmcp` clients driven
-//!   through `serve_with_lifecycle` (discover vs initialize) asserting the
-//!   negotiated version, tool/resource/prompt surface, hardware-free tool
-//!   execution, and the capability views.
-//! - **Raw wire** (spawned real binary + `reqwest`): hand-built JSON-RPC
-//!   POSTs with explicit `MCP-Protocol-Version`, SEP-2243 `Mcp-Method` /
-//!   `Mcp-Name`, and `Mcp-Session-Id` headers, asserting exact HTTP status,
-//!   JSON-RPC error codes, `resultType` presence, and response-ID echo
-//!   without typed rmcp result deserialization.
+//! - The typed layer uses an in-process [`TestServer`] and real `rmcp` clients
+//!   through `serve_with_lifecycle`. It checks the negotiated version,
+//!   tool/resource/prompt surface, hardware-free tool execution, and
+//!   capability views.
+//! - The raw-wire layer uses the spawned binary and `reqwest` to send
+//!   hand-built JSON-RPC POSTs with explicit `MCP-Protocol-Version`, SEP-2243
+//!   `Mcp-Method`/`Mcp-Name`, and `Mcp-Session-Id` headers. It checks exact HTTP
+//!   statuses, JSON-RPC error codes, `resultType` presence, and response-ID
+//!   echo without typed rmcp result deserialization.
 //!
-//! Raw expected values never derive from production `src/mcp_protocol.rs`:
-//! the two layers stay independent so implementation and expectation cannot
-//! fail together. The coverage lock test at the bottom compares the
-//! independent test-case list `TestProtocol::ALL` against the raw
-//! `server/discover` `supportedVersions` wire output.
+//! Raw expected values never derive from production `src/mcp_protocol.rs`.
+//! Keeping the layers independent prevents implementation and expectation from
+//! failing together. The coverage-lock test compares the independent
+//! `TestProtocol::ALL` list with the raw `server/discover` `supportedVersions`
+//! output.
 
 mod common;
 
@@ -32,8 +32,9 @@ use rmcp::model::{PaginatedRequestParams, ReadResourceRequestParams};
 use rmcp::service::RoleClient;
 use serde_json::{json, Value};
 
-/// Exact `2026-07-28` per-request `_meta` carried by every raw modern
-/// request (SEP-2575 client context; `clientInfo` optional but included).
+/// Builds the exact `2026-07-28` per-request `_meta` for raw modern requests.
+/// This represents SEP-2575 client context. The protocol treats `clientInfo`
+/// as optional, but this raw test fixture includes it.
 fn meta_2026_07_28() -> Value {
     json!({
         "io.modelcontextprotocol/protocolVersion": "2026-07-28",
@@ -42,7 +43,7 @@ fn meta_2026_07_28() -> Value {
     })
 }
 
-/// Expected `2025-11-25` capability wire shape (common set only).
+/// Returns the expected common capability wire shape for `2025-11-25`.
 fn capabilities_2025_11_25_json() -> Value {
     json!({
         "completions": {},
@@ -52,8 +53,8 @@ fn capabilities_2025_11_25_json() -> Value {
     })
 }
 
-/// Expected `2026-07-28` capability wire shape: common set plus
-/// `resources.subscribe` with no list-change flags.
+/// Returns the expected `2026-07-28` capability shape: the common set plus
+/// `resources.subscribe`, without list-change flags.
 fn capabilities_2026_07_28_json() -> Value {
     json!({
         "completions": {},
@@ -63,14 +64,10 @@ fn capabilities_2026_07_28_json() -> Value {
     })
 }
 
-// =============================================================================
-// Typed matrix
-// =============================================================================
-
-/// Run an async assertion body against a typed client for one exact protocol
+/// Runs an async assertion body against a typed client for one exact protocol
 /// version on a fresh in-process server. The common
 /// [`common::VersionedClientHandler`] serves both lifecycle modes, so every
-/// case shares one return type.
+/// case uses the same return type.
 async fn typed_protocol<F, Fut>(protocol: TestProtocol, run: F) -> Result<()>
 where
     F: FnOnce(rmcp::service::RunningService<RoleClient, common::VersionedClientHandler>) -> Fut,
@@ -253,20 +250,15 @@ async fn typed_2025_11_25_capabilities_keep_subscription_disabled() {
     .unwrap();
 }
 
-// =============================================================================
-// SEP-2549 cache fields (version-correct `ttlMs` / `cacheScope`)
-//
-// Modern `2026-07-28` peers get `ttlMs: 0` + `cacheScope: "private"` on
-// every cacheable family (tools/list, resources/list,
-// resources/templates/list, resources/read for every URI kind,
-// prompts/list). Legacy `2025-11-25` peers must see NEITHER field — rmcp
-// strips `resultType` for legacy but deliberately does not strip cache
+// SEP-2549 cache fields follow the exact protocol version. For `2026-07-28`,
+// every cacheable list or resource-read family carries
+// `ttlMs: 0` and `cacheScope: "private"`. Legacy `2025-11-25` peers omit both
+// fields. rmcp strips `resultType` for legacy peers but does not strip cache
 // fields, so the server omits them itself. Tool calls, prompts/get, and
 // completion have no applicable cache fields.
-// =============================================================================
 
-/// Assert a typed `2026-07-28` list/read result carries the SEP-2549 cache
-/// fields.
+/// Asserts that a typed `2026-07-28` list or read result carries SEP-2549
+/// cache fields.
 fn assert_2026_07_28_cache_fields(
     ttl_ms: Option<u64>,
     cache_scope: Option<rmcp::model::CacheScope>,
@@ -279,7 +271,8 @@ fn assert_2026_07_28_cache_fields(
     );
 }
 
-/// Assert a typed `2025-11-25` list/read result carries neither cache field.
+/// Asserts that a typed `2025-11-25` list or read result carries neither cache
+/// field.
 fn assert_2025_11_25_no_cache_fields(
     ttl_ms: Option<u64>,
     cache_scope: Option<rmcp::model::CacheScope>,
@@ -319,7 +312,7 @@ async fn typed_2026_07_28_cache_fields_on_every_cacheable_family() {
             .unwrap();
         assert_2026_07_28_cache_fields(prompts.ttl_ms, prompts.cache_scope);
 
-        // Every URI kind of resources/read carries the fields.
+        // Each supported resources/read URI kind carries these fields.
         for uri in ["serial://ports", "serial://connections"] {
             let read = client
                 .peer()
@@ -379,9 +372,9 @@ async fn typed_2025_11_25_cache_fields_absent_on_every_cacheable_family() {
 
 #[tokio::test]
 async fn typed_2026_07_28_list_cursor_pages_are_honored() {
-    // The explicit tools/list + prompts/list handlers paginate through the
-    // same `paginate` helper as resources: a cursor past the single-page
-    // catalog yields an empty page and no next cursor.
+    // The explicit tools/list and prompts/list handlers use the same
+    // `paginate` helper as resources. A cursor past the single-page catalog
+    // yields an empty page without a next cursor.
     typed_protocol(TestProtocol::V2026_07_28, |client| async move {
         let cursor = base64::engine::general_purpose::STANDARD.encode("999".as_bytes());
         let tools = client
@@ -420,24 +413,20 @@ async fn typed_2026_07_28_list_cursor_pages_are_honored() {
     .unwrap();
 }
 
-// =============================================================================
-// Raw wire helpers
-// =============================================================================
-
-/// A raw HTTP response plus the parsed JSON-RPC payload (direct JSON body or
-/// first non-empty SSE `data:` event).
+/// Stores a raw HTTP response and its parsed JSON-RPC payload. The payload may
+/// come from a direct JSON body or the first non-empty SSE `data:` event.
 #[derive(Debug)]
 struct RawWire {
     status: u16,
     content_type: String,
-    /// `Mcp-Session-Id` response header, when present.
+    /// `Mcp-Session-Id` response header when present.
     session_id: Option<String>,
-    /// First non-empty JSON-RPC payload, when the response carried one.
+    /// First non-empty JSON-RPC payload when the response carried one.
     json: Option<Value>,
 }
 
-/// Parse a response body that is either direct JSON or an SSE stream of
-/// `data:` events. Returns the first non-empty JSON value found.
+/// Parses a direct JSON response body or an SSE stream of `data:` events and
+/// returns the first non-empty JSON value.
 fn parse_raw_body(content_type: &str, body: &str) -> Option<Value> {
     if content_type.starts_with("application/json") {
         return serde_json::from_str(body).ok();
@@ -489,8 +478,8 @@ async fn raw_post(
     }
     let body = match id {
         Some(id) => json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}),
-        // A JSON-RPC notification carries no id; an id would make the
-        // server treat it as a request and answer -32601.
+        // JSON-RPC notifications have no id. Including one would make the
+        // server treat this message as a request and return -32601.
         None => json!({"jsonrpc": "2.0", "method": method, "params": params}),
     };
     let resp = req.json(&body).send().await.expect("raw POST");
@@ -514,9 +503,9 @@ async fn raw_post(
     }
 }
 
-/// `2026-07-28` request: `_meta` + matching `MCP-Protocol-Version` header
-/// plus the SEP-2243 `Mcp-Method` / `Mcp-Name` headers rmcp requires for
-/// `2026-07-28`.
+/// Builds a `2026-07-28` request with matching `_meta` and
+/// `MCP-Protocol-Version` values plus the SEP-2243 `Mcp-Method`/`Mcp-Name`
+/// headers required by rmcp.
 async fn raw_2026_07_28(
     url: &str,
     id: u64,
@@ -539,9 +528,8 @@ async fn raw_2026_07_28(
     .await
 }
 
-/// Establish a `2025-11-25` session: initialize with `2025-11-25`, capture
-/// `Mcp-Session-Id`, send `notifications/initialized`. Returns the session
-/// id and the initialize raw wire.
+/// Starts a `2025-11-25` session, captures `Mcp-Session-Id`, and sends
+/// `notifications/initialized`. Returns the session id and initialize response.
 async fn raw_2025_11_25_session(url: &str) -> (String, RawWire) {
     let init = raw_post(
         url,
@@ -584,8 +572,8 @@ async fn raw_2025_11_25_session(url: &str) -> (String, RawWire) {
     (session, init)
 }
 
-/// `2025-11-25` request: session header + `MCP-Protocol-Version:
-/// 2025-11-25`.
+/// Builds a `2025-11-25` request with the session header and matching
+/// `MCP-Protocol-Version` value.
 async fn raw_2025_11_25(url: &str, session: &str, id: u64, method: &str, params: Value) -> RawWire {
     raw_post(
         url,
@@ -599,10 +587,6 @@ async fn raw_2025_11_25(url: &str, session: &str, id: u64, method: &str, params:
     )
     .await
 }
-
-// =============================================================================
-// Raw wire assertions
-// =============================================================================
 
 #[tokio::test]
 async fn raw_discover_succeeds_without_session_and_lists_2026_07_28_first() {
@@ -625,21 +609,18 @@ async fn raw_discover_succeeds_without_session_and_lists_2026_07_28_first() {
         "supportedVersions exactly 2026-07-28 then 2025-11-25"
     );
     assert_eq!(result["capabilities"], capabilities_2026_07_28_json());
-    // Discovery is not a cacheable list/read family: `server/discover`
-    // carries only rmcp's own required zero/private cache fields, never
-    // server-added ones. Detailed cacheable list/read family assertions
-    // (`ttlMs` / `cacheScope` presence and absence per exact version) live
-    // in the dedicated version-indexed cache tests below.
+    // `server/discover` is not a cacheable list or read family. It carries
+    // only rmcp's required zero/private cache fields, not server-added fields.
+    // The version-indexed cache tests below cover the cacheable families.
 }
 
 #[tokio::test]
 async fn coverage_matrix_matches_exact_supported_versions_on_the_wire() {
-    // Public-boundary coverage lock: the independent test-case list
-    // `TestProtocol::ALL` (in order) must equal the exact `supportedVersions`
-    // the raw `server/discover` returns. This fails on a missing, extra, or
-    // reordered version, so a future production policy row requires an
-    // explicit test case. Deliberately independent from production
-    // `src/mcp_protocol.rs` internals — raw wire facts only.
+    // Keep the independent test-case list `TestProtocol::ALL` aligned with the
+    // exact `supportedVersions` returned by raw `server/discover`. A missing,
+    // extra, or reordered version fails this test, so every future production
+    // policy row requires an explicit test case. The expected list remains
+    // independent from `src/mcp_protocol.rs` internals.
     let server = common::spawned::SpawnedServer::start().await;
     let raw = raw_2026_07_28(&server.url, 50, "server/discover", json!({}), None).await;
     assert_eq!(raw.status, 200, "discover without session id succeeds");
@@ -664,7 +645,6 @@ async fn coverage_matrix_matches_exact_supported_versions_on_the_wire() {
 async fn raw_2026_07_28_surface_includes_result_type_complete() {
     let server = common::spawned::SpawnedServer::start().await;
 
-    // tools/list
     let raw = raw_2026_07_28(&server.url, 2, "tools/list", json!({}), None).await;
     assert_eq!(raw.status, 200);
     let json = raw.json.unwrap();
@@ -679,14 +659,12 @@ async fn raw_2026_07_28_surface_includes_result_type_complete() {
     let expected: BTreeSet<&str> = common::EXPECTED_TOOLS.iter().copied().collect();
     assert_eq!(names, expected);
 
-    // resources/list
     let raw = raw_2026_07_28(&server.url, 3, "resources/list", json!({}), None).await;
     assert_eq!(raw.status, 200);
     let json = raw.json.unwrap();
     assert_eq!(json["result"]["resultType"], "complete");
     assert_eq!(json["result"]["resources"].as_array().unwrap().len(), 2);
 
-    // resources/read(serial://ports)
     let raw = raw_2026_07_28(
         &server.url,
         4,
@@ -704,14 +682,12 @@ async fn raw_2026_07_28_surface_includes_result_type_complete() {
         "application/json"
     );
 
-    // prompts/list
     let raw = raw_2026_07_28(&server.url, 5, "prompts/list", json!({}), None).await;
     assert_eq!(raw.status, 200);
     let json = raw.json.unwrap();
     assert_eq!(json["result"]["resultType"], "complete");
     assert_eq!(json["result"]["prompts"].as_array().unwrap().len(), 2);
 
-    // prompts/get
     let raw = raw_2026_07_28(
         &server.url,
         6,
@@ -728,7 +704,6 @@ async fn raw_2026_07_28_surface_includes_result_type_complete() {
         "prompt messages present"
     );
 
-    // completion/complete
     let raw = raw_2026_07_28(
         &server.url,
         7,
@@ -748,7 +723,6 @@ async fn raw_2026_07_28_surface_includes_result_type_complete() {
         "completion values array"
     );
 
-    // tools/call(compute_checksum)
     let raw = raw_2026_07_28(
         &server.url,
         8,
@@ -813,8 +787,7 @@ async fn raw_2025_11_25_responses_omit_result_type() {
 async fn raw_2026_07_28_cache_fields_present_2025_11_25_absent() {
     let server = common::spawned::SpawnedServer::start().await;
 
-    // 2026-07-28: every cacheable list family carries ttlMs 0 + cacheScope
-    // private on the wire.
+    // Modern list-family responses carry `ttlMs: 0` and private `cacheScope`.
     for (id, method, params, name) in [
         (30, "tools/list", json!({}), None),
         (31, "resources/list", json!({}), None),
@@ -831,7 +804,8 @@ async fn raw_2026_07_28_cache_fields_present_2025_11_25_absent() {
         );
     }
 
-    // 2026-07-28 resources/read for both static URI kinds.
+    // Modern resources/read responses carry the same fields for both static
+    // URI kinds.
     for (id, uri) in [(34u64, "serial://ports"), (35u64, "serial://connections")] {
         let raw = raw_2026_07_28(
             &server.url,
@@ -850,7 +824,7 @@ async fn raw_2026_07_28_cache_fields_present_2025_11_25_absent() {
         );
     }
 
-    // 2025-11-25: neither cache field may leak to legacy peers.
+    // Legacy responses must omit both cache fields.
     let (session, _init) = raw_2025_11_25_session(&server.url).await;
     for (id, method, params) in [
         (36, "tools/list", json!({})),
@@ -894,9 +868,9 @@ async fn raw_2026_07_28_cache_fields_present_2025_11_25_absent() {
 #[tokio::test]
 async fn raw_2026_07_28_list_cursor_pages_are_honored() {
     let server = common::spawned::SpawnedServer::start().await;
-    // The manual tools/list + prompts/list handlers paginate through the
-    // same `paginate` helper as resources. A cursor past the single-page
-    // catalog yields an empty page and no next cursor.
+    // The manual tools/list and prompts/list handlers use the same `paginate`
+    // helper as resources. A cursor past the single-page catalog yields an
+    // empty page without a next cursor.
     let cursor = base64::engine::general_purpose::STANDARD.encode("999".as_bytes());
     let raw = raw_2026_07_28(
         &server.url,
@@ -992,7 +966,7 @@ async fn raw_2025_11_25_unknown_resource_keeps_resource_not_found() {
 async fn raw_2026_07_28_missing_required_meta_returns_400() {
     let server = common::spawned::SpawnedServer::start().await;
 
-    // server/discover without _meta: invalid params, no header can save it.
+    // `server/discover` without `_meta` must fail; headers cannot replace it.
     let raw = raw_post(
         &server.url,
         Some(14),
@@ -1009,7 +983,7 @@ async fn raw_2026_07_28_missing_required_meta_returns_400() {
     assert_eq!(json["id"], 14);
     assert_eq!(json["error"]["code"], -32602);
 
-    // _meta present but missing the required clientCapabilities key.
+    // An `_meta` object without `clientCapabilities` must also fail.
     let raw = raw_post(
         &server.url,
         Some(15),
@@ -1063,18 +1037,17 @@ async fn raw_2026_07_28_header_meta_version_mismatch_returns_400() {
 
 #[tokio::test]
 async fn raw_strict_metadata_option_rejects_modern_request_missing_header() {
-    // Strict policy regression for the opt-in
-    // `stateless_protocol_metadata_required` seam on the shipped HTTP
-    // binary (see `common::spawned`): a modern `2026-07-28` request that
-    // carries complete per-request `_meta` — which routes it statelessly —
-    // but omits the `MCP-Protocol-Version` header must be rejected with
-    // HTTP 400 / JSON-RPC `-32020` (HEADER_MISMATCH) before tool dispatch.
-    // The response carries no `result`, so no tool ever ran.
+    // Check the opt-in `stateless_protocol_metadata_required` seam on the
+    // shipped HTTP binary (see `common::spawned`). A modern `2026-07-28`
+    // request with complete per-request `_meta` routes through stateless
+    // handling before the missing `MCP-Protocol-Version` header causes HTTP
+    // 400 and JSON-RPC `-32020` (HEADER_MISMATCH). The missing `result`
+    // confirms that no tool ran.
     //
     // This isolates the strict option's reachable behavior under mixed
-    // routing. Requests missing BOTH signals are classified legacy by rmcp
-    // and rejected earlier with HTTP 422 (no JSON-RPC body) — that path is
-    // rmcp's own and is not asserted here.
+    // routing. rmcp classifies requests missing both signals as legacy and
+    // rejects them earlier with HTTP 422 and no JSON-RPC body. This test does
+    // not assert that rmcp-owned path.
     let server = common::spawned::SpawnedServer::start().await;
     let mut params = json!({});
     params["_meta"] = meta_2026_07_28();
@@ -1184,14 +1157,13 @@ async fn raw_2026_07_28_routing_rejects_legacy_only_methods() {
 #[tokio::test]
 async fn raw_2026_07_28_initialize_is_rejected_with_method_not_found() {
     let server = common::spawned::SpawnedServer::start().await;
-    // The server only allows `initialize` for the legacy `2025-11-25`
-    // lifecycle; a modern `2026-07-28` initialize is rejected in
-    // `SerialHandler::initialize` with METHOD_NOT_FOUND before any peer
-    // bookkeeping. rmcp routes the stateless (discover-lifecycle) request
-    // through `serve_negotiated_request_directly`, which maps the handler's
-    // `-32601` to HTTP 404 with a direct JSON body — the same modern
-    // routing semantics as ping/logging/setLevel/subscribe. No session is
-    // established, so no `Mcp-Session-Id` header appears.
+    // The server allows `initialize` only for the legacy `2025-11-25`
+    // lifecycle. `SerialHandler::initialize` rejects a modern `2026-07-28`
+    // initialize with `-32601` before peer bookkeeping. rmcp routes this
+    // stateless request through `serve_negotiated_request_directly` and maps
+    // the error to HTTP 404 with a direct JSON body, matching modern routing
+    // for ping, logging/setLevel, and resource subscription methods. No
+    // session is established, so no `Mcp-Session-Id` header appears.
     let mut params = json!({
         "protocolVersion": "2026-07-28",
         "capabilities": {},
@@ -1265,9 +1237,9 @@ async fn raw_2025_11_25_ping_succeeds_and_subscription_methods_are_method_not_fo
 async fn raw_2025_11_25_listen_stays_method_not_found() {
     // Modern `subscriptions/listen` coverage lives in
     // tests/resource_subscriptions.rs. A raw modern listen is a long-lived
-    // SSE stream that only completes on cancellation, so typed clients drive
+    // SSE stream that completes only on cancellation, so typed clients drive
     // it. Legacy `2025-11-25` must not see that surface: rmcp gates the method
-    // and the server returns `-32601` inside an SSE 200.
+    // and the server returns `-32601` inside an SSE 200 response.
     let server = common::spawned::SpawnedServer::start().await;
     let (session, _init) = raw_2025_11_25_session(&server.url).await;
     let legacy = raw_2025_11_25(

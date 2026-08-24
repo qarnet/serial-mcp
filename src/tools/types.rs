@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::serial::{ConnectionSummary, FlowControl, FlushTarget, PortInfo};
 
-// ---- Argument structs ------------------------------------------------------
+// Tool argument types.
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct OpenArgs {
@@ -107,11 +107,11 @@ pub struct WriteArgs {
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct ReadArgs {
     pub connection_id: String,
-    /// Where to start reading from. `{"type":"cursor"}` (default) — shared
-    /// read cursor, `{"type":"now"}` — live edge (skip buffered backlog),
-    /// `{"type":"buffer_start"}` — replay everything retained in the ring,
-    /// or `{"type":"offset","offset":N}` — absolute stream offset from a
-    /// prior result's `from_offset`/`next_offset`.
+    /// Read start position. Use `{"type":"cursor"}` (default) for the shared
+    /// read cursor, `{"type":"now"}` for the live edge and no buffered backlog;
+    /// `{"type":"buffer_start"}` for retained ring history; or
+    /// `{"type":"offset","offset":N}` for an absolute stream offset from a
+    /// prior `from_offset` or `next_offset`.
     #[serde(default)]
     pub from: Option<ReadFrom>,
     #[serde(default)]
@@ -183,10 +183,10 @@ pub struct SendBreakArgs {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type")]
 pub enum ReadFrom {
-    /// Start at the live edge — only new data after the call.
+    /// Start at the live edge. Only new data after the call is returned.
     #[serde(rename = "now")]
     Now,
-    /// Start at the shared read cursor — replay what `read` hasn't consumed.
+    /// Start at the shared read cursor. Replay data that `read` has not consumed.
     #[serde(rename = "cursor")]
     Cursor,
     /// Replay everything retained in the ring, then go live.
@@ -244,23 +244,22 @@ pub struct OpenProfileArgs {
     pub rx_buffer_size: Option<usize>,
 }
 
-// ---- Response structs ------------------------------------------------------
+// Tool response types.
 
 /// Preview outcome of automatic profile selection for one port.
 ///
-/// Mirrors what a bare `open(port=...)` would do, WITHOUT marking any
+/// Mirrors what a bare `open(port=...)` would do, without marking any
 /// profile used or mutating the store:
 ///
 /// - `selected`: a bare open would reuse `selected_profile` (unique
 ///   high-confidence winner, or the single matching high profile).
-/// - `ambiguous`: multiple equally-ranked high-confidence profiles; a bare
-///   open stays transient — pick explicitly with `open_profile`.
+/// - `ambiguous`: multiple equally-ranked high-confidence profiles. A bare
+///   open stays transient; pick explicitly with `open_profile`.
 /// - `ineligible`: the port's identity is too weak for automatic selection,
-///   but the listed candidates match explicitly — use `open_profile` for a
+///   but the listed candidates match explicitly. Use `open_profile` for a
 ///   deliberate choice.
 /// - `duplicate`: another live port shares this port's high fingerprint, so
-///   settings are never applied automatically to an indistinguishable
-///   device.
+///   settings are never applied automatically to an indistinguishable device.
 /// - `none`: no matching profile; a bare open starts a generated session for
 ///   a high-confidence device or a transient session for weaker identity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -438,13 +437,11 @@ pub struct ReadResult {
     /// Decoded frames, present when the `rx_framing` option was used.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub frames: Option<Vec<FrameResult>>,
-    /// Number of frames dropped due to decode errors (checksum mismatches
-    /// with `validate: true`) or a true encode failure (including the hex
-    /// fallback failing). A successful lossless encoding fallback (e.g.
-    /// binary bytes under `utf8` re-encoded as `hex`) is NOT a drop and
-    /// does not increment this counter. When a checksum-mismatched
-    /// frame is dropped by the decoder, it does NOT appear in `frames` and is
-    /// counted here instead.
+    /// Number of frames dropped for checksum mismatches with `validate: true` or
+    /// a true encoding failure, including a failed hex fallback. A successful
+    /// lossless fallback, such as binary data requested as `utf8`, is not a drop
+    /// and does not increment this count. A checksum-dropped frame is absent
+    /// from `frames` and counted here.
     #[serde(default)]
     #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
     pub frames_dropped: usize,
@@ -459,10 +456,10 @@ pub struct ReadResult {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(schema_with = "crate::schema_helpers::option_uint_schema")]
     pub from_offset: Option<u64>,
-    /// Absolute stream offset of the cursor after this read (where the next
-    /// read starts). Equal to `from_offset + bytes_returned` for a consuming
-    /// read. To re-read the same bytes non-destructively, pass the same
-    /// `from` on the next read.
+    /// Absolute stream offset of the cursor after this read, where the next
+    /// cursor-based read begins. It equals `from_offset + bytes_returned` for a
+    /// consuming read. To replay these bytes, use
+    /// `from: {"type":"offset","offset":<from_offset>}`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(schema_with = "crate::schema_helpers::option_uint_schema")]
     pub next_offset: Option<u64>,
@@ -615,8 +612,8 @@ pub struct ProfileSummary {
     pub defaults: crate::profiles::ProfileDefaults,
     /// Bookkeeping metadata (generated flag, revision, timestamps, usage).
     pub metadata: crate::profiles::ProfileMetadata,
-    /// Bounded history of prior selector/defaults snapshots (for future
-    /// rollback). Empty for profiles that were never overwritten.
+    /// Bounded history of prior selector/default snapshots for
+    /// `rollback_profile`. Empty for profiles never overwritten.
     pub revisions: Vec<crate::profiles::ProfileRevision>,
 }
 
@@ -627,7 +624,7 @@ pub struct ListProfilesResult {
     pub profiles: Vec<ProfileSummary>,
 }
 
-// ---- Default helpers -------------------------------------------------------
+// Default helpers.
 
 pub fn default_encoding() -> String {
     "utf8".into()
@@ -639,16 +636,18 @@ pub fn default_break_duration_ms() -> u64 {
     250
 }
 
-// ---- Profile management tools ----------------------------------------------
+// Profile management tool types.
 
-/// Configure connection defaults. Two modes:
-/// - `profile` mode: write defaults to a named profile in the profiles TOML.
-///   Applies to future `open_profile` calls. Does NOT touch live connections.
-/// - `connection` mode: mutate defaults on a live connection (the four
-///   framing defaults + reconnect_policy + max_buffered_bytes). Does NOT
-///   persist to disk. `rx_buffer_size`, serial-line params,
-///   `log_capacity`, and `log_enabled` only apply via profile + reopen
-///   (LogBuffer has no live setter for capacity/enabled).
+/// Configure connection or profile defaults.
+///
+/// - `profile` mode writes defaults to a named profile in the profiles TOML and
+///   applies them to future `open_profile` calls. It does not touch live
+///   connections.
+/// - `connection` mode mutates the four framing defaults,
+///   `reconnect_policy`, and `max_buffered_bytes` on a live connection. It does
+///   not persist to disk. `rx_buffer_size`, serial-line parameters,
+///   `log_capacity`, and `log_enabled` apply through a profile and reopen
+///   because `LogBuffer` has no live setter for capacity or enabled state.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ConfigureArgs {
     /// Profile name to write (profile mode), or connection name to mutate
@@ -661,8 +660,8 @@ pub struct ConfigureArgs {
     /// If false (default), return an error when the name already exists.
     #[serde(default)]
     pub overwrite: bool,
-    /// Defaults to apply. All fields optional — omit a field to leave it
-    /// unchanged on the profile / connection.
+    /// Defaults to apply. All fields are optional. Omitted fields remain
+    /// unchanged on the profile or connection.
     #[serde(default)]
     pub defaults: crate::profiles::ProfileDefaults,
 }
@@ -762,7 +761,7 @@ pub struct RollbackProfileResult {
     pub persistence: crate::profiles::ProfilePersistenceResult,
 }
 
-// ---- Log tools -------------------------------------------------------------
+// Log tool types.
 
 /// Arguments for the `get_log` tool.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -804,11 +803,12 @@ pub struct ClearLogResult {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ExportLogArgs {
     pub connection_id: String,
-    /// Portable `.jsonl` filename for the export, relative to the configured
-    /// capture directory (`--capture-dir`). Not an arbitrary path: no
-    /// separators, no subdirectories, no absolute/relative traversal, ASCII
-    /// 1-120 chars ending `.jsonl`. The server rejects existing files (no
-    /// overwrite) and enforces per-file, total-byte, and file-count quotas.
+    /// Portable `.jsonl` filename under the configured capture directory
+    /// (`--capture-dir`). This is a filename, not a caller-selected filesystem
+    /// path: it must contain 1 through 120 ASCII characters, end in `.jsonl`,
+    /// and contain no separator, subdirectory, absolute path, or traversal.
+    /// Existing files are rejected; per-file, total-byte, and file-count quotas
+    /// apply.
     pub path: String,
 }
 
@@ -828,7 +828,7 @@ pub struct ExportLogResult {
     /// Total managed bytes in the root after this export.
     #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
     pub total_bytes_used: u64,
-    /// POST-commit durability warning. Present only when the file was
+    /// Post-commit durability warning. Present only when the file was
     /// committed but the root-directory sync failed on Unix (crash
     /// durability of the rename could not be confirmed). The export
     /// otherwise succeeded; the committed file is never deleted. Absent on
@@ -837,7 +837,7 @@ pub struct ExportLogResult {
     pub durability_warning: Option<String>,
 }
 
-// ---- Reconnect tool --------------------------------------------------------
+// Reconnect and checksum tool types.
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ReconnectArgs {
@@ -891,10 +891,11 @@ pub struct TransactArgs {
     pub data: String,
     #[serde(default = "default_encoding")]
     pub encoding: String,
-    /// Where the read half starts. `{"type":"now"}` (default) — live edge,
-    /// skip pre-write buffered backlog; `{"type":"cursor"}` — shared read
-    /// cursor; `{"type":"buffer_start"}` — replay everything retained; or
-    /// `{"type":"offset","offset":N}`.
+    /// Where the read half starts. `{"type":"now"}` (default) starts at the
+    /// live edge and skips pre-write buffered backlog;
+    /// `{"type":"cursor"}` uses the shared read cursor;
+    /// `{"type":"buffer_start"}` replays retained data; or
+    /// `{"type":"offset","offset":N}` starts at an absolute offset.
     #[serde(default)]
     pub from: Option<ReadFrom>,
     #[serde(default)]
@@ -927,14 +928,14 @@ pub struct TransactResult {
     pub read: ReadResult,
 }
 
-// ---- Atomic boot capture ---------------------------------------------------
+// Atomic boot capture types.
 
 /// Optional DTR/RTS reset pulse for `capture_boot`.
 ///
 /// When present, the server asserts the configured lines (DTR first, then
 /// RTS, like `set_dtr_rts`), holds them for `hold_ms`, then always releases
-/// them — on normal completion, cancellation, assertion/release failure, or
-/// disconnect. The release guard is armed BEFORE the assertion so a partial
+/// them on normal completion, cancellation, assertion or release failure, or
+/// disconnect. The release guard is armed before the assertion so a partial
 /// assertion failure still restores the configured release state.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct CaptureBootReset {
@@ -969,13 +970,12 @@ fn default_capture_hold_ms() -> u64 {
 /// armed until a stop condition (match, timeout, silence, size cap,
 /// disconnect, cancellation) fires.
 ///
-/// There is deliberately no `from` field — capture always begins at its
-/// atomic mark. The connection's `max_buffered_bytes` default bounds the
-/// in-memory result. `settle_ms` delays consumption, not capture: the
-/// always-on pump still appends bytes from the mark during settle. The read
-/// phase timeout defaults to 5000ms (omitted or explicit null both resolve
-/// to this bounded default); the total operation is bounded by
-/// hold + settle + read timeout.
+/// There is no `from` field. Capture begins at its atomic mark. The
+/// connection's `max_buffered_bytes` default bounds the in-memory result.
+/// `settle_ms` delays consumption, not capture: the always-on pump still
+/// appends bytes from the mark during settle. The read phase timeout defaults
+/// to 5000ms; omitted and explicit `null` both resolve to this bounded default.
+/// The total operation is bounded by hold plus settle plus read timeout.
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct CaptureBootArgs {
     pub connection_id: String,

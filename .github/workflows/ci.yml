@@ -30,18 +30,17 @@ jobs:
         with:
           primary-key: nix-${{ runner.os }}-${{ hashFiles('**/flake.lock', '**/Cargo.lock') }}
           restore-prefixes-first-match: nix-${{ runner.os }}-
-          # The build produces ~4-5 GB of store paths (593 cargo deps + the
-          # serial-mcp crate + toolchain + system libs). The previous 2G cap
-          # evicted the deps/crate artifacts between runs, forcing a full
-          # ~14 min rebuild every run even on cache hits. 8G lets the cache
-          # retain the build outputs so subsequent runs substitute instead
-          # of recompiling. Trade-off: larger GitHub Actions cache storage
-          # (billed against the repo's 10 GB per-repo cache quota).
+          # The build uses ~4-5 GB of store paths: 593 cargo dependencies, the
+          # serial-mcp crate, the toolchain, and system libraries. The old 2G
+          # cap evicted dependency and crate artifacts, causing a full ~14 min
+          # rebuild on every cache hit. 8G retains build outputs for later
+          # substitution instead of recompilation. This uses more of the
+          # repository's 10 GB GitHub Actions cache quota.
           gc-max-store-size-linux: 8G
 
-      # --print-build-logs (-L) streams cargo/compiler output so the build
-      # phase is visible in the job log instead of a silent multi-minute
-      # gap. Essential for debugging flake/build failures.
+      # --print-build-logs (-L) keeps cargo and compiler output visible during
+      # the build instead of leaving a silent multi-minute gap. This aids
+      # flake and build failure diagnosis.
       - name: nix flake check
         run: nix flake check --accept-flake-config --print-build-logs
 
@@ -107,26 +106,24 @@ jobs:
         run: python3 -m unittest discover -s scripts/tests -v
 
   mcp-conformance:
-    # Pinned official MCP conformance suite + Inspector interoperability smoke
-    # against the real HTTP binary, plus the historical rmcp 1.7.0 client gate.
-    # Execution delegates to scripts/test-mcp-compat.sh so local and CI share
-    # ONE executable path: the script installs the lockfile-pinned validation
-    # tree (compat/mcp-validation/package-lock.json — exact
+    # Run the official MCP conformance suite and Inspector interoperability
+    # smoke against the real HTTP binary, plus the historical rmcp 1.7.0
+    # client gate. scripts/test-mcp-compat.sh is the shared local and CI path.
+    # It installs the lockfile-pinned validation tree from
+    # compat/mcp-validation/package-lock.json, including exact
     # @modelcontextprotocol/conformance@0.2.0-alpha.10 and
-    # @modelcontextprotocol/inspector@2.0.0 with integrity hashes) via
-    # `npm ci --ignore-scripts` (lifecycle scripts disabled, no npx, no
-    # dynamic package resolution) and invokes the local node_modules/.bin
-    # binaries directly. The script also owns the exact scenario sets at their
-    # exact protocol versions (never `--suite all`), the expected-failure
-    # baseline, and the pinned Inspector invocation. The four expected
-    # failures in conformance/expected-failures.yaml are fixture-dependent
-    # checks serial-mcp deliberately cannot satisfy (no fixture endpoints are
-    # ever added to the product). A baseline entry that starts passing fails
-    # the job as stale; any other failure is an unexpected regression.
-    # Inspector is interoperability (NOT conformance): a separate smoke that
-    # drives the exact pinned @modelcontextprotocol/inspector@2.0.0 CLI.
-    # This job only owns environment setup, the 15-minute bound, cleanup, and
-    # report upload.
+    # @modelcontextprotocol/inspector@2.0.0 versions with integrity hashes, via
+    # `npm ci --ignore-scripts`. Lifecycle scripts stay disabled; npx and
+    # dynamic package resolution are not used. The script invokes local
+    # node_modules/.bin binaries, owns exact protocol-version scenario sets,
+    # uses no `--suite all`, and owns the expected-failure baseline and pinned
+    # Inspector invocation. The four expected failures in
+    # conformance/expected-failures.yaml cover fixture-dependent checks that
+    # serial-mcp cannot satisfy. The product never adds fixture endpoints. A
+    # baseline check that starts passing is stale and fails the job; any other
+    # failure is an unexpected regression. Inspector is a separate
+    # interoperability smoke using the exact pinned 2.0.0 CLI. This job owns
+    # environment setup, the 15-minute bound, cleanup, and report upload.
     name: MCP conformance + Inspector smoke
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -155,15 +152,15 @@ jobs:
         with:
           node-version: "22.19.0"
 
-      # The shared runner installs the lockfile-pinned MCP validation tooling
-      # (`npm ci --ignore-scripts` in compat/mcp-validation, lifecycle scripts
-      # disabled — no npx, no dynamic resolution), builds the locked binary,
-      # runs the focused Rust gates, builds + runs the historical rmcp 1.7.0
-      # client over stdio and HTTP, starts the loopback server with a bounded
-      # readiness probe, runs the exact legacy/modern conformance scenario
-      # sets via the local conformance binary, and runs the Inspector smoke
-      # via the local mcp-inspector binary. It stops the server and cleans its
-      # own temp dir via a trap on success, failure, signal, or timeout.
+      # The shared runner installs lockfile-pinned MCP validation tooling with
+      # `npm ci --ignore-scripts` in compat/mcp-validation. Lifecycle scripts,
+      # npx, and dynamic resolution stay disabled. It builds the locked binary,
+      # runs focused Rust gates, builds and runs the historical rmcp 1.7.0
+      # client over stdio and HTTP, starts a loopback server with bounded
+      # readiness, runs the exact legacy and modern scenario sets through the
+      # local conformance binary, and runs the Inspector smoke through the
+      # local mcp-inspector binary. A trap stops the server and cleans the temp
+      # directory on success, failure, signal, or timeout.
       - name: Run shared MCP compatibility gate
         run: bash scripts/test-mcp-compat.sh
 
@@ -181,12 +178,11 @@ jobs:
     env:
       NCS_VERSION: v3.3.0
       NCS_INSTALL_DIR: /home/runner/ncs
-      # Pinned nrfutil core + sdk-manager packages, visible update points for
-      # the provisioning step. The installer downloads these exact versioned
-      # tarballs only and verifies their SHA-256 before extraction — never
-      # the unversioned launcher URL that returned an HTTP 504 HTML page and
-      # broke every later nrfutil step. See firmware/AGENTS.md "CI nrfutil
-      # provisioning" for the update procedure.
+      # Pin nrfutil core and sdk-manager versions and their checksums here.
+      # The installer downloads only these versioned tarballs and verifies
+      # SHA-256 before extraction. It never uses the unversioned launcher URL,
+      # which returned an HTTP 504 HTML page and broke later nrfutil steps. See
+      # firmware/AGENTS.md "CI nrfutil provisioning" for update procedure.
       NRFUTIL_VERSION: "8.2.0"
       NRFUTIL_SHA256: "fabe84198efe045a7cdcc9d5132669c1bc2cb168f61db93f2261ae4fd980e73f"
       NRFUTIL_SDK_MANAGER_VERSION: "1.16.1"
@@ -195,15 +191,13 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      # GitHub-hosted ubuntu-latest runners ship ~14 GB free disk. The NCS
-      # SDK + toolchain cache alone is ~4.6 GB, cargo cache ~1-2 GB, and the
-      # runner image preinstalls ~7 GB of toolchains we never use (dotnet,
-      # android, ghc, CodeQL, docker images). Without reclaiming that headroom
-      # the native-sim job intermittently hits ENOSPC — the runner can't even
-      # write its own _diag log (System.IO.IOException: No space left on
-      # device). This step reclaims ~7 GB. DO NOT remove without measuring
-      # free disk with the df -h steps below. See firmware/AGENTS.md
-      # "CI disk pressure" for the full rationale.
+      # GitHub-hosted ubuntu-latest runners provide ~14 GB of free disk. The
+      # NCS SDK and toolchain cache use ~4.6 GB, cargo uses ~1-2 GB, and the
+      # image includes ~7 GB of unused dotnet, android, ghc, CodeQL, and
+      # Docker content. Without this headroom native-sim can hit ENOSPC before
+      # the runner writes its own _diag log. This step reclaims ~7 GB. Keep it
+      # only with the df -h measurements below. See firmware/AGENTS.md "CI
+      # disk pressure" for the full rationale.
       - name: Free disk space
         run: |
           df -h /
@@ -237,37 +231,34 @@ jobs:
             /home/runner/.nrfutil
           key: ncs-${{ env.NCS_VERSION }}-v3
 
-      # Fail-closed, checksum-verified, version-pinned provisioning. The old
-      # flow curl'd an unversioned launcher into /usr/local/bin (which
-      # silently installed a 160-byte HTTP 504 HTML page when Nordic's CDN
-      # timed out) and then floated the core module and sdk-manager through
-      # `nrfutil self-upgrade` / `nrfutil install sdk-manager` on every run.
-      # scripts/install-nrfutil-ci.sh downloads the exact versioned tarballs
-      # pinned in the job env, verifies SHA-256 before extraction, stages and
-      # verifies both binaries, and only then publishes the destination — no
-      # sudo, nothing executed before verification, temp cleaned on failure.
-      # The offline tests in scripts/tests/test_install_nrfutil_ci.sh exercise
-      # this pipeline deterministically (file:// fixtures, no network).
+      # Provisioning is fail-closed, checksum-verified, and version-pinned.
+      # The old flow downloaded an unversioned launcher into /usr/local/bin.
+      # A CDN timeout installed a 160-byte HTTP 504 page, then later steps
+      # floated core and sdk-manager versions through `nrfutil self-upgrade`
+      # and `nrfutil install sdk-manager`. The installer downloads the exact
+      # versioned tarballs from the job environment, verifies SHA-256 before
+      # extraction, stages and verifies both binaries, then publishes the
+      # destination. It uses no sudo, executes nothing before verification,
+      # and cleans temporary files on failure. Offline tests cover this flow
+      # with file:// fixtures and no network.
       - name: Run installer offline tests
         run: bash scripts/tests/test_install_nrfutil_ci.sh
 
       - name: Provision pinned nrfutil + sdk-manager
         run: |
           bash scripts/install-nrfutil-ci.sh "$RUNNER_TEMP/nrfutil"
-          # Isolated NRFUTIL_HOME: stale command registrations restored from
-          # the actions/cache entry (path /home/runner/.nrfutil) can never
-          # override the pinned binaries. GITHUB_PATH/GITHUB_ENV only affect
-          # later steps, which is exactly what the next steps need.
+          # Isolated NRFUTIL_HOME prevents stale command registrations restored
+          # from /home/runner/.nrfutil by the cache from overriding pinned
+          # binaries. GITHUB_PATH and GITHUB_ENV affect later steps only.
           mkdir -p "$RUNNER_TEMP/nrfutil-home"
           echo "$RUNNER_TEMP/nrfutil/bin" >> "$GITHUB_PATH"
           echo "NRFUTIL_HOME=$RUNNER_TEMP/nrfutil-home" >> "$GITHUB_ENV"
 
-      # Version token on the first line proves the binaries every later step
-      # will use. The first line carries a per-build hash suffix
-      # ("nrfutil 8.2.0 (c910332 2026-04-21)"), so the check is a prefix match
-      # on the pinned version, not a full-line equality. NRFUTIL_HOME
-      # isolation (set above) keeps cached ~/.nrfutil registrations from
-      # shadowing these.
+      # The first output line proves which binaries later steps use. It has a
+      # per-build hash suffix, such as "nrfutil 8.2.0 (c910332 2026-04-21)",
+      # so the check matches the pinned version prefix rather than the full
+      # line. NRFUTIL_HOME isolation prevents cached registrations from
+      # shadowing these binaries.
       - name: Verify pinned nrfutil + sdk-manager versions
         run: |
           set -euo pipefail
@@ -309,11 +300,10 @@ jobs:
           cargo test --test native_sim_validation -- --ignored --test-threads=1
           cargo test --test native_sim_connection_lifecycle -- --ignored --test-threads=1
 
-      # Remove the firmware build tree after tests so the post-step cache
-      # upload (and any later steps) don't walk a stale build dir. The NCS
-      # cache at /home/runner/ncs is intentionally kept — actions/cache@v6
-      # saves it post-job and a cache miss + skipped install would break the
-      # next run. DO NOT rm -rf /home/runner/ncs.
+      # Remove the firmware build tree after tests so post-step cache upload
+      # and later steps do not walk a stale directory. Keep /home/runner/ncs:
+      # actions/cache@v6 saves it after the job, and a cache miss followed by a
+      # skipped install would break the next run. Do not remove that path.
       - name: Clean firmware build tree
         if: always()
         run: rm -rf build/native_sim
@@ -324,9 +314,8 @@ jobs:
   release:
     name: Release
     needs: [nix-flake, build-test, native-sim]
-    # Only a trusted push to main may reach the privileged release call. Pull
-    # requests and other refs skip it, so PR-contributed content can never
-    # trigger a publish.
+    # Only a trusted push to main reaches the privileged release call. Pull
+    # requests and other refs skip it, so PR content cannot trigger a publish.
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     permissions:
       contents: write
@@ -340,7 +329,7 @@ jobs:
   publish-mcp-registry:
     name: Publish to MCP Registry
     needs: release
-    # Same trusted gate as the release job; runs only after release succeeds.
+    # Use the same trusted gate and run only after release succeeds.
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     permissions:
       contents: read
@@ -353,8 +342,9 @@ jobs:
   notify-release-failure:
     name: Notify release pipeline failure
     needs: [release, publish-mcp-registry]
-    # Runs on trusted main push only, after the release chain, whenever either
-    # privileged call failed. always() keeps it alive when a dependency fails.
+    # Run only on a trusted main push after the release chain when either
+    # privileged call fails. always() keeps the notifier alive after dependency
+    # failure.
     if: always() && github.event_name == 'push' && github.ref == 'refs/heads/main' && (needs.release.result == 'failure' || needs.publish-mcp-registry.result == 'failure')
     runs-on: ubuntu-latest
     permissions:
@@ -370,10 +360,10 @@ jobs:
           REGISTRY_RESULT: ${{ needs.publish-mcp-registry.result }}
         run: |
           set -euo pipefail
-          # One stable issue per failure lineage: comment on the open
+          # Keep one stable issue per failure lineage: comment on the open
           # "[automation] Release pipeline failed" issue or create it. There is
-          # no checkout, so GH_REPO pins the repository for gh. All dynamic
-          # values arrive via env, never interpolated into the source.
+          # no checkout; GH_REPO selects the repository for gh. Dynamic values
+          # arrive through the environment, not shell source interpolation.
           BODY="Release pipeline failed in run ${RUN_URL} at commit ${SHA}. release=${RELEASE_RESULT}, registry=${REGISTRY_RESULT}."
           OPEN=$(gh api "repos/${GH_REPO}/issues?state=open&per_page=100" \
             --jq 'map(select(.title == "[automation] Release pipeline failed"))[0].number // empty')

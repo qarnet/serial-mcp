@@ -1,24 +1,20 @@
 #!/usr/bin/env bash
 #
-# Deterministic offline tests for scripts/install-nrfutil-ci.sh.
+# Offline deterministic tests for scripts/install-nrfutil-ci.sh.
 #
-# The installer is exercised through NRFUTIL_BASE_URL=file:// fixtures so the
-# full pipeline (download -> SHA-256 verify -> strip-components=2 extraction ->
-# executable check -> atomic publish -> staging cleanup) is proven WITHOUT any
-# live Nordic network dependency. Fixtures are tiny archives generated in a
-# temp dir at run time; no binaries are committed.
+# Exercise the installer through NRFUTIL_BASE_URL=file:// fixtures. Cover the
+# full pipeline: download, SHA-256 verification, strip-components=2 extraction,
+# executable check, atomic publish, and staging cleanup without a live Nordic
+# network dependency. Generate tiny archives in a temp directory at run time;
+# commit no binaries.
 #
-# Covered cases:
-#   1. missing required env vars           -> fail, no destination
-#   2. SHA-256 mismatch                    -> fail, no destination, staging cleaned
-#   3. archive missing bin/nrfutil         -> fail, no destination
-#   4. non-executable bin/nrfutil          -> fail, no destination
-#   5. happy path                          -> destination published with both
-#      binaries executable, staging dir removed
+# Cases cover missing required environment, SHA-256 mismatch, missing and
+# non-executable bin/nrfutil, and successful publication of both executables
+# with staging cleanup.
 #
-# Version/checksum env values used here are fixtures, NOT the production
-# pins; production values live in .github/workflows/ci.yml and are verified
-# by the native-sim job itself.
+# Version and checksum environment values here are fixtures, not production
+# pins. Production values live in .github/workflows/ci.yml and are verified by
+# the native-sim job itself.
 
 set -euo pipefail
 
@@ -41,7 +37,7 @@ step() { printf '\n--- %s\n' "$*"; }
 ok()   { printf 'ok:   %s\n' "$*"; PASS=$((PASS + 1)); }
 bad()  { printf 'FAIL: %s\n' "$*" >&2; FAIL=$((FAIL + 1)); }
 
-# --- fixture helpers ----------------------------------------------------------
+# Fixture helpers.
 
 # make_archive <out.tar.gz> <pkg-root> <binary-name> <file-mode>
 # Builds the Nordic package layout <pkg>/data/bin/<binary> (plus a share
@@ -65,13 +61,12 @@ staging_leftovers() {
   find "$TMP_BASE" -maxdepth 1 -name 'nrfutil-ci.*' -print 2>/dev/null
 }
 
-# Reset fixtures for a fresh case.
+# Reset fixtures for each case.
 new_fixtures() {
   rm -rf "$FIXTURES" "$DEST"
   mkdir -p "$FIXTURES/nrfutil" "$FIXTURES/nrfutil-sdk-manager"
 }
 
-# --- 1. missing required env vars ---------------------------------------------
 step "missing required env vars fail closed"
 new_fixtures
 if env -i PATH="$PATH" bash "$INSTALLER" "$DEST" >"$WORK/out.log" 2>&1; then
@@ -82,7 +77,6 @@ else
   ok "missing env vars rejected, no destination created"
 fi
 
-# --- 2. SHA-256 mismatch ------------------------------------------------------
 step "SHA-256 mismatch fails before extraction"
 new_fixtures
 printf 'this is not the real tarball\n' > "$FIXTURES/nrfutil/nrfutil-x86_64-unknown-linux-gnu-8.2.0.tar.gz"
@@ -101,7 +95,6 @@ else
   ok "SHA-256 mismatch rejected, no destination, staging cleaned"
 fi
 
-# --- 3. archive missing bin/nrfutil -------------------------------------------
 step "archive without bin/nrfutil fails at executable verification"
 new_fixtures
 make_archive "$FIXTURES/nrfutil/nrfutil-x86_64-unknown-linux-gnu-8.2.0.tar.gz" \
@@ -121,7 +114,6 @@ else
   ok "missing bin/nrfutil rejected, no destination"
 fi
 
-# --- 4. non-executable bin/nrfutil --------------------------------------------
 step "non-executable bin/nrfutil fails at executable verification"
 new_fixtures
 make_archive "$FIXTURES/nrfutil/nrfutil-x86_64-unknown-linux-gnu-8.2.0.tar.gz" \
@@ -141,7 +133,6 @@ else
   ok "non-executable bin/nrfutil rejected, no destination"
 fi
 
-# --- 5. happy path -------------------------------------------------------------
 step "happy path publishes both binaries and cleans staging"
 new_fixtures
 make_archive "$FIXTURES/nrfutil/nrfutil-x86_64-unknown-linux-gnu-8.2.0.tar.gz" \
@@ -169,6 +160,5 @@ else
   fi
 fi
 
-# --- summary -------------------------------------------------------------------
 printf '\n==== install-nrfutil-ci tests: %d passed, %d failed ====\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

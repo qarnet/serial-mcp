@@ -4,20 +4,20 @@ on:
   workflow_call:
     inputs:
       mode:
-        description: 'Release mode: "release" performs a real release (draft, assets, publish, crate publish); "dry-run" builds the four platform binaries and uploads them as Actions artifacts.'
+        description: 'Mode "release" creates and publishes a release, uploads assets, and publishes the crate. Mode "dry-run" builds the four platform binaries and uploads Actions artifacts.'
         required: true
         type: string
       ref:
-        description: Git ref (branch, tag, or SHA) to build and release
+        description: Git ref to build and release (branch, tag, or SHA)
         required: true
         type: string
     secrets:
       CARGO_REGISTRY_TOKEN:
         required: false
-        description: crates.io publish token (used by release mode only)
+        description: crates.io publish token for release mode
     outputs:
       version:
-        description: Package version prepared by the release (emitted even when the release is skipped as already published)
+        description: Package version prepared by the release, including when an already-published version is skipped
         value: ${{ jobs.prepare.outputs.version }}
 
 env:
@@ -39,7 +39,7 @@ jobs:
     steps:
       - name: Validate mode
         run: |
-          # Defense in depth: reject unknown modes before anything mutates.
+          # Reject unknown modes before any mutation.
           if [ "${{ inputs.mode }}" != "release" ] && [ "${{ inputs.mode }}" != "dry-run" ]; then
             echo "Invalid mode '${{ inputs.mode }}' — only 'release' and 'dry-run' are accepted." >&2
             exit 1
@@ -69,10 +69,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          # Only a *published* (non-draft) release counts as "already released".
-          # A leftover draft from a failed run must be retryable, not skipped —
-          # with immutable releases, assets are attached to the draft and only
-          # sealed when it is published, so an unpublished tag/draft is unfinished.
+          # Only a published, non-draft release counts as already released. A
+          # leftover draft from a failed run must remain retryable. Immutable
+          # releases attach assets to the draft and seal it only on publish, so
+          # an unpublished tag or draft is unfinished.
           if [ "$(gh release view "${{ steps.version.outputs.tag }}" \
                     --json isDraft -q .isDraft 2>/dev/null)" = "false" ]; then
             echo "published=true" >> "$GITHUB_OUTPUT"
@@ -81,9 +81,9 @@ jobs:
           fi
 
       - name: Validate crates.io token present
-        # Release mode must not begin mutating unless the publish credential is
-        # available. Dry-run callers pass no token and skip this entirely. The
-        # token is only ever read through env, never printed.
+        # Release mode must have its publish credential before mutation starts.
+        # Dry-run callers pass no token and skip this check. Read the token only
+        # through env; never print it.
         if: inputs.mode == 'release' && steps.tag.outputs.published != 'true'
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
@@ -96,8 +96,8 @@ jobs:
       - name: Decide mode
         id: mode
         run: |
-          # The caller supplies the mode. A release-mode call whose version is
-          # already published degrades to a no-op skip; dry-run always proceeds.
+          # The caller supplies the mode. A release call for an already-published
+          # version becomes a no-op; dry-run always proceeds.
           if [ "${{ inputs.mode }}" = "release" ] && [ "${{ steps.tag.outputs.published }}" = "true" ]; then
             echo "mode=skip" >> "$GITHUB_OUTPUT"
           else
@@ -200,8 +200,8 @@ jobs:
              "serial-mcp-${{ matrix.artifact_name_suffix }}${EXT}"
 
       - name: Upload artifact
-        # Named per platform; publish-release downloads exactly these in
-        # release mode, dry-run users see the same artifacts in the UI.
+        # Name artifacts per platform. publish-release downloads these exact
+        # names in release mode, and dry-run users see the same artifacts.
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: serial-mcp-${{ matrix.artifact_name_suffix }}
@@ -222,11 +222,10 @@ jobs:
           TAG: ${{ needs.prepare.outputs.tag }}
           SHA: ${{ needs.prepare.outputs.sha }}
         run: |
-          # Under immutable releases the tag cannot be created by `git push` (a
-          # ruleset restricts tag creation); GitHub creates it when the release
-          # is published. A draft does not create the tag yet, so we point it at
-          # the release commit; publish-release uploads assets, then seals it.
-          # Idempotent: a re-run after a partial failure reuses the existing draft.
+          # Immutable-release rules prevent `git push` from creating the tag.
+          # GitHub creates it when the release is published. The draft points
+          # at the release commit; publish-release uploads assets and seals it.
+          # A rerun after partial failure reuses the existing draft.
           if ! gh release view "$TAG" >/dev/null 2>&1; then
             gh release create "$TAG" \
               --target "$SHA" \
@@ -268,8 +267,8 @@ jobs:
           path: artifacts/x86_64-windows
 
       - name: Upload artifacts to draft
-        # Upload the exact matrix artifacts without executing them — the
-        # binaries are only ever passed to `gh release upload` by path.
+        # Upload exact matrix artifacts without executing them. The binaries
+        # are passed to `gh release upload` by path only.
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
@@ -281,8 +280,8 @@ jobs:
           done
 
       - name: Mark draft as published
-        # Flipping the draft to published is what seals the release under
-        # immutable releases — by now every platform's binary is attached.
+        # Publishing the draft seals the release under immutable-release rules;
+        # every platform binary is attached first.
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
@@ -321,8 +320,8 @@ jobs:
         run: |
           NAME=$(cargo metadata --format-version 1 --no-deps | jq -r '.packages[0].name')
           VERSION="${{ needs.prepare.outputs.version }}"
-          # crates.io rejects republishing an existing version; treat an already
-          # published version as a no-op so re-runs don't fail the release.
+          # crates.io rejects an existing version. Treat it as a no-op so reruns
+          # do not fail the release.
           CODE=$(curl -sS -o /dev/null -w '%{http_code}' \
             -H "User-Agent: ${NAME}-release-ci (github.com/qarnet/serial-mcp)" \
             "https://crates.io/api/v1/crates/${NAME}/${VERSION}")

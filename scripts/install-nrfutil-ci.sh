@@ -1,26 +1,12 @@
 #!/usr/bin/env bash
-# Provision pinned nrfutil core + sdk-manager into an isolated directory.
+# Install exact nrfutil and sdk-manager archives into an isolated directory.
 #
-# This replaces the old native-sim CI flow, which curl'd an UNVERSIONED
-# launcher into /usr/local/bin, chmod'd and sudo-mv'd whatever bytes came
-# back (a 160-byte HTTP 504 HTML page when Nordic's CDN timed out), and then
-# floated the core module and sdk-manager through `nrfutil self-upgrade` /
-# `nrfutil install sdk-manager` on every run. When the launcher download
-# silently succeeded with HTML, the next `nrfutil self-upgrade` tried to
-# shell-parse that HTML and the whole job died.
-#
-# This installer instead:
-#   * downloads exact versioned Nordic package tarballs (never the
-#     unversioned launcher), with curl failing closed (--fail-with-body)
-#     and bounded retries for transient network/server errors, a connect
-#     timeout, and an overall per-transfer timeout;
-#   * verifies the SHA-256 of every archive before anything is extracted;
-#   * stages both archives in a temp dir, verifies bin/nrfutil and
-#     bin/nrfutil-sdk-manager exist and are executable, and only then
-#     publishes the destination with a single atomic rename;
-#   * cleans the staging dir on any failure via a trap;
-#   * never uses sudo, never executes downloaded content, never pipes a
-#     download into a shell.
+# Versioned URLs and SHA-256 checks prevent an unpinned package or a CDN error
+# page from reaching extraction. Downloads fail closed with bounded retries,
+# connection and transfer timeouts. Both archives are staged, verified, and
+# published with one atomic rename. A trap removes staging on failure. The
+# installer uses no sudo, never executes downloaded content, and never pipes a
+# download into a shell.
 #
 # Usage:
 #   scripts/install-nrfutil-ci.sh <destination-dir>
@@ -108,8 +94,8 @@ for exe in bin/nrfutil bin/nrfutil-sdk-manager; do
 done
 log "extracted binaries verified"
 
-# Publish with a single atomic rename; a failure before this point leaves
-# no partial destination (the trap removes the staging dir).
+# Publish only after extraction checks. A failure before this point leaves no
+# partial destination, and the trap removes the staging directory.
 mkdir -p "$(dirname "$dest")"
 rm -rf "$dest"
 mv "$stage" "$dest"

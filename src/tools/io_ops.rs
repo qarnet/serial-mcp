@@ -34,7 +34,7 @@ pub async fn write(
     let decoded = decode_tx_payload(encoding, &args.data, "write.data.len()")?;
     let decoded_len = decoded.len();
 
-    // Resolve tx_framing via the shared 4-layer precedence helper.
+    // Apply four-layer TX framing precedence.
     let tx_framing = crate::precedence::resolve_field(
         args.tx_framing,
         args.protocol,
@@ -89,7 +89,7 @@ pub async fn read(
         args.connection_id, args.timeout_ms, args.no_new_rx_timeout_ms
     );
 
-    // Look up connection early to get max_buffered_bytes default.
+    // Look up the connection early for its max_buffered_bytes default.
     let max_buffered_bytes_default = lookup_connection(connections, &args.connection_id)
         .await
         .map(|c| c.max_buffered_bytes_default())
@@ -112,7 +112,7 @@ pub async fn read(
     )
     .await?;
 
-    // Reserve budget before reading.
+    // Reserve budget before RX work.
     let _reservation = budget
         .try_reserve(max_buffered_bytes)
         .map_err(|e| map_budget_err("read.max_buffered_bytes", e))?;
@@ -124,7 +124,7 @@ pub async fn read(
         .await
         .map_err(|e| format!("read: {e}"))?;
 
-    // Resolve rx_framing + rx_parser via the shared 4-layer precedence helper.
+    // Apply four-layer RX framing and parser precedence.
     let rx_framing = crate::precedence::resolve_field(
         args.rx_framing,
         args.protocol,
@@ -140,11 +140,9 @@ pub async fn read(
         connection.protocol_default(),
     );
 
-    // Resolve the initial read cursor from the `from` parameter.
-    // Default: Cursor (shared read cursor). Writes the cursor BEFORE calling
-    // read_bytes_from_ring so the agent can re-pass the same
-    // from: {"type":"offset","offset":N} to re-read non-destructively
-    // (cursor gets reset on each call).
+    // Resolve and store the initial cursor from `from` before reading.
+    // `ReadFrom` covers `Cursor`, `Now`, `BufferStart`, and `Offset`; the
+    // default is the shared cursor.
     let ring = session.ring();
     let initial_cursor = match args.from.as_ref().unwrap_or(&ReadFrom::Cursor) {
         ReadFrom::Now => ring.end_offset(),
@@ -195,7 +193,7 @@ pub async fn transact(
     let encoding = parse_encoding(&args.encoding)?;
     let connection = lookup_connection(connections, &args.connection_id).await?;
 
-    // --- Write half (shared decode/validate/framing, then session I/O) ---
+    // Write half: shared decode, validation, framing, and session I/O.
     let decoded = decode_tx_payload(encoding, &args.data, "transact.data.len()")?;
     let decoded_len = decoded.len();
 
@@ -229,7 +227,7 @@ pub async fn transact(
         encoding: encoding.to_string(),
     };
 
-    // --- Read half: transact reads from the live edge by default ---
+    // Read half: transact starts at the live edge by default.
     let max_buffered_bytes = connection.max_buffered_bytes_default();
     let _reservation = budget
         .try_reserve(max_buffered_bytes)
@@ -265,7 +263,7 @@ pub async fn transact(
     };
     session.set_read_cursor(initial_cursor);
 
-    // Resolve the matcher from the match config (inline the matcher-building).
+    // Resolve the optional matcher.
     let matcher = match args.r#match {
         Some(ref m) => Some(
             crate::match_config::validate_match_request(m)
@@ -328,9 +326,8 @@ pub async fn flush(
                         e,
                     )
                 })?;
-            // Discard all unread buffered RX data. To skip past data without
-            // destroying it, use `read` with `from: {"type": "now"}` and
-            // discard the result.
+            // Discard unread RX data. To skip without destroying it, use
+            // `read` with `from: {"type": "now"}` and discard the result.
             discard_rx_backlog(rx_sessions, &args.connection_id).await;
         }
         FlushTarget::Output => {
@@ -344,9 +341,8 @@ pub async fn flush(
             })?;
         }
         FlushTarget::Both => {
-            // Output-first ordering: flush queued/OS output, then clear OS
-            // input, then discard the retained ring and clamp the shared
-            // cursor — the same RX semantics as target=input.
+            // Flush output first, then OS input, retained ring data, and the
+            // shared cursor. RX semantics match `target="input"`.
             let session = tx_sessions.get_or_create(Arc::clone(&connection)).await;
             session.flush_output().await.map_err(|e| {
                 log_tool_err(
@@ -392,11 +388,7 @@ async fn discard_rx_backlog(rx_sessions: &Arc<RxSessionManager>, connection_id: 
     }
 }
 
-// ------------------------------------------------------------------
-// Shared TX preparation (used by `write` and `transact`)
-// ------------------------------------------------------------------
-
-/// Decode a tool string and validate decoded size against `MAX_WRITE_BYTES`.
+/// Decode tool input and validate its size against `MAX_WRITE_BYTES`.
 fn decode_tx_payload(
     encoding: Encoding,
     input: &str,
@@ -408,19 +400,19 @@ fn decode_tx_payload(
     Ok(bytes)
 }
 
-/// Failure of the shared TX framing stage: callers map `Encode` errors
-/// themselves; `Size` validation errors pass through unchanged.
+/// Failure from shared TX framing. Callers map `Encode`; `Size` carries the
+/// ready-made validation error.
 #[derive(Debug)]
 enum TxFramingError {
-    /// `TxFramingMode::encode` failed; the caller owns the error mapping.
+    /// `TxFramingMode::encode` failed; the caller maps the error.
     Encode(String),
-    /// The framed size exceeded `MAX_WRITE_BYTES`; carries the ready-made
-    /// `{field}={value} exceeds maximum {max}` validation error.
+    /// Framed size exceeded `MAX_WRITE_BYTES`; carries the ready-made
+    /// `{field}={value} exceeds maximum {max}` error.
     Size(String),
 }
 
-/// Apply TX framing when configured; otherwise return the decoded bytes
-/// unchanged. Validates the final length against `MAX_WRITE_BYTES`.
+/// Apply optional TX framing, validate final length against `MAX_WRITE_BYTES`,
+/// and return decoded bytes unchanged when unframed.
 fn apply_tx_framing(
     decoded: Vec<u8>,
     framing: Option<&crate::framing::TxFramingConfig>,

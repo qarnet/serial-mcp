@@ -1,13 +1,11 @@
-//! `SpawnedServer` — a real `serial-mcp` child process running the
+//! `SpawnedServer` runs a real `serial-mcp` child process with the
 //! streamable-HTTP transport on a free local port.
 //!
-//! Why this exists:
-//!
-//! - Validates the actual shipped binary, not an in-test assembly.
-//! - Mirrors what users run (`serial-mcp --transport=http --bind=...`).
-//! - Keeps the in-process `TestServer` available for tests that need
-//!   to inject a custom `ConnectionManager` or non-default security
-//!   rules into the server before a client connects.
+//! It validates the shipped binary rather than an in-test assembly, mirrors
+//! what users run (`serial-mcp --transport=http --bind=...`), and keeps the
+//! in-process `TestServer` available for tests that need to inject a custom
+//! `ConnectionManager` or non-default security rules before a client
+//! connects.
 //!
 //! Usage:
 //!
@@ -28,7 +26,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::binaries::{ensure_serial_mcp_built, serial_mcp_bin};
 
-/// A real `serial-mcp` HTTP server running in a child process on
+/// Real `serial-mcp` HTTP server running in a child process on
 /// `127.0.0.1:<chosen>`. The child is killed on `Drop`.
 ///
 /// Unless the caller supplies an explicit profiles path, the server runs
@@ -44,14 +42,15 @@ pub struct SpawnedServer {
     _profiles_dir: Option<tempfile::TempDir>,
 }
 
-/// Serializes the pick-port → spawn → wait-listening window across
+/// Serializes the pick-port, spawn, and wait-listening window across
 /// concurrently running tests in this process. `pick_free_port` cannot
-/// return a port that is currently bound, so once `wait_for_port`
-/// confirms the child owns its port, later picks cannot collide.
-/// Without this, two tests could pick the same port between listener
-/// drop and child bind; the losing child exits silently (stderr is
-/// null) and both clients talk to the winning test's server — which
-/// dies mid-flight when that test completes.
+/// return a currently bound port, so once `wait_for_port` confirms that the
+/// child owns its port, later picks cannot collide.
+///
+/// Without this guard, two tests could pick the same port between listener
+/// drop and child bind. The losing child exits silently (`stderr` is null),
+/// and both clients talk to the winning test's server, which dies mid-flight
+/// when that test completes.
 static SPAWN_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 impl SpawnedServer {
@@ -77,7 +76,7 @@ impl SpawnedServer {
     }
 
     /// Like [`SpawnedServer::start_with_profiles_path`], but runs the
-    /// child with `cwd` as its working directory — for relative
+    /// child with `cwd` as its working directory for relative
     /// `--profiles-path` resolution tests.
     pub async fn start_with_cwd(
         cwd: &std::path::Path,
@@ -104,12 +103,12 @@ impl SpawnedServer {
         let child = spawn_serial_mcp_http(port, profiles_path, cwd, capture_dir)
             .await
             .expect("spawn serial-mcp --transport=http");
-        // Wait until the listener is actually accepting. axum binds and
-        // prints nothing to stdout, so we have to probe it.
+        // Wait until the listener is accepting. axum binds and prints nothing
+        // to stdout, so probe it.
         wait_for_port(port, Duration::from_secs(15))
             .await
             .expect("spawned serial-mcp to start listening");
-        // Best-effort reap on drop.
+        // Drop performs best-effort reaping.
         let shutdown = CancellationToken::new();
         SpawnedServer {
             url: format!("http://127.0.0.1:{port}/mcp"),
@@ -140,8 +139,8 @@ impl Drop for SpawnedServer {
         self.shutdown.cancel();
         if let Some(mut child) = self.child.take() {
             let _ = child.start_kill();
-            // Reap the zombie so the test process does not leak it.
-            // We do not await here (Drop is sync), so spawn a thread.
+            // Reap the child so the test process does not leak a zombie. Drop
+            // is synchronous, so spawn a thread instead of awaiting here.
             #[allow(clippy::let_underscore_future)]
             std::thread::spawn(move || {
                 let _ = child.wait();
@@ -151,9 +150,9 @@ impl Drop for SpawnedServer {
 }
 
 fn pick_free_port() -> Option<u16> {
-    // TcpListener::bind("127.0.0.1:0") assigns a free port. We close
-    // immediately; the window between close and the spawned server's
-    // bind is guarded by SPAWN_LOCK against intra-process collisions.
+    // `TcpListener::bind("127.0.0.1:0")` assigns a free port. Close the
+    // listener immediately; `SPAWN_LOCK` guards the window before the spawned
+    // server binds against intra-process collisions.
     let listener = TcpListener::bind("127.0.0.1:0").ok()?;
     let port = listener.local_addr().ok()?.port();
     drop(listener);
@@ -195,7 +194,7 @@ async fn wait_for_port(port: u16, timeout: Duration) -> Result<()> {
     let target = format!("127.0.0.1:{port}");
     while tokio::time::Instant::now() < deadline {
         if TcpListener::bind(&target).is_err() {
-            // Port already taken -> server is up.
+            // A bind failure means the server already owns the port.
             return Ok(());
         }
         tokio::time::sleep(Duration::from_millis(50)).await;

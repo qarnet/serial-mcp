@@ -1,8 +1,8 @@
 //! TX framing codecs and byte helpers.
 //!
-//! Holds the `TxFramingMode::encode` implementation, SLIP (RFC 1055) and
-//! COBS stuffing, the length-prefix/delimiter/blank-frame byte helpers used
-//! by the decoder, and `hex_upper`.
+//! Contains `TxFramingMode::encode`, SLIP (RFC 1055) and COBS stuffing,
+//! length-prefix/delimiter/blank-frame helpers used by the decoder, and
+//! `hex_upper`.
 
 use crate::checksums::xor_checksum;
 use crate::codec;
@@ -11,8 +11,7 @@ use crate::util::find_subsequence;
 use super::config::{Endianness, TxFramingMode, TxLineEnding};
 
 impl TxFramingMode {
-    /// Encode a decoded payload by applying this TX framing mode.
-    /// Returns the framed bytes to send to the UART.
+    /// Apply this TX framing mode and return bytes for the UART.
     pub fn encode(&self, payload: &[u8]) -> Result<Vec<u8>, String> {
         match self {
             TxFramingMode::Line { ending } => {
@@ -153,7 +152,7 @@ impl TxFramingMode {
                     u8::from_str_radix(hex_str, 16)
                         .map_err(|_| "TX NMEA invalid hex in checksum".to_string())
                 });
-                // Exclusive borrow on body is done — derive the checksum input now.
+                // Derive checksum input after releasing the borrow of `body`.
                 let existing_val = match existing_checksum {
                     Some(Ok(v)) => Some(v),
                     Some(Err(e)) => return Err(e),
@@ -187,18 +186,16 @@ impl TxFramingMode {
     }
 }
 
-/// Whether a frame's data should be skipped under `skip_empty`: true when the
-/// data is empty or contains only ASCII whitespace bytes (space, \t, \r, \n,
-/// \x0b, \x0c).
+/// Return whether frame data is empty or contains only ASCII whitespace
+/// (space, `\t`, `\r`, `\n`, `\x0b`, or `\x0c`) for `skip_empty`.
 pub(crate) fn is_blank_frame(data: &[u8]) -> bool {
     data.iter().all(|&b| b.is_ascii_whitespace())
 }
 
-/// Extract the next delimited frame from the buffer, returning `Some(frame)`
-/// when the delimiter byte sequence is found. Returns `None` if the delimiter
-/// has not yet appeared. The delimiter bytes are always drained from the buffer;
-/// they are included in the returned frame only when `include_terminators` is
-/// `true`.
+/// Extract the next frame when `delim` appears in `buf`.
+///
+/// Always drains the delimiter. Includes it in the returned frame only when
+/// `include_terminators` is `true`.
 pub(crate) fn extract_delimited(
     buf: &mut Vec<u8>,
     delim: &[u8],
@@ -223,7 +220,7 @@ pub(crate) fn hex_upper(bytes: &[u8]) -> String {
         .join("")
 }
 
-// ---- SLIP (RFC 1055) constants and codec ------------------------------------
+// SLIP (RFC 1055) constants and codec.
 
 pub(crate) const SLIP_END: u8 = 0xC0;
 pub(crate) const SLIP_ESC: u8 = 0xDB;
@@ -318,8 +315,8 @@ pub(crate) fn read_length_prefix(bytes: &[u8], prefix_size: u8, endianness: Endi
             }
         }
         _ => {
-            // Invalid prefix_size — should never happen because
-            // FrameDecoder::new() rejects sizes other than 1/2/4.
+            // Invalid prefix_size; FrameDecoder::new() rejects sizes other
+            // than 1/2/4.
             0
         }
     }
@@ -335,7 +332,7 @@ mod tests {
     use crate::framing::decoder::{FrameDecoder, ParsedFrame};
     use crate::match_config::PatternEncoding;
 
-    // ── SLIP (RFC 1055) tests ─────────────────────────────────────────────
+    // SLIP (RFC 1055) tests.
 
     #[test]
     fn slip_stuff_replaces_end_and_esc() {
@@ -368,7 +365,7 @@ mod tests {
         assert_eq!(framed, &[SLIP_END, SLIP_ESC, SLIP_ESC_ESC, SLIP_END]);
     }
 
-    // ── TX framing unit tests ────────────────────────────────────────────
+    // TX framing tests.
 
     #[test]
     fn tx_line_lf() {
@@ -530,7 +527,7 @@ mod tests {
         }
     }
 
-    // ── Round-trip tests (TX encode → RX decode) ──────────────────────
+    // TX-to-RX round-trip tests.
 
     #[test]
     fn roundtrip_line_lf() {
@@ -678,7 +675,7 @@ mod tests {
         assert_eq!(frames[0].data, payload);
     }
 
-    // ── TX framing JSON deserialization ──────────────────────────────────
+    // TX framing JSON deserialization tests.
 
     #[test]
     fn tx_framing_line_crlf_deserialize() {
@@ -709,7 +706,7 @@ mod tests {
     #[test]
     fn cobs_stuff_preserves_payload_without_delimiter() {
         // Encode a payload containing the 0x00 delimiter byte; the encoded block
-        // must NOT contain the 0x00 delimiter byte.
+        // must not contain the 0x00 delimiter byte.
         let stuffed = cobs_stuff(&[0x00, 0x41, 0x00]);
         assert!(
             !stuffed.contains(&0x00),
@@ -754,7 +751,7 @@ mod tests {
         assert_eq!(framed, b"<hi|");
     }
 
-    // ── NMEA TX auto-checksum tests ────────────────────────────────────
+    // NMEA TX auto-checksum tests.
 
     #[test]
     fn tx_nmea_appends_checksum_and_terminators() {
@@ -774,7 +771,7 @@ mod tests {
         )
         .into_bytes();
         let framed = TxFramingMode::Nmea.encode(&payload).unwrap();
-        // Payload already starts with $ and has correct checksum — should pass through.
+        // Payload already starts with $ and has correct checksum; pass it through.
         assert_eq!(framed.len(), payload.len() + 2);
         assert!(framed.starts_with(b"$"));
         assert!(framed.ends_with(b"\r\n"));

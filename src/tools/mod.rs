@@ -18,11 +18,10 @@ mod tests {
     use crate::server::tool_catalog;
     use crate::tools::types::OpenArgs;
 
-    /// The exhaustive 25-tool catalog served by MCP (shared with the xtask
-    /// `agent-eval` catalog metrics via `crate::server::tool_catalog`). A
-    /// missing tool would skip its
-    /// `outputSchema`/`title` check and any uint-format scan, so the count
-    /// is guarded explicitly.
+    /// The 25-tool MCP catalog, shared with the xtask `agent-eval` catalog
+    /// metrics through `crate::server::tool_catalog`. An explicit count guard
+    /// prevents a missing tool from skipping its `outputSchema`/`title` check
+    /// and uint-format scan.
     #[test]
     fn tool_catalog_has_exactly_twenty_five_tools() {
         let catalog = tool_catalog();
@@ -38,16 +37,15 @@ mod tests {
     }
 
     /// Regression guard: every MCP tool must carry `outputSchema` and `title`,
-    /// and every MCP tool `outputSchema` must be free of the non-standard
-    /// `uint*` format keywords that schemars 1.x emits for unsigned integer
-    /// fields.
+    /// and each output schema must omit the non-standard `uint*` format
+    /// keywords that schemars 1.x emits for unsigned integer fields.
     ///
-    /// DO NOT DELETE — see the header of `serial::schema` (src/serial/mod.rs) and
-    /// `src/schema_helpers.rs` for the full rationale. History: b12b09fd,
+    /// Keep this guard. See the `serial::schema` header in `src/serial/mod.rs`
+    /// and `src/schema_helpers.rs` for the rationale. History: b12b09fd,
     /// bc37a0b0, and the PortInfo regression this test originally missed
-    /// because it only checked `uint`/`uint32`/`uint64` and not `uint8`/
-    /// `uint16`. The `uint8`/`uint16` cases are now covered here, and the
-    /// per-type coverage lives in `serial::schema`.
+    /// because it checked only `uint`/`uint32`/`uint64`, not `uint8`/`uint16`.
+    /// This scan covers `uint8`/`uint16`; per-type coverage lives in
+    /// `serial::schema`.
     fn all_tool_attrs() -> Vec<(String, rmcp::model::Tool)> {
         tool_catalog()
             .into_iter()
@@ -67,13 +65,13 @@ mod tests {
     }
 
     /// Regression guard: the tool catalog (names, descriptions, and generated
-    /// input/output schemas) must not carry any removed streaming/logging
-    /// surface — `subscribe`/`Subscribe` wording, `poll_interval_ms`,
+    /// input/output schemas) must not carry removed streaming or logging
+    /// surface. This includes `subscribe`/`Subscribe`, `poll_interval_ms`,
     /// `notification_drop_count`, `peer_disconnected`, `budget_exhausted`,
-    /// `channel_closed`, or `read_error`. The `subscribe`/`unsubscribe`
-    /// tools and their schema helpers were removed with MCP logging in the
-    /// rmcp 3 server-surface migration; this test keeps generated tool
-    /// schemas from regressing into stale wording.
+    /// `channel_closed`, and `read_error`. The `subscribe`/`unsubscribe` tools
+    /// and schema helpers were removed with MCP logging in the rmcp 3
+    /// server-surface migration; this test prevents stale wording from
+    /// returning to generated tool schemas.
     #[test]
     fn tool_catalog_omits_removed_streaming_surface() {
         let removed = [
@@ -116,8 +114,8 @@ mod tests {
 
     #[test]
     fn tool_catalog_names_match_served_route_names() {
-        // Every catalog entry must carry a non-empty name and the exact
-        // served count (25); duplicate names would make tools/list ambiguous.
+        // Catalog entries need non-empty names, and the served count must stay
+        // 25; duplicate names would make tools/list ambiguous.
         let catalog = tool_catalog();
         let names: Vec<&str> = catalog.iter().map(|t| t.name.as_ref()).collect();
         assert_eq!(names.len(), 25);
@@ -149,8 +147,8 @@ mod tests {
 
     #[test]
     fn open_args_schema_no_longer_requires_default_bearing_fields() {
-        // Omitted baud/default-bearing fields must be valid calls
-        // (they resolve to profile defaults / built-ins).
+        // Omitted baud/default-bearing fields are valid; they resolve to
+        // profile defaults or built-ins.
         let schema = schema_for!(OpenArgs);
         let json = serde_json::to_value(&schema).unwrap();
         let required = json
@@ -175,7 +173,7 @@ mod tests {
                 "open schema must not require {field}: {required:?}"
             );
         }
-        // The profile_mode field must be present.
+        // profile_mode must be present.
         let props = json.get("properties").unwrap();
         assert!(
             props.get("profile_mode").is_some(),
@@ -199,10 +197,9 @@ mod tests {
         );
     }
 
-    /// Review gate: the optional override fields must genuinely
-    /// accept null (and omission) against the GENERATED schema — not merely
-    /// be absent from the `required` list. Validates public schema behavior
-    /// via the jsonschema validator, like the tool schema guards do.
+    /// Review gate: optional override fields must accept null and omission in
+    /// the generated schema, not merely be absent from `required`. Validate
+    /// public schema behavior with jsonschema as the tool schema guards do.
     #[test]
     fn open_and_open_profile_schemas_accept_null_overrides() {
         use jsonschema::validator_for;
@@ -277,9 +274,9 @@ mod tests {
         assert!(!json.contains("\"format\":\"uint\""));
     }
 
-    /// Regression guard: after renaming `framing` → `rx_framing` and
-    /// adding `tx_framing`, the write/read input schemas must expose
-    /// `rx_framing` / `tx_framing` and NOT expose the old `framing` field.
+    /// Regression guard for renaming `framing` to `rx_framing` and adding
+    /// `tx_framing`: write/read input schemas must expose `rx_framing` /
+    /// `tx_framing` and omit the old `framing` field.
     #[test]
     fn framing_fields_renamed_in_tool_schemas() {
         let schema = schema_for!(crate::tools::types::WriteArgs);
@@ -305,8 +302,8 @@ mod tests {
         );
     }
 
-    /// After relocating `parser` from `rx_framing` to sibling
-    /// `rx_parser`, verify `rx_parser` appears in ReadArgs schema.
+    /// After moving `parser` from `rx_framing` to sibling `rx_parser`, verify
+    /// that `rx_parser` appears in the ReadArgs schema.
     #[test]
     fn rx_parser_present_in_schemas() {
         let schema = schema_for!(crate::tools::types::ReadArgs);
@@ -316,9 +313,8 @@ mod tests {
             "ReadArgs must contain rx_parser"
         );
 
-        // Verify rx_framing sub-schema no longer exposes a "parser" property.
-        // The `rx_framing` field value is a ref, so check the RxFramingConfig
-        // schema directly.
+        // `rx_framing` is a ref, so inspect the RxFramingConfig schema directly
+        // to verify that it no longer exposes a "parser" property.
         let schema = schema_for!(crate::framing::RxFramingConfig);
         let json = serde_json::to_string(&schema).unwrap();
         assert!(
@@ -327,8 +323,8 @@ mod tests {
         );
     }
 
-    /// After adding the `protocol` field, verify it appears in
-    /// WriteArgs and ReadArgs schemas.
+    /// Verify that the `protocol` field appears in WriteArgs and ReadArgs
+    /// schemas.
     #[test]
     fn protocol_field_present_in_schemas() {
         let schema = schema_for!(crate::tools::types::WriteArgs);

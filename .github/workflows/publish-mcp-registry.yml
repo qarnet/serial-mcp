@@ -4,15 +4,15 @@ on:
   workflow_call:
     inputs:
       ref:
-        description: Trusted git ref (branch, tag, or SHA) whose CURRENT scripts build the manifest
+        description: Trusted git ref, by branch, tag, or SHA, whose current scripts build the manifest
         required: true
         type: string
       version:
-        description: Strict SemVer version to publish (must have a published GitHub release v<version>)
+        description: Strict SemVer version to publish; it must have a published GitHub release v<version>
         required: true
         type: string
 
-# OIDC token required for mcp-publisher login github-oidc (no extra secrets needed)
+# mcp-publisher login github-oidc requires OIDC. No other secrets are needed.
 permissions:
   contents: read
   id-token: write
@@ -28,8 +28,8 @@ jobs:
       REPO: ${{ github.repository }}
     steps:
       - name: Checkout current trusted ref
-        # Full history so the historical template can be read as DATA via
-        # `git show` — historical code is never executed.
+        # Fetch full history so `git show` can read the historical template as
+        # data. Historical code is never executed.
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ inputs.ref }}
@@ -39,12 +39,12 @@ jobs:
         uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
 
       - name: Validate version
-        # Strict version validation before it is used in any tag/path argument.
+        # Validate the version before using it in any tag or path argument.
         run: python3 scripts/build_registry_manifest.py --validate-version-only "$VERSION"
 
       - name: Read historical template as data
-        # The template is extracted with `git show` into staging; it is a JSON
-        # data file, never executed.
+        # Extract the template with `git show` into staging. It is JSON data,
+        # never executable code.
         run: |
           set -euo pipefail
           rm -rf staging
@@ -56,9 +56,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          # Only a *published* (non-draft) release is eligible: the manifest
-          # points at release assets that only exist once the release is
-          # sealed. gh release view already fails on a missing tag.
+          # Only a published, non-draft release is eligible. The manifest
+          # points to assets available after the release is sealed. gh release
+          # view also fails when the tag is missing.
           DRAFT=$(gh release view "$TAG" --json isDraft -q '.isDraft')
           if [ "$DRAFT" != "false" ]; then
             echo "::error::release $TAG does not exist or is still a draft; refusing to publish."
@@ -70,9 +70,8 @@ jobs:
         run: |
           set -euo pipefail
           NAME=$(jq -r '.name' staging/template-server.json)
-          # The version must not already be in the registry. Publishing a
-          # duplicate version returns HTTP 400 and fails the job, so re-runs
-          # and un-bumped merges (tag exists from a prior release) must no-op.
+          # Do not publish a version already in the registry. A duplicate
+          # returns HTTP 400, so reruns and unbumped merges must no-op.
           COUNT=$(curl -fsS --get \
             --data-urlencode "search=$NAME" \
             --data-urlencode "version=$VERSION" \
@@ -92,10 +91,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          # Fail-closed authenticated download of the exact platform assets
-          # into clean staging. No curl-to-hash pipelines: the builder below
-          # re-verifies presence, regularity, size and sha256 against the
-          # GitHub release metadata.
+          # Download exact platform assets into clean staging with
+          # authentication. Do not use curl-to-hash pipelines. The builder
+          # rechecks presence, regularity, size, and sha256 against GitHub
+          # release metadata.
           gh release download "$TAG" --dir staging/assets --pattern 'serial-mcp-*'
 
       - name: Fetch release asset metadata
@@ -110,11 +109,10 @@ jobs:
 
       - name: Build server.json from validated assets
         if: steps.gate.outputs.publish == 'true'
-        # The committed server.json is a template WITHOUT a packages array —
-        # this step is the only producer of package identifiers and sha256
-        # hashes. scripts/build_registry_manifest.py validates every input
-        # (version, template, metadata, local files, sizes, digests) before
-        # atomically writing the output.
+        # The committed server.json is a template without a packages array.
+        # This step alone produces package identifiers and sha256 hashes.
+        # scripts/build_registry_manifest.py validates the version, template,
+        # metadata, files, sizes, and digests before an atomic write.
         run: |
           set -euo pipefail
           python3 scripts/build_registry_manifest.py \
@@ -126,13 +124,13 @@ jobs:
 
       - name: Validate server.json against schema
         if: steps.gate.outputs.publish == 'true'
-        # Schema validation uses the independent jsonschema-cli flake package;
-        # avoid spawning a full project build environment for validation.
+        # Use the independent jsonschema-cli flake package for schema
+        # validation. Do not create the full project build environment.
         run: |
           set -euo pipefail
-          # -f fails on HTTP errors, -sS keeps the error message visible, and
-          # --retry handles transient network failures — a corrupted schema
-          # must fail the job, never validate against a partial file.
+          # -f fails on HTTP errors, -sS keeps errors visible, and --retry
+          # handles transient failures. A corrupted schema must fail the job,
+          # not validate against a partial file.
           curl -fsSL --retry 3 --retry-all-errors \
             https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json \
             -o /tmp/mcp-server.schema.json
@@ -145,8 +143,7 @@ jobs:
 
       - name: Publish to MCP Registry
         if: steps.gate.outputs.publish == 'true'
-        # Pinned mcp-publisher 1.7.9 takes the manifest as a positional path
-        # (no --mcp-file flag; default ./server.json). The staged path keeps
-        # the repository-root template invariant: the committed server.json is
-        # never overwritten.
+        # mcp-publisher 1.7.9 takes the manifest as a positional path. It has
+        # no --mcp-file flag and defaults to ./server.json. The staged path
+        # keeps the committed server.json template untouched.
         run: nix run .#mcp-publisher -- publish staging/server.json

@@ -15,7 +15,8 @@ use thiserror::Error;
 pub enum Encoding {
     /// Raw UTF-8 text. Bytes that are not valid UTF-8 cannot be encoded.
     Utf8,
-    /// Lowercase hex pairs. Decoder accepts upper or lower case and ignores spaces.
+    /// Lowercase, space-separated hex pairs. Decoder accepts upper- or
+    /// lowercase input and ignores spaces.
     Hex,
     /// Standard Base64. Decoder also accepts URL-safe / no-padding input.
     Base64,
@@ -95,11 +96,10 @@ pub struct EncodedPayload {
 /// Try `requested`, then fall back to exact lowercase spaced hex when the
 /// requested encoding cannot represent `bytes`.
 ///
-/// A successful fallback returns the hex payload with
-/// `encoding == Encoding::Hex` and `fallback_reason` set to the original
-/// error text; it is NOT an error — callers own warning/drop semantics and
-/// must not count a successful fallback as a dropped payload. Only a true
-/// hex-encoding failure returns `Err`.
+/// A successful fallback returns `Encoding::Hex` and records the original error
+/// text in `fallback_reason`. It is a successful encoding result: callers may
+/// warn, but must not count it as a dropped payload. Return `Err` only when hex
+/// encoding fails.
 ///
 /// Never lossy: invalid UTF-8 bytes are preserved exactly in hex form.
 pub fn encode_or_hex(requested: Encoding, bytes: &[u8]) -> Result<EncodedPayload, CodecError> {
@@ -221,7 +221,7 @@ mod tests {
         assert_eq!(decode(Encoding::Base64, &b64).unwrap(), data);
     }
 
-    // ── encode_or_hex ─────────────────────────────────────────────────────
+    // `encode_or_hex` tests.
 
     #[test]
     fn encode_or_hex_valid_utf8_stays_requested_encoding() {

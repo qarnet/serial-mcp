@@ -1,42 +1,39 @@
 #!/usr/bin/env node
-// Inspector 2.0.0 interoperability smoke (NOT conformance).
+// Inspector 2.0.0 interoperability smoke, not conformance.
 //
-// Drives the exact pinned `@modelcontextprotocol/inspector@2.0.0` CLI in
-// `--cli --format json` mode against a running Streamable HTTP server and
-// asserts the observable MCP surface:
+// Drive the exact pinned `@modelcontextprotocol/inspector@2.0.0` CLI in
+// `--cli --format json` mode against a running Streamable HTTP server. Assert:
 //
-//   - initialize  -> server name "serial-mcp", negotiated modern 2026-07-28
-//   - tools/list  -> exactly 25 unique tools, compute_checksum present
-//   - resources/list -> serial://ports and serial://connections present
-//   - prompts/list   -> diagnose_port and interactive_terminal present
+//   - initialize returns server name "serial-mcp" and negotiated modern 2026-07-28
+//   - tools/list returns exactly 25 unique tools, including compute_checksum
+//   - resources/list contains serial://ports and serial://connections
+//   - prompts/list contains diagnose_port and interactive_terminal
 //   - tools/call compute_checksum {"algorithm":"xor","data":"$GPGGA,1","encoding":"utf8"}
-//                   -> raw 111 / hex "6F" (parsed from the actual JSON envelope)
+//     returns raw 111 / hex "6F" from the actual JSON envelope
 //
-// Node standard library only. No jq, no prose snapshots, no web/TUI/Playwright.
-// The CLI is invoked non-interactively: MCP_AUTO_OPEN_ENABLED=false, non-TTY
-// stdio, and a bounded --connect-timeout. Every command is killed on its own
-// timeout; a nonzero CLI exit or a failed assertion exits the script nonzero.
+// Use Node standard library only. No jq, no prose snapshots, no web/TUI/Playwright.
+// Invoke the CLI non-interactively with MCP_AUTO_OPEN_ENABLED=false, non-TTY
+// stdio, and a bounded --connect-timeout. Kill each command on its own timeout;
+// a nonzero CLI exit or failed assertion exits the script nonzero.
 //
 // Usage:
 //   node scripts/inspector-smoke.mjs <server-url>
 //       [--inspector-cmd <command...> | --inspector-cmd=<path>]
 //
-// The first positional is the server URL. The exact Inspector CLI invocation
-// resolves with this precedence:
-//   - `--inspector-cmd <command...>` — every argv token AFTER the flag is the
-//     command plus its fixed args (at least one token required; tokens are
-//     never whitespace-split);
-//   - `--inspector-cmd=<path>` — one executable path, kept intact (paths with
-//     spaces stay a single token); mutually exclusive with the standalone form;
-//   - the INSPECTOR_CMD env var — ONE executable path, never whitespace-split
-//     (paths with spaces remain intact); use --inspector-cmd when the command
-//     needs args;
-//   - otherwise the local locked binary
-//     `compat/mcp-validation/node_modules/.bin/mcp-inspector` (resolved
-//     relative to this script; installed from the committed package-lock.json
-//     via `npm ci --ignore-scripts`). NEVER npx and never a dynamic package
-//     resolution — the validation tree is lockfile-pinned with lifecycle
-//     scripts disabled.
+// The first positional argument is the server URL. Resolve the exact Inspector
+// CLI invocation in this order:
+//   - `--inspector-cmd <command...>` consumes every argv token after the flag as
+//     the command and its fixed args. At least one token is required, and tokens
+//     are never whitespace-split.
+//   - `--inspector-cmd=<path>` names one executable path and keeps it intact;
+//     paths with spaces stay one token. The forms are mutually exclusive.
+//   - INSPECTOR_CMD names one executable path and is never whitespace-split;
+//     use --inspector-cmd when the command needs args.
+//   - Otherwise use the local locked binary
+//     `compat/mcp-validation/node_modules/.bin/mcp-inspector`, resolved relative
+//     to this script and installed from the committed package-lock.json via
+//     `npm ci --ignore-scripts`. Do not use npx or dynamic package resolution;
+//     the validation tree is lockfile-pinned with lifecycle scripts disabled.
 
 import { spawn } from "node:child_process";
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -69,10 +66,9 @@ if (!serverUrl || serverUrl.startsWith("--")) {
   process.exit(2);
 }
 
-// Resolve the exact Inspector CLI invocation (see header comment for the
-// precedence). Deterministic: the standalone `--inspector-cmd` consumes every
-// following argv token verbatim; the `=` form and INSPECTOR_CMD env each name
-// ONE path and are never whitespace-split.
+// Resolve the exact Inspector CLI invocation using the header precedence. The
+// standalone `--inspector-cmd` consumes every following argv token verbatim;
+// the `=` form and INSPECTOR_CMD each name one path and never whitespace-split.
 function inspectorCommand(argv) {
   const standaloneIndex = argv.indexOf("--inspector-cmd");
   const equalsIndex = argv.findIndex((arg) => arg.startsWith("--inspector-cmd="));
@@ -114,8 +110,8 @@ function inspectorCommand(argv) {
   return [LOCKED_INSPECTOR_BIN];
 }
 
-// One CLI invocation with a hard per-command timeout. Resolves with parsed
-// JSON; rejects on nonzero exit, timeout, or unparseable output.
+// Run one CLI invocation with a hard per-command timeout. Resolve with parsed
+// JSON; reject on nonzero exit, timeout, or unparseable output.
 function runInspector(cmd, args, timeoutMs) {
   return new Promise((resolve, reject) => {
     const child = spawn(cmd[0], [...cmd.slice(1), "--cli", ...args], {
@@ -175,8 +171,8 @@ function fail(message) {
 
 let failures = 0;
 
-// Shared session config: forces the modern protocol era so the Inspector
-// negotiates 2026-07-28 (its ad-hoc --server-url default is legacy).
+// Shared session config forces modern protocol negotiation. The Inspector's
+// ad-hoc --server-url default is legacy, so this selects 2026-07-28.
 const workDir = mkdtempSync(join(tmpdir(), "inspector-smoke-"));
 const configPath = join(workDir, "inspector-config.json");
 writeFileSync(
@@ -197,7 +193,7 @@ const base = ["--config", configPath, "--server", "serial-mcp", "--connect-timeo
 const timeoutMs = 60000;
 
 try {
-  // 1. initialize: name + modern negotiated version.
+  // Verify initialize identity and modern negotiated version.
   const init = await runInspector(cmd, [...base, "--method", "initialize", "--format", "json"], timeoutMs);
   if (init.result?.serverInfo?.name !== SERVER_NAME) {
     failures++;
@@ -212,7 +208,7 @@ try {
     console.log(`initialize: negotiated ${MODERN_VERSION} ok`);
   }
 
-  // 2. tools/list: exactly 25 unique tools, compute_checksum present.
+  // Verify tools/list count, uniqueness, and compute_checksum.
   const tools = await runInspector(cmd, [...base, "--method", "tools/list", "--format", "json"], timeoutMs);
   const toolNames = (tools.result?.tools ?? []).map((t) => t.name);
   if (toolNames.length !== EXPECTED_TOOLS) {
@@ -232,7 +228,7 @@ try {
     console.log("tools/list: compute_checksum present ok");
   }
 
-  // 3. resources/list: serial://ports and serial://connections present.
+  // Verify both public resource URIs.
   const resources = await runInspector(cmd, [...base, "--method", "resources/list", "--format", "json"], timeoutMs);
   const resourceUris = (resources.result?.resources ?? []).map((r) => r.uri);
   for (const expectedUri of ["serial://ports", "serial://connections"]) {
@@ -244,7 +240,7 @@ try {
     }
   }
 
-  // 4. prompts/list: diagnose_port and interactive_terminal present.
+  // Verify both public prompts.
   const prompts = await runInspector(cmd, [...base, "--method", "prompts/list", "--format", "json"], timeoutMs);
   const promptNames = (prompts.result?.prompts ?? []).map((p) => p.name);
   for (const expectedName of ["diagnose_port", "interactive_terminal"]) {
@@ -256,7 +252,7 @@ try {
     }
   }
 
-  // 5. tools/call compute_checksum: raw 111 / hex "6F" from the JSON envelope.
+  // Verify compute_checksum raw 111 / hex "6F" from the JSON envelope.
   const call = await runInspector(
     cmd,
     [...base, "--method", "tools/call", "--tool-name", "compute_checksum", "--tool-args-json", CHECKSUM_ARGUMENTS, "--format", "json"],

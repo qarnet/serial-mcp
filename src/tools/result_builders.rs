@@ -1,7 +1,6 @@
-//! Wire result construction for reads: `build_read_result` turns a
-//! [`ReadOutcome`] (from the sibling `read_loop` module) into the MCP
-//! `ReadResult` JSON with per-payload lossless encode-or-hex fallback.
-//! The shared read timeout default comes from `helpers`.
+//! Build MCP read results from [`ReadOutcome`] (from sibling `read_loop`) with
+//! per-payload lossless encode-or-hex fallback. The shared read timeout
+//! default comes from `helpers`.
 
 use rmcp::Json;
 
@@ -9,10 +8,6 @@ use crate::codec::{self, Encoding};
 use crate::tools::helpers::DEFAULT_READ_TIMEOUT_MS;
 use crate::tools::read_loop::ReadOutcome;
 use crate::tools::types::*;
-
-// ------------------------------------------------------------------
-// Result builders
-// ------------------------------------------------------------------
 
 pub fn build_read_result(
     outcome: ReadOutcome,
@@ -29,10 +24,9 @@ pub fn build_read_result(
     let (data, effective_encoding) = match codec::encode_or_hex(encoding, &outcome.bytes) {
         Ok(payload) => {
             if let Some(reason) = &payload.fallback_reason {
-                // Lossless fallback: exact spaced hex preserves every byte.
-                // Warned but never counted as a drop. Lossy UTF-8 was
-                // rejected (corrupts bytes); hex matches the binary-protocol
-                // context that produced the unencodable payload.
+                // On requested-encoding failure, spaced hex preserves every
+                // byte. Warn, but never count this fallback as a drop; lossy
+                // UTF-8 is rejected.
                 tracing::warn!(
                     "read data not encodable as {encoding} ({reason}); \
                      falling back to hex"
@@ -51,10 +45,9 @@ pub fn build_read_result(
             .frames
             .iter()
             .filter_map(|f| {
-                // Encode each frame independently from the REQUESTED
-                // encoding (not the top-level effective encoding): a valid
-                // UTF-8 frame preceding malformed binary SLIP stays UTF-8
-                // while the top-level raw data falls back to hex.
+                // Encode each frame from the requested encoding, not the
+                // top-level effective encoding. A valid UTF-8 frame before
+                // malformed binary SLIP can stay UTF-8 while raw data uses hex.
                 match codec::encode_or_hex(encoding, &f.data) {
                     Ok(payload) => {
                         if let Some(reason) = &payload.fallback_reason {
@@ -73,7 +66,7 @@ pub fn build_read_result(
                         })
                     }
                     Err(err) => {
-                        // Only a true encode+hex failure counts as a drop.
+                        // Count a drop only when encoding and hex fallback fail.
                         tracing::warn!("Frame {} encoding failed: {err}", f.index);
                         frames_dropped += 1;
                         None
@@ -117,10 +110,9 @@ pub fn build_read_result(
 }
 
 /// Shared post-read accounting for `read`, `transact`, and `capture_boot`.
-/// Runs the exact four-step
-/// order every caller used: record the read operation, log RX bytes, then
-/// optionally record/log truncation, then optionally log the match.
-/// Builds no results, returns no errors, and owns no tool-specific logging.
+/// Records the read operation and RX bytes, then optional truncation and match
+/// events. Builds no results, returns no errors, and owns no tool-specific
+/// logging.
 pub(crate) fn record_read_completion(
     connection: &crate::serial::SerialConnection,
     result: &crate::tools::types::ReadResult,

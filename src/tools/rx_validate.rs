@@ -1,9 +1,6 @@
-//! RX request validation for `read`: per-tool limits (`RxLimits`),
-//! the common resolved argument set (`ResolvedRxArgs`), the
-//! `RxRequestArgs` accessor trait with its `ReadArgs` impls,
-//! and `validate_rx_request`. General primitives (clamping, connection
-//! lookup, encoding parsing, shared limits) live in the sibling `helpers`
-//! module.
+//! RX request validation for `read`: `RxLimits`, `ResolvedRxArgs`,
+//! `RxRequestArgs`, and `validate_rx_request`. General primitives live in the
+//! sibling `helpers` module.
 
 use std::sync::Arc;
 
@@ -15,10 +12,6 @@ use crate::tools::helpers::{
     MAX_TIMEOUT_MS,
 };
 use crate::tools::types::ReadArgs;
-
-// ------------------------------------------------------------------
-// RX request validation (used by read)
-// ------------------------------------------------------------------
 
 /// Per-tool limits and the error-message label for [`validate_rx_request`].
 pub struct RxLimits {
@@ -66,14 +59,13 @@ impl RxRequestArgs for ReadArgs {
     }
 }
 
-/// Validate and resolve the inputs for `read`: encoding,
-/// connection lookup, `max_buffered_bytes` bounds, `timeout_ms` / silence
-/// timeout, and matcher resolution. Error messages are prefixed with
-/// `limits.tool` to match each tool's existing wording.
+/// Validate and resolve `read` inputs: encoding, connection lookup,
+/// `max_buffered_bytes` bounds, `timeout_ms`, nonzero
+/// `no_new_rx_timeout_ms`, and matcher. Prefix errors with `limits.tool` to
+/// preserve each tool's wording.
 ///
-/// `max_buffered_bytes` is passed explicitly (resolved from the connection
-/// default by the handler).
-/// Does NOT reserve the buffer budget — the caller does that.
+/// The handler passes `max_buffered_bytes`, resolved from the connection
+/// default. The caller reserves the buffer budget.
 pub async fn validate_rx_request<A: RxRequestArgs>(
     connections: &Arc<ConnectionManager>,
     args: &A,
@@ -130,8 +122,6 @@ mod tests {
     use super::*;
 
     use crate::tools::helpers::{MAX_READ_BYTES, MIN_READ_BYTES};
-
-    // ── RX request validation ──────────────────────────────────────────────
 
     struct TestRxArgs {
         connection_id: String,

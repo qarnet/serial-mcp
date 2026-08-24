@@ -1,41 +1,34 @@
-//! `xtask` — repo-local test/build orchestrator for `serial-mcp`.
+//! `xtask` provides repo-local build and test commands for `serial-mcp`.
 //!
-//! Centralizes the small set of commands an operator or CI run needs
-//! in order to take the repo from a clean checkout to a fully tested
-//! state, with no surprises. Each subcommand is intentionally thin:
-//! it shells out to existing helpers (`cargo`, `fw-build-native`)
-//! and the `tests/common/binaries.rs` /
-//! `firmware.rs` test helpers via the `cargo test` build. We do not
-//! reimplement cargo, west, or our own build pipeline in here.
+//! Each subcommand delegates to existing `cargo`, `fw-build-native`, and test
+//! helpers. It does not reimplement Cargo, west, or the project build pipeline.
 //!
 //! Subcommands:
 //!
 //! - `xtask build-test-assets`
-//!   Build the `serial-mcp` binary plus the `native_sim` firmware.
-//!   Pristine firmware build. Safe to run after a clean checkout or
-//!   before the first test run.
+//!   Build the `serial-mcp` binary and the `native_sim` firmware. The firmware
+//!   build is pristine and can run after a clean checkout or before tests.
 //!
 //! - `xtask test`
-//!   Run unit tests plus four process-level integration suites (stdio, blob
-//!   resources, native_sim validation, native_sim lifecycle). Missing test
-//!   assets are built through the shared test helpers.
+//!   Run unit tests and four process-level integration suites: stdio, blob
+//!   resources, native_sim validation, and native_sim lifecycle. Shared test
+//!   helpers build missing assets.
 //!
 //! - `xtask test-all`
-//!   Like `test`, plus the HTTP integration suite. The HTTP suite
-//!   spawns a real `serial-mcp --transport=http` child process and
-//!   also benefits from a built `serial-mcp` binary.
+//!   Run the same suites as `test`, plus the HTTP integration suite. The HTTP
+//!   suite spawns a real `serial-mcp --transport=http` child process and uses
+//!   the built `serial-mcp` binary.
 //!
 //! - `xtask print-paths`
-//!   Print the on-disk paths the test orchestrator resolves for the
-//!   serial-mcp binary and the firmware binary.
-//!   Useful for debugging test wiring and for AGENTS.md cross-checks.
+//!   Print the on-disk paths resolved for the `serial-mcp` binary and firmware
+//!   binary. Use this to debug test wiring and compare paths with AGENTS.md.
 //!
 //! - `xtask agent-eval [--output-dir PATH] [--baseline PATH] [--write-baseline PATH]`
-//!   Run the deterministic agent-interface evaluation: catalog bytes from the
-//!   live `tools/list` catalog plus fixed call-shape scenarios and decision
-//!   thresholds. Writes `report.json` and `report.md` under
-//!   `target/agent-interface-eval/` by default. No network, user config, or
-//!   timestamps.
+//!   Run the deterministic agent-interface evaluation. It measures catalog
+//!   bytes from the live `tools/list` catalog, evaluates fixed call-shape
+//!   scenarios, and applies fixed decision thresholds. It writes `report.json`
+//!   and `report.md` under `target/agent-interface-eval/` by default. It uses
+//!   no network, user config, or timestamps.
 
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -76,8 +69,8 @@ fn real_main() -> Result<()> {
     }
 }
 
-/// Parse `agent-eval` flags: `--output-dir <path>`, `--baseline <path>`,
-/// `--write-baseline <path>` (each optionally `--flag=<path>`).
+/// Parse `agent-eval` flags: `--output-dir <path>`, `--baseline <path>`, and
+/// `--write-baseline <path>`. Each flag also accepts `--flag=<path>`.
 fn agent_eval(rest: &[String]) -> Result<()> {
     let mut options = agent_eval::EvalOptions::default();
     let mut it = rest.iter();
@@ -125,11 +118,11 @@ SUBCOMMANDS:
     );
 }
 
+/// Return workspace root from xtask's compile-time manifest directory.
+///
+/// `CARGO_MANIFEST_DIR` is xtask's compile-time manifest directory. Its parent
+/// is the workspace root, so resolution does not depend on process cwd.
 fn workspace_root() -> PathBuf {
-    // The xtask binary lives at <repo>/xtask/. We resolve the
-    // workspace root by walking up from the binary's own source path
-    // (compile-time constant), not from the process cwd, so the
-    // behavior is independent of where the user invoked the binary.
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     manifest.parent().map(PathBuf::from).unwrap_or(manifest)
 }
@@ -169,9 +162,9 @@ fn build_test_assets(rest: &[String]) -> Result<()> {
 fn test(rest: &[String], include_http: bool) -> Result<()> {
     let root = workspace_root();
     let mut args: Vec<String> = rest.to_vec();
-    // cargo test separates program args from test-runner args with
-    // a literal `--`. We always pass `--test-threads=1` (or the
-    // caller's value) on the runner side.
+    // `cargo test` separates program arguments from test-runner arguments with
+    // a literal `--`. Always pass `--test-threads=1` or the caller's value on
+    // the runner side.
     let has_threads = args
         .iter()
         .any(|a| a == "--test-threads" || a.starts_with("--test-threads="));
@@ -179,18 +172,17 @@ fn test(rest: &[String], include_http: bool) -> Result<()> {
         args.push("--test-threads=1".to_string());
     }
 
-    // Library unit tests
+    // Run library unit tests.
     let mut unit = Command::new("cargo");
     unit.current_dir(&root)
         .args(["test", "--lib", "--locked", "--"])
         .args(&args);
     run(&mut unit, "cargo test --lib")?;
 
-    // Process-level integration suites. Each `cargo test --test <foo>`
-    // builds the helper into a separate test binary. The
-    // native_sim firmware suites have their tests marked
-    // `#[ignore = "requires native_sim firmware binary"]` and need
-    // `--ignored`; the others run their default tests directly.
+    // Run process-level integration suites. Each `cargo test --test <foo>`
+    // builds the helper into a separate test binary. The native_sim firmware
+    // suites mark their tests with `#[ignore = "requires native_sim firmware binary"]`
+    // and need `--ignored`; other suites run their default tests directly.
     let hardware_suites: &[(&str, bool)] = &[
         ("stdio_integration", false),
         ("blob_resources", false),
@@ -209,8 +201,7 @@ fn test(rest: &[String], include_http: bool) -> Result<()> {
     }
 
     if include_http {
-        // HTTP suite does not need `--ignored` and uses the spawned
-        // binary which is the default.
+        // Run the HTTP suite without `--ignored`. It uses the spawned binary.
         let mut c = Command::new("cargo");
         c.current_dir(&root)
             .args(["test", "--test", "http_integration", "--locked", "--"])
