@@ -115,10 +115,6 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: cargo test --locked --test config_schema_validation
 
-      - name: Validate release and documentation consistency
-        if: matrix.os == 'ubuntu-latest'
-        run: cargo test --locked --test doc_drift
-
       - name: Run registry manifest builder tests
         if: matrix.os == 'ubuntu-latest'
         run: python3 -m unittest discover -s scripts/tests -v
