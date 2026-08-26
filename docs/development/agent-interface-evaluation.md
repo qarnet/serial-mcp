@@ -24,19 +24,19 @@ hypothetical `capture_boot`. Its five native_sim completion references are
 historical evidence and remain unchanged in that JSON. It is NOT the current
 catalog — the evaluator compares the live catalog against it.
 
-## Current catalog (25 tools, 268802 bytes)
+## Current catalog (25 tools, 267742 bytes)
 
 - tool count: **25** — the `subscribe`/`unsubscribe` tools were removed with
   MCP logging in the rmcp 3 server-surface migration (`read` remains the
   complete RX path; `poll_interval_ms` and stream-only schema helpers are gone)
-- aggregate compact `tools/list` payload: **268802 bytes** — **+9838** vs the
-  historical baseline (26 tools / 258964 bytes, +3.8%; `capture_boot`,
+- aggregate compact `tools/list` payload: **267742 bytes** — **+8778** vs the
+  historical baseline (26 tools / 258964 bytes, +3.4%; `capture_boot`,
   `export_log` contract hardening, and documentation growth account for most
   growth; removing the two subscription tools shrank the catalog from the
   pre-migration 27-tool / 288177-byte snapshot)
-- largest tools: `configure` 38644, `transact` 26656, `capture_boot` 25791,
-  `read` 23848, `open` 23739
-- `export_log` (contract hardening): 2736 bytes (description 931, input schema
+- largest tools: `configure` 38236, `transact` 26637, `capture_boot` 25757,
+  `read` 23841, `open` 23635
+- `export_log` (contract hardening): 2704 bytes (description 899, input schema
   542, output schema 1111) — the description states the disabled-by-default
   store, the `--capture-dir` requirement, the portable filename-only `path`
   contract, no-overwrite/symlink policy, and quotas; the result carries three
@@ -44,11 +44,10 @@ catalog — the evaluator compares the live catalog against it.
   `total_bytes_used`) and an optional post-commit `durability_warning`
   (`skip_serializing_if`-omitted on success).
 
-The evaluator's regression rule flags aggregate growth `>=5%`; the current
-report sits at **3.80%** (status `warning` but below the flag) — the
-growth comes from `capture_boot` plus contract hardening, minus the removed
-subscription tools, not schema bloat on remaining tools. The
-tool-count guard (`tool_catalog_has_exactly_twenty_five_tools`) and the
+The aggregate is **3.4%**, below the **5%** aggregate threshold. The evaluator
+still reports a warning because `export_log` grew from **754** to **2704** bytes
+(+258.6%, +1950), while other tool sizes, notably `configure`, shrank.
+The tool-count guard (`tool_catalog_has_exactly_twenty_five_tools`) and the
 uint-format schema guards
 (`serial::schema::export_log_result_has_no_uint_formats`,
 `tools::mod::tool_schemas_have_no_nonstandard_uint_formats`) pin the shape.

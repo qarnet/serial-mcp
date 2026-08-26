@@ -1,33 +1,32 @@
 //! Standalone historical MCP client interoperability fixture.
 //!
-//! Compiled against the exact pinned `rmcp 1.7.0` (the pre-migration SDK that
-//! `origin/main` resolved before the rmcp 3 migration) to prove the CURRENT
-//! serial-mcp server still interoperates with a real historical client
-//! implementation over both transports:
+//! This fixture compiles against the exact pinned `rmcp 1.7.0`, the
+//! pre-migration SDK resolved by `origin/main`, to prove that the current
+//! serial-mcp server interoperates with a real historical client over both
+//! transports:
 //!
 //! ```text
 //! rmcp-1-client http <server-url>
 //! rmcp-1-client stdio <absolute-serial-mcp-binary>
 //! ```
 //!
-//! This package is deliberately standalone: it does not depend on serial-mcp
-//! library internals and does not import current test constants. Every
-//! expected value below is an independent fixture-local constant — the whole
-//! point is independent implementation evidence, not a mirror of current
-//! code.
+//! This package remains standalone. It does not depend on serial-mcp library
+//! internals or import current test constants. Every expected value below is
+//! an independent fixture-local constant, providing implementation evidence
+//! rather than mirroring current code.
 //!
-//! Both modes run the same public-behavior verifier (peer info, negotiated
-//! `2025-11-25`, server identity, exact 25-tool surface, resources,
-//! templates, prompts, and one real `compute_checksum` tool call), then shut
-//! the client down cleanly. A verification failure still attempts client
-//! cancellation before returning the error. On success one JSON line is
-//! printed to stdout:
+//! Both modes run the same public-behavior verifier. It checks peer info,
+//! negotiated `2025-11-25`, server identity, the exact 25-tool surface,
+//! resources, templates, prompts, and one real `compute_checksum` call. The
+//! client then shuts down cleanly. A verification failure still attempts
+//! client cancellation before returning the error. On success, one JSON line
+//! is printed to stdout:
 //!
 //! ```json
 //! {"mode":"http|stdio","protocolVersion":"2025-11-25","tools":25,"status":"ok"}
 //! ```
 //!
-//! Runtime validation never panics: every failure is a contextual error that
+//! Runtime validation does not panic. Every failure is a contextual error that
 //! exits nonzero.
 
 use std::collections::BTreeSet;
@@ -39,17 +38,18 @@ use rmcp::service::{RoleClient, RunningService, ServiceExt};
 use rmcp::transport::{StreamableHttpClientTransport, TokioChildProcess};
 use serde_json::{Map, Value};
 
-/// CLI contract. Invalid/missing arguments print this to stderr and exit
-/// nonzero.
+/// Defines the CLI contract. Invalid or missing arguments print this to stderr
+/// and exit nonzero.
 const USAGE: &str = "\
 usage: rmcp-1-client http <server-url>
        rmcp-1-client stdio <absolute-serial-mcp-binary>";
 
-/// How long one complete mode (initialize + verify + shutdown) may take.
+/// Maximum duration for one complete mode, including initialize, verification,
+/// and shutdown.
 const MODE_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Exact 25-tool surface of the current server, as an independent
-/// fixture-local constant (set-compared; order is not the contract).
+/// Independent fixture-local expected tool names. The verifier compares sets,
+/// so order is not part of the contract.
 const EXPECTED_TOOLS: [&str; 25] = [
     "list_ports",
     "list_connections",
@@ -78,18 +78,18 @@ const EXPECTED_TOOLS: [&str; 25] = [
     "compute_checksum",
 ];
 
-/// Exact static resource URIs of the current server.
+/// Independent fixture-local expected static resource URIs.
 const EXPECTED_RESOURCES: [&str; 2] = ["serial://ports", "serial://connections"];
 
-/// Exact resource template URIs of the current server: connection detail,
-/// raw, and log templates.
+/// Independent fixture-local expected resource templates for connection detail,
+/// raw, and log resources.
 const EXPECTED_RESOURCE_TEMPLATES: [&str; 3] = [
     "serial://connections/{id}",
     "serial://connections/{id}/raw",
     "serial://connections/{id}/log",
 ];
 
-/// Exact prompt names of the current server.
+/// Independent fixture-local expected prompt names.
 const EXPECTED_PROMPTS: [&str; 2] = ["diagnose_port", "interactive_terminal"];
 
 #[tokio::main]
@@ -130,18 +130,18 @@ async fn run() -> Result<()> {
     Ok(())
 }
 
-/// HTTP mode: rmcp 1.7.0's reqwest Streamable HTTP client transport against the
-/// passed URL (`/mcp` on the current server).
+/// Runs HTTP mode through rmcp 1.7.0's reqwest Streamable HTTP client transport
+/// against the passed server URL (`/mcp` on the current server).
 async fn http_mode(url: &str) -> Result<()> {
     let transport = StreamableHttpClientTransport::from_uri(url);
     let client = ().serve(transport).await.context("http mode: initialize/session failed")?;
     verify_and_shutdown(client, "http").await
 }
 
-/// Stdio mode: spawn the current serial-mcp binary with an isolated temporary
-/// profile path and `RUST_LOG=off`, then drive it through rmcp 1.7.0's
-/// `TokioChildProcess` transport. The temporary directory stays alive through
-/// client shutdown (it is dropped only after the child has been closed).
+/// Runs stdio mode by spawning the current serial-mcp binary with an isolated
+/// temporary profile path and `RUST_LOG=off`, then drives it through rmcp
+/// 1.7.0's `TokioChildProcess` transport. The temporary directory stays alive
+/// through client shutdown and is dropped only after the child closes.
 async fn stdio_mode(binary: &str) -> Result<()> {
     let temp_dir = tempfile::tempdir().context("stdio mode: create temp directory")?;
     let profiles_path = temp_dir.path().join("profiles.toml");
@@ -151,20 +151,20 @@ async fn stdio_mode(binary: &str) -> Result<()> {
     let child =
         TokioChildProcess::new(command).context("stdio mode: spawn serial-mcp child process")?;
     let client = ().serve(child).await.context("stdio mode: initialize/session failed")?;
-    // temp_dir lives here across the whole verify+shutdown, so the child can
-    // never observe a missing profile path.
+    // Keep temp_dir alive through verification and shutdown so the child never
+    // observes a missing profile path.
     verify_and_shutdown(client, "stdio").await
 }
 
-/// Run the shared public-behavior verifier, then shut the client down
-/// cleanly. On verification failure the client is still cancelled (best
-/// effort) before the error is returned; stdio child cleanup rides on the
-/// client shutdown (`Transport::close` -> `graceful_shutdown`).
+/// Verifies public behavior, then shuts the client down cleanly. On
+/// verification failure, it still attempts cancellation before returning the
+/// error. Stdio child cleanup follows client shutdown through
+/// `Transport::close` and `graceful_shutdown`.
 async fn verify_and_shutdown(client: RunningService<RoleClient, ()>, mode: &str) -> Result<()> {
     let verified = verify(&client).await;
     if let Err(error) = &verified {
-        // Best-effort cancellation before returning the error: the child /
-        // HTTP session must not be left running on a failed check.
+        // Cancel before returning the error so a child or HTTP session is not
+        // left running after a failed check.
         let _ = client.cancel().await;
         return Err(anyhow!("{error}"));
     }
@@ -182,16 +182,14 @@ async fn verify_and_shutdown(client: RunningService<RoleClient, ()>, mode: &str)
     Ok(())
 }
 
-/// The shared public-behavior verifier for the compatibility contract.
-/// Uses the all-page rmcp 1.7.0 helpers (`list_all_*`) so pagination cannot
-/// hide items. Returns a descriptive error on the first failed check.
+/// Verifies the public compatibility contract with rmcp 1.7.0. The all-page
+/// helpers (`list_all_*`) prevent pagination from hiding items. The verifier
+/// returns a descriptive error on the first failed check.
 async fn verify(client: &RunningService<RoleClient, ()>) -> std::result::Result<(), String> {
-    // 1. Peer info exists after initialize.
     let peer_info = client
         .peer_info()
         .ok_or_else(|| "peer info missing after initialize".to_string())?;
 
-    // 2. Negotiated protocol is exactly V_2025_11_25.
     if peer_info.protocol_version != ProtocolVersion::V_2025_11_25 {
         return Err(format!(
             "negotiated protocol {:?}, expected {:?}",
@@ -200,7 +198,6 @@ async fn verify(client: &RunningService<RoleClient, ()>) -> std::result::Result<
         ));
     }
 
-    // 3. Server implementation name is `serial-mcp`.
     if peer_info.server_info.name != "serial-mcp" {
         return Err(format!(
             "server implementation name {:?}, expected \"serial-mcp\"",
@@ -208,10 +205,9 @@ async fn verify(client: &RunningService<RoleClient, ()>) -> std::result::Result<
         ));
     }
 
-    // 4. Exact 25-tool surface. Set equality alone cannot catch duplicates,
-    //    so the RAW count is asserted first (exact 25, not "at least the
-    //    expected set"), then the name set must equal the fixture-local
-    //    constant exactly.
+    // Check the raw tool count before set equality so duplicate entries cannot
+    // satisfy the expected set. Then compare names with the fixture-local
+    // constant.
     let tools = client
         .list_all_tools()
         .await
@@ -233,8 +229,7 @@ async fn verify(client: &RunningService<RoleClient, ()>) -> std::result::Result<
         ));
     }
 
-    // 5. Static resource URIs are exactly serial://ports + serial://connections
-    //    (raw count 2 first, then exact set equality).
+    // Check the raw resource count before comparing the exact URI set.
     let resources = client
         .list_all_resources()
         .await
@@ -256,8 +251,7 @@ async fn verify(client: &RunningService<RoleClient, ()>) -> std::result::Result<
         ));
     }
 
-    // 6. Resource template URIs are exactly the connection detail/raw/log
-    //    templates (raw count 3 first, then exact set equality).
+    // Check the raw template count before comparing the exact URI-template set.
     let templates = client
         .list_all_resource_templates()
         .await
@@ -279,8 +273,7 @@ async fn verify(client: &RunningService<RoleClient, ()>) -> std::result::Result<
         ));
     }
 
-    // 7. Prompt names are exactly diagnose_port + interactive_terminal (raw
-    //    count 2 first, then exact set equality).
+    // Check the raw prompt count before comparing the exact name set.
     let prompts = client
         .list_all_prompts()
         .await
@@ -302,11 +295,8 @@ async fn verify(client: &RunningService<RoleClient, ()>) -> std::result::Result<
         ));
     }
 
-    // 8. compute_checksum with the standard fixture arguments succeeds and
-    //    the structured result carries integer checksum=111 and string
-    //    checksum_hex="6F". A tool-error result must never pass merely
-    //    because it carries fields: explicitly require is_error == Some(false)
-    //    before accepting the structured content.
+    // Require a successful compute_checksum result before reading structured
+    // fields. The fixture expects checksum=111 and checksum_hex="6F".
     let mut arguments = Map::new();
     arguments.insert("algorithm".to_string(), Value::String("xor".to_string()));
     arguments.insert("data".to_string(), Value::String("$GPGGA,1".to_string()));

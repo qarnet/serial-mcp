@@ -1,6 +1,6 @@
-"""Offline, deterministic unit tests for scripts/build_registry_manifest.py.
+"""Offline deterministic unit tests for scripts/build_registry_manifest.py.
 
-Run from anywhere:
+Run from any directory:
     python3 -m unittest discover -s scripts/tests -v
 """
 
@@ -50,7 +50,7 @@ def make_metadata(directory, assets, tag=TAG):
 
 
 def happy_fixture(base):
-    """Directory with template + four real assets + matching metadata."""
+    """Create template, four real assets, and matching metadata."""
     assets = Path(base) / "assets"
     assets.mkdir()
     entries = []
@@ -221,8 +221,8 @@ class ManifestBuilderTests(unittest.TestCase):
             self.assert_failure(base, mutate=bad, needle="is not a sha256 digest")
 
     def test_bare_hash_digest_rejected(self):
-        # GitHub emits digests as "sha256:<64 hex>"; a bare 64-hex hash must
-        # be rejected with its own explicit error, not silently accepted.
+        # GitHub emits digests as "sha256:<64 hex>". Reject a bare 64-hex hash
+        # with its own explicit error instead of accepting it silently.
         with tempfile.TemporaryDirectory() as base:
 
             def bare(t, m, a):
@@ -271,8 +271,8 @@ class ManifestBuilderTests(unittest.TestCase):
 
     def test_zero_byte_file_rejected_http_error_analogue(self):
         # HTTP-error analogue: the old `curl -sL | sha256sum` silently accepted
-        # failed downloads and hashed empty input. A zero-byte asset must
-        # never produce a manifest.
+        # failed downloads and hashed empty input. A zero-byte asset must never
+        # produce a manifest.
         with tempfile.TemporaryDirectory() as base:
 
             def zero(t, m, a):

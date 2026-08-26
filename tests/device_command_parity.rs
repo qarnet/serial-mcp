@@ -1,4 +1,4 @@
-//! First command/lifecycle parity batch for Rust PTY device fixture.
+//! Public-boundary command and lifecycle coverage for Rust PTY device fixture.
 //!
 //! Every case opens fixture PTY through public MCP tools.
 

@@ -323,9 +323,7 @@ async fn at_command_connection_default_drives_stateful_transact_and_parser_quirk
         .iter()
         .find(|frame| frame["data"] == json!("+CME ERROR: 10"))
         .context("AT CME frame missing")?;
-    // Current parser checks generic +COMMAND: response before CME/CMS error.
-    // Preserve this public characterization; changing it needs a separate
-    // parser-semantics decision.
+    // Generic +COMMAND: response parsing precedes CME/CMS error parsing.
     assert_eq!(cme_frame["parsed"]["response_type"], json!("response"));
     assert_eq!(cme_frame["parsed"]["command"], json!("CME ERROR"));
     assert_eq!(cme_frame["parsed"]["fields"], json!(["10"]));

@@ -17,7 +17,7 @@ use super::codecs::{
 use super::config::{Endianness, LineEnding, ParserConfig, RxFramingConfig, RxFramingMode};
 use super::parsers::build_parser;
 
-// ---- Frame types -----------------------------------------------------------
+// Frame types.
 
 /// A decoded frame with optional parsed content.
 ///
@@ -25,7 +25,9 @@ use super::parsers::build_parser;
 /// deserialized, so no `Deserialize` derive.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct Frame {
-    /// Raw frame bytes (without delimiters/terminators unless include_terminators is set).
+    /// Raw frame bytes. `include_terminators` controls line, delimiter, and
+    /// length-prefix inclusion; `StartEnd` marker inclusion uses
+    /// `include_markers`.
     #[schemars(schema_with = "crate::schema_helpers::byte_array_schema")]
     pub data: Vec<u8>,
     /// Frame number since decoder creation (0-based).
@@ -73,7 +75,9 @@ pub enum ParsedFrame {
         fields: Vec<String>,
         /// Checksum status:
         /// - Some(true): checksum present and valid (or present, validate=false: not enforced but reported as valid-shape).
-        /// - Some(false): checksum present and INVALID (only reachable when validate=false; when validate=true a mismatch drops the frame and increments `frames_dropped`).
+        /// - Some(false): checksum present and invalid (only reachable when
+        ///   `validate=false`; when `validate=true`, a mismatch drops the frame
+        ///   and increments `frames_dropped`).
         /// - None: no checksum present in the sentence.
         #[serde(skip_serializing_if = "Option::is_none")]
         checksum_valid: Option<bool>,
@@ -94,20 +98,21 @@ pub enum ParsedFrame {
         data: Vec<u8>,
         /// LRC status. Same semantics as `ParsedFrame::Nmea::checksum_valid`
         /// (`Some(true)` valid, `Some(false)` invalid with `validate=false`,
-        /// `None` absent) — see that field's doc for the full explanation.
+        /// `None` absent). See that field's documentation for the full
+        /// explanation.
         /// `None` here also covers a malformed frame shorter than 2 hex chars
         /// after the data (defensive; should not occur for valid frames).
         checksum_valid: Option<bool>,
     },
 }
 
-// ---- Frame decoder ---------------------------------------------------------
+// Frame decoder.
 
 /// Stateful frame boundary detector.
 ///
-/// Push chunks via [`FrameDecoder::push`] to receive decoded
-/// [`Frame`] instances. Callers accumulate frames and drain consumed
-/// bytes from their accumulation buffer.
+/// Push chunks with [`FrameDecoder::push`]. Complete frames are returned from
+/// each call; incomplete bytes remain in the decoder until more data arrives or
+/// [`FrameDecoder::flush_partial`] is called.
 pub struct FrameDecoder {
     /// Buffer for incomplete frame data.
     buf: Vec<u8>,
@@ -172,7 +177,7 @@ enum SlipState {
     /// Discard bytes until the first END marker is seen.
     BeforeFirstEnd,
     /// Inside a frame. `buf` accumulates decoded payload bytes. `escaped` is
-    /// true after an `ESC` byte — the next byte is the escape code.
+    /// true after an `ESC` byte; the next byte is the escape code.
     InFrame { buf: Vec<u8>, escaped: bool },
 }
 
@@ -424,7 +429,7 @@ fn cobs_decode(
                 let mut read_pos: usize = 0;
                 let len = buf_outer.len();
                 loop {
-                    // 1. Flush pending zero first (does NOT consume a
+                    // 1. Flush pending zero first without consuming a
                     //    byte). This handles the code==1 case (zero data
                     //    bytes) where the implicit zero is due immediately
                     //    before the next code byte. For code>1, this flush
@@ -435,8 +440,8 @@ fn cobs_decode(
                         decoded.push(0x00);
                         *pending_zero = false;
                         // Fall through to code-byte handling (or the next
-                        // iteration will read the next byte). Do NOT
-                        // consume a byte from buf_outer for this flush.
+                        // iteration will read the next byte). No byte is
+                        // consumed from buf_outer for this flush.
                     }
                     // 2. If we have consumed all bytes in buf_outer, break.
                     if read_pos >= len {
@@ -512,8 +517,8 @@ fn cobs_decode(
                 }
                 // If we broke out of the inner loop via the delimiter,
                 // the outer loop continues with BeforeFirstDelim.
-                // Otherwise we consumed all bytes in buf_outer without
-                // hitting a delimiter — drain and wait for more bytes.
+                // Otherwise all bytes in buf_outer were consumed without a
+                // delimiter. Drain them and wait for more bytes.
                 if !matches!(state, CobsState::BeforeFirstDelim) {
                     buf_outer.drain(..read_pos);
                     return PushOutcome {
@@ -527,7 +532,7 @@ fn cobs_decode(
     }
 }
 
-// ---- Frame decoder implementation ------------------------------------------
+// Frame decoder implementation.
 
 impl FrameDecoder {
     /// Create a new frame decoder from an RX framing configuration and
@@ -627,12 +632,10 @@ impl FrameDecoder {
         })
     }
 
-    /// Feed a chunk of bytes and return the decoded frames in a
-    /// [`PushOutcome`] that carries both the frames and any stream-fatal
-    /// error (SLIP malformed escape, COBS invalid code). Per-frame checksum
-    /// mismatches are counted in `frames_dropped` and do NOT set `error`.
-    /// The caller is responsible for draining consumed bytes from their
-    /// accumulation buffer.
+    /// Feed a chunk of bytes and return a [`PushOutcome`] containing decoded
+    /// frames and any stream-fatal error (SLIP malformed escape or COBS invalid
+    /// code). Per-frame checksum mismatches are counted in `frames_dropped` and
+    /// do not set `error`.
     pub fn push(&mut self, chunk: &[u8]) -> PushOutcome {
         self.buf.extend_from_slice(chunk);
         // SLIP and COBS are handled separately via free functions to avoid
@@ -830,7 +833,7 @@ impl FrameDecoder {
     /// non-`\n` byte (bare CR confirmed in same chunk), transitions directly to
     /// [`LineState::CrMode`] and returns the frame before the `\r`.
     fn match_auto_lf(&mut self) -> Option<Vec<u8>> {
-        // Scan for \n first — preserves existing eager-LF behavior.
+        // Scan for \n first to preserve eager LF behavior.
         if let Some(lf_pos) = self.buf.iter().position(|&b| b == b'\n') {
             // Check if there's a bare \r before this \n that hasn't been
             // consumed yet. If no \r precedes this \n, or only the \r
@@ -946,9 +949,8 @@ impl FrameDecoder {
         self.buf.len()
     }
 
-    /// Flush any remaining bytes as a partial frame. For SLIP and COBS, this
-    /// drains the in-frame buffer; pending escaped/partial state is emitted as
-    /// raw bytes.
+    /// Flush an incomplete payload as a partial frame. For SLIP and COBS, this
+    /// returns accumulated decoded payload bytes without parsing them.
     pub fn flush_partial(&mut self) -> Option<Frame> {
         let (data, frame_type) = match &mut self.mode {
             DecoderMode::Slip {
@@ -987,12 +989,11 @@ impl FrameDecoder {
     }
 }
 
-// ---- Utility ---------------------------------------------------------------
+// Decoder error and result types.
 
-/// SLIP framing error: a malformed escape sequence was encountered during
-/// RX decode. Construction errors (e.g. invalid delimiter) are synchronous
-/// and configurable by the agent; runtime decode errors like this indicate
-/// stream corruption and are not recoverable by retrying the same bytes.
+/// Runtime frame-decoding error. Invalid configuration fails in
+/// [`FrameDecoder::new`]; malformed SLIP escapes and invalid COBS codes are
+/// returned through [`PushOutcome::error`].
 #[derive(Debug, Clone)]
 pub enum FrameDecodeError {
     /// SLIP `ESC` (0xDB) followed by an invalid byte (not `ESC_END` 0xDC
@@ -1038,21 +1039,21 @@ impl std::error::Error for FrameDecodeError {}
 
 /// Result of pushing a chunk through a [`FrameDecoder`].
 ///
-/// Always carries the frames decoded before any error — stream-fatal errors
-/// (SLIP malformed escape, COBS invalid code) no longer discard frames that
-/// were successfully decoded from the same chunk. Per-frame checksum mismatches
-/// are counted in `frames_dropped` and do NOT set `error`.
+/// Carries frames decoded before any error. Stream-fatal errors such as a
+/// malformed SLIP escape or invalid COBS code do not discard frames already
+/// decoded from the same chunk. Per-frame checksum mismatches are counted in
+/// `frames_dropped` and do not set `error`.
 #[derive(Debug)]
 pub struct PushOutcome {
     /// Frames successfully decoded from this chunk.
     pub frames: Vec<Frame>,
-    /// Per-frame drops (currently only checksum mismatches with `validate: true`).
-    /// Does NOT include frames skipped by `skip_empty` (those never consume
-    /// an index by design).
+    /// Per-frame drops, currently checksum mismatches with `validate: true`.
+    /// This excludes frames skipped by `skip_empty`; skipped frames do not
+    /// consume an index.
     pub frames_dropped: usize,
     /// Stream-fatal error (SLIP malformed escape, COBS invalid code).
-    /// `None` for per-frame checksum drops — those are counted in
-    /// `frames_dropped` and the decoder keeps going.
+    /// `None` for per-frame checksum drops. Those are counted in
+    /// `frames_dropped`, and the decoder continues.
     pub error: Option<FrameDecodeError>,
 }
 
@@ -1067,7 +1068,7 @@ mod tests {
     };
     use crate::match_config::PatternEncoding;
 
-    // ── Line decoder (auto — original behavior) ──────────────────────────
+    // Line decoder with auto ending.
 
     #[test]
     fn line_decoder_single_line() {
@@ -1140,7 +1141,7 @@ mod tests {
         assert_eq!(frames[0].data, b"hello\r\n");
     }
 
-    // ── Line decoder: new ending modes ────────────────────────────────────
+    // Line decoder ending modes.
 
     #[test]
     fn line_decoder_lf_preserves_cr() {
@@ -1232,7 +1233,7 @@ mod tests {
         assert_eq!(frames[0].data, b"hello\r\n");
     }
 
-    // ── Line decoder: auto promotion (bare-CR detection) ──────────────────
+    // Line decoder auto promotion for bare CR.
 
     fn auto_config() -> RxFramingConfig {
         RxFramingConfig {
@@ -1260,10 +1261,12 @@ mod tests {
         assert_eq!(frames.len(), 2);
         assert_eq!(frames[0].data, b"a");
         assert_eq!(frames[1].data, b"b");
-        // After CRLF, decoder stays in AutoLf — next bare \r still triggers promotion.
+        // After CRLF, decoder stays in AutoLf. A later bare \r still triggers
+        // promotion.
         let frames = dec.push(b"c\r").frames;
         assert!(frames.is_empty(), "pending CR after CRLF");
-        // Push "d" — confirmation byte stays buffered as start of next line.
+        // Push "d". The confirmation byte stays buffered as the next line's
+        // start.
         let frames = dec.push(b"d").frames;
         assert_eq!(frames.len(), 1, "bare CR confirmed on next non-\\n byte");
         assert_eq!(frames[0].data, b"c");
@@ -1341,7 +1344,7 @@ mod tests {
         // Promote to CrMode.
         dec.push(b"a\r");
         dec.push(b"b");
-        // In CrMode: \n is NOT a terminator, \r is.
+        // In CrMode, \n is not a terminator and \r is.
         // Buffer has "b" from confirmation, then "x\ny\r" → "bx\ny\r" → split on \r.
         let frames = dec.push(b"x\ny\r").frames;
         assert_eq!(frames.len(), 1);
@@ -1429,8 +1432,8 @@ mod tests {
         let result = dec.push(b"\xC0\xDB\x41\xC0");
         assert!(result.error.is_some());
         // After resync, decoder is in BeforeFirstEnd. The trailing END from
-        // the malformed chunk remains in buf_outer. Push a valid frame —
-        // two consecutive ENDs produce one empty frame then "ok".
+        // the malformed chunk remains in buf_outer. Push a valid frame. Two
+        // consecutive ENDs produce one empty frame and then "ok".
         let frames = dec.push(b"\xC0ok\xC0").frames;
         assert_eq!(frames.len(), 2);
         assert!(frames[0].data.is_empty());
@@ -1457,7 +1460,7 @@ mod tests {
         let mut chunk = vec![SLIP_END];
         chunk.extend_from_slice(b"aa");
         chunk.push(SLIP_END);
-        // One SLIP_END separates frames — no empty frame between them.
+        // One SLIP_END separates frames, with no empty frame between them.
         chunk.extend_from_slice(b"bb");
         chunk.push(SLIP_END);
         // Now append a malformed escape: ESC followed by invalid byte.
@@ -1559,12 +1562,10 @@ mod tests {
 
     #[test]
     fn slip_parser_error_propagates_and_resets_state() {
-        // SLIP-frame a NMEA sentence with a BAD checksum. The NmeaParser with
-        // validate:true returns Err(ChecksumMismatch) when it sees the bad *XX.
-        // This exercises slip_decode's parser-Err path (src/framing/decoder.rs):
-        // drain consumed bytes, reset state to BeforeFirstEnd, return Err.
-        // Then push a well-formed SLIP-framed NMEA sentence and confirm the
-        // decoder recovers (state was reset — no stale escaped/buf corruption).
+        // SLIP-frame a NMEA sentence with a bad checksum. With validate=true,
+        // the decoder drops the frame, increments frames_dropped, and leaves
+        // PushOutcome.error unset. Push a valid SLIP-framed NMEA sentence next
+        // to confirm the decoder continues without stale state.
         use crate::checksums::xor_checksum;
 
         let bad_body = b"GPGLL,3751.65,N,12226.54,W*00"; // wrong checksum (correct is 7E)
@@ -1583,7 +1584,7 @@ mod tests {
         };
         let mut dec = FrameDecoder::new(&framing, Some(&parser)).unwrap();
 
-        // Push 1: bad-checksum frame → dropped (frames_dropped=1, no error).
+        // Push 1: the bad-checksum frame is dropped and counted without error.
         let mut push1 = vec![SLIP_END];
         push1.extend_from_slice(bad_body);
         push1.push(SLIP_END);
@@ -1595,9 +1596,9 @@ mod tests {
         assert_eq!(result.frames_dropped, 1, "checksum drop should be counted");
         assert!(result.error.is_none(), "checksum drop should not set error");
 
-        // Push 2: good-checksum frame → decoder was NOT reset by the checksum
-        // drop (state stayed InFrame with empty buf). The leading SLIP_END
-        // produces an empty frame; the good sentence produces a parsed Nmea frame.
+        // Push 2: the decoder continues after the checksum drop. The leading
+        // SLIP_END produces an empty frame; the good sentence produces a parsed
+        // NMEA frame.
         let mut push2 = vec![SLIP_END];
         push2.extend_from_slice(good_sentence.as_bytes());
         push2.push(SLIP_END);
@@ -1627,7 +1628,7 @@ mod tests {
         );
     }
 
-    // ── Delimiter decoder ───────────────────────────────────────────────
+    // Delimiter decoder.
 
     #[test]
     fn delimiter_decoder_basic() {
@@ -1679,7 +1680,7 @@ mod tests {
         assert_eq!(frames[0].data, b"x");
     }
 
-    // ── Length-prefixed decoder ─────────────────────────────────────────
+    // Length-prefixed decoder.
 
     #[test]
     fn length_prefixed_basic() {
@@ -1717,7 +1718,7 @@ mod tests {
         assert_eq!(frames[0].data, b"hello");
     }
 
-    // ── Start/end marker decoder ────────────────────────────────────────
+    // Start/end marker decoder.
 
     #[test]
     fn start_end_basic() {
@@ -1781,7 +1782,7 @@ mod tests {
         );
     }
 
-    // ── Negative / edge-case tests ───────────────────────────────────────
+    // Negative and edge-case tests.
 
     #[test]
     fn line_decoder_no_terminator_then_flush() {
@@ -2078,7 +2079,7 @@ mod tests {
         assert!(matches!(frames[1].parsed, Some(ParsedFrame::Json(_))));
     }
 
-    // ── Coverage gap tests ──────────────────────────────────────────────
+    // Coverage gap tests.
 
     #[test]
     fn delimiter_decoder_empty_segments() {
@@ -2140,7 +2141,7 @@ mod tests {
         assert_eq!(frames[0].data, b"data");
     }
 
-    // ── COBS framing tests ───────────────────────────────────────────────
+    // COBS framing tests.
 
     fn cobs_rx_config() -> RxFramingConfig {
         RxFramingConfig {
@@ -2294,14 +2295,10 @@ mod tests {
 
     #[test]
     fn cobs_parser_error_propagates_and_resets_state() {
-        // COBS-frame a NMEA sentence with a BAD checksum. The NmeaParser with
-        // validate:true returns Err(ChecksumMismatch) when it sees the bad *XX.
-        // This exercises cobs_decode's parser-Err path (src/framing/decoder.rs):
-        // drain consumed bytes, clear decoded/remaining/pending_zero, reset
-        // state to BeforeFirstDelim, return Err.
-        // Then push a well-formed COBS-framed NMEA sentence and confirm the
-        // decoder recovers (state was reset — no stale decoded/remaining/
-        // pending_zero corruption).
+        // COBS-frame a NMEA sentence with a bad checksum. With validate=true,
+        // the decoder drops the frame, increments frames_dropped, and leaves
+        // PushOutcome.error unset. Push a valid COBS-framed NMEA sentence next
+        // to confirm the decoder continues without stale decoded state.
         use crate::checksums::xor_checksum;
 
         let bad_body = b"GPGLL,3751.65,N,12226.54,W*00"; // wrong checksum (correct is 7E)
@@ -2327,7 +2324,7 @@ mod tests {
         };
         let mut dec = FrameDecoder::new(&framing, Some(&parser)).unwrap();
 
-        // Push 1: bad-checksum frame → dropped (frames_dropped=1, no error).
+        // Push 1: the bad-checksum frame is dropped and counted without error.
         let result = dec.push(&bad_framed);
         assert!(
             result.frames.is_empty(),
@@ -2336,9 +2333,8 @@ mod tests {
         assert_eq!(result.frames_dropped, 1, "checksum drop should be counted");
         assert!(result.error.is_none(), "checksum drop should not set error");
 
-        // Push 2: good-checksum frame → one clean Nmea frame (state was reset
-        // to BeforeFirstDelim by the error path; no stale decoded/remaining/
-        // pending_zero corruption).
+        // Push 2: the decoder continues after the checksum drop and emits one
+        // clean NMEA frame.
         let frames = dec.push(&good_framed).frames;
         assert_eq!(
             frames.len(),
@@ -2424,7 +2420,7 @@ mod tests {
 
     #[test]
     fn roundtrip_cobs_alternating_ones_zeros_300() {
-        // 300 bytes alternating 0x01 / 0x00 — heavy zero density across the
+        // 300 bytes alternating 0x01 / 0x00 exercise zero density across the
         // continuation boundary.
         let payload: Vec<u8> = (0..300).map(|i| if i % 2 == 0 { 1 } else { 0 }).collect();
         let mode = TxFramingMode::Cobs;
@@ -2438,7 +2434,7 @@ mod tests {
     #[test]
     fn roundtrip_cobs_all_byte_values_256() {
         // Every byte value 0x00-0xFF once. Exercises embedded 0x00 and 0xFF
-        // (which is a non-zero data byte, NOT a code, when it appears in the
+        // (which is a non-zero data byte, not a code, when it appears in the
         // data portion).
         let payload: Vec<u8> = (0..=255u8).collect();
         let mode = TxFramingMode::Cobs;
@@ -2449,7 +2445,7 @@ mod tests {
         assert_eq!(frames[0].data, payload);
     }
 
-    // ── StartEnd multi-marker tests ─────────────────────────────────────
+    // StartEnd multi-marker tests.
 
     #[test]
     fn start_end_matches_either_of_multiple_start_markers() {
@@ -2512,7 +2508,7 @@ mod tests {
         assert_eq!(frames[1].data, b"more");
     }
 
-    // ── skip_empty framing option ──────────────────────────────────────────
+    // `skip_empty` framing option.
 
     #[test]
     fn skip_empty_drops_empty_line_frames() {
@@ -2665,7 +2661,7 @@ mod tests {
         let mut dec = FrameDecoder::new(&config, None).unwrap();
         let frames = dec.push(b"a\n\nb\n").frames;
         assert_eq!(frames.len(), 2);
-        // The skipped blank line does NOT consume an index.
+        // The skipped blank line does not consume an index.
         assert_eq!(frames[0].index, 0);
         assert_eq!(frames[1].index, 1);
     }
@@ -2687,7 +2683,8 @@ mod tests {
 
         let result = dec.push(&chunk);
         assert_eq!(result.frames.len(), 2, "two good frames should survive");
-        // Frame indices must be contiguous — the dropped frame consumes no index.
+        // Frame indices remain contiguous because the dropped frame consumes no
+        // index.
         assert_eq!(result.frames[0].index, 0);
         assert_eq!(result.frames[1].index, 1);
         assert_eq!(result.frames_dropped, 1);
@@ -2746,7 +2743,7 @@ mod tests {
             skip_empty: true,
         };
         let mut dec = FrameDecoder::new(&config, None).unwrap();
-        // Push "b" without a newline — no frame emitted by push.
+        // Push "b" without a newline. No frame is emitted by push.
         let frames = dec.push(b"b").frames;
         assert!(frames.is_empty());
         // flush_partial emits the pending content regardless of skip_empty.
@@ -2755,7 +2752,7 @@ mod tests {
         assert_eq!(partial.unwrap().data, b"b");
     }
 
-    // ── Checksum-failure-surfacing via push ────────────────────────────
+    // Checksum failure handling through push.
 
     #[test]
     fn nmea_checksum_failure_drops_frame_and_counts() {
@@ -2863,7 +2860,7 @@ mod tests {
         }
     }
 
-    // ── Cross-mode edge-case coverage ────────────────────────────────────
+    // Cross-mode edge-case coverage.
 
     #[test]
     fn skip_empty_applies_to_delimiter() {

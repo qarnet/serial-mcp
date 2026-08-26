@@ -1,12 +1,12 @@
-//! Fixed call-shape scenarios for the agent-interface evaluation.
+//! Fixed call-shape scenarios for agent-interface evaluation.
 //!
-//! Every scenario is a static sequence of MCP `tools/call` requests with
-//! normalized placeholders (`/dev/ttyACM0`, a fixed UUID connection id), so
-//! request bytes are deterministic across runs. Current variants use the
-//! shipped tool names and shapes; hypothetical shorthand/recipe/facade/
-//! capture variants are marked `modeled` and always carry their expansion
-//! into current calls. A static harness cannot measure model
-//! misunderstanding — the report states this limitation.
+//! Each scenario is a static sequence of MCP `tools/call` requests with
+//! normalized placeholders (`/dev/ttyACM0` and a fixed UUID connection ID).
+//! Request bytes are deterministic across runs. Current variants use shipped
+//! tool names and shapes. Hypothetical shorthand, recipe, facade, and capture
+//! variants are marked `modeled` and carry their expansion into current calls.
+//! A static harness cannot measure model misunderstanding; the report records
+//! this limitation.
 
 use serde::Serialize;
 
@@ -19,8 +19,8 @@ pub struct Call {
     pub args: serde_json::Value,
 }
 
-/// A hypothetical, NOT-implemented call shape with its expansion into
-/// current calls.
+/// A hypothetical, not implemented call shape with its expansion into current
+/// calls.
 #[derive(Debug, Clone)]
 pub struct ModeledVariant {
     /// `shorthand` | `recipe` | `facade` | `capture_boot`.
@@ -41,11 +41,12 @@ pub struct Scenario {
     /// Name of an existing public behavior test that proves this
     /// composition completes (or "modeled" for hypothetical variants).
     pub completion_ref: &'static str,
-    /// Stale-data/race risk flag (e.g. arm-reset-capture composition).
+    /// Stale-data/race risk flag, such as arm-reset-capture composition.
     pub stale_race: bool,
     pub retries: usize,
     pub invalid_calls: usize,
-    /// Belongs to the "common task" set used by the facade decision.
+    /// Whether this scenario belongs to the common-task set used by the facade
+    /// decision.
     pub common: bool,
 }
 
@@ -59,7 +60,7 @@ pub struct ScenarioMetrics {
     pub request_bytes: usize,
     pub invalid_calls: usize,
     pub retries: usize,
-    /// Occurrences of advanced option fields across the call arguments.
+    /// Occurrences of advanced option fields in call arguments.
     pub advanced_fields: usize,
     pub stale_race: bool,
     pub completion_ref: String,
@@ -79,8 +80,8 @@ pub struct ModeledMetrics {
     pub note: String,
 }
 
-/// Advanced option fields counted per call (framing/parser/protocol
-/// overrides and match config — the "escalation" surface).
+/// Advanced option fields counted per call: framing, parser, protocol, and
+/// match overrides that form the escalation surface.
 const ADVANCED_KEYS: [&str; 7] = [
     "rx_framing",
     "tx_framing",
@@ -116,7 +117,7 @@ fn total_bytes(calls: &[Call]) -> usize {
     calls.iter().map(envelope_bytes).sum()
 }
 
-/// Compute metrics for one scenario (current + modeled variant).
+/// Compute metrics for one scenario and its modeled variant.
 pub fn scenario_metrics(scenario: &Scenario) -> ScenarioMetrics {
     let modeled = scenario.modeled.as_ref().map(|m| ModeledMetrics {
         kind: m.kind.to_string(),
@@ -152,7 +153,7 @@ fn conn(id: &str) -> serde_json::Value {
 
 const CID: &str = FIXED_CONNECTION_ID;
 
-/// The fixed scenario set (order is stable and part of the baseline).
+/// Fixed scenario set. Order is stable and part of the baseline.
 pub fn scenarios() -> Vec<Scenario> {
     let match_ok = serde_json::json!({
         "pattern": "OK>",
@@ -161,7 +162,7 @@ pub fn scenarios() -> Vec<Scenario> {
     vec![
         Scenario {
             id: "first_console_discovery_open",
-            label: "First console: discovery + open",
+            label: "First console: discover and open",
             calls: vec![
                 call("list_ports", serde_json::json!({})),
                 call("open", serde_json::json!({ "port": FIXED_PORT })),
@@ -222,7 +223,7 @@ pub fn scenarios() -> Vec<Scenario> {
         },
         Scenario {
             id: "command_response_transact",
-            label: "Command/response via transact",
+            label: "Command response with transact",
             calls: vec![
                 call("open", serde_json::json!({ "port": FIXED_PORT })),
                 call(
@@ -237,7 +238,7 @@ pub fn scenarios() -> Vec<Scenario> {
             ],
             modeled: Some(ModeledVariant {
                 kind: "shorthand",
-                label: "transact with string shorthand (match/from)",
+                label: "transact with string shorthand for match and from",
                 calls: vec![
                     call("open", serde_json::json!({ "port": FIXED_PORT })),
                     call(
@@ -263,7 +264,7 @@ pub fn scenarios() -> Vec<Scenario> {
                         }),
                     ),
                 ],
-                note: "String forms for `match`/`from` would expand to the current tagged objects.",
+                note: "String forms for `match` and `from` would expand to current tagged objects.",
             }),
             completion_ref: "tests/serial_pty.rs::pty_transact_writes_then_reads_response",
             stale_race: false,
@@ -273,7 +274,7 @@ pub fn scenarios() -> Vec<Scenario> {
         },
         Scenario {
             id: "command_response_write_read",
-            label: "Command/response via write + read",
+            label: "Command response with write and read",
             calls: vec![
                 call("open", serde_json::json!({ "port": FIXED_PORT })),
                 call(
@@ -377,7 +378,7 @@ pub fn scenarios() -> Vec<Scenario> {
                         }),
                     ),
                 ],
-                note: "A bare string `protocol` would expand to the current tagged preset object.",
+                note: "Bare-string `protocol` would expand to the current tagged preset object.",
             }),
             completion_ref: "tests/device_protocol_parity.rs::at_command_connection_default_drives_stateful_transact_and_parser_quirk",
             stale_race: false,
@@ -387,7 +388,7 @@ pub fn scenarios() -> Vec<Scenario> {
         },
         Scenario {
             id: "at_modem_recipe",
-            label: "AT modem via connection recipe (modeled)",
+            label: "AT modem with connection recipe (modeled)",
             calls: vec![
                 call(
                     "open",
@@ -445,7 +446,7 @@ pub fn scenarios() -> Vec<Scenario> {
                         }),
                     ),
                 ],
-                note: "A `recipe` would replace the repeated protocol-preset object (at_modem = at_command preset + bounded timeouts).",
+                note: "A `recipe` would replace the repeated protocol-preset object: at_modem uses the at_command preset and bounded timeouts.",
             }),
             completion_ref: "tests/device_protocol_parity.rs::at_command_connection_default_drives_stateful_transact_and_parser_quirk",
             stale_race: false,
@@ -455,7 +456,7 @@ pub fn scenarios() -> Vec<Scenario> {
         },
         Scenario {
             id: "ndjson_stream",
-            label: "NDJSON stream (protocol preset)",
+            label: "NDJSON stream with protocol preset",
             calls: vec![
                 call(
                     "open",
@@ -498,7 +499,7 @@ pub fn scenarios() -> Vec<Scenario> {
                         serde_json::json!({ "connection_id": CID, "timeout_ms": 1000 }),
                     ),
                 ],
-                note: "ndjson_stream recipe = ndjson preset (line framing + JSON parser, skip_empty).",
+                note: "ndjson_stream recipe uses the ndjson preset: line framing, JSON parser, and skip_empty.",
             }),
             completion_ref: "tests/device_protocol_parity.rs::ndjson_preset_parses_records_and_skips_blank_whitespace_lines",
             stale_race: false,
@@ -536,7 +537,7 @@ pub fn scenarios() -> Vec<Scenario> {
         },
         Scenario {
             id: "boot_reset_prompt_capture",
-            label: "Boot-reset prompt capture (atomic capture_boot)",
+            label: "Boot reset prompt capture with atomic capture_boot",
             calls: vec![call(
                 "capture_boot",
                 serde_json::json!({
@@ -562,7 +563,7 @@ pub fn scenarios() -> Vec<Scenario> {
         },
         Scenario {
             id: "boot_reset_manual_composition",
-            label: "Boot-reset prompt capture (manual multi-call composition)",
+            label: "Boot reset prompt capture with manual calls",
             calls: vec![
                 call("open", serde_json::json!({ "port": FIXED_PORT })),
                 call(
@@ -600,7 +601,7 @@ pub fn scenarios() -> Vec<Scenario> {
         },
         Scenario {
             id: "permission_busy_disconnected",
-            label: "Permission/busy/disconnected errors with retry",
+            label: "Permission, busy, and disconnected errors with retry",
             calls: vec![
                 call("open", serde_json::json!({ "port": FIXED_PORT })),
                 call("open", serde_json::json!({ "port": FIXED_PORT })),
@@ -619,7 +620,7 @@ pub fn scenarios() -> Vec<Scenario> {
         },
         Scenario {
             id: "command_response_facade",
-            label: "Command/response via facade `command` (modeled)",
+            label: "Command response with `command` facade (modeled)",
             calls: vec![
                 call("open", serde_json::json!({ "port": FIXED_PORT })),
                 call(
@@ -659,7 +660,7 @@ pub fn scenarios() -> Vec<Scenario> {
                         }),
                     ),
                 ],
-                note: "A facade `command` would be a 1:1 alias of `transact` with string `match` — same call count, fewer bytes.",
+                note: "A `command` facade would alias `transact` with string `match`. It keeps call count unchanged and uses fewer bytes.",
             }),
             completion_ref: "tests/serial_pty.rs::pty_transact_writes_then_reads_response",
             stale_race: false,
@@ -681,7 +682,7 @@ mod tests {
         ids.sort();
         ids.dedup();
         assert_eq!(ids.len(), all.len(), "scenario ids must be unique");
-        // The fixed order is part of the committed baseline.
+        // Fixed order is part of the committed baseline.
         assert_eq!(all[0].id, "first_console_discovery_open");
         assert_eq!(all[all.len() - 1].id, "command_response_facade");
     }

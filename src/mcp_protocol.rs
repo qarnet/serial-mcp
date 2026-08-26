@@ -1,10 +1,10 @@
 //! Product-owned MCP protocol version policy.
 //!
 //! Single production source for the advertised protocol versions and their
-//! exact lifecycle / capability / cache contracts. A version is supported
-//! ONLY when it has a row in [`SUPPORTED_PROTOCOLS`] — never because rmcp
-//! knows it or because its date sorts after a known version. Adding or
-//! changing support is a one-row policy edit plus a test row.
+//! exact lifecycle / capability / cache contracts. A version is supported only
+//! when it has a row in [`SUPPORTED_PROTOCOLS`], never because rmcp knows it or
+//! because its date sorts after a known version. Adding or changing support is
+//! a one-row policy edit plus a test row.
 
 use rmcp::model::ProtocolVersion;
 
@@ -20,9 +20,9 @@ pub(crate) enum ProtocolLifecycle {
 /// SEP-2549 cache-field policy for a protocol version.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum CachePolicy {
-    /// No `ttlMs`/`cacheScope` fields. Legacy peers must never see them;
-    /// rmcp strips `resultType` for legacy but does NOT strip cache fields,
-    /// so the server omits them itself.
+    /// No `ttlMs`/`cacheScope` fields. Legacy peers must never see them. rmcp
+    /// strips `resultType` for legacy but does not strip cache fields, so the
+    /// server omits them itself.
     Omit,
     /// `ttlMs: 0` / `cacheScope: "private"` on every cacheable family.
     ImmediatePrivate,
@@ -59,7 +59,7 @@ const SUPPORTED_PROTOCOLS: [ProtocolPolicy; 2] = [
 ];
 
 /// Exact policy lookup. A version with no row (unknown, custom future, or
-/// unsupported older) gets no policy — no lexical/date/range comparison.
+/// unsupported older) gets no policy, with no lexical/date/range comparison.
 pub(crate) fn policy_for(version: &ProtocolVersion) -> Option<&'static ProtocolPolicy> {
     SUPPORTED_PROTOCOLS.iter().find(|p| &p.version == version)
 }

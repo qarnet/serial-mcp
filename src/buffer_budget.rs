@@ -1,9 +1,9 @@
-//! Buffer budget manager for RX tools.
+//! Shared buffer budget for RX tools.
 //!
-//! Provides a trait-based interface for reserving buffer space from a shared
-//! program pool. RX tools (`read`, `transact`, `capture_boot`) reserve their
-//! full requested `max_buffered_bytes` up front and release it on
-//! completion/cancellation/error via RAII.
+//! The trait reserves space from a shared program pool. RX tools (`read`,
+//! `transact`, `capture_boot`) reserve their full requested
+//! `max_buffered_bytes` up front and release it on
+//! completion, cancellation, or error through RAII.
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -24,7 +24,7 @@ pub enum BufferBudgetError {
     InsufficientProgramBudget { requested: usize, available: usize },
 }
 
-/// Trait for reserving buffer space from a shared pool.
+/// Reserve buffer space from a shared pool.
 ///
 /// Implementations must be `Send + Sync` so the budget can be shared across
 /// tasks. The returned [`BufferReservation`] releases bytes back to the pool
@@ -52,15 +52,15 @@ pub trait BufferBudget: Send + Sync {
     fn available(&self) -> usize;
 }
 
-/// Trait for a reservation that releases bytes on drop.
+/// Reservation that releases bytes on drop.
 pub trait BufferReservation: Send + std::fmt::Debug {
     /// The number of bytes reserved by this reservation.
     fn bytes(&self) -> usize;
 }
 
-// ---- Real implementation ---------------------------------------------------
+// Atomic implementation.
 
-/// Production budget manager backed by an atomic counter.
+/// Production budget backed by an atomic counter.
 ///
 /// The program pool starts at `program_limit` bytes. Each reservation
 /// deducts from the pool; each drop returns bytes. The per-tool ceiling
@@ -102,7 +102,7 @@ impl BufferBudget for AtomicBudget {
                 tool_limit: self.tool_limit,
             });
         }
-        // CAS loop to deduct from available pool.
+        // Deduct from the available pool with a compare-exchange loop.
         loop {
             let current = self.available.load(Ordering::Acquire);
             if current < bytes {
@@ -119,7 +119,7 @@ impl BufferBudget for AtomicBudget {
             {
                 break;
             }
-            // Another task modified the counter; retry.
+            // A concurrent update won the exchange; retry.
         }
         Ok(Box::new(AtomicReservation {
             bytes,
@@ -163,13 +163,12 @@ impl Drop for AtomicReservation {
     }
 }
 
-// ---- Fake implementation for tests -----------------------------------------
+// Fake implementation for tests.
 
-/// A fake budget manager for deterministic testing.
+/// Fake budget for deterministic tests.
 ///
-/// Useful for testing budget exhaustion paths without requiring concurrent
-/// load. The remaining counter is backed by a `Mutex<usize>` for
-/// single-threaded determinism.
+/// Exercises budget exhaustion without concurrent load. The remaining counter
+/// uses a `Mutex<usize>` for single-threaded determinism.
 pub struct FakeBudget {
     tool_limit: usize,
     program_limit: usize,
@@ -256,14 +255,13 @@ impl Drop for FakeReservation {
     }
 }
 
-// ---- Null implementation (no program-level pool) --------------------------
+// Unlimited implementation without a program-level pool.
 
-/// A budget manager that always succeeds at the program pool level but still
-/// enforces `tool_limit` as a per-request ceiling.
+/// Budget that always succeeds at the program-pool level while enforcing
+/// `tool_limit` as a per-request ceiling.
 ///
-/// Used when the server is started without explicit program pool limits
-/// (the `UnlimitedBudget` has infinite program capacity but validates
-/// per-request sizes against `tool_limit`).
+/// Used when the server starts without explicit program-pool limits. It has
+/// unlimited program capacity but validates each request against `tool_limit`.
 pub struct UnlimitedBudget {
     tool_limit: usize,
 }

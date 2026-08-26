@@ -8,7 +8,7 @@ on:
         required: false
         default: main
 
-# Manual testing only: no repository or crates.io write credential, no OIDC.
+# Manual testing only. No repository or crates.io write credential and no OIDC.
 permissions:
   contents: read
 

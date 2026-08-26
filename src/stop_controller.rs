@@ -7,22 +7,22 @@
 //! Silence-timeout support (`no_new_rx_timeout_ms`) lets operations stop
 //! after a period of no incoming data.
 //!
-//! The controller is *stateless* regarding event sourcing — it does not own
-//! channels, loops, or notification logic. It only tracks counters and deadlines
-//! and answers: "should the operation continue, and if not, why?"
+//! The controller is stateless regarding event sourcing. It does not own
+//! channels, loops, or notification logic. It only tracks counters and
+//! deadlines and answers: "should the operation continue, and if not, why?"
 //!
 //! ## Normal vs Error stop reasons
 //!
 //! Normal stops (successful outcomes):
-//! - `match_found`      — pattern matched in the byte stream
-//! - `timeout`          — total wall-clock budget elapsed
-//! - `max_buffered_bytes` — buffer budget reached
-//! - `data_complete`    — settle phase completed (read without matcher)
-//! - `no_new_rx_timeout` — silence budget elapsed (no data within window)
+//! - `match_found`: pattern matched in the byte stream
+//! - `timeout`: total wall-clock budget elapsed
+//! - `max_buffered_bytes`: buffer budget reached
+//! - `data_complete`: settle phase completed (read without matcher)
+//! - `no_new_rx_timeout`: silence budget elapsed (no data within window)
 //!
 //! Error stops (something went wrong):
-//! - `connection_closed` — underlying serial port closed
-//! - `cancelled`        — MCP client cancelled the request
+//! - `connection_closed`: underlying serial port closed
+//! - `cancelled`: MCP client cancelled the request
 
 use std::time::Instant;
 
@@ -358,7 +358,7 @@ mod tests {
     fn match_found_takes_priority_over_max_bytes() {
         let start = Instant::now();
         let mut ctrl = RxStopController::new(start, None, 5, None);
-        // Both match and max_bytes — match should win.
+        // Both match and max_bytes are set, so match should win.
         let decision = ctrl.push_data(10, 10, Some(MatchResult::Found(3)));
         assert!(matches!(decision, RxStopDecision::Stop(_)));
         if let RxStopDecision::Stop(outcome) = decision {
@@ -441,7 +441,7 @@ mod tests {
         // Record some data but don't find match yet (this simulates
         // a scenario where data arrived before timeout was checked).
         ctrl.push_data(5, 5, None);
-        // Now check timeout — should include bytes info.
+        // Now check timeout, which should include byte information.
         let decision = ctrl.check_timeout();
         if let RxStopDecision::Stop(outcome) = decision {
             assert_eq!(outcome.meta.bytes_observed, 5);

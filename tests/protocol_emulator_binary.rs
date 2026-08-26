@@ -1,8 +1,7 @@
 //! Binary payload integration test for the protocol emulator.
 //!
-//! Exercises the hex / base64 / utf8 encoding paths with raw binary data
-//! that cannot be represented as valid UTF-8, plus large payloads and
-//! hex-pattern matching in read+match.
+//! It covers hex, base64, and lossless UTF-8 fallback for binary data, plus a
+//! large payload and hex-pattern matching in `read` with `match`.
 
 #![cfg(target_os = "linux")]
 
@@ -14,13 +13,11 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 mod common;
 use common::{connect_client, pty::PtyPair, tool_request, TestServer};
 
-// ------------------------------------------------------------------
-// Minimal device emulator that speaks three commands:
-//   READ BIN       → 256 bytes: 0x00 .. 0xFF
-//   READ BIG       → 3 120 bytes (repeating chunk, exercises chunking)
-//   READ PATTERN   → 5 bytes: 0xCA 0xFE 0xC0 0xFF 0xEE
-// Everything else is silently ignored (no response).
-// ------------------------------------------------------------------
+// The emulator responds to three commands:
+// `READ BIN` returns bytes 0x00 through 0xFF.
+// `READ BIG` returns 3,120 bytes in repeated chunks.
+// `READ PATTERN` returns bytes 0xCA 0xFE 0xC0 0xFF 0xEE.
+// Other commands produce no response.
 
 async fn emulator_task(mut master: File) {
     let mut buf = vec![0u8; 512];
@@ -44,7 +41,7 @@ async fn emulator_task(mut master: File) {
                     master.write_all(&payload).await
                 }
                 b"READ BIG" => {
-                    // 13 * 240 = 3 120 bytes
+                    // 13 * 240 = 3,120 bytes.
                     let payload = b"HELLO WORLD! ".repeat(240);
                     master.write_all(&payload).await
                 }
@@ -64,7 +61,6 @@ fn assert_tool_ok(result: &rmcp::model::CallToolResult, label: &str) {
 
 #[tokio::test]
 async fn protocol_emulator_binary_workflow() {
-    // ---- Stage 0: setup ----
     let pty = PtyPair::open().expect("openpty");
     let slave_path = pty.slave_path.to_string_lossy().into_owned();
     let (master, _slave_fd) = pty.into_parts();
@@ -87,7 +83,6 @@ async fn protocol_emulator_binary_workflow() {
         .expect("string")
         .to_string();
 
-    // ---- Stage 1: hex roundtrip of 0x00..0xFF ----
     client
         .peer()
         .call_tool(tool_request(
@@ -132,7 +127,6 @@ async fn protocol_emulator_binary_workflow() {
     let expected: Vec<u8> = (0u8..=255).collect();
     assert_eq!(decoded, expected, "byte values must be 0x00..0xFF");
 
-    // ---- Stage 2: base64 roundtrip of 0x00..0xFF ----
     client
         .peer()
         .call_tool(tool_request(
@@ -179,7 +173,6 @@ async fn protocol_emulator_binary_workflow() {
         "base64 roundtrip must match original bytes"
     );
 
-    // ---- Stage 3: utf8 read of binary falls back to exact hex (lossless) ----
     client
         .peer()
         .call_tool(tool_request(
@@ -215,8 +208,8 @@ async fn protocol_emulator_binary_workflow() {
         ))
         .await
         .unwrap();
-    // Contract: invalid UTF-8 no longer fails the read — the same
-    // bytes are re-encoded as exact spaced hex with effective encoding "hex".
+    // Invalid UTF-8 uses lossless fallback: the same bytes are returned as
+    // spaced hex with effective encoding "hex".
     assert_tool_ok(&utf8_result, "utf8_encoding_binary_hex_fallback");
     let utf8_structured = utf8_result.structured_content.expect("structured");
     assert_eq!(
@@ -232,7 +225,6 @@ async fn protocol_emulator_binary_workflow() {
         "utf8-requested read must preserve every byte via hex fallback"
     );
 
-    // ---- Stage 4: large payload (>3 KB) via hex read ----
     client
         .peer()
         .call_tool(tool_request(
@@ -276,7 +268,6 @@ async fn protocol_emulator_binary_workflow() {
         "expected >=3000 bytes for big payload, got {big_bytes}"
     );
 
-    // ---- Stage 5: read with hex pattern match in binary data ----
     client
         .peer()
         .call_tool(tool_request(
@@ -325,7 +316,6 @@ async fn protocol_emulator_binary_workflow() {
         "match_index must be present"
     );
 
-    // ---- Stage 6: resource still lists the open connection ----
     let detail_uri = format!("serial://connections/{connection_id}");
     let detail_res = client
         .peer()
@@ -343,7 +333,6 @@ async fn protocol_emulator_binary_workflow() {
         "connection detail must match PTY slave path"
     );
 
-    // ---- Stage 7: cleanup ----
     let close_result = client
         .peer()
         .call_tool(tool_request(

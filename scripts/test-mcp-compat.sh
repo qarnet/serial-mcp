@@ -1,101 +1,100 @@
 #!/usr/bin/env bash
 #
-# MCP version compatibility runner — the single executable local/CI gate for
-# both supported protocol versions (2025-11-25 legacy sessions and 2026-07-28
-# modern discovery/stateless requests). Linux/CI scope.
+# Run compatibility checks for both supported MCP protocol versions through one
+# local/CI gate: 2025-11-25 legacy sessions and 2026-07-28 modern
+# discovery/stateless requests. Linux/CI scope.
 #
-# Runs, in order:
-#   1. locked serial-mcp binary build (unless SERIAL_MCP_BIN names one)
-#   2. install of the lockfile-pinned MCP validation tooling
-#      (`npm ci --ignore-scripts` in compat/mcp-validation; lifecycle scripts
-#      are never executed and packages are never resolved via npx)
-#   3. focused Rust gates: protocol_compatibility, stdio_integration,
-#      resource_subscriptions
-#   4. locked historical rmcp 1.7.0 fixture build into a stable compat target
-#   5. historical fixture stdio smoke against the current binary
-#   6. isolated loopback HTTP server (temporary profile path) with a bounded
-#      modern server/discover readiness probe
-#   7. historical fixture HTTP smoke against /mcp
-#   8. official legacy conformance scenarios at --spec-version 2025-11-25
-#   9. official modern conformance scenarios at --spec-version 2026-07-28
-#  10. pinned Inspector 2.0.0 interoperability smoke against the preferred
-#      (modern) version
+# Run, in order:
+# 1. Build the locked serial-mcp binary unless SERIAL_MCP_BIN names one.
+# 2. Install lockfile-pinned MCP validation tooling with
+#    `npm ci --ignore-scripts` in compat/mcp-validation. Lifecycle scripts are
+#    not executed and packages are not resolved via npx.
+# 3. Run focused Rust gates: protocol_compatibility, stdio_integration, and
+#    resource_subscriptions.
+# 4. Build the locked historical rmcp 1.7.0 fixture into a stable compat target.
+# 5. Run the historical fixture stdio smoke against the current binary.
+# 6. Start an isolated loopback HTTP server with a temporary profile path and a
+#    bounded modern server/discover readiness probe.
+# 7. Run the historical fixture HTTP smoke against /mcp.
+# 8. Run official legacy conformance scenarios at --spec-version 2025-11-25.
+# 9. Run official modern conformance scenarios at --spec-version 2026-07-28.
+# 10. Run the pinned Inspector 2.0.0 interoperability smoke against the
+#     preferred modern version.
 #
-# The conformance and Inspector packages are installed from the committed
-# lockfile compat/mcp-validation/package-lock.json only (exact versions
-# 0.2.0-alpha.10 / 2.0.0 with integrity hashes, private package.json) and are
-# invoked through that project's local node_modules/.bin — never via npx and
-# never from a dynamic package resolution.
+# Conformance and Inspector packages come only from the committed lockfile
+# compat/mcp-validation/package-lock.json (exact versions 0.2.0-alpha.10 /
+# 2.0.0 with integrity hashes, private package.json). Invoke them through that
+# project's local node_modules/.bin, not via npx or dynamic package resolution.
 #
 # Protocol versions, package pins, scenario lists, the expected-failure path,
-# and all assertions are FIXED in this file. Environment overrides may select
-# paths/port only:
+# and assertions are fixed in this file. Environment overrides may select paths
+# and port only:
 #   SERIAL_MCP_BIN          default: target/debug/serial-mcp
 #   MCP_COMPAT_PORT         default: 8931
 #   MCP_COMPAT_REPORT_DIR   default: target/conformance-results
 #   MCP_COMPAT_CARGO_TARGET default: target/mcp-compat-rmcp-1
 #
-# The script never runs `--suite all`, never suppresses a runner exit status
-# (the readiness probe may keep its `curl ... || true` because it explicitly
-# polls and validates the HTTP status), and never adds fixture endpoints to
-# the product. Every conformance scenario is wrapped in GNU timeout 180 and
-# fails the run on any nonzero exit. A trap always stops/waits for the HTTP
-# server and removes only this run's own `mktemp -d` directory.
+# The script does not run `--suite all`, suppress a runner exit status, or add
+# fixture endpoints to the product. The readiness probe keeps `curl ... || true`
+# because it polls and validates the HTTP status itself. GNU timeout 180 wraps
+# every conformance scenario, and any nonzero exit fails the run. A trap stops
+# and waits for the HTTP server and removes only this run's own `mktemp -d`
+# directory.
 
 set -euo pipefail
 
-# Resolve the repository root from this script's path (never cwd).
+# Resolve repository root from this script's path rather than cwd.
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
 cd "$ROOT"
 
-# --- Fixed contract (not overridable) -----------------------------------------
-# The exact pinned official conformance package (no floating tags). It is
-# installed from the committed lockfile and invoked via the local binary below;
-# this constant only documents the pinned package name.
+# Fixed contract.
+# Record the exact pinned official conformance package. Install it from the
+# committed lockfile and invoke it through the local binary below; this constant
+# documents the package name.
 CONFORMANCE_PACKAGE="@modelcontextprotocol/conformance@0.2.0-alpha.10"
-# Lockfile-pinned MCP validation project: exact direct versions and integrity
-# hashes live in compat/mcp-validation/package-lock.json (private
-# package.json). Installed with `npm ci --ignore-scripts` — lifecycle scripts
-# are disabled by policy (preinstall supply-chain hardening). The local
-# binaries are the ONLY conformance/Inspector entry points in this script;
-# npx and dynamic package resolution are never used.
+# The lockfile-pinned MCP validation project keeps exact direct versions and
+# integrity hashes in compat/mcp-validation/package-lock.json (private
+# package.json). Install with `npm ci --ignore-scripts`; lifecycle scripts are
+# disabled by policy for supply-chain hardening. This script uses only the local
+# binaries for conformance and Inspector; npx and dynamic package resolution
+# are not used.
 VALIDATION_DIR="$ROOT/compat/mcp-validation"
 CONFORMANCE_BIN="$VALIDATION_DIR/node_modules/.bin/conformance"
 INSPECTOR_BIN="$VALIDATION_DIR/node_modules/.bin/mcp-inspector"
-# Expected-failure baseline: exactly the four documented fixture-dependent
-# checks (see conformance/expected-failures.yaml). A baseline entry that
-# starts passing fails the run as stale; any other failure is unexpected.
+# The expected-failure baseline contains exactly four documented
+# fixture-dependent checks (see conformance/expected-failures.yaml). A baseline
+# entry that starts passing fails the run as stale; any other failure is
+# unexpected.
 EXPECTED_FAILURES="$ROOT/conformance/expected-failures.yaml"
-# Scenario set for MCP protocol version 2025-11-25 (legacy initialize/session
-# lifecycle). server-initialize covers the legacy initialize/session
-# lifecycle in the pinned package (the handoff's `server-session-lifecycle`
-# name does not exist in @modelcontextprotocol/conformance@0.2.0-alpha.10).
+# MCP protocol version 2025-11-25 uses the legacy initialize/session lifecycle.
+# server-initialize covers that lifecycle in the pinned package; the handoff's
+# `server-session-lifecycle` name does not exist in
+# @modelcontextprotocol/conformance@0.2.0-alpha.10.
 SCENARIOS_2025_11_25="server-initialize ping completion-complete tools-list resources-list prompts-list"
-# Scenario set for MCP protocol version 2026-07-28 (modern discovery /
-# stateless lifecycle).
+# MCP protocol version 2026-07-28 uses the modern discovery/stateless lifecycle.
 SCENARIOS_2026_07_28="server-stateless completion-complete tools-list resources-list prompts-list caching sep-2164-resource-not-found"
-# GNU timeout for every fixture invocation and conformance scenario.
+# GNU timeout applies to every fixture invocation and conformance scenario.
 GATE_TIMEOUT=180
 
-# --- Environment overrides (paths/port only) ----------------------------------
+# Environment overrides are limited to paths and port.
 BIN="${SERIAL_MCP_BIN:-target/debug/serial-mcp}"
 PORT="${MCP_COMPAT_PORT:-8931}"
 REPORT_DIR="${MCP_COMPAT_REPORT_DIR:-target/conformance-results}"
 FIXTURE_TARGET="${MCP_COMPAT_CARGO_TARGET:-target/mcp-compat-rmcp-1}"
 
-# --- Server lifecycle ---------------------------------------------------------
+# Server lifecycle.
 SERVER_PID=""
 PROFILES_DIR=""
 
 cleanup() {
-  # Always stop/waits for the HTTP server we started.
+  # Always stop and wait for the HTTP server started by this run.
   if [ -n "$SERVER_PID" ]; then
     kill "$SERVER_PID" 2>/dev/null || true
     wait "$SERVER_PID" 2>/dev/null || true
     SERVER_PID=""
   fi
-  # Remove only this run's own temporary directory (never an override dir).
+  # Remove only this run's temporary directory, never an override directory.
   if [ -n "$PROFILES_DIR" ]; then
     rm -rf -- "$PROFILES_DIR"
     PROFILES_DIR=""
@@ -109,7 +108,7 @@ step() {
   printf '\n==== [%s] %s ====\n' "$(date -u +%H:%M:%S)" "$*"
 }
 
-# --- 1. locked serial-mcp binary build ---------------------------------------
+# Build the locked serial-mcp binary when no executable was supplied.
 if [ -x "$BIN" ]; then
   step "using prebuilt serial-mcp binary: $BIN"
 else
@@ -123,7 +122,7 @@ fi
 BIN="$(realpath "$BIN")"
 step "serial-mcp binary: $BIN"
 
-# --- 2. lockfile-pinned MCP validation tooling install ------------------------
+# Install lockfile-pinned MCP validation tooling without lifecycle scripts.
 step "installing MCP validation tooling (npm ci --ignore-scripts)"
 npm ci --ignore-scripts --prefix "$VALIDATION_DIR"
 if [ ! -x "$CONFORMANCE_BIN" ]; then
@@ -135,7 +134,7 @@ if [ ! -x "$INSPECTOR_BIN" ]; then
   exit 1
 fi
 
-# --- 3. focused Rust gates ----------------------------------------------------
+# Run focused Rust gates.
 step "focused Rust gates: protocol_compatibility"
 cargo test --locked --test protocol_compatibility
 step "focused Rust gates: stdio_integration"
@@ -143,7 +142,7 @@ cargo test --locked --test stdio_integration
 step "focused Rust gates: resource_subscriptions"
 cargo test --locked --test resource_subscriptions
 
-# --- 4. locked historical fixture build ---------------------------------------
+# Build the locked historical fixture.
 step "building historical rmcp 1.7.0 fixture"
 cargo build --locked --manifest-path compat/rmcp-1-client/Cargo.toml \
   --target-dir "$FIXTURE_TARGET"
@@ -153,11 +152,11 @@ if [ ! -x "$FIXTURE_BIN" ]; then
   exit 1
 fi
 
-# --- 5. historical fixture stdio smoke ----------------------------------------
+# Run the historical fixture stdio smoke.
 step "historical rmcp 1.7.0 fixture over stdio"
 timeout "$GATE_TIMEOUT" "$FIXTURE_BIN" stdio "$BIN"
 
-# --- 6. loopback HTTP server + readiness probe --------------------------------
+# Start the loopback HTTP server and poll readiness.
 mkdir -p "$REPORT_DIR"
 PROFILES_DIR="$(mktemp -d)"
 step "starting HTTP server on 127.0.0.1:$PORT (logs: $REPORT_DIR/server.log)"
@@ -169,9 +168,9 @@ echo "$SERVER_PID" >"$REPORT_DIR/server.pid"
 
 MCP_URL="http://127.0.0.1:$PORT/mcp"
 step "readiness probe (bounded server/discover for 2026-07-28)"
-# Bounded readiness probe: a modern server/discover (the only session-less
-# request the server accepts) must return HTTP 200. `|| true` is retained
-# because the loop polls and validates the HTTP status itself.
+# The bounded probe sends modern server/discover, the only session-less request
+# the server accepts. It must return HTTP 200. `curl ... || true` lets the loop
+# continue while it polls and validates the HTTP status itself.
 probe_code=""
 for _ in $(seq 1 60); do
   probe_code="$(curl -s -o /dev/null -w '%{http_code}' -X POST \
@@ -194,11 +193,11 @@ if [ "$probe_code" != "200" ]; then
   exit 1
 fi
 
-# --- 7. historical fixture HTTP smoke -----------------------------------------
+# Run the historical fixture HTTP smoke.
 step "historical rmcp 1.7.0 fixture over HTTP ($MCP_URL)"
 timeout "$GATE_TIMEOUT" "$FIXTURE_BIN" http "$MCP_URL"
 
-# --- 8. conformance (2025-11-25) ----------------------------------------------
+# Run legacy conformance scenarios.
 for sc in $SCENARIOS_2025_11_25; do
   step "conformance $sc (2025-11-25)"
   timeout "$GATE_TIMEOUT" "$CONFORMANCE_BIN" server \
@@ -207,7 +206,7 @@ for sc in $SCENARIOS_2025_11_25; do
     -o "$REPORT_DIR/$sc-2025-11-25"
 done
 
-# --- 9. conformance (2026-07-28) ----------------------------------------------
+# Run modern conformance scenarios.
 for sc in $SCENARIOS_2026_07_28; do
   step "conformance $sc (2026-07-28)"
   timeout "$GATE_TIMEOUT" "$CONFORMANCE_BIN" server \
@@ -216,11 +215,11 @@ for sc in $SCENARIOS_2026_07_28; do
     -o "$REPORT_DIR/$sc-2026-07-28"
 done
 
-# --- 10. Inspector 2.0.0 interoperability smoke --------------------------------
+# Run the Inspector 2.0.0 interoperability smoke.
 step "Inspector 2.0.0 interoperability smoke (2026-07-28)"
 node "$ROOT/scripts/inspector-smoke.mjs" "$MCP_URL" --inspector-cmd "$INSPECTOR_BIN"
 
-# --- success summary ----------------------------------------------------------
+# Print the success summary.
 printf '\n==== mcp-compat: all gates passed ====\n'
 echo "  validation tooling install:       ok (npm ci --ignore-scripts, locked)"
 echo "  rmcp-1 stdio smoke:               ok"

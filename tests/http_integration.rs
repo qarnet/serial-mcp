@@ -1,12 +1,6 @@
-//! HTTP transport integration tests.
-//!
-//! These tests run an in-process `SerialHandler` behind `axum`, connect a
-//! real `rmcp` HTTP client, and assert the MCP surface (tools, resources,
-//! prompts, notifications) is wired up correctly.
-//!
-//! No OS serial port is involved. Tests that need a connection inject an
-//! in-memory loopback via `ConnectionManager::insert` so the duplex peer
-//! can stand in for a device.
+//! HTTP integration tests use real `rmcp` clients over in-process `axum`
+//! transport. They cover the MCP surface without opening an OS serial port;
+//! tests needing serial I/O inject in-memory loopback connections.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -107,7 +101,7 @@ async fn list_resources_pagination_with_cursor_returns_next_page() {
     let server = common::spawned::SpawnedServer::start().await;
     let (client, _rx) = common::spawned::spawn_client(&server).await.unwrap();
 
-    // Request first page with size 1
+    // List resources with default pagination.
     let page1 = client
         .peer()
         .list_resources(Some(PaginatedRequestParams::default().with_cursor(None)))
@@ -157,7 +151,7 @@ async fn list_resource_templates_pagination_with_cursor_returns_next_page() {
     let server = common::spawned::SpawnedServer::start().await;
     let (client, _rx) = common::spawned::spawn_client(&server).await.unwrap();
 
-    // Request first page with size 1
+    // List resource templates with default pagination.
     let page1 = client
         .peer()
         .list_resource_templates(Some(PaginatedRequestParams::default().with_cursor(None)))
@@ -263,8 +257,6 @@ async fn call_tool_open_with_bad_data_bits_returns_is_error() {
     client.cancel().await.ok();
 }
 
-// ── configure tool: profile mode ─────────────────────────────────────────────
-
 #[tokio::test]
 async fn configure_profile_creates_new_profile() {
     let profiles_dir = TempDir::new().unwrap();
@@ -292,7 +284,7 @@ async fn configure_profile_creates_new_profile() {
     assert_eq!(s["mode"], "profile");
     assert_eq!(s["created"], true);
     assert_eq!(s["defaults"]["baud_rate"], 9600);
-    // Verify it shows up in list_profiles.
+    // The new profile must appear in list_profiles.
     let listed = client
         .peer()
         .call_tool(tool_request("list_profiles", json!({})))
@@ -307,11 +299,9 @@ async fn configure_profile_creates_new_profile() {
         .collect::<Vec<_>>();
     assert!(names.contains(&name), "profile should be listed: {names:?}");
     client.cancel().await.ok();
-    // TempDir cleanup: profiles_dir dropped here, deletes profiles.toml.
 }
 
-/// `list_profiles` exposes metadata and bounded revision history
-/// so agents can understand selection and future rollback revisions.
+/// `list_profiles` exposes profile metadata and retained revision snapshots.
 #[tokio::test]
 async fn list_profiles_exposes_metadata_and_revisions() {
     let profiles_dir = TempDir::new().unwrap();
@@ -334,7 +324,7 @@ async fn list_profiles_exposes_metadata_and_revisions() {
         .unwrap();
     assert_ne!(created.is_error, Some(true), "{created:?}");
 
-    // Overwrite bumps the revision and records the prior state.
+    // Overwriting increments the revision and retains prior defaults.
     let overwritten = client
         .peer()
         .call_tool(tool_request(
@@ -364,14 +354,11 @@ async fn list_profiles_exposes_metadata_and_revisions() {
         !p["metadata"]["created_at_ms"].is_null(),
         "created timestamp set"
     );
-    // Prior state snapshot for future rollback.
+    // The retained revision contains the prior defaults.
     let revisions = p["revisions"].as_array().expect("revisions array");
     assert_eq!(revisions.len(), 1);
     assert_eq!(revisions[0]["revision"], json!(1));
     assert_eq!(revisions[0]["defaults"]["baud_rate"], json!(9600));
-    // Metadata must survive serialization to the wire (no uint formats etc.
-    // are exercised by the schema guards).
-
     client.cancel().await.ok();
 }
 
@@ -386,7 +373,6 @@ async fn configure_profile_overwrites_existing() {
         .await;
     let (client, _rx) = connect_client(&server).await.unwrap();
     let name = "test-configure-ow";
-    // Create initial profile.
     let _ = client
         .peer()
         .call_tool(tool_request(
@@ -398,7 +384,7 @@ async fn configure_profile_overwrites_existing() {
         ))
         .await
         .unwrap();
-    // Overwrite via configure with overwrite: true, higher baud.
+    // Overwrite with a higher baud rate.
     let result = client
         .peer()
         .call_tool(tool_request(
@@ -417,7 +403,6 @@ async fn configure_profile_overwrites_existing() {
     assert_eq!(s["created"], false);
     assert_eq!(s["defaults"]["baud_rate"], 19200);
     client.cancel().await.ok();
-    // TempDir cleanup: profiles_dir dropped here, deletes profiles.toml.
 }
 
 #[tokio::test]
@@ -431,7 +416,6 @@ async fn configure_profile_rejects_existing_without_overwrite() {
         .await;
     let (client, _rx) = connect_client(&server).await.unwrap();
     let name = "test-configure-rej";
-    // Create initial profile.
     let _ = client
         .peer()
         .call_tool(tool_request(
@@ -443,7 +427,7 @@ async fn configure_profile_rejects_existing_without_overwrite() {
         ))
         .await
         .unwrap();
-    // Attempt overwrite without overwrite flag.
+    // An overwrite without the flag must fail.
     let result = client
         .peer()
         .call_tool(tool_request(
@@ -461,10 +445,7 @@ async fn configure_profile_rejects_existing_without_overwrite() {
         "should reject existing profile without overwrite: {result:?}"
     );
     client.cancel().await.ok();
-    // TempDir cleanup: profiles_dir dropped here, deletes profiles.toml.
 }
-
-// ── configure tool: validation errors ────────────────────────────────────────
 
 #[tokio::test]
 async fn configure_rejects_both_profile_and_connection_id() {
@@ -505,8 +486,6 @@ async fn configure_rejects_neither() {
     );
     client.cancel().await.ok();
 }
-
-// ── compute_checksum: known vectors ──────────────────────────────────────────
 
 #[tokio::test]
 async fn compute_checksum_xor_known_vector() {
@@ -661,7 +640,7 @@ async fn call_tool_list_ports_returns_structured_result() {
         .expect("list_ports must produce structuredContent");
     assert!(structured.get("count").is_some());
     assert!(structured.get("ports").is_some());
-    // The parallel profile-match preview is always present.
+    // The tool always returns profile matches alongside ports.
     let ports = structured["ports"].as_array().unwrap();
     let matches = structured["profile_matches"]
         .as_array()
@@ -675,8 +654,8 @@ async fn call_tool_list_ports_returns_structured_result() {
     client.cancel().await.ok();
 }
 
-/// The `serial://ports` resource serves the same profile-match map
-/// as the `list_ports` tool (same fresh store read, same pure computation).
+/// The `serial://ports` resource exposes the same profile-match map as
+/// `list_ports`.
 #[tokio::test]
 async fn ports_resource_includes_profile_match_map() {
     let server = common::spawned::SpawnedServer::start().await;
@@ -730,9 +709,9 @@ async fn get_prompt_diagnose_port_returns_user_message() {
     client.cancel().await.ok();
 }
 
-/// The rendered `diagnose_port` prompt must use current tool shapes: a valid
-/// `read` flow, no removed per-call `max_buffered_bytes`, and no removed
-/// `wait_for` tool.
+/// The rendered `diagnose_port` prompt uses `read` with `match` for pattern
+/// waits. `max_buffered_bytes` is not a per-call field, and `wait_for` is not a
+/// tool.
 #[tokio::test]
 async fn get_prompt_diagnose_port_uses_current_read_flow() {
     let server = common::spawned::SpawnedServer::start().await;
@@ -749,17 +728,17 @@ async fn get_prompt_diagnose_port_uses_current_read_flow() {
     assert!(!result.messages.is_empty());
     let rendered = serde_json::to_string(&result.messages[0].content).unwrap();
     assert!(rendered.contains("/dev/ttyUSB7"));
-    // Uses the current read flow (read with timeout / match).
+    // The prompt uses read with timeout and match.
     assert!(
         rendered.contains("read(connection_id"),
         "prompt must drive the current read flow: {rendered}"
     );
-    // The per-call max_buffered_bytes argument was removed in v0.8.1.
+    // max_buffered_bytes is a connection default, not a per-call read field.
     assert!(
         !rendered.contains("max_buffered_bytes"),
         "prompt must not use the removed per-call max_buffered_bytes: {rendered}"
     );
-    // The wait_for tool was removed; read(match=...) is the pattern-wait flow.
+    // wait_for is not a tool; read(match=...) is the pattern-wait flow.
     assert!(
         !rendered.contains("wait_for"),
         "prompt must not reference the removed wait_for tool: {rendered}"
@@ -767,8 +746,8 @@ async fn get_prompt_diagnose_port_uses_current_read_flow() {
     client.cancel().await.ok();
 }
 
-/// `tools/list` descriptions for `read`/`transact`/`flush` must advertise the
-/// actual tagged-object `ReadFrom` wire shape, not string shorthand.
+/// `tools/list` descriptions for `read`, `transact`, and `flush` must advertise
+/// tagged-object `ReadFrom` values, not string shorthand.
 #[tokio::test]
 async fn read_tool_description_uses_tagged_readfrom_examples() {
     let server = common::spawned::SpawnedServer::start().await;
@@ -799,8 +778,8 @@ async fn read_tool_description_uses_tagged_readfrom_examples() {
             "{name} description must show the tagged from example: {d}"
         );
     }
-    // The read description must carry the complete tagged set, including the
-    // absolute offset object.
+    // Read description must include all tagged forms, including an absolute
+    // offset object.
     let read = desc("read");
     for tagged in [
         r#"{"type":"cursor"}"#,
@@ -813,7 +792,7 @@ async fn read_tool_description_uses_tagged_readfrom_examples() {
             "read description must contain {tagged}: {read}"
         );
     }
-    // No bare string shorthand survives in the examples.
+    // Descriptions must not advertise bare-string forms.
     for name in ["read", "transact", "flush"] {
         let d = desc(name);
         for shorthand in [
@@ -830,10 +809,9 @@ async fn read_tool_description_uses_tagged_readfrom_examples() {
     client.cancel().await.ok();
 }
 
-/// The generated input schemas for `read`/`transact` carry the
-/// agent-visible `from` guidance in the property description. It must
-/// advertise the tagged `ReadFrom` wire form, never bare string shorthand —
-/// agents copy these descriptions when constructing calls.
+/// The `read` and `transact` input schemas describe `from` with tagged objects,
+/// such as `{"type":"now"}` and `{"type":"offset","offset":N}`. They must
+/// not advertise bare strings.
 #[tokio::test]
 async fn read_tool_input_schema_uses_tagged_readfrom_examples() {
     let server = common::spawned::SpawnedServer::start().await;
@@ -886,8 +864,6 @@ async fn read_tool_input_schema_uses_tagged_readfrom_examples() {
     client.cancel().await.ok();
 }
 
-// ---- With an injected loopback connection -----------------------------------
-
 #[tokio::test]
 async fn write_tool_sends_bytes_to_loopback_peer() {
     let manager = Arc::new(ConnectionManager::new());
@@ -911,8 +887,6 @@ async fn write_tool_sends_bytes_to_loopback_peer() {
     assert_eq!(&buf, b"hello over http");
     client.cancel().await.ok();
 }
-
-// ── Lossless RX encoding fallback ─────────────────────────────────────────
 
 #[tokio::test]
 async fn read_invalid_utf8_falls_back_to_exact_hex() {
@@ -940,14 +914,14 @@ async fn read_invalid_utf8_falls_back_to_exact_hex() {
         ))
         .await
         .unwrap();
-    // Fallback is a normal result, never a tool error.
+    // Encoding fallback is a normal tool result, not a tool error.
     assert_ne!(result.is_error, Some(true), "{result:?}");
     let s = result.structured_content.expect("structured content");
     assert_eq!(s["data"], json!("48 69 ff fe 00"));
     assert_eq!(s["encoding"], json!("hex"));
     assert_eq!(s["bytes_read"], json!(5));
-    // Cat path drains instantly ("drained") when bytes are already buffered;
-    // otherwise the read waits and stops at "timeout". Both carry the data.
+    // Buffered input may stop as "drained"; otherwise this call stops at
+    // "timeout". Both normal results retain the data.
     assert!(
         s["stop_reason"] == json!("drained") || s["stop_reason"] == json!("timeout"),
         "unexpected stop_reason: {s:?}"
@@ -963,7 +937,7 @@ async fn read_framing_error_keeps_valid_frame_utf8_and_raw_hex() {
     let (conn, mut peer) = loopback_connection("loop-read-slip-partial-enc");
     let connection_id = manager.insert(conn).await.unwrap();
 
-    // One valid SLIP frame then a malformed escape (0xDB 0xFF).
+    // A valid SLIP frame is followed by malformed escape bytes (0xDB 0xFF).
     let slip_bytes: [u8; 6] = [0xC0, b'O', b'K', 0xC0, 0xDB, 0xFF];
     peer.write_all(&slip_bytes).await.unwrap();
     peer.flush().await.unwrap();
@@ -991,7 +965,7 @@ async fn read_framing_error_keeps_valid_frame_utf8_and_raw_hex() {
         s["error"].as_str().is_some_and(|e| e.contains("SLIP")),
         "framing error text must be present: {s:?}"
     );
-    // Top-level raw bytes (malformed tail) fall back to hex...
+    // Raw bytes include the malformed tail, so they fall back to hex.
     assert_eq!(s["encoding"], json!("hex"));
     assert!(
         s["data"]
@@ -1001,7 +975,7 @@ async fn read_framing_error_keeps_valid_frame_utf8_and_raw_hex() {
             .all(|c| c.is_ascii_hexdigit() || c == ' '),
         "top-level data should be hex: {s:?}"
     );
-    // ...while the independently valid frame stays in requested UTF-8.
+    // The valid frame is encoded independently and remains UTF-8.
     let frames = s["frames"].as_array().expect("partial frames");
     assert_eq!(frames.len(), 1);
     assert_eq!(frames[0]["data"], json!("OK"));
@@ -1019,7 +993,7 @@ async fn read_match_index_over_chunked_stream_preserved() {
     let server = TestServer::start_with(manager).await;
     let (client, _rx) = connect_client(&server).await.unwrap();
 
-    // Chunked stream: the literal spans the boundary between two writes.
+    // The literal spans the boundary between two writes.
     peer.write_all(b"ABCD").await.unwrap();
     peer.flush().await.unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -1027,7 +1001,7 @@ async fn read_match_index_over_chunked_stream_preserved() {
     peer.flush().await.unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    // read over the chunked stream: "OK>" at global index 6.
+    // The match is at global index 6.
     let result = client
         .peer()
         .call_tool(tool_request(
@@ -1045,7 +1019,7 @@ async fn read_match_index_over_chunked_stream_preserved() {
     assert_eq!(s["matched"], json!(true), "{s:?}");
     assert_eq!(s["match_index"], json!(6), "{s:?}");
 
-    // No-match: a pattern absent from the stream times out without a match.
+    // An absent pattern times out without a match.
     let result = client
         .peer()
         .call_tool(tool_request(
@@ -1133,7 +1107,7 @@ async fn read_with_no_data_times_out_with_is_error() {
         Some(true),
         "read timeout must return isError=false: {result:?}"
     );
-    // Timeout is a normal stop reason, not an error. Verify structured content.
+    // Timeout is a normal tool result, not a tool error.
     let structured = result
         .structured_content
         .expect("timeout result must have structured content");
@@ -1220,8 +1194,6 @@ async fn send_break_result_includes_actual_duration() {
     client.cancel().await.ok();
 }
 
-// ── Gap-fill: set_dtr_rts integration ────────────────────────────────────────
-
 #[tokio::test]
 async fn set_dtr_rts_all_combos_return_valid_response() {
     let manager = Arc::new(ConnectionManager::new());
@@ -1253,8 +1225,6 @@ async fn set_dtr_rts_all_combos_return_valid_response() {
 
     client.cancel().await.ok();
 }
-
-// ── Gap-fill: flush target isolation ─────────────────────────────────────────
 
 #[tokio::test]
 async fn flush_each_target_returns_valid_response() {
@@ -1291,8 +1261,6 @@ async fn flush_each_target_returns_valid_response() {
     client.cancel().await.ok();
 }
 
-// ── Gap-fill: write encoding error ───────────────────────────────────────────
-
 #[tokio::test]
 async fn write_with_invalid_encoding_returns_tool_error() {
     let manager = Arc::new(ConnectionManager::new());
@@ -1302,7 +1270,6 @@ async fn write_with_invalid_encoding_returns_tool_error() {
     let server = TestServer::start_with(manager).await;
     let (client, _rx) = connect_client(&server).await.unwrap();
 
-    // Malformed base64
     {
         let result = client
             .peer()
@@ -1315,7 +1282,6 @@ async fn write_with_invalid_encoding_returns_tool_error() {
         assert_eq!(result.is_error, Some(true), "{result:?}");
     }
 
-    // Invalid hex (odd length)
     {
         let result = client
             .peer()
@@ -1328,7 +1294,6 @@ async fn write_with_invalid_encoding_returns_tool_error() {
         assert_eq!(result.is_error, Some(true), "{result:?}");
     }
 
-    // Invalid hex characters
     {
         let result = client
             .peer()
@@ -1341,7 +1306,6 @@ async fn write_with_invalid_encoding_returns_tool_error() {
         assert_eq!(result.is_error, Some(true), "{result:?}");
     }
 
-    // Valid utf8 should succeed
     {
         let result = client
             .peer()
@@ -1358,7 +1322,6 @@ async fn write_with_invalid_encoding_returns_tool_error() {
         );
     }
 
-    // Bogus encoding name
     {
         let result = client
             .peer()
@@ -1373,8 +1336,6 @@ async fn write_with_invalid_encoding_returns_tool_error() {
 
     client.cancel().await.ok();
 }
-
-// ── Gap-fill: read silence timeout ───────────────────────────────────────────
 
 #[tokio::test]
 async fn read_silence_timeout_stops_with_no_new_rx_timeout() {
@@ -1414,8 +1375,6 @@ async fn read_silence_timeout_stops_with_no_new_rx_timeout() {
     client.cancel().await.ok();
 }
 
-// ── Gap-fill: set_flow_control invalid mode ──────────────────────────────────
-
 #[tokio::test]
 async fn set_flow_control_invalid_mode_returns_tool_error() {
     let manager = Arc::new(ConnectionManager::new());
@@ -1439,7 +1398,6 @@ async fn set_flow_control_invalid_mode_returns_tool_error() {
         "bogus flow_control should return tool error: {result:?}"
     );
 
-    // Valid mode should succeed
     let result = client
         .peer()
         .call_tool(tool_request(
@@ -1457,8 +1415,6 @@ async fn set_flow_control_invalid_mode_returns_tool_error() {
     client.cancel().await.ok();
 }
 
-// ── Gap-fill: send_break cancellation ────────────────────────────────────────
-
 #[tokio::test]
 async fn send_break_cancellation_stops_gracefully() {
     let manager = Arc::new(ConnectionManager::new());
@@ -1468,7 +1424,7 @@ async fn send_break_cancellation_stops_gracefully() {
     let server = TestServer::start_with(manager).await;
     let (client, _rx) = connect_client(&server).await.unwrap();
 
-    // Request a long break and cancel mid-way
+    // Start a long break and cancel the client before it completes.
     let result = tokio::time::timeout(
         Duration::from_millis(100),
         client.peer().call_tool(tool_request(
@@ -1481,28 +1437,24 @@ async fn send_break_cancellation_stops_gracefully() {
     )
     .await;
 
-    // Cancel the client before the break completes
     client.cancel().await.ok();
 
-    // The call should either complete with cancellation or the timeout fires
-    // (in which case we already cancelled — the task will be cleaned up).
-    // Either way, this proves the tool doesn't hang forever.
+    // The call may return a tool result, transport cancellation, or the local
+    // timeout. The request must not hang.
     match result {
         Ok(Ok(call_result)) => {
-            // Completed before 100ms timeout — may be is_error due to cancellation
+            // A completed call may be a normal result or a tool error.
             assert!(
                 call_result.is_error == Some(true) || call_result.is_error == Some(false),
                 "break completed: {call_result:?}"
             );
         }
         _ => {
-            // Timeout fired — that's fine; the client was cancelled and the
-            // break task will be cleaned up by the runtime.
+            // Local timeout or transport cancellation; the request was already
+            // cancelled.
         }
     }
 }
-
-// ── Gap-fill: bogus connection ID for each tool ──────────────────────────────
 
 #[tokio::test]
 async fn bogus_connection_id_returns_tool_error_for_all_id_tools() {
@@ -1543,7 +1495,7 @@ async fn bogus_connection_id_returns_tool_error_for_all_id_tools() {
         );
     }
 
-    // list_connections does not take connection_id — just verify it succeeds
+    // list_connections has no connection_id; it should still succeed.
     let result = client
         .peer()
         .call_tool(tool_request("list_connections", json!({})))
@@ -1558,8 +1510,6 @@ async fn bogus_connection_id_returns_tool_error_for_all_id_tools() {
     client.cancel().await.ok();
 }
 
-// ── get_status integration ───────────────────────────────────────────────────
-
 #[tokio::test]
 async fn get_status_returns_config_and_counters() {
     let manager = Arc::new(ConnectionManager::new());
@@ -1569,7 +1519,7 @@ async fn get_status_returns_config_and_counters() {
     let server = TestServer::start_with(manager).await;
     let (client, _rx) = connect_client(&server).await.unwrap();
 
-    // Before any I/O, counters should be zero
+    // Initial counters are zero.
     let result = client
         .peer()
         .call_tool(tool_request(
@@ -1598,7 +1548,7 @@ async fn get_status_returns_config_and_counters() {
         "port_info should be null for loopback connections"
     );
 
-    // Write some data — tx counter should increase
+    // A write increments the TX counter.
     client
         .peer()
         .call_tool(tool_request(
@@ -1610,7 +1560,7 @@ async fn get_status_returns_config_and_counters() {
 
     peer.write_all(b"world").await.unwrap();
 
-    // Read to increment rx counter
+    // A read increments the RX counter.
     client
         .peer()
         .call_tool(tool_request(
@@ -1623,7 +1573,7 @@ async fn get_status_returns_config_and_counters() {
         .await
         .unwrap();
 
-    // Check updated status
+    // Status reflects the I/O counters.
     let result = client
         .peer()
         .call_tool(tool_request(
@@ -1677,7 +1627,7 @@ async fn reconfigure_changes_baud_rate_on_loopback() {
     let server = TestServer::start_with(manager).await;
     let (client, _rx) = connect_client(&server).await.unwrap();
 
-    // Verify initial config
+    // Start with the default configuration.
     let status = client
         .peer()
         .call_tool(tool_request(
@@ -1689,7 +1639,7 @@ async fn reconfigure_changes_baud_rate_on_loopback() {
     let s = status.structured_content.unwrap();
     assert_eq!(s["baud_rate"], json!(115200));
 
-    // Reconfigure baud_rate to 9600
+    // Change the baud rate to 9600.
     let result = client
         .peer()
         .call_tool(tool_request(
@@ -1702,7 +1652,7 @@ async fn reconfigure_changes_baud_rate_on_loopback() {
     let s = result.structured_content.expect("structured");
     assert_eq!(s["baud_rate"], json!(9600), "{s:?}");
 
-    // Verify through get_status that change persisted
+    // get_status reports the changed configuration.
     let status = client
         .peer()
         .call_tool(tool_request(
@@ -1730,7 +1680,6 @@ async fn reconfigure_invalid_args_return_error() {
     let server = TestServer::start_with(manager).await;
     let (client, _rx) = connect_client(&server).await.unwrap();
 
-    // Bogus baud_rate (0)
     let result = client
         .peer()
         .call_tool(tool_request(
@@ -1741,7 +1690,6 @@ async fn reconfigure_invalid_args_return_error() {
         .unwrap();
     assert_eq!(result.is_error, Some(true), "{result:?}");
 
-    // Bogus data_bits
     let result = client
         .peer()
         .call_tool(tool_request(
@@ -1752,7 +1700,6 @@ async fn reconfigure_invalid_args_return_error() {
         .unwrap();
     assert_eq!(result.is_error, Some(true), "{result:?}");
 
-    // Bogus flow_control
     let result = client
         .peer()
         .call_tool(tool_request(
@@ -1763,7 +1710,6 @@ async fn reconfigure_invalid_args_return_error() {
         .unwrap();
     assert_eq!(result.is_error, Some(true), "{result:?}");
 
-    // Unknown connection
     let result = client
         .peer()
         .call_tool(tool_request(
@@ -1816,8 +1762,6 @@ async fn open_profile_not_found_returns_error() {
 
     client.cancel().await.ok();
 }
-
-// ── reconfigure gap-fill tests ───────────────────────────────────────────────
 
 #[tokio::test]
 async fn reconfigure_multiple_params_at_once() {
@@ -1911,12 +1855,9 @@ async fn reconfigure_invalid_stop_bits_returns_error() {
     client.cancel().await.ok();
 }
 
-// ── Shared persistent profile store ─────────────────────────────────────────
-//
-// These tests prove user-observable persistence behavior through public MCP
-// calls: real process restart, shared HTTP sessions, concurrent writers
-// (same process and across processes), legacy migration, startup rejection
-// of corrupt/future files, and failed-write preservation.
+// Profile persistence through public MCP calls covers real process restart,
+// shared HTTP sessions, same- and cross-process concurrency, legacy migration,
+// corrupt/future-file startup rejection, and failed-write preservation.
 
 fn profile_names(s: &serde_json::Value) -> Vec<String> {
     s["profiles"]
@@ -1958,8 +1899,8 @@ async fn list_profile_names_via<H: rmcp::handler::client::ClientHandler>(
     profile_names(&listed.structured_content.expect("structured"))
 }
 
-/// Run the real binary and require it to exit within `timeout`; returns the
-/// captured stdout. Panics on a hang (a regression where startup succeeds).
+/// Run the binary with a bounded startup check and return status plus stdout.
+/// A timeout panics because these callers expect startup to fail.
 async fn run_bin_with_timeout(args: &[&str], timeout: Duration) -> (bool, Vec<u8>) {
     let child = tokio::process::Command::new(common::binaries::serial_mcp_bin())
         .args(args)
@@ -1985,7 +1926,7 @@ async fn profiles_survive_real_process_restart() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("profiles.toml");
 
-    // First actual process creates profile A through the MCP surface.
+    // First process creates profile A through MCP.
     let mut server = SpawnedServer::start_with_profiles_path(Some(&path)).await;
     let (client, _rx) = spawn_client(&server).await.unwrap();
     let created = configure_profile_via(&client, "restart-a", 9600).await;
@@ -1993,7 +1934,7 @@ async fn profiles_survive_real_process_restart() {
     client.cancel().await.ok();
     server.stop().await.unwrap();
 
-    // Fresh actual process with the same path must load it.
+    // A fresh process with the same path must load it.
     let server2 = SpawnedServer::start_with_profiles_path(Some(&path)).await;
     let (client2, _rx2) = spawn_client(&server2).await.unwrap();
     let names = list_profile_names_via(&client2).await;
@@ -2032,14 +1973,14 @@ async fn profiles_shared_across_http_sessions() {
     let created = configure_profile_via(&client_a, "session-a", 9600).await;
     assert_ne!(created.is_error, Some(true), "{created:?}");
 
-    // Client B (separate session, same server) sees it immediately.
+    // Client B uses a separate session on the same server.
     let names_b = list_profile_names_via(&client_b).await;
     assert!(
         names_b.contains(&"session-a".to_string()),
         "client B must observe client A's profile: {names_b:?}"
     );
 
-    // Client B deletes it.
+    // Client B deletes the profile.
     let deleted = client_b
         .peer()
         .call_tool(tool_request(
@@ -2050,7 +1991,7 @@ async fn profiles_shared_across_http_sessions() {
         .unwrap();
     assert_ne!(deleted.is_error, Some(true), "{deleted:?}");
 
-    // Client A no longer sees it.
+    // Client A must no longer see the profile.
     let names_a = list_profile_names_via(&client_a).await;
     assert!(
         !names_a.contains(&"session-a".to_string()),
@@ -2071,7 +2012,7 @@ async fn concurrent_same_process_profile_writes_keep_both() {
     let (client_a, _rx_a) = connect_client(&server).await.unwrap();
     let (client_b, _rx_b) = connect_client(&server).await.unwrap();
 
-    // Two distinct clients create different profiles at the same time.
+    // Two clients create different profiles concurrently.
     let (ra, rb) = tokio::join!(
         configure_profile_via(&client_a, "conc-a", 9600),
         configure_profile_via(&client_b, "conc-b", 19200),
@@ -2079,7 +2020,7 @@ async fn concurrent_same_process_profile_writes_keep_both() {
     assert_ne!(ra.is_error, Some(true), "{ra:?}");
     assert_ne!(rb.is_error, Some(true), "{rb:?}");
 
-    // A third view sees both.
+    // Another view sees both profiles.
     let names = list_profile_names_via(&client_a).await;
     assert!(
         names.contains(&"conc-a".to_string()) && names.contains(&"conc-b".to_string()),
@@ -2089,7 +2030,7 @@ async fn concurrent_same_process_profile_writes_keep_both() {
     client_b.cancel().await.ok();
     drop(server);
 
-    // A fresh store over the same file proves both persisted.
+    // A fresh store over the same file sees both persisted profiles.
     let server2 = TestServer::builder(Arc::new(ConnectionManager::new()))
         .profiles_path(path)
         .start()
@@ -2109,8 +2050,8 @@ async fn concurrent_server_process_profile_writes_keep_both() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("profiles.toml");
 
-    // Two actual server processes share one profile file but bind different
-    // ports. Advisory locking + reload-under-lock must preserve both writes.
+    // Independent server processes share one profile file. Advisory locking and
+    // reload-under-lock must preserve both writes.
     let mut server1 = SpawnedServer::start_with_profiles_path(Some(&path)).await;
     let mut server2 = SpawnedServer::start_with_profiles_path(Some(&path)).await;
     let (client1, _rx1) = spawn_client(&server1).await.unwrap();
@@ -2127,7 +2068,7 @@ async fn concurrent_server_process_profile_writes_keep_both() {
     server1.stop().await.unwrap();
     server2.stop().await.unwrap();
 
-    // Third process proves both writes landed.
+    // A third process confirms both writes persisted.
     let server3 = SpawnedServer::start_with_profiles_path(Some(&path)).await;
     let (client3, _rx3) = spawn_client(&server3).await.unwrap();
     let names = list_profile_names_via(&client3).await;
@@ -2176,7 +2117,7 @@ baud_rate = 115200
         .expect("legacy-dev listed");
     assert_eq!(legacy["defaults"]["baud_rate"], 115200);
 
-    // A mutation persists the migration: the file now declares v2.
+    // A mutation persists the migration as schema version 2.
     let created = configure_profile_via(&client, "new-dev", 9600).await;
     assert_ne!(created.is_error, Some(true), "{created:?}");
     client.cancel().await.ok();
@@ -2188,7 +2129,7 @@ baud_rate = 115200
         "mutation must persist current schema version:\n{content}"
     );
 
-    // Restart proves both profiles remain.
+    // Restart confirms both profiles remain.
     let server2 = SpawnedServer::start_with_profiles_path(Some(&path)).await;
     let (client2, _rx2) = spawn_client(&server2).await.unwrap();
     let names2 = list_profile_names_via(&client2).await;
@@ -2271,13 +2212,13 @@ async fn failed_profile_write_preserves_previous_state() {
     let ra = configure_profile_via(&client, "keep-a", 9600).await;
     assert_ne!(ra.is_error, Some(true), "{ra:?}");
 
-    // Make the profile directory non-writable (keep execute so the tempdir
-    // stays traversable and cleanup can restore it).
+    // Make the profile directory non-writable while keeping it traversable for
+    // cleanup.
     let dir_path = dir.path();
     let original_mode = std::fs::metadata(dir_path).unwrap().permissions().mode();
     std::fs::set_permissions(dir_path, std::fs::Permissions::from_mode(0o555)).unwrap();
 
-    // Creating profile B must fail as a tool error, not a crash.
+    // Creating profile B must return a tool error, not crash the server.
     let rb = configure_profile_via(&client, "lost-b", 19200).await;
     assert_eq!(
         rb.is_error,
@@ -2285,14 +2226,14 @@ async fn failed_profile_write_preserves_previous_state() {
         "write must fail with the profile dir read-only: {rb:?}"
     );
 
-    // The in-memory view is unchanged: A present, B absent.
+    // The in-memory view remains unchanged: A is present and B is absent.
     let names = list_profile_names_via(&client).await;
     assert!(
         names.contains(&"keep-a".to_string()) && !names.contains(&"lost-b".to_string()),
         "failed write must leave the cache untouched: {names:?}"
     );
 
-    // Restore permissions, restart the actual server: disk still has A, not B.
+    // Restore permissions and restart; disk must still contain A, not B.
     std::fs::set_permissions(dir_path, std::fs::Permissions::from_mode(original_mode)).unwrap();
     client.cancel().await.ok();
     server.stop().await.unwrap();
@@ -2313,8 +2254,7 @@ async fn relative_profiles_path_resolves_against_server_cwd() {
     let dir = TempDir::new().unwrap();
     let relative = std::path::Path::new("profiles.toml");
 
-    // Launch the real binary with cwd = isolated temp dir and a bare
-    // relative profile filename.
+    // Launch the binary in an isolated cwd with a relative profile filename.
     let mut server = SpawnedServer::start_with_cwd(dir.path(), Some(relative)).await;
     let (client, _rx) = spawn_client(&server).await.unwrap();
     let created = configure_profile_via(&client, "rel-dev", 9600).await;
@@ -2322,14 +2262,14 @@ async fn relative_profiles_path_resolves_against_server_cwd() {
     client.cancel().await.ok();
     server.stop().await.unwrap();
 
-    // The file landed in the server's cwd.
+    // The file is created in the server's cwd.
     let on_disk = dir.path().join("profiles.toml");
     assert!(
         on_disk.exists(),
         "relative --profiles-path must create the file in the server's cwd"
     );
 
-    // Restart with the same cwd + relative path proves persistence.
+    // Restart with the same cwd and relative path confirms persistence.
     let server2 = SpawnedServer::start_with_cwd(dir.path(), Some(relative)).await;
     let (client2, _rx2) = spawn_client(&server2).await.unwrap();
     let names = list_profile_names_via(&client2).await;
@@ -2340,22 +2280,16 @@ async fn relative_profiles_path_resolves_against_server_cwd() {
     client2.cancel().await.ok();
 }
 
-// =============================================================================
-// capture_boot — controlled `SerialIo` through public HTTP MCP
+// capture_boot tests use the public HTTP MCP surface, tool router, RX pump, and
+// stop controller with a controlled in-memory backend. They cover post-mark
+// scope, private cursor reads, line transitions, and pump-gate ordering. The
+// backend injects RX bytes during assertion or release; no tool or store logic
+// is mocked.
 //
-// These tests drive the REAL MCP surface (HTTP transport, tool router,
-// RxSession pump, stop controller) against a controlled in-memory backend
-// that records line transitions and can inject RX bytes synchronously at
-// assertion/release time. No tool/store logic is mocked.
-//
-// NOTE on request delivery: the rmcp client only transmits a `tools/call`
-// request once its future is polled. Tests that need the capture to run
-// while the test drives the backend must poll the future (tokio::select!)
-// instead of holding it un-polled.
-// =============================================================================
+// rmcp sends a tools/call request only after its future is polled. Tests that
+// drive the backend during capture poll the future with tokio::select!.
 
-/// Default reset pulse shape used by most capture tests: assert both lines
-/// low (Arduino-style reset), release back high.
+/// Default reset pulse: assert both lines low, then release both high.
 fn capture_reset() -> serde_json::Value {
     json!({
         "assert_dtr": false,
@@ -2366,7 +2300,7 @@ fn capture_reset() -> serde_json::Value {
     })
 }
 
-/// A literal-substring match request that never matches the test payloads.
+/// A literal-substring match request that never matches test payloads.
 fn never_match() -> serde_json::Value {
     json!({
         "pattern": "zzz-no-match",
@@ -2392,9 +2326,8 @@ async fn controlled_server(
     (server, client, cid, state)
 }
 
-/// Wait until the line log records the first line transition, polling the
-/// in-flight capture call so its request is actually transmitted (the rmcp
-/// client only sends a request once its future is polled).
+/// Wait for the first line transition while polling the in-flight capture call.
+/// rmcp sends the request only after its future is polled.
 async fn wait_for_line(
     call: &mut std::pin::Pin<
         Box<
@@ -2421,14 +2354,12 @@ async fn wait_for_line(
     }
 }
 
-// ── 1. Stale bytes excluded; immediate release-hook bytes captured; shared
-//       cursor and ring history remain readable afterwards ────────────────
-
 #[tokio::test]
 async fn capture_boot_stale_bytes_excluded_boot_bytes_captured_cursor_preserved() {
     let (_server, client, cid, state) = controlled_server("loop-capture-1", 65536).await;
 
-    // Stale pre-mark bytes, consumed by an ordinary read (cursor now at 5).
+    // Consume five stale bytes with an ordinary read; the shared cursor reaches
+    // offset 5 before capture starts.
     state.inject_rx(b"STALE");
     let r = client
         .peer()
@@ -2441,8 +2372,8 @@ async fn capture_boot_stale_bytes_excluded_boot_bytes_captured_cursor_preserved(
     assert_ne!(r.is_error, Some(true), "{r:?}");
     assert_eq!(r.structured_content.unwrap()["data"], json!("STALE"));
 
-    // Boot bytes appear only when the reset line is ASSERTED: the hook fires
-    // synchronously inside `set_dtr_rts` for the (false,false) state.
+    // Inject boot bytes synchronously when the reset line is asserted at
+    // (false, false).
     state.set_on_line_change(Some(Arc::new({
         let state = Arc::clone(&state);
         move |dtr, rts| {
@@ -2476,7 +2407,7 @@ async fn capture_boot_stale_bytes_excluded_boot_bytes_captured_cursor_preserved(
     );
     assert_eq!(s["read"]["from_offset"], json!(5));
 
-    // The shared cursor never moved: a plain read still starts at 5 and
+    // Capture uses a private cursor, so a plain read still starts at 5 and
     // re-reads the captured bytes.
     let r = client
         .peer()
@@ -2490,7 +2421,7 @@ async fn capture_boot_stale_bytes_excluded_boot_bytes_captured_cursor_preserved(
     assert_eq!(s["data"], json!("BOOT!"));
     assert_eq!(s["from_offset"], json!(5));
 
-    // Ring history is still readable: replay from the oldest retained byte.
+    // Ring history remains readable from the oldest retained byte.
     let r = client
         .peer()
         .call_tool(tool_request(
@@ -2509,14 +2440,11 @@ async fn capture_boot_stale_bytes_excluded_boot_bytes_captured_cursor_preserved(
     client.cancel().await.ok();
 }
 
-// ── 2. Bytes emitted inside the line-change call are captured and a match
-//       stops at the pattern ──────────────────────────────────────────────
-
 #[tokio::test]
 async fn capture_boot_immediate_bytes_captured_and_match_stops_at_pattern() {
     let (_server, client, cid, state) = controlled_server("loop-capture-match", 65536).await;
 
-    // The device starts streaming the moment the reset line is asserted.
+    // The device starts streaming when the reset line is asserted.
     state.set_on_line_change(Some(Arc::new({
         let state = Arc::clone(&state);
         move |dtr, rts| {
@@ -2553,8 +2481,6 @@ async fn capture_boot_immediate_bytes_captured_and_match_stops_at_pattern() {
     client.cancel().await.ok();
 }
 
-// ── 3. Request-scoped cancellation during hold releases lines ────────────
-
 #[tokio::test]
 async fn capture_boot_cancellation_releases_lines_request_scoped() {
     let (_server, client, cid, state) = controlled_server("loop-capture-cancel", 65536).await;
@@ -2579,7 +2505,7 @@ async fn capture_boot_cancellation_releases_lines_request_scoped() {
         .await
         .unwrap();
 
-    // Wait until the pulse is asserted (hold phase).
+    // Wait until assertion starts the hold phase.
     let deadline = Instant::now() + Duration::from_secs(2);
     while state.line_log().is_empty() && Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(10)).await;
@@ -2590,11 +2516,10 @@ async fn capture_boot_cancellation_releases_lines_request_scoped() {
         "assertion must precede cancellation"
     );
 
-    // Request-scoped cancellation (notifications/cancelled for THIS request),
-    // not whole-client teardown. Note: rmcp's client resolves its own
-    // cancelled request handle with `Err(Cancelled)` and discards the server
-    // response, so the structured `cancelled` outcome is proven at the unit
-    // level (read_loop.rs) and the wire-level release is proven below.
+    // Cancel this request through notifications/cancelled, not whole-client
+    // teardown. rmcp resolves the cancelled handle with Err(Cancelled) and
+    // discards the server response; read_loop.rs proves the structured
+    // cancelled result, while this test proves wire-level line release.
     handle
         .peer
         .notify_cancelled(CancelledNotificationParam::new(
@@ -2604,8 +2529,8 @@ async fn capture_boot_cancellation_releases_lines_request_scoped() {
         .await
         .unwrap();
 
-    // The capture must release the lines promptly instead of holding for the
-    // full 30s hold.
+    // Capture must release lines promptly instead of waiting for the 30-second
+    // hold to finish.
     let deadline = Instant::now() + Duration::from_secs(2);
     while !state.line_log().iter().any(|&(d, r)| d && r) && Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(10)).await;
@@ -2621,8 +2546,7 @@ async fn capture_boot_cancellation_releases_lines_request_scoped() {
         "assert then release, in order"
     );
 
-    // The capture finished server-side: the control lock is free, so a
-    // subsequent line-control call completes promptly.
+    // Server-side capture cleanup frees the control lock for a new call.
     let r = tokio::time::timeout(
         Duration::from_secs(2),
         client.peer().call_tool(tool_request(
@@ -2635,7 +2559,7 @@ async fn capture_boot_cancellation_releases_lines_request_scoped() {
     .unwrap();
     assert_ne!(r.is_error, Some(true), "{r:?}");
 
-    // The client is still fully functional (request-scoped, not teardown).
+    // Request-scoped cancellation leaves the client usable.
     let r = client
         .peer()
         .call_tool(tool_request("get_status", json!({ "connection_id": cid })))
@@ -2646,13 +2570,9 @@ async fn capture_boot_cancellation_releases_lines_request_scoped() {
     client.cancel().await.ok();
 }
 
-/// Cancellation during hold where the FIRST release attempt fails: the
-/// capture must NOT disarm the guard (the old unconditional disarm disabled
-/// the drop retry), the drop-time retry must apply the configured release
-/// state through the control lock, and the control lock must become usable
-/// again afterwards. The transition ordering in the line log proves the
-/// retry: assert, failed release attempt, then a second release-state
-/// transition from the drop cleanup.
+/// A failed first release leaves cleanup armed. Drop retries the configured
+/// release state through the control lock, which remains usable afterwards.
+/// The line log must show assertion, failed release, then retry.
 #[tokio::test]
 async fn capture_boot_cancellation_with_failed_release_retries_cleanup_via_control_lock() {
     let (_server, client, cid, state) =
@@ -2678,8 +2598,8 @@ async fn capture_boot_cancellation_with_failed_release_retries_cleanup_via_contr
         .await
         .unwrap();
 
-    // Wait for the assertion (hold phase), then arm a failure for the
-    // release attempt the cancellation will trigger.
+    // Wait for assertion, then fail the release attempt triggered by
+    // cancellation.
     let deadline = Instant::now() + Duration::from_secs(2);
     while state.line_log().is_empty() && Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(10)).await;
@@ -2687,8 +2607,8 @@ async fn capture_boot_cancellation_with_failed_release_retries_cleanup_via_contr
     assert_eq!(state.line_log(), vec![(false, false)]);
     state.set_fail_next_set(1);
 
-    // Request-scoped cancellation: the release attempt records the release
-    // state and FAILS; the guard must stay armed.
+    // Request-scoped cancellation records the release state and fails; cleanup
+    // must remain armed.
     handle
         .peer
         .notify_cancelled(CancelledNotificationParam::new(
@@ -2698,10 +2618,8 @@ async fn capture_boot_cancellation_with_failed_release_retries_cleanup_via_contr
         .await
         .unwrap();
 
-    // The failed attempt recorded (true,true) inside the capture; the
-    // drop-time retry — queued through the control lock after the capture's
-    // pulse guard drops — records (true,true) again. Exactly three
-    // transitions, in order.
+    // Failed release and drop-time retry both record (true, true). Expect
+    // assertion, failed release, then retry in that order.
     let deadline = Instant::now() + Duration::from_secs(2);
     while state.line_log().len() < 3 && Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(10)).await;
@@ -2713,8 +2631,7 @@ async fn capture_boot_cancellation_with_failed_release_retries_cleanup_via_contr
         state.line_log()
     );
 
-    // The control lock became usable after the capture and its cleanup: a
-    // fresh line-control call completes promptly (nothing stuck holding it).
+    // Cleanup must leave the control lock usable for a fresh line-control call.
     let r = tokio::time::timeout(
         Duration::from_secs(2),
         client.peer().call_tool(tool_request(
@@ -2730,14 +2647,11 @@ async fn capture_boot_cancellation_with_failed_release_retries_cleanup_via_contr
     client.cancel().await.ok();
 }
 
-// ── 4. Assertion failure and release failure attempt configured cleanup ──
-
 #[tokio::test]
 async fn capture_boot_assertion_failure_errors_and_attempts_cleanup() {
     let (_server, client, cid, state) = controlled_server("loop-capture-assert-fail", 65536).await;
 
-    // The assert call fails (intent recorded, then I/O error — the RTS
-    // failure after DTR applied case).
+    // The assertion records its state, then fails with an I/O error.
     state.set_fail_next_set(1);
 
     let r = client
@@ -2758,7 +2672,7 @@ async fn capture_boot_assertion_failure_errors_and_attempts_cleanup() {
         "assertion failure must be a tool error: {r:?}"
     );
 
-    // The drop-time guard must still attempt the configured release state.
+    // Drop cleanup must still attempt the configured release state.
     let deadline = Instant::now() + Duration::from_secs(2);
     while Instant::now() < deadline {
         if state.line_log().iter().any(|&(d, r)| d && r) {
@@ -2796,8 +2710,7 @@ async fn capture_boot_release_failure_errors_and_retries_cleanup() {
     ));
     let mut call = Box::pin(call);
 
-    // Wait for the assert (polling the call so the request is transmitted),
-    // then arm a failure for the release call.
+    // Poll the call until assertion is recorded, then fail the release call.
     let deadline = Instant::now() + Duration::from_secs(2);
     wait_for_line(&mut call, &state, deadline, "assertion").await;
     assert_eq!(state.line_log(), vec![(false, false)]);
@@ -2810,8 +2723,7 @@ async fn capture_boot_release_failure_errors_and_retries_cleanup() {
         "release failure must be a tool error: {r:?}"
     );
 
-    // The guard's drop retries the release (failure flag now consumed);
-    // the release must eventually land in the log.
+    // Drop cleanup retries release after the failure flag is consumed.
     let deadline = Instant::now() + Duration::from_secs(2);
     while Instant::now() < deadline {
         if state.line_log().iter().any(|&(d, r)| d && r) {
@@ -2828,12 +2740,11 @@ async fn capture_boot_release_failure_errors_and_retries_cleanup() {
     client.cancel().await.ok();
 }
 
-// ── 5. Invalid framing construction fails before any line transition ─────
-
 #[tokio::test]
 async fn capture_boot_invalid_framing_fails_before_line_transition() {
     let (_server, client, cid, state) = controlled_server("loop-capture-bad-framing", 65536).await;
 
+    // Invalid framing construction must return a tool error before line changes.
     let r = client
         .peer()
         .call_tool(tool_request(
@@ -2861,14 +2772,13 @@ async fn capture_boot_invalid_framing_fails_before_line_transition() {
     client.cancel().await.ok();
 }
 
-// ── 6. Runtime SLIP framing error: partial structured result, lines
-//       released ──────────────────────────────────────────────────────────
+// Runtime SLIP errors return partial structured data and still release lines.
 
 #[tokio::test]
 async fn capture_boot_runtime_framing_error_returns_partial_result_and_releases_lines() {
     let (_server, client, cid, state) = controlled_server("loop-capture-slip-err", 65536).await;
 
-    // One valid SLIP frame then a malformed escape (0xDB 0xFF).
+    // A valid SLIP frame is followed by malformed escape bytes (0xDB 0xFF).
     let slip_bytes: [u8; 6] = [0xC0, b'O', b'K', 0xC0, 0xDB, 0xFF];
     state.set_on_line_change(Some(Arc::new({
         let state = Arc::clone(&state);
@@ -2892,7 +2802,7 @@ async fn capture_boot_runtime_framing_error_returns_partial_result_and_releases_
         ))
         .await
         .unwrap();
-    // Framing errors are structured results, not tool errors.
+    // Runtime framing errors are structured results, not tool errors.
     assert_ne!(r.is_error, Some(true), "{r:?}");
     let s = r.structured_content.expect("structured capture result");
     assert_eq!(s["read"]["stop_reason"], json!("framing_error"));
@@ -2902,24 +2812,21 @@ async fn capture_boot_runtime_framing_error_returns_partial_result_and_releases_
             .is_some_and(|e| e.contains("SLIP")),
         "framing error text must be present: {s:?}"
     );
-    // The valid frame decoded before the error survives. Each frame is
-    // encoded independently from the requested encoding (utf8 default), so
-    // the valid "OK" frame stays UTF-8 while only the top-level raw bytes
-    // (malformed tail) fall back to hex.
+    // The valid frame survives. Frame encoding is independent, so "OK" stays
+    // UTF-8 while the raw malformed tail falls back to hex.
     let frames = s["read"]["frames"].as_array().expect("partial frames");
     assert_eq!(frames.len(), 1);
     assert_eq!(frames[0]["data"], json!("OK"));
     assert_eq!(frames[0]["encoding"], json!("utf8"));
     assert_eq!(s["read"]["encoding"], json!("hex"));
     assert_eq!(s["read"]["frames_dropped"], json!(0));
-    // Lines were released despite the decode error.
+    // Lines are released after the decode error.
     assert_eq!(state.line_log(), vec![(false, false), (true, true)]);
 
     client.cancel().await.ok();
 }
 
-// ── 7. NDJSON framing/parser and binary hex/base64 output reuse current
-//       read behavior ─────────────────────────────────────────────────────
+// Preset/parser decoding and binary encoding use the current read behavior.
 
 #[tokio::test]
 async fn capture_boot_ndjson_preset_decodes_frames() {
@@ -2973,7 +2880,6 @@ async fn capture_boot_binary_output_hex_and_base64() {
         }
     })));
 
-    // Hex output.
     let r = client
         .peer()
         .call_tool(tool_request(
@@ -2992,7 +2898,7 @@ async fn capture_boot_binary_output_hex_and_base64() {
     assert_eq!(s["read"]["encoding"], json!("hex"));
     assert_eq!(s["read"]["data"], json!("00 01 02 ff"));
 
-    // Base64 output for the next capture.
+    // Request base64 encoding for the next capture.
     let r = client
         .peer()
         .call_tool(tool_request(
@@ -3014,8 +2920,7 @@ async fn capture_boot_binary_output_hex_and_base64() {
     client.cancel().await.ok();
 }
 
-// ── 8. Silence timeout after a banner; wall timeout during continuous
-//       output ────────────────────────────────────────────────────────────
+// Capture stops on silence after a banner and on wall timeout during output.
 
 #[tokio::test]
 async fn capture_boot_silence_timeout_stops_after_banner() {
@@ -3062,7 +2967,7 @@ async fn capture_boot_silence_timeout_stops_after_banner() {
 async fn capture_boot_wall_timeout_stops_during_continuous_output() {
     let (_server, client, cid, state) = controlled_server("loop-capture-wall", 65536).await;
 
-    // A device that never goes silent: keep feeding bytes.
+    // Keep feeding bytes so the device never goes silent.
     let stop = tokio_util::sync::CancellationToken::new();
     let injector = {
         let state = Arc::clone(&state);
@@ -3102,7 +3007,7 @@ async fn capture_boot_wall_timeout_stops_during_continuous_output() {
     client.cancel().await.ok();
 }
 
-// ── 9. Disconnect returns a partial capture with `connection_closed` ────
+// Disconnect returns a partial capture with `connection_closed`.
 
 #[tokio::test]
 async fn capture_boot_disconnect_returns_partial_capture_connection_closed() {
@@ -3128,7 +3033,7 @@ async fn capture_boot_disconnect_returns_partial_capture_connection_closed() {
     ));
     let mut call = Box::pin(call);
 
-    // Wait for the assertion, then close the connection mid-capture.
+    // Close the connection after assertion, while capture is active.
     let deadline = Instant::now() + Duration::from_secs(2);
     wait_for_line(&mut call, &state, deadline, "assertion").await;
     assert_eq!(state.line_log(), vec![(false, false)]);
@@ -3154,16 +3059,16 @@ async fn capture_boot_disconnect_returns_partial_capture_connection_closed() {
     client.cancel().await.ok();
 }
 
-// ── 10. Ring wrap reports `bytes_lost`; the atomic mark is preserved ─────
+// Ring wrap reports `bytes_lost` while preserving the atomic mark.
 
 #[tokio::test]
 async fn capture_boot_ring_wrap_reports_bytes_lost_and_preserves_mark() {
-    // Tiny ring forces a wrap while the capture is in flight.
+    // Tiny ring forces a wrap while capture is in flight.
     let (_server, client, cid, state) = controlled_server("loop-capture-wrap", 16).await;
 
-    // 32 bytes injected at assertion into a 16-byte ring: the ring wraps, so
-    // the read must report bytes_lost and start at the clamped offset while
-    // mark_offset keeps the original atomic boundary.
+    // 32 bytes into a 16-byte ring force a wrap. The read reports bytes_lost
+    // and starts at the retained offset; mark_offset keeps the original
+    // boundary.
     let burst: [u8; 32] = *b"0123456789abcdefGHIJKLMNOPQRSTUV";
     state.set_on_line_change(Some(Arc::new({
         let state = Arc::clone(&state);
@@ -3204,13 +3109,13 @@ async fn capture_boot_ring_wrap_reports_bytes_lost_and_preserves_mark() {
     client.cancel().await.ok();
 }
 
-// ── 11. Concurrent `set_dtr_rts` cannot interleave inside the pulse ──────
+// Concurrent `set_dtr_rts` cannot interleave inside the reset pulse.
 
 #[tokio::test]
 async fn capture_boot_concurrent_set_dtr_rts_cannot_interleave_inside_pulse() {
     let (server, client, cid, state) = controlled_server("loop-capture-lock", 65536).await;
-    // A second client session on the SAME server for the concurrent
-    // line-control call.
+    // A second session on the same server issues the concurrent line-control
+    // call.
     let (client_b, _rx_b) = connect_client(&server).await.unwrap();
 
     let call = client.peer().call_tool(tool_request(
@@ -3229,13 +3134,12 @@ async fn capture_boot_concurrent_set_dtr_rts_cannot_interleave_inside_pulse() {
     ));
     let mut call = Box::pin(call);
 
-    // Wait for the assertion (capture now holds the control lock).
+    // Capture holds the control lock after assertion.
     let deadline = Instant::now() + Duration::from_secs(2);
     wait_for_line(&mut call, &state, deadline, "assertion").await;
     assert_eq!(state.line_log(), vec![(false, false)]);
 
-    // A concurrent set_dtr_rts on the same connection must wait for the
-    // whole pulse (assert + hold + release) to finish.
+    // Concurrent set_dtr_rts must wait for assertion, hold, and release.
     let set_call = client_b.peer().call_tool(tool_request(
         "set_dtr_rts",
         json!({ "connection_id": cid, "dtr": true, "rts": true }),
@@ -3255,7 +3159,7 @@ async fn capture_boot_concurrent_set_dtr_rts_cannot_interleave_inside_pulse() {
     let set_result = set_call.await.unwrap();
     assert_ne!(set_result.is_error, Some(true), "{set_result:?}");
 
-    // Exactly three transitions, in order: assert, release, user's set.
+    // Expect assertion, release, then the user's set.
     assert_eq!(
         state.line_log(),
         vec![(false, false), (true, true), (true, true)],
@@ -3266,14 +3170,13 @@ async fn capture_boot_concurrent_set_dtr_rts_cannot_interleave_inside_pulse() {
     client_b.cancel().await.ok();
 }
 
-// ── 12. Arm-only capture (no reset config) never touches lines ───────────
+// Arm-only capture has no reset config and never touches lines.
 
 #[tokio::test]
 async fn capture_boot_arm_only_does_not_touch_lines() {
     let (_server, client, cid, state) = controlled_server("loop-capture-arm", 65536).await;
 
-    // Stale bytes that predate the capture (purged or pre-mark — either way
-    // they must never appear in the result).
+    // Bytes that predate capture must never appear in the result.
     state.inject_rx(b"STALE");
     let call = client.peer().call_tool(tool_request(
         "capture_boot",
@@ -3286,9 +3189,8 @@ async fn capture_boot_arm_only_does_not_touch_lines() {
     ));
     let mut call = Box::pin(call);
 
-    // Poll the call so the request is transmitted, then wait for the
-    // server-side capture to reach its read phase (gate acquisition + mark:
-    // at most one pump cycle, ~100ms) before emitting the external bytes.
+    // Poll the request, then let capture reach gate acquisition and mark before
+    // injecting external bytes. This takes at most one pump cycle, about 100 ms.
     tokio::select! {
         res = call.as_mut() => {
             panic!("arm-only capture completed before external bytes: {res:?}");
@@ -3296,7 +3198,7 @@ async fn capture_boot_arm_only_does_not_touch_lines() {
         _ = tokio::time::sleep(Duration::from_millis(300)) => {}
     }
 
-    // Device bytes arrive after the capture is armed (external reset).
+    // Inject device bytes after capture reaches its post-mark read phase.
     state.inject_rx(b"EXT-BOOT");
 
     let r = call.await.unwrap();
@@ -3322,7 +3224,7 @@ async fn capture_boot_arm_only_does_not_touch_lines() {
     client.cancel().await.ok();
 }
 
-// ── Schema guard: capture_boot schemas carry no non-standard uint formats ─
+// Capture schemas must not emit non-standard unsigned-integer formats.
 
 #[test]
 fn capture_boot_schemas_have_no_nonstandard_uint_formats() {
@@ -3341,7 +3243,8 @@ fn capture_boot_schemas_have_no_nonstandard_uint_formats() {
     }
 }
 
-// ── Safe persistent capture (export_log) ─────────────────────────────────────
+// export_log tests cover disabled ordering, safe names, atomic no-clobber
+// commits, symlinks, quotas, concurrency, snapshots, and recovery.
 
 use serial_mcp::capture_store::{CaptureLimits, CaptureStore};
 use serial_mcp::log_buffer::LogEntry;
@@ -3366,8 +3269,8 @@ fn capture_store_in(
     )
 }
 
-/// Loopback connection seeded with `events` rx_data entries (plus the
-/// automatic `open` event, which is always present).
+/// Loopback connection seeded with `events` rx_data entries and its automatic
+/// `open` event.
 fn seeded_log_conn(
     name: &str,
     events: usize,
@@ -3386,7 +3289,7 @@ fn export_call(connection_id: &str, path: &str) -> serde_json::Value {
     json!({ "connection_id": connection_id, "path": path })
 }
 
-/// Run one `export_log` call through the real MCP boundary.
+/// Run one `export_log` call through the public MCP boundary.
 async fn export_via<H: rmcp::handler::client::ClientHandler>(
     client: &rmcp::service::RunningService<rmcp::service::RoleClient, H>,
     connection_id: &str,
@@ -3399,8 +3302,7 @@ async fn export_via<H: rmcp::handler::client::ClientHandler>(
         .unwrap()
 }
 
-/// Concatenated text of a tool-call result's content blocks (error text
-/// lives in `content`, alongside `structured_content`).
+/// Join text content blocks; tool error text lives in `content`.
 fn tool_error_text(result: &rmcp::model::CallToolResult) -> String {
     result
         .content
@@ -3411,8 +3313,8 @@ fn tool_error_text(result: &rmcp::model::CallToolResult) -> String {
         .join("\n")
 }
 
-/// ConnectionConfig for a connection whose log is enabled but has capacity
-/// 0 — every recorded event is immediately evicted, so exports are empty.
+/// ConnectionConfig with enabled logging and capacity 0; every event is evicted
+/// immediately, so exports are empty.
 fn empty_log_config(port: &str) -> ConnectionConfig {
     use serial_mcp::serial::{DataBits, FlowControl, Parity, StopBits};
     ConnectionConfig {
@@ -3435,9 +3337,8 @@ fn empty_log_config(port: &str) -> ConnectionConfig {
     }
 }
 
-/// The only entries allowed in a capture root after failed exports: the
-/// advisory lock file. Temp files may exist only transiently and are
-/// removed on failure (NamedTempFile drop), so this is also a no-temp check.
+/// Failed exports leave only the advisory lock in the capture root. Temp files
+/// are transient and `NamedTempFile` removes them on failure.
 fn assert_root_has_only_lock(root: &std::path::Path) {
     let entries: Vec<String> = std::fs::read_dir(root)
         .unwrap()
@@ -3455,7 +3356,7 @@ async fn export_log_disabled_errors_before_path_write_and_creates_nothing() {
     let manager = Arc::new(ConnectionManager::new());
     let (conn, _peer) = seeded_log_conn("loop-export-disabled", 2);
     let cid = manager.insert(conn).await.unwrap();
-    let server = TestServer::start_with(manager).await; // default: disabled store
+    let server = TestServer::start_with(manager).await; // persistent store disabled by default
     let (client, _rx) = connect_client(&server).await.unwrap();
 
     let result = client
@@ -3474,8 +3375,8 @@ async fn export_log_disabled_errors_before_path_write_and_creates_nothing() {
         "disabled error must teach --capture-dir: {text}"
     );
 
-    // The disabled check runs BEFORE connection lookup: a bogus connection
-    // id yields the disabled error, not connection_not_found.
+    // Disabled storage is checked before connection lookup: a bogus ID still
+    // yields the disabled error, not connection_not_found.
     let result = client
         .peer()
         .call_tool(tool_request(
@@ -3507,7 +3408,7 @@ async fn export_log_enabled_writes_valid_jsonl_matching_get_log() {
         .await;
     let (client, _rx) = connect_client(&server).await.unwrap();
 
-    // Reference snapshot via get_log.
+    // Use get_log as the reference snapshot.
     let get = client
         .peer()
         .call_tool(tool_request("get_log", json!({ "connection_id": cid })))
@@ -3528,7 +3429,7 @@ async fn export_log_enabled_writes_valid_jsonl_matching_get_log() {
     assert_eq!(structured["total_bytes_used"], structured["bytes_written"]);
     let canonical = root.path().canonicalize().unwrap().join("boot.jsonl");
     assert_eq!(structured["path"], json!(canonical.display().to_string()));
-    // No durability warning on a normally-durable Unix commit.
+    // A normal Unix commit has no durability warning.
     assert!(
         structured.get("durability_warning").is_none(),
         "normal export must omit durability_warning: {structured:?}"
@@ -3557,8 +3458,7 @@ async fn export_log_empty_log_commits_zero_byte_file_and_consumes_slot() {
     let root = TempDir::new().unwrap();
     let store = capture_store_in(root.path(), 1024, 1024, 4);
     let manager = Arc::new(ConnectionManager::new());
-    // log_capacity 0 with logging enabled: every record is immediately
-    // evicted, so the buffer is empty.
+    // Capacity 0 evicts every event, so the snapshot is empty.
     let (conn, _peer) = loopback_connection_with_config(empty_log_config("loop-export-empty"));
     let cid = manager.insert(conn).await.unwrap();
     let server = TestServer::builder(manager)
@@ -3581,7 +3481,7 @@ async fn export_log_empty_log_commits_zero_byte_file_and_consumes_slot() {
     assert!(committed.is_file());
     assert_eq!(std::fs::metadata(&committed).unwrap().len(), 0);
 
-    // A second zero-byte export consumes a second file slot.
+    // A second zero-byte export consumes another file slot.
     let result = client
         .peer()
         .call_tool(tool_request(
@@ -3636,7 +3536,7 @@ async fn export_log_rejects_traversal_absolute_and_bad_names_without_files() {
             Some(true),
             "name {bad:?} must fail: {result:?}"
         );
-        // The validation error is a tool error with a useful message.
+        // Invalid names return tool errors with messages.
         let text = tool_error_text(&result);
         assert!(!text.is_empty(), "name {bad:?} must produce a message");
     }
@@ -3704,7 +3604,7 @@ async fn export_log_rejects_symlink_target_and_leaves_outside_untouched() {
         .await
         .unwrap();
     assert_eq!(result.is_error, Some(true), "{result:?}");
-    // The symlink still points at the outside target; the target is untouched.
+    // The symlink and its outside target remain untouched.
     assert!(root
         .path()
         .join("boot.jsonl")
@@ -3745,7 +3645,7 @@ async fn export_log_concurrent_same_name_yields_exactly_one_success() {
         1,
         "exactly one concurrent same-name export may succeed: {results:?}"
     );
-    // The committed file is a complete snapshot (the loser changed nothing).
+    // The committed file is a complete snapshot; the loser changed nothing.
     let raw = std::fs::read(root.path().join("race.jsonl")).unwrap();
     assert!(raw.ends_with(b"\n"));
     assert!(!raw.is_empty());
@@ -3757,7 +3657,7 @@ async fn export_log_concurrent_same_name_yields_exactly_one_success() {
 #[tokio::test]
 async fn export_log_per_file_quota_failure_creates_no_file() {
     let root = TempDir::new().unwrap();
-    // Tiny per-file quota: any real snapshot exceeds it.
+    // The tiny per-file quota rejects this snapshot.
     let store = capture_store_in(root.path(), 16, 1024, 8);
     let manager = Arc::new(ConnectionManager::new());
     let (conn, _peer) = seeded_log_conn("loop-export-file-quota", 5);
@@ -3791,8 +3691,7 @@ async fn export_log_total_byte_quota_persists_across_exports_and_fresh_stores() 
     let (conn, _peer) = seeded_log_conn("loop-export-total", 1);
     let cid = manager.insert(conn).await.unwrap();
 
-    // Server A commits one file against a generous quota; its result
-    // reports the EXACT committed byte count.
+    // Server A commits one file and reports its exact committed byte count.
     let store_a = capture_store_in(root.path(), 4096, 100_000, 8);
     let server_a = TestServer::builder(Arc::clone(&manager))
         .capture_store(store_a)
@@ -3808,9 +3707,8 @@ async fn export_log_total_byte_quota_persists_across_exports_and_fresh_stores() 
     client_a.cancel().await.ok();
     drop(server_a);
 
-    // Server B is a FRESH CaptureStore instance scanning the same root with
-    // a total quota equal to A's committed size: B's identical snapshot
-    // passes the per-file check but blows the total (A's file + B's file).
+    // A fresh store scans the same root. Its total quota equals A's committed
+    // size, so the identical second snapshot exceeds the total quota.
     let store_b = capture_store_in(root.path(), used_bytes, used_bytes, 8);
     let server_b = TestServer::builder(Arc::clone(&manager))
         .capture_store(store_b)
@@ -3824,7 +3722,7 @@ async fn export_log_total_byte_quota_persists_across_exports_and_fresh_stores() 
         text.contains("total-byte quota"),
         "fresh store must observe A's usage: {text}"
     );
-    // No file was committed by the failed attempt.
+    // The failed attempt commits no file.
     assert!(!root.path().join("b.jsonl").exists());
     assert_eq!(
         std::fs::metadata(root.path().join("a.jsonl"))
@@ -3878,10 +3776,9 @@ async fn export_log_file_count_quota_includes_prior_committed_files() {
 
 #[tokio::test]
 async fn export_log_independent_servers_sharing_root_cannot_exceed_quota() {
-    // Two servers, each with an independent CaptureStore (independent
-    // process-local mutexes). Only the advisory lock on the shared root
-    // serializes scan+commit, so the FILE-COUNT quota holds across them:
-    // at most one of the two concurrent exports may commit.
+    // Independent stores share a root but not a process-local mutex. The root
+    // advisory lock serializes scan and commit, so the file-count quota permits
+    // at most one concurrent export.
     let root = TempDir::new().unwrap();
     let manager_a = Arc::new(ConnectionManager::new());
     let (conn_a, _peer_a) = loopback_connection("loop-export-xstore-a");
@@ -3931,8 +3828,7 @@ async fn export_log_independent_servers_sharing_root_cannot_exceed_quota() {
         1,
         "only the winning commit may persist: {files:?}"
     );
-    // The loser's error names the count quota (cross-store scan saw the
-    // winner's committed file).
+    // The loser sees the winner's committed file during its cross-store scan.
     let loser = results
         .iter()
         .find(|r| r.is_error == Some(true))
@@ -3960,7 +3856,7 @@ async fn export_log_failure_leaves_connection_usable() {
         .await;
     let (client, _rx) = connect_client(&server).await.unwrap();
 
-    // Failed export (bad filename).
+    // A bad filename fails before writing.
     let result = client
         .peer()
         .call_tool(tool_request(
@@ -3971,7 +3867,7 @@ async fn export_log_failure_leaves_connection_usable() {
         .unwrap();
     assert_eq!(result.is_error, Some(true));
 
-    // The connection still answers get_log and a good export succeeds.
+    // The connection still answers get_log, and a valid export succeeds.
     let result = client
         .peer()
         .call_tool(tool_request("get_log", json!({ "connection_id": cid })))
@@ -4012,8 +3908,8 @@ async fn export_log_snapshot_is_point_in_time() {
         .as_u64()
         .unwrap();
 
-    // Events recorded AFTER the export must not appear in the committed
-    // file (the snapshot locked the buffer exactly once).
+    // Events recorded after export must not appear in the committed file; the
+    // snapshot captured the buffer once.
     log.rx_data(999);
     log.rx_data(998);
     let text = std::fs::read_to_string(root.path().join("pit.jsonl")).unwrap();
@@ -4028,8 +3924,8 @@ async fn export_log_snapshot_is_point_in_time() {
 
 #[tokio::test]
 async fn spawned_server_starts_with_capture_dir() {
-    // Real binary + real HTTP transport: a valid --capture-dir must not
-    // break startup, and the initialized server still serves the catalog.
+    // A real binary with HTTP transport accepts --capture-dir and still serves
+    // the initialized catalog.
     let root = TempDir::new().unwrap();
     let server = common::spawned::SpawnedServer::start_with_capture_dir(root.path()).await;
     let (client, _rx) = common::spawned::spawn_client(&server).await.unwrap();

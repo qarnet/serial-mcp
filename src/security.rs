@@ -1,9 +1,9 @@
 use glob::Pattern;
 use tracing::warn;
 
-/// Security manager that handles port allowlist checks.
+/// Security manager for port allowlist checks.
 ///
-/// If the allowlist is empty, all ports are allowed.
+/// An empty allowlist allows all ports.
 #[derive(Clone)]
 pub struct SecurityManager {
     allowlist: Vec<Pattern>,
@@ -11,7 +11,7 @@ pub struct SecurityManager {
 
 impl SecurityManager {
     /// Create a security manager from explicit glob pattern strings.
-    /// Invalid patterns are silently ignored (logged as warnings).
+    /// Invalid patterns are ignored after a warning is logged.
     pub fn from_patterns<I: IntoIterator>(patterns: I) -> Self
     where
         I::Item: AsRef<str>,
@@ -29,7 +29,8 @@ impl SecurityManager {
         Self { allowlist }
     }
 
-    /// Check if a port matches the allowlist. Empty allowlist = allow all.
+    /// Check whether a port matches the allowlist. An empty allowlist allows
+    /// all ports.
     pub fn is_port_allowed(&self, port: &str) -> bool {
         if self.allowlist.is_empty() {
             return true;
@@ -37,7 +38,7 @@ impl SecurityManager {
         self.allowlist.iter().any(|pattern| pattern.matches(port))
     }
 
-    /// Human-readable summary of allowlist patterns for error messages.
+    /// Format allowlist patterns for error messages.
     pub fn allowlist_summary(&self) -> String {
         if self.allowlist.is_empty() {
             "(all ports allowed)".to_string()

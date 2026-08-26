@@ -1,22 +1,23 @@
-//! Shared checksum primitives for protocol parsers/presets.
+//! Shared checksum primitives for protocol parsers and presets.
 //!
-//! Pure functions, no I/O. Two free functions compute single-byte checksums:
+//! Pure functions with no I/O. Two free functions compute single-byte
+//! checksums:
 //!
-//! - [`xor_checksum`]: NMEA-0183 `*XX` XOR of all bytes.
-//! - [`lrc`]: Modbus ASCII LRC (Longitudinal Redundancy Check) —
-//!   two's complement of the sum of all bytes.
+//! - [`xor_checksum`]: NMEA-0183 `*XX` XOR of every supplied byte.
+//! - [`lrc`]: Modbus ASCII LRC (Longitudinal Redundancy Check), the wrapping
+//!   two's complement of the byte sum.
 //!
-//! A trait abstraction will return when multi-byte checksums land
-//! (CRC-16 for Modbus RTU, FCS-16 for HDLC) — tracked in FEATURES.md.
+//! Multi-byte checksum support will use a trait abstraction. CRC-16 for Modbus
+//! RTU and FCS-16 for HDLC remain future scope, tracked in FEATURES.md.
 
-/// NMEA-0183 `*XX` XOR checksum: XOR of all bytes in the slice.
+/// NMEA-0183 `*XX` XOR checksum: XOR every byte in the supplied slice.
 pub(crate) fn xor_checksum(bytes: &[u8]) -> u8 {
     bytes.iter().fold(0u8, |acc, &b| acc ^ b)
 }
 
-/// Modbus ASCII LRC (Longitudinal Redundancy Check): the two's complement of
-/// the sum of all bytes, as a single byte. Transmitted as 2 hex chars in the
-/// frame. Used by Modbus ASCII mode.
+/// Modbus ASCII LRC (Longitudinal Redundancy Check): the wrapping two's
+/// complement of the byte sum, returned as one byte. Modbus ASCII transmits it
+/// as two hex characters in the frame.
 pub(crate) fn lrc(bytes: &[u8]) -> u8 {
     let sum: u8 = bytes.iter().fold(0u8, |acc, &b| acc.wrapping_add(b));
     sum.wrapping_neg()
@@ -34,7 +35,7 @@ mod tests {
     #[test]
     fn xor_checksum_known_nmea_sentence() {
         // NMEA-0183 $GPGLL sentence body between $ and *:
-        // "GPGLL,3751.65,N,12226.54,W" → XOR checksum 0x7E
+        // "GPGLL,3751.65,N,12226.54,W" has XOR checksum 0x7E.
         assert_eq!(xor_checksum(b"GPGLL,3751.65,N,12226.54,W"), 0x7E);
     }
 
@@ -57,7 +58,7 @@ mod tests {
     #[test]
     fn lrc_known_modbus_request() {
         // Modbus spec worked example: read holding registers
-        // address=1, function=3, start=0, qty=1 → [0x01, 0x03, 0x00, 0x00, 0x00, 0x01]
+        // address=1, function=3, start=0, qty=1 uses bytes [0x01, 0x03, 0x00, 0x00, 0x00, 0x01]
         // sum = 0x01+0x03+0x00+0x00+0x00+0x01 = 0x05
         // LRC = two's complement of 0x05 = 0xFB
         assert_eq!(lrc(&[0x01, 0x03, 0x00, 0x00, 0x00, 0x01]), 0xFB);

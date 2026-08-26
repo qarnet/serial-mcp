@@ -1,8 +1,13 @@
-# Agent Configuration
+# Agent configuration
 
-Note: `serial-mcp` must be on your `PATH`. If installed via `cargo install`, it should already be available as `serial-mcp`.
+`serial-mcp` must be on your `PATH`. A Cargo installation normally makes it
+available as `serial-mcp`.
 
-Config schemas vary by tool. Where a published JSON schema exists, we provide an example config in [`example-configs/`](../example-configs/) and validate it via a Rust integration test. Where none exists, we link the official docs. If a config stops working, check the linked docs — schemas can change.
+Configuration formats differ between clients. For clients with a published JSON
+schema, this repository provides an example in [`example-configs/`](../example-configs/).
+A Rust integration test validates that example. For clients without a published
+schema, use the official documentation. If a configuration stops working, check
+those docs. Schemas can change.
 
 ## Port names by platform
 
@@ -12,98 +17,78 @@ Config schemas vary by tool. Where a published JSON schema exists, we provide an
 | macOS | `/dev/tty.usbmodem1101`, `/dev/tty.usbserial-*` | Grant serial permission on first use |
 | Windows | `COM3`, `COM4` | No extra setup needed |
 
----
+## Claude Code and Claude Desktop
 
-## Claude Code / Desktop
+Claude Code reads `.mcp.json` in a project. It reads `~/.claude.json` globally.
+Claude Desktop reads one of these files:
 
-**File:**
-- Claude Code: `.mcp.json` (project) or `~/.claude.json` (global)
-- Claude Desktop:
-  - Linux: `~/.config/claude-desktop/claude_desktop_config.json`
-  - macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
-  - Windows: `%APPDATA%\Claude\claude_desktop_config.json`
+- Linux: `~/.config/claude-desktop/claude_desktop_config.json`
+- macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
+- Windows: `%APPDATA%\Claude\claude_desktop_config.json`
 
-**Docs:** [code.claude.com/docs/en/mcp](https://code.claude.com/docs/en/mcp)
-
-**Schema:** `https://json.schemastore.org/claude-code-settings.json`
-
-**Example:** [`example-configs/claude_code.json`](../example-configs/claude_code.json)
+See the [Claude MCP documentation](https://code.claude.com/docs/en/mcp).
+The published schema is `https://json.schemastore.org/claude-code-settings.json`.
+Use [`example-configs/claude_code.json`](../example-configs/claude_code.json) as
+an example.
 
 ## Cursor
 
-**File:** `.cursor/mcp.json` (project) or `~/.cursor/mcp.json` (global)
-
-**Docs:** [cursor.com/docs/mcp](https://cursor.com/docs/mcp)
-
-**Schema:** none published — no example provided
+Cursor reads `.cursor/mcp.json` in a project. It reads `~/.cursor/mcp.json`
+globally. See the [Cursor MCP documentation](https://cursor.com/docs/mcp).
+No published schema exists, so this repository does not provide an example.
 
 ## VS Code (Copilot)
 
-**File:** `.vscode/mcp.json` in your workspace
-
-**Docs:** [code.visualstudio.com/docs/agents/reference/mcp-configuration](https://code.visualstudio.com/docs/agents/reference/mcp-configuration)
-
-**Schema:** none published — VS Code has built-in IntelliSense
-
-**Note:** Uses `"servers"` as the top-level key, not `"mcpServers"`.
+VS Code reads `.vscode/mcp.json` in the workspace. See the [VS Code MCP
+configuration documentation](https://code.visualstudio.com/docs/agents/reference/mcp-configuration).
+No published schema exists. VS Code provides built-in IntelliSense instead.
+Use `"servers"` as the top-level key, not `"mcpServers"`.
 
 ## Zed
 
-**File:** `~/.config/zed/settings.json` under `"context_servers"`
-
-**Docs:** [zed.dev/docs/ai/mcp](https://zed.dev/docs/ai/mcp)
-
-**Schema:** none published — no example provided
-
-**Note:** Uses `"context_servers"` as the top-level key. No `type` field — inferred from `command` vs `url`.
+Zed reads `~/.config/zed/settings.json` under `"context_servers"`. See the [Zed
+MCP documentation](https://zed.dev/docs/ai/mcp). No published schema exists.
+This repository does not provide an example. Use `"context_servers"` as the
+top-level key. Do not add a `type` field. Zed infers the transport from
+`command` or `url`.
 
 ## opencode
 
-**File:** `opencode.json` / `opencode.jsonc` (project) or `~/.config/opencode/opencode.json`
-
-**Docs:** [opencode.ai/config.json](https://opencode.ai/config.json) (the schema is the docs)
-
-**Schema:** `https://opencode.ai/config.json`
-
-**Example:** [`example-configs/opencode.json`](../example-configs/opencode.json)
-
-**Note:** Uses `"mcp"` as the top-level key, not `"mcpServers"`.
+opencode reads `opencode.json` or `opencode.jsonc` in a project. It reads
+`~/.config/opencode/opencode.json` globally. See the
+[opencode configuration documentation](https://opencode.ai/config.json).
+The schema is `https://opencode.ai/config.json`.
+Use [`example-configs/opencode.json`](../example-configs/opencode.json) as an
+example. Use `"mcp"` as the top-level key, not `"mcpServers"`.
 
 ## OpenAI Codex
 
-**File:** `~/.codex/config.json` (global) or `.codex/config.json` (project)
-
-**Docs:** [developers.openai.com/codex](https://developers.openai.com/codex)
-
-**Schema:** `https://developers.openai.com/codex/config-schema.json`
-
-**Example:** [`example-configs/codex.json`](../example-configs/codex.json)
-
-**Note:** Uses `"mcp_servers"` (underscore) as the top-level key. No `type` field — transport inferred from `command` vs `url`.
+Codex reads `~/.codex/config.json` globally. It reads `.codex/config.json` in a
+project. See the [Codex documentation](https://developers.openai.com/codex).
+The schema is `https://developers.openai.com/codex/config-schema.json`.
+Use [`example-configs/codex.json`](../example-configs/codex.json) as an example.
+Use `"mcp_servers"` as the top-level key. Do not add a `type` field. Codex
+infers the transport from `command` or `url`.
 
 ## Hermes Agent
 
-**File:** `~/.hermes/config.yaml` or project `.hermes.yaml`
+Hermes reads `~/.hermes/config.yaml` or `.hermes.yaml` in a project. See the
+[Hermes MCP feature documentation](https://hermes-agent.nousresearch.com/docs/user-guide/features/mcp/).
+No published schema exists. No example is provided because Hermes uses YAML
+rather than JSON. The [MCP feature docs](https://hermes-agent.nousresearch.com/docs/user-guide/features/mcp/)
+describe the YAML format.
 
-**Docs:** [hermes-agent.nousresearch.com/docs/user-guide/features/mcp](https://hermes-agent.nousresearch.com/docs/user-guide/features/mcp/)
-
-**Schema:** none published
-
-**Example:** not provided — Hermes uses YAML, not JSON. See the [MCP feature docs](https://hermes-agent.nousresearch.com/docs/user-guide/features/mcp/) for the YAML config format.
-
----
-
-## HTTP transport (remote / headless)
+## HTTP transport (remote and headless)
 
 Start the server with `--transport=http` on the target machine:
 
 ```bash
 serial-mcp --transport=http
-# custom bind address:
+# Set a custom bind address
 serial-mcp --transport=http --bind=0.0.0.0:8000
 ```
 
-Agent config (any client that supports streamable HTTP):
+Use this configuration with any client that supports streamable HTTP:
 
 ```json
 {
@@ -116,7 +101,7 @@ Agent config (any client that supports streamable HTTP):
 }
 ```
 
-## Dev one-liner (no install, cargo run from source)
+## Run from source without installing
 
 ```json
 {
@@ -136,12 +121,19 @@ Agent config (any client that supports streamable HTTP):
 
 ## Troubleshooting
 
-- `Failed to open port` or `Unable to acquire exclusive lock on serial port`: another program already owns the device. Close tools like `picocom`, `screen`, `minicom`, serial monitors, or another `serial-mcp` instance.
-- `Connection busy: ... already owns RX`: a receive-side operation (`read`) is already active on that connection. Each connection has a single shared RX pump; only one `read` can be active at a time. Finish the current operation before starting another. See [RX and Reading](rx-and-reading.md) for the RX model.
+- `Failed to open port` or `Unable to acquire exclusive lock on serial port`:
+  another program already owns the device. Close tools such as `picocom`,
+  `screen`, or `minicom`. Close any serial monitor or other `serial-mcp` instance
+  too.
+- `Connection busy: ... already owns RX`: a receive-side operation, `read`, is
+  already active on that connection. Each connection has one shared RX pump.
+  Only one `read` can be active at a time. Finish the current operation before
+  starting another. See [RX and reading](rx-and-reading.md) for the RX model.
 
 ## Schema validation
 
-Config examples are validated against their published JSON schemas as a Rust integration test. Schemas used:
+The config examples are validated against their published JSON schemas by a Rust
+integration test. The schemas are:
 
 ```
 claude_code_settings = "https://json.schemastore.org/claude-code-settings.json"
@@ -149,21 +141,28 @@ opencode_config     = "https://opencode.ai/config.json"
 codex_config        = "https://developers.openai.com/codex/config-schema.json"
 ```
 
-Run locally: `cargo test --locked --test config_schema_validation`
+Run the test locally with:
 
-Vendored schemas live in [`schemas/`](../schemas/). To refresh them against the latest upstream: `./scripts/update-config-schemas.sh`.
+```bash
+cargo test --locked --test config_schema_validation
+```
 
-A scheduled [GitHub Actions workflow](../.github/workflows/schema-drift.yml) checks daily whether upstream schemas have changed.
+Vendored schemas live in [`schemas/`](../schemas/). To refresh them from the
+latest upstream versions, run `./scripts/update-config-schemas.sh`.
 
-Each tool also validates config at runtime:
+A scheduled [GitHub Actions workflow](../.github/workflows/schema-drift.yml)
+checks daily for upstream schema changes.
+
+Each client also validates configuration at runtime:
 
 | Tool | How to validate |
 |---|---|
-| Claude Code CLI / Desktop | Run `claude mcp list` — shows connection status |
-| Cursor | Settings → MCP — green dot means connected |
-| VS Code | Command Palette → `MCP: List Servers` |
-| Zed | AI → MCP Servers |
-| opencode | Validates on startup; check `~/.local/share/opencode/opencode.log` |
-| Hermes Agent | Run `hermes mcp list` — shows connected servers |
+| Claude Code CLI / Desktop | Run `claude mcp list` to see connection status |
+| Cursor | Settings → MCP. A green dot means connected |
+| VS Code | Open the Command Palette and run `MCP: List Servers` |
+| Zed | Open AI → MCP Servers |
+| opencode | Validation runs on startup; check `~/.local/share/opencode/opencode.log` |
+| Hermes Agent | Run `hermes mcp list` to see connected servers |
 
-If a config doesn't work, click the docs link for that tool to verify the current JSON shape — schemas can change between versions.
+If a configuration fails, use that client's documentation link to verify the
+current JSON shape. Schemas can change between versions.

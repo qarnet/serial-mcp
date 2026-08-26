@@ -5,7 +5,7 @@
 //! updated binding, producing the `(ProfileSessionResult,
 //! ProfilePersistenceResult)` pair carried by durable tool results.
 //!
-//! Callers MUST hold the connection's learning lock across the live
+//! Callers must hold the connection's learning lock across the live
 //! mutation, this call, and the binding update so concurrent durable
 //! requests on one connection cannot snapshot each other's half-applied
 //! state.
@@ -19,16 +19,16 @@ use crate::profiles::{
 };
 use crate::serial::SerialConnection;
 
-/// Classify a store error as a stale-producing conflict: a revision-CAS
-/// mismatch or a missing (externally deleted) profile. Plain I/O failures
-/// keep the binding dirty but NOT stale so a later durable operation or
-/// clean close retries the effective snapshot.
+/// Classify store errors that make a binding stale: a revision-CAS mismatch or
+/// a missing (externally deleted) profile. Plain I/O failures leave the binding
+/// dirty but not stale, so a later durable operation or clean close retries the
+/// effective snapshot.
 fn is_conflict(err: &str) -> bool {
     err.contains("revision conflict") || err.contains("not found")
 }
 
-/// Attempt write-through persistence of `conn`'s effective defaults into
-/// its bound profile and update the binding accordingly:
+/// Persist `conn`'s effective defaults through its bound profile and update the
+/// binding:
 ///
 /// - no binding or non-persistent binding: `Transient`, no store call
 /// - persistent CAS no-op (defaults already equal): `NotNeeded`, binding
@@ -39,8 +39,8 @@ fn is_conflict(err: &str) -> bool {
 ///   revision kept, binding dirty; stale when the error is a conflict or
 ///   missing profile; the error is recorded
 ///
-/// A stale binding never attempts a store write — it keeps reporting the
-/// conflict rather than overwrite a newer/rolled-back profile.
+/// A stale binding never attempts a store write. It keeps reporting the
+/// conflict rather than overwriting a newer or rolled-back profile.
 pub async fn learn(
     store: &Arc<ProfileStore>,
     conn: &Arc<SerialConnection>,
@@ -101,9 +101,9 @@ pub async fn learn(
             changed: false,
             profile,
         }) => {
-            // Durable defaults already equal the effective snapshot: no
-            // revision/history bump and no file write. The binding is
-            // durably represented, so it becomes clean.
+            // Durable defaults already match the effective snapshot: no
+            // revision/history bump or file write. The binding is durably
+            // represented, so it becomes clean.
             conn.update_active_profile_binding(|b| {
                 b.dirty = false;
                 b.stale = false;

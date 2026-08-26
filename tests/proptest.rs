@@ -1,14 +1,14 @@
 //! Property-based and boundary-value tests.
 //!
-//! Catches:
-//! - Serde roundtrip breakage (serialize→deserialize→re-serialize identical)
-//! - JSON Schema vs serialized output mismatches
-//! - Codec invariant violations (decode(encode(x)) == x)
-//! - Clamp/validation boundary panics (u64::MAX, usize::MAX)
-//! - Port name special-character safety
+//! These tests cover:
+//! - Serde round trips that preserve serialized output.
+//! - JSON Schema validation of serialized values.
+//! - Codec round trips that preserve arbitrary byte payloads.
+//! - Clamp and validation boundaries such as `u64::MAX` and `usize::MAX`.
+//! - Safe handling of port names with special characters.
 //!
-//! Run: cargo test --test proptest
-//! Fuzz longer: PROPTEST_CASES=10000 cargo test --test proptest
+//! Run with: `cargo test --test proptest`
+//! Run more cases with: `PROPTEST_CASES=10000 cargo test --test proptest`
 
 use std::sync::Arc;
 
@@ -28,8 +28,6 @@ use serial_mcp::tools::types::{
     ReadArgs, ReadResult, SendBreakArgs, SendBreakResult, SetDtrRtsArgs, SetDtrRtsResult,
     SetFlowControlResult, WriteArgs, WriteResult,
 };
-
-// ── Schema helper ────────────────────────────────────────────────────────────
 
 fn schemars_to_jsonschema<T: schemars::JsonSchema>() -> Value {
     let schema = schema_for!(T);
@@ -60,8 +58,7 @@ fn roundtrip_stable<T: serde::Serialize + serde::de::DeserializeOwned + std::fmt
     }
 }
 
-/// Like roundtrip_stable but panics instead of returning Result — for use
-/// inside proptest! tests where `?` on `String` isn't supported.
+/// Invokes round-trip validation in `proptest!` cases.
 macro_rules! assert_roundtrip {
     ($val:expr) => {
         roundtrip_stable(&$val)
@@ -73,8 +70,6 @@ macro_rules! assert_schema_valid {
         validate_schema::<$type>(&$val)
     };
 }
-
-// ── Strategies ──────────────────────────────────────────────────────────────
 
 fn valid_port_name() -> impl Strategy<Value = String> {
     prop::string::string_regex(r"/dev/[A-Za-z0-9_/\-]+")
@@ -147,8 +142,6 @@ fn optional_u64() -> impl Strategy<Value = Option<u64>> {
 fn non_empty_string() -> impl Strategy<Value = String> {
     r"[A-Za-z0-9_\r\n\t ]{1,256}"
 }
-
-// ── Schema roundtrips — all argument types ──────────────────────────────────
 
 proptest! {
     #[test]
@@ -277,8 +270,6 @@ proptest! {
     }
 }
 
-// ── Schema validation — all result types against their schemas ──────────────
-
 proptest! {
     #[test]
     fn open_result_schema_valid(
@@ -337,8 +328,6 @@ proptest! {
         assert_schema_valid!(SendBreakResult, v);
     }
 }
-
-// ── Encoding roundtrips ─────────────────────────────────────────────────────
 
 proptest! {
     #[test]
@@ -403,9 +392,9 @@ proptest! {
 
     #[test]
     fn cobs_roundtrip_arbitrary_payload(bytes in prop::collection::vec(any::<u8>(), 0..=512)) {
-        // Plain COBS (delimiter 0x00) roundtrip — must hold for ALL byte
-        // payloads, including those with trailing/embedded zeros crossing
-        // the 254-byte continuation boundary.
+        // Generated inputs range from 0 through 512 bytes. Plain COBS uses
+        // 0x00 as delimiter; round trips cover embedded or trailing zero bytes
+        // and the 254-byte continuation boundary.
         let mode = serial_mcp::framing::TxFramingMode::Cobs;
         let framed = mode.encode(&bytes).unwrap();
         let cfg = serial_mcp::framing::RxFramingConfig {
@@ -421,8 +410,9 @@ proptest! {
 
     #[test]
     fn slip_roundtrip_arbitrary_payload(bytes in prop::collection::vec(any::<u8>(), 0..=512)) {
-        // SLIP (RFC 1055) roundtrip: TX encode → RX decode must reproduce
-        // the original payload for any byte sequence (including END/ESC).
+        // Generated inputs range from 0 through 512 bytes. RFC 1055 SLIP
+        // encoding and decoding must preserve each generated sequence,
+        // including payloads containing END and ESC.
         let mode = serial_mcp::framing::TxFramingMode::Slip;
         let framed = mode.encode(&bytes).unwrap();
         let cfg = serial_mcp::framing::RxFramingConfig {
@@ -436,8 +426,6 @@ proptest! {
     }
 }
 
-// ── Framing/parser roundtrips & no-panic — NMEA / Modbus ─────────────────────
-
 proptest! {
     #[test]
     fn nmea_parser_roundtrip_valid_checksum(
@@ -449,21 +437,20 @@ proptest! {
             FrameDecoder, LineEnding, ParserConfig, ParserType, ParsedFrame,
             RxFramingConfig, RxFramingMode,
         };
-        // Build the NMEA body: talker + sentence_type + comma + fields.
-        // Always include the comma so a zero-field sentence (e.g. "GPGGA,*XX")
-        // is still recognised as NMEA — the parser requires at least one
-        // comma in the content to distinguish NMEA from non-NMEA frames.
+        // Build the NMEA body from the talker, sentence type, comma, and fields.
+        // Keep the comma for zero-field sentences such as "GPGGA,*XX": the
+        // parser requires one comma to distinguish NMEA from other frames.
         let mut body = format!("{talker}{sentence_type},");
         if !fields.is_empty() {
             body.push_str(&fields.join(","));
         }
-        // Compute XOR checksum inline (serial_mcp::checksums::XorChecksum is
-        // pub(crate) — not visible from integration tests).
+        // Compute the XOR checksum inline because XorChecksum is `pub(crate)`
+        // and unavailable to integration tests.
         let cs: u8 = body.bytes().fold(0u8, |acc, b| acc ^ b);
         let sentence = format!("{body}*{cs:02X}");
 
-        // Route through FrameDecoder: Line framing + NMEA parser with validation.
-        // build_parser is private; FrameDecoder is the correct integration path.
+        // Exercise line framing and NMEA validation through FrameDecoder because
+        // build_parser is private.
         let cfg = RxFramingConfig {
             mode: RxFramingMode::Line {
                 ending: LineEnding::Auto,
@@ -490,12 +477,14 @@ proptest! {
             }) => {
                 let expected_st: String;
                 if let Some(stripped) = talker.strip_prefix('P') {
-                    // Proprietary: talker_id = "P", sentence_type = rest of talker + suffix
+                    // A proprietary talker uses "P" as talker_id; its sentence
+                    // type is the remaining talker text followed by the suffix.
                     expected_st = format!("{stripped}{sentence_type}");
                     prop_assert_eq!(talker_id.as_str(), "P");
                     prop_assert_eq!(st.as_str(), expected_st);
                 } else {
-                    // Standard: talker_id = first 2 chars, sentence_type = the rest
+                    // A standard talker keeps its two characters as talker_id
+                    // and returns the generated sentence type separately.
                     prop_assert_eq!(talker_id.as_str(), talker);
                     prop_assert_eq!(st.as_str(), sentence_type);
                 }
@@ -544,7 +533,6 @@ proptest! {
             },
             ..Default::default()
         };
-        // validate: true
         let parser = ParserConfig {
             parser_type: ParserType::Nmea,
             custom_prompt: None,
@@ -554,7 +542,6 @@ proptest! {
         let _ = dec.push(&bytes);
         let _ = dec.flush_partial();
 
-        // validate: false
         let parser_no_val = ParserConfig {
             parser_type: ParserType::Nmea,
             custom_prompt: None,
@@ -588,8 +575,6 @@ proptest! {
         let _ = dec.flush_partial();
     }
 }
-
-// ── Boundary values — clamp helpers never panic ──────────────────────────────
 
 proptest! {
     #[test]
@@ -693,8 +678,6 @@ proptest! {
     }
 }
 
-// ── JSON schema covers every known tool outputSchema ────────────────────────
-
 #[test]
 fn all_result_types_have_valid_schema() {
     let types: Vec<(&str, Value)> = vec![
@@ -725,8 +708,6 @@ fn all_result_types_have_valid_schema() {
             .unwrap_or_else(|e| panic!("{name} schema fails to compile: {e}"));
     }
 }
-
-// ── Stateful connection lifecycle ───────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Op {
@@ -792,14 +773,11 @@ fn lifecycle_write_after_close_no_panic() {
     run_lifecycle_scenario(Op::WriteAfterClose);
 }
 
-// ── RxFramingConfig roundtrip ──────────────────────────────────────────────
-
 #[test]
 fn rx_framing_config_roundtrip_all_modes() {
     use serial_mcp::framing::*;
     use serial_mcp::match_config::PatternEncoding;
 
-    // Line (default ending: auto)
     let c1 = RxFramingConfig {
         mode: RxFramingMode::Line {
             ending: LineEnding::Auto,
@@ -814,7 +792,6 @@ fn rx_framing_config_roundtrip_all_modes() {
     assert_eq!(c2.max_frames, Some(10));
     assert!(c2.include_terminators);
 
-    // Delimiter
     let c3 = RxFramingConfig {
         mode: RxFramingMode::Delimiter {
             delimiter: "|".into(),
@@ -828,7 +805,6 @@ fn rx_framing_config_roundtrip_all_modes() {
     let c4: RxFramingConfig = serde_json::from_value(json).unwrap();
     assert!(matches!(c4.mode, RxFramingMode::Delimiter { .. }));
 
-    // Length-prefixed
     let c5 = RxFramingConfig {
         mode: RxFramingMode::LengthPrefixed {
             prefix_size: 2,
@@ -844,7 +820,6 @@ fn rx_framing_config_roundtrip_all_modes() {
     assert!(matches!(c6.mode, RxFramingMode::LengthPrefixed { .. }));
     assert_eq!(c6.max_frames, Some(0));
 
-    // Start/end
     let c7 = RxFramingConfig {
         mode: RxFramingMode::StartEnd {
             start: vec!["STX".into()],
@@ -861,7 +836,6 @@ fn rx_framing_config_roundtrip_all_modes() {
     assert!(matches!(c8.mode, RxFramingMode::StartEnd { .. }));
     assert!(c8.max_frames.is_none());
 
-    // SLIP (parameterless)
     let c9 = RxFramingConfig {
         mode: RxFramingMode::Slip,
         ..Default::default()
@@ -870,7 +844,7 @@ fn rx_framing_config_roundtrip_all_modes() {
     let c10: RxFramingConfig = serde_json::from_value(json).unwrap();
     assert!(matches!(c10.mode, RxFramingMode::Slip));
 
-    // Line with skip_empty: true (ndjson-style)
+    // Also cover line framing with skip_empty enabled, as used by NDJSON.
     let c11 = RxFramingConfig {
         mode: RxFramingMode::Line {
             ending: LineEnding::Auto,
@@ -885,22 +859,23 @@ fn rx_framing_config_roundtrip_all_modes() {
     assert!(c12.skip_empty);
 }
 
-// ── Generated-name and ranking properties ───────────────────────────────────
-
 proptest! {
     #[test]
     fn generated_label_normalization_properties(label in "[A-Za-z0-9 _\\-!@#ÄÖÜß]*") {
         let normalized = normalize_generated_label(&label);
-        // Never empty, never overwritten silently, ASCII lowercase only.
+        // Normalization guarantees a nonempty ASCII lowercase label with
+        // bounded length and normalized separators. It does not allocate
+        // profile names or prevent overwrites; collision handling belongs to
+        // `generated_name_allocation_property`.
         assert!(!normalized.is_empty(), "empty label for {label:?}");
         assert!(normalized.len() <= 32, "cap at 32: {label:?} -> {normalized:?}");
         assert!(normalized.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'),
                 "non-normalized chars: {label:?} -> {normalized:?}");
         assert!(!normalized.starts_with('-') && !normalized.ends_with('-'),
                 "trimmed: {label:?} -> {normalized:?}");
-        // Runs of separators collapse to a single dash.
+        // Consecutive separators collapse to one dash.
         assert!(!normalized.contains("--"), "no double dash: {label:?} -> {normalized:?}");
-        // Lowercasing a normalized label is a fixed point.
+        // Normalizing an already normalized label is a fixed point.
         assert_eq!(normalized, normalize_generated_label(&normalized));
     }
 
@@ -945,13 +920,14 @@ proptest! {
             .collect();
         let ranked = rank_candidates(profiles.clone());
         assert_eq!(ranked.len(), profiles.len());
-        // Sorted non-increasing by effective timestamp (None == 0).
+        // Rank profiles by descending effective timestamp; absent timestamps use
+        // zero.
         for pair in ranked.windows(2) {
             let a = pair[0].metadata.last_used_at_ms.unwrap_or(0);
             let b = pair[1].metadata.last_used_at_ms.unwrap_or(0);
             assert!(a >= b, "must rank newest first: {timestamps:?}");
         }
-        // Ranking is a permutation of the inputs.
+        // The result contains each input profile exactly once.
         let mut names: Vec<String> = ranked.iter().map(|p| p.name.clone()).collect();
         names.sort();
         let mut orig: Vec<String> = profiles.iter().map(|p| p.name.clone()).collect();

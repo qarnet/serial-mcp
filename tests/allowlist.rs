@@ -1,8 +1,7 @@
-//! Port allowlist tests using the in-process HTTP harness.
+//! Port allowlist tests use in-process HTTP requests with fake paths.
 //!
-//! These tests verify that `SecurityManager` (configured via `--allowlist`)
-//! correctly allows or blocks port-open operations.
-//! No child processes or OS serial ports are involved.
+//! They verify allowlist decisions before OS open errors without child
+//! processes or hardware.
 
 use std::sync::Arc;
 
@@ -37,9 +36,8 @@ async fn empty_allowlist_allows_any_port() {
         .await
         .unwrap();
 
-    // Empty allowlist means all ports are allowed.
-    // Since /tmp/test-fake-port doesn't exist, this will fail at the OS level,
-    // but the error must NOT mention "allowlist".
+    // An empty allowlist permits any path to reach OS open. The fake path
+    // therefore produces an OS-level error without an allowlist rejection.
     assert_eq!(
         result.is_error,
         Some(true),
@@ -125,9 +123,8 @@ async fn exact_match_allows_authorized_port() {
         .await
         .unwrap();
 
-    // The port is in the allowlist, so it should NOT fail with an allowlist
-    // rejection. It may still fail with a connection error (port not present),
-    // but the error message must NOT mention "allowlist".
+    // An allowed path may still fail when OS open cannot find it, but it must
+    // not fail authorization.
     if result.is_error == Some(true) {
         let content = result
             .content
@@ -155,7 +152,6 @@ async fn glob_pattern_matches_multiple_ports() {
         .await;
     let (client, _rx) = connect_client(&server).await.unwrap();
 
-    // /dev/ttyACM0 matches /dev/ttyACM*
     let result = client
         .peer()
         .call_tool(tool_request(
@@ -181,7 +177,6 @@ async fn glob_pattern_matches_multiple_ports() {
         );
     }
 
-    // /dev/ttyUSB5 matches /dev/ttyUSB*
     let result = client
         .peer()
         .call_tool(tool_request(
@@ -207,7 +202,7 @@ async fn glob_pattern_matches_multiple_ports() {
         );
     }
 
-    // /dev/ttyS0 does NOT match either pattern
+    // A path outside both glob patterns must fail authorization before OS open.
     let result = client
         .peer()
         .call_tool(tool_request(
@@ -251,7 +246,6 @@ async fn comma_separated_multiple_exact_ports() {
         .await;
     let (client, _rx) = connect_client(&server).await.unwrap();
 
-    // COM3 is in the list
     let result = client
         .peer()
         .call_tool(tool_request(
@@ -277,7 +271,7 @@ async fn comma_separated_multiple_exact_ports() {
         );
     }
 
-    // COM2 is NOT in the list
+    // A path outside the list must fail authorization before OS open.
     let result = client
         .peer()
         .call_tool(tool_request(

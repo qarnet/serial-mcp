@@ -34,13 +34,9 @@ pub fn clamp_timeout_or_err(name: &str, value: u64, max: u64) -> Result<u64, Str
     }
 }
 
-// ------------------------------------------------------------------
-// Budget error mapping
-// ------------------------------------------------------------------
-
-/// Map a [`crate::buffer_budget::BufferBudgetError`] to a user-facing error
-/// string. `field` is the fully-qualified argument name
-/// (e.g. `"read.max_buffered_bytes"`) used to prefix the limit/zero messages.
+/// Map a [`crate::buffer_budget::BufferBudgetError`] to user-facing text.
+/// `field` prefixes the limit and zero-request messages
+/// (for example, `"read.max_buffered_bytes"`).
 pub fn map_budget_err(field: &str, e: crate::buffer_budget::BufferBudgetError) -> String {
     use crate::buffer_budget::BufferBudgetError;
     match e {
@@ -58,10 +54,6 @@ pub fn map_budget_err(field: &str, e: crate::buffer_budget::BufferBudgetError) -
     }
 }
 
-// ------------------------------------------------------------------
-// Connection lookup
-// ------------------------------------------------------------------
-
 pub async fn lookup_connection(
     connections: &Arc<ConnectionManager>,
     id: &str,
@@ -72,26 +64,16 @@ pub async fn lookup_connection(
         .map_err(|_| format!("Connection ID {id} not found"))
 }
 
-// ------------------------------------------------------------------
-// Parsers
-// ------------------------------------------------------------------
-
 pub fn parse_encoding(raw: &str) -> Result<Encoding, String> {
     raw.parse::<Encoding>()
         .map_err(|e| format!("Unsupported encoding - {e}"))
 }
 
-// ------------------------------------------------------------------
-// Open-settings resolution
-// ------------------------------------------------------------------
-
 /// Optional open-field overlay shared by `open` and `open_profile`.
-///
-/// `None` fields fall through to the selected profile's defaults, then to
-/// built-in defaults. `open` fills the overlay from `OpenArgs`;
-/// `open_profile` fills only `name`/`log_capacity`/`log_enabled`/
-/// `rx_buffer_size` from `OpenProfileArgs` (all other fields come from the
-/// named profile).
+/// Unset fields fall through to selected-profile defaults, then built-in
+/// defaults. `open` fills it from `OpenArgs`; `open_profile` overrides only
+/// `name`, `log_capacity`, `log_enabled`, and `rx_buffer_size` from
+/// `OpenProfileArgs`; remaining fields use the named profile's defaults.
 #[derive(Debug, Clone, Default)]
 pub struct OpenOverlay {
     pub(crate) name: Option<String>,
@@ -112,7 +94,7 @@ pub struct OpenOverlay {
 }
 
 impl OpenOverlay {
-    /// Overlay from the bare `open` tool's arguments.
+    /// Build an overlay from bare `open` arguments.
     pub(crate) fn from_open_args(args: &OpenArgs) -> Self {
         Self {
             name: args.name.clone(),
@@ -133,9 +115,8 @@ impl OpenOverlay {
         }
     }
 
-    /// Overlay from the `open_profile` tool's override arguments. Only the
-    /// fields `open_profile` exposes are populated; everything else falls
-    /// through to the named profile's defaults.
+    /// Build an overlay from `OpenProfileArgs`. Other fields use the named
+    /// profile's defaults.
     pub(crate) fn from_open_profile_args(args: &OpenProfileArgs) -> Self {
         Self {
             name: args.name.clone(),
@@ -147,10 +128,9 @@ impl OpenOverlay {
     }
 }
 
-/// Concrete, fully-resolved open settings after merging explicit open
-/// fields, a selected profile's defaults, and built-in defaults
-/// (115200/8-N-1, 256 KiB ring, etc.). `ConnectionConfig` is built from
-/// this; no `unwrap_or` precedence is scattered across tool logic.
+/// Fully resolved open settings after merging explicit fields, selected-profile
+/// defaults, and built-in defaults (115200/8-N-1, 256 KiB ring, etc.). Builds
+/// `ConnectionConfig` without scattered `unwrap_or` precedence.
 #[derive(Debug, Clone)]
 pub struct ResolvedOpenSettings {
     pub port: String,
@@ -197,9 +177,8 @@ impl PartialEq for ResolvedOpenSettings {
 }
 
 impl ResolvedOpenSettings {
-    /// Resolve `overlay` against `profile_defaults` (the selected profile's
-    /// defaults) and the built-in defaults. Parsing failures (invalid data
-    /// bits etc.) return a tool error.
+    /// Resolve `overlay` against `profile_defaults` and built-in defaults.
+    /// Parsing failures (invalid data bits, for example) return a tool error.
     pub fn resolve(
         port: String,
         overlay: &OpenOverlay,
@@ -208,8 +187,8 @@ impl ResolvedOpenSettings {
         let builtin = crate::profiles::ProfileDefaults::default();
         let base = profile_defaults.unwrap_or(&builtin);
 
-        // Connection name: explicit name, else the profile's name prefix
-        // (expanded to `{prefix}-{short_port_name}`), else none.
+        // Resolve connection name: explicit name, profile prefix expanded to
+        // `{prefix}-{short_port_name}`, or none.
         let name = match &overlay.name {
             Some(n) => Some(n.clone()),
             None => base.name.as_ref().map(|prefix| {
@@ -273,14 +252,13 @@ impl ResolvedOpenSettings {
         })
     }
 
-    /// The settings a profile alone would produce (no explicit overlay),
-    /// used to detect whether explicit fields override the profile
-    /// (`dirty`).
+    /// Settings produced by the profile alone, used to detect explicit
+    /// overrides (`dirty`).
     pub fn from_profile(port: String, profile: &crate::profiles::Profile) -> Result<Self, String> {
         Self::resolve(port, &OpenOverlay::default(), Some(&profile.defaults))
     }
 
-    /// Build the concrete `ConnectionConfig` for hardware open.
+    /// Build `ConnectionConfig` for hardware open.
     pub fn into_connection_config(
         self,
         port_info: Option<crate::serial::PortInfo>,
@@ -305,8 +283,8 @@ impl ResolvedOpenSettings {
         }
     }
 
-    /// The effective settings as profile defaults (used for generated
-    /// profiles, whose defaults equal the effective live open settings).
+    /// Convert effective settings to profile defaults for generated profiles,
+    /// whose defaults equal the effective live settings.
     pub fn as_profile_defaults(&self) -> crate::profiles::ProfileDefaults {
         crate::profiles::ProfileDefaults {
             baud_rate: self.baud_rate,
@@ -341,10 +319,6 @@ pub fn parse_open_args(args: OpenArgs) -> Result<ConnectionConfig, String> {
     let resolved = ResolvedOpenSettings::resolve(port, &overlay, None)?;
     Ok(resolved.into_connection_config(None))
 }
-
-// ------------------------------------------------------------------
-// Error helper
-// ------------------------------------------------------------------
 
 pub fn log_tool_err<E: std::fmt::Display>(op: &str, context: &str, err: E) -> String {
     error!("{op} failed: {err}");
@@ -406,8 +380,6 @@ mod tests {
         let err = parse_open_args(args).unwrap_err();
         assert!(err.contains("data_bits"));
     }
-
-    // ── Open-settings resolution precedence ───────────────────────────────
 
     #[test]
     fn omitted_open_fields_fall_back_to_builtin_defaults() {
@@ -513,7 +485,7 @@ mod tests {
             revisions: Vec::new(),
         };
 
-        // Same effective settings as the profile → clean.
+        // Same effective settings as the profile; clean.
         let args = OpenArgs {
             port: "/dev/ttyACM0".into(),
             baud_rate: Some(9600),
@@ -550,7 +522,7 @@ mod tests {
             "explicit value equal to profile is not dirty"
         );
 
-        // Different baud → dirty.
+        // Different baud; dirty.
         let args = OpenArgs {
             baud_rate: Some(19200),
             ..args
@@ -623,7 +595,7 @@ mod tests {
     #[test]
     fn shape_match_context_truncates_post_match() {
         let shaped = crate::match_config::shape_match_context(b"preOK>post123", 3, 3, Some(3));
-        // pre_start=0, match_end=6, shaped="preOK>" (6 bytes)
+        // pre_start=0, match_end=6, shaped="preOK>" (6 bytes).
         assert_eq!(shaped.data, b"preOK>");
         assert_eq!(shaped.match_index, 3);
     }

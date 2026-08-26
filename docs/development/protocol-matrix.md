@@ -1,20 +1,20 @@
-# Protocol Support Matrix
+# Protocol support matrix
 
-> At-a-glance status of every serial protocol we have a specification for (the
-> spec library lives in the gitignored `resources/` symlink). Longer-horizon
-> items are tracked in [FEATURES.md](FEATURES.md).
->
-> Specs are **cited, never committed** — see the License column. Source files are
-> named relative to `resources/`.
+This matrix lists every serial protocol with a specification in the gitignored
+`resources/` symlink. Longer-horizon items are tracked in
+[FEATURES.md](FEATURES.md).
+
+Specs are cited, never committed. See the License column. Source files are
+named relative to `resources/`.
 
 ## Legend
 
-- **Status** — `shipped` · `deferred` (FEATURES.md) · `reference` (not a
+- Status values are `shipped`, `deferred` (FEATURES.md), and `reference` (not a
   serial-framing target).
-- **Effort** — relative implementation cost given the current frame pipeline
+- Effort is the relative implementation cost for the current frame pipeline
   (`src/framing/`).
-- **License** — `free` = redistributable (RFC / IETF draft / explicitly free);
-  `©` = copyrighted, cite-only.
+- License values are `free` for redistributable RFCs, IETF drafts, or explicitly
+  free specifications, and `©` for copyrighted, cite-only specifications.
 
 ## Serial protocols
 
@@ -34,8 +34,8 @@
 
 ## Reference-only specs (not serial-framing targets)
 
-These are present in the local specification library for context but are
-**not** protocol-preset candidates; noted here so the matrix is complete.
+These specifications are present in the local library for context. They are
+not protocol-preset candidates. They are listed so the matrix is complete.
 
 | Spec | Source (`resources/`) | Standard | Why it's here, not a target |
 |---|---|---|---|
@@ -45,19 +45,19 @@ These are present in the local specification library for context but are
 
 ## Notes
 
-- The **`checksums` module** (`src/checksums.rs`) is the shared home for the
-  XOR checksum, LRC, and any future `crc16_modbus` / FCS-16 primitives.
-  Checksum mismatches with `validate: true` are dropped and counted per frame;
-  stream-fatal framing errors use the `FramingError` stop reason.
-- New framing modes (`Cobs` shipped; later `HdlcLike`) are added
-  **symmetrically** to `RxFramingMode` and `TxFramingMode` and wired into
-  `preset_tx_framing` / `preset_rx_framing`. New parsers (`Nmea` and
-  `ModbusAscii` shipped; later `Midi`) extend `ParserType` and
+- The `checksums` module (`src/checksums.rs`) is the shared home for the XOR
+  checksum, LRC, and future `crc16_modbus` and FCS-16 primitives. Checksum
+  mismatches with `validate: true` are dropped and counted per frame. The
+  `stream-fatal` framing errors use the `FramingError` stop reason.
+- Add new framing modes (`Cobs` shipped, `HdlcLike` later) symmetrically to
+  `RxFramingMode` and `TxFramingMode`, then wire them into
+  `preset_tx_framing` and `preset_rx_framing`. New parsers (`Nmea` and
+  `ModbusAscii` shipped, `Midi` later) extend `ParserType` and
   `preset_rx_parser`.
-- The `ShellPrompt` parser (shipped 0.6.0) has no formal spec — it is a
-  heuristic, intentionally omitted from this matrix.
-- The `protocol:` knob is uniform: all 7 advertised protocols (`at_command`,
+- The `ShellPrompt` parser shipped in 0.6.0 has no formal spec. It is a
+  heuristic and is intentionally omitted from this matrix.
+- The `protocol:` knob is uniform. All 7 advertised protocols (`at_command`,
   `slip`, `json_lines`, `cobs`, `ndjson`, `nmea0183`, `modbus_ascii`) are
   selectable as first-class presets.
-- Every addition is **additive** to the JSON schema (new enum variants / optional
-  fields), preserving the path to a stable 1.0.
+- Every addition is additive to the JSON schema through new enum variants or
+  optional fields, preserving the path to a stable 1.0.

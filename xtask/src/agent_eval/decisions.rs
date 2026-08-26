@@ -1,13 +1,14 @@
-//! Fixed decision thresholds for the agent-interface evaluation. Thresholds
-//! are constants fixed before measurement; the evaluator only computes
-//! whether they are met.
+//! Fixed thresholds for the agent-interface evaluation.
+//!
+//! Thresholds are set before measurement. The evaluator checks whether the
+//! measured metrics meet them.
 
 use serde::Serialize;
 
 use super::catalog::CatalogMetrics;
 use super::scenarios::ScenarioMetrics;
 
-/// One current-vs-alternative comparison.
+/// Comparison between current and alternative call shapes.
 #[derive(Debug, Clone, Serialize)]
 pub struct Comparison {
     pub scenario: String,
@@ -16,12 +17,12 @@ pub struct Comparison {
     pub alternative_calls: usize,
     pub current_bytes: usize,
     pub alternative_bytes: usize,
-    /// `current_calls - alternative_calls` (positive = the alternative saves calls).
+    /// `current_calls - alternative_calls`; positive values mean fewer calls.
     pub call_savings: i64,
-    /// `(current - alternative) / current * 100`. Positive = the alternative
-    /// is smaller. Negative = the alternative is larger.
+    /// `(current - alternative) / current * 100`; positive values mean fewer
+    /// request bytes.
     pub byte_reduction_pct: f64,
-    /// Recipe metric: repeated advanced objects removed by the alternative.
+    /// Number of repeated advanced objects removed by the alternative.
     pub reduced_advanced_objects: usize,
     pub completion_ref: String,
     pub invalid_calls: usize,
@@ -57,7 +58,7 @@ impl Comparison {
     }
 }
 
-/// Aggregated metrics feeding the decisions.
+/// Aggregated metrics used by the decisions.
 #[derive(Debug, Clone, Serialize)]
 pub struct AggregateMetrics {
     pub automatic_profiles: Comparison,
@@ -73,7 +74,7 @@ pub struct AggregateMetrics {
     pub total_scenario_request_bytes: usize,
 }
 
-/// Build the aggregate metrics from measured scenarios.
+/// Build aggregate metrics from measured scenarios.
 pub fn aggregate(scenarios: &[ScenarioMetrics]) -> AggregateMetrics {
     let by_id = |id: &str| -> &ScenarioMetrics {
         scenarios
@@ -81,8 +82,7 @@ pub fn aggregate(scenarios: &[ScenarioMetrics]) -> AggregateMetrics {
             .find(|s| s.id == id)
             .unwrap_or_else(|| panic!("scenario {id} missing"))
     };
-    // Materialize each modeled variant as a ScenarioMetrics (owned) so the
-    // comparisons below can borrow stable values.
+    // Store modeled variants as owned metrics so comparisons can borrow them.
     let modeled_metrics: Vec<(String, ScenarioMetrics)> = scenarios
         .iter()
         .filter_map(|s| {
@@ -129,8 +129,8 @@ pub fn aggregate(scenarios: &[ScenarioMetrics]) -> AggregateMetrics {
         .map(|id| Comparison::new(by_id(id), modeled_of(id), 0))
         .collect();
 
-    // Recipes: at_modem_recipe and ndjson_stream (modeled recipe variants)
-    // both replace one repeated protocol-preset object on `open`.
+    // Both modeled recipe variants replace one repeated protocol-preset object
+    // on `open`.
     let recipe_comparisons = ["at_modem_recipe", "ndjson_stream"]
         .iter()
         .map(|id| Comparison::new(by_id(id), modeled_of(id), 1))
@@ -141,9 +141,8 @@ pub fn aggregate(scenarios: &[ScenarioMetrics]) -> AggregateMetrics {
         .map(|id| Comparison::new(by_id(id), modeled_of(id), 0))
         .collect();
 
-    // capture_boot vs the manual composition: one atomic call removes the
-    // arm/reset race of the
-    // 5-call open+read+set_dtr_rts×2+read sequence.
+    // One atomic capture_boot call removes the arm/reset race in the five-call
+    // open, read, set_dtr_rts, set_dtr_rts, read sequence.
     let capture_boot = Comparison::new(
         by_id("boot_reset_manual_composition"),
         by_id("boot_reset_prompt_capture"),
@@ -151,7 +150,7 @@ pub fn aggregate(scenarios: &[ScenarioMetrics]) -> AggregateMetrics {
     );
     let boot_stale_race = by_id("boot_reset_manual_composition").stale_race;
 
-    // Common-task medians (facade decision).
+    // Compute common-task medians for the facade decision.
     let common: Vec<&ScenarioMetrics> = scenarios.iter().filter(|s| s.common).collect();
     let mut common_calls: Vec<f64> = common.iter().map(|s| s.tool_calls as f64).collect();
     common_calls.sort_by(|a, b| a.partial_cmp(b).unwrap());
@@ -199,7 +198,7 @@ fn median(sorted: &[f64]) -> f64 {
     }
 }
 
-/// One yes/no decision with its reason.
+/// One yes/no decision and its reason.
 #[derive(Debug, Clone, Serialize)]
 pub struct Decision {
     pub decision: &'static str,
@@ -207,7 +206,7 @@ pub struct Decision {
     pub reason: String,
 }
 
-/// Interface decisions plus the automatic-profiles justification.
+/// Interface decisions and the automatic-profiles justification.
 #[derive(Debug, Clone, Serialize)]
 pub struct Decisions {
     pub automatic_profiles: Decision,
@@ -217,13 +216,14 @@ pub struct Decisions {
     pub phase5_capture_boot: Decision,
 }
 
-/// Projected catalog growth for hypothetical variants. Measured catalog
-/// growth is 0% for all modeled candidates because none add tools;
-/// oneOf-branch growth inside existing schemas is not modeled, which the
-/// report states as a limitation.
+/// Projected catalog growth for hypothetical variants.
+///
+/// Modeled candidates add no tools, so measured catalog growth is 0%. Growth
+/// inside existing `oneOf` branches is not modeled; the report states this
+/// limitation.
 const MODELED_CATALOG_GROWTH_PCT: f64 = 0.0;
 
-/// Fixed decision thresholds.
+/// Decision thresholds fixed before measurement.
 const SHORTHAND_MIN_BYTE_REDUCTION_PCT: f64 = 20.0;
 const SHORTHAND_MIN_SCENARIOS: usize = 3;
 const SHORTHAND_MAX_CATALOG_GROWTH_PCT: f64 = 3.0;
@@ -236,10 +236,10 @@ const FACADE_MAX_CATALOG_GROWTH_PCT: f64 = 10.0;
 const AUTOMATIC_MIN_CALL_SAVINGS: i64 = 1;
 const AUTOMATIC_MIN_BYTE_REDUCTION_PCT: f64 = 20.0;
 
-/// Evaluate all fixed decisions against the measured metrics.
+/// Evaluate fixed decisions against measured metrics.
 pub fn evaluate(m: &AggregateMetrics) -> Decisions {
-    // Shorthand: >=20% request-byte reduction in at least three scenarios
-    // with modeled shorthand variants, projected catalog growth <=3%.
+    // Shorthand requires >=20% request-byte reduction in at least three
+    // scenarios and projected catalog growth <=3%.
     let shorthand_met_count = m
         .shorthand_comparisons
         .iter()
@@ -255,8 +255,8 @@ pub fn evaluate(m: &AggregateMetrics) -> Decisions {
         },
         thresholds_met: shorthand_thresholds_met,
         reason: format!(
-            "{} of {} shorthand scenarios reach >={:.0}% request-byte reduction \
-             (need >={}); projected catalog growth {:.1}% (limit {:.0}%)",
+            "{} of {} shorthand scenarios meet the {:.0}% request-byte reduction \
+             threshold (minimum {}); projected catalog growth is {:.1}% (maximum {:.0}%)",
             shorthand_met_count,
             m.shorthand_comparisons.len(),
             SHORTHAND_MIN_BYTE_REDUCTION_PCT,
@@ -266,8 +266,8 @@ pub fn evaluate(m: &AggregateMetrics) -> Decisions {
         ),
     };
 
-    // Recipes: >=20% reduction OR one repeated advanced object removed in at
-    // least three scenarios, no extra calls, growth <=2%.
+    // Recipes require >=20% reduction or one repeated advanced object removed
+    // in at least three scenarios, with no extra calls and growth <=2%.
     let recipe_met_count = m
         .recipe_comparisons
         .iter()
@@ -282,8 +282,8 @@ pub fn evaluate(m: &AggregateMetrics) -> Decisions {
         decision: if recipe_thresholds_met { "yes" } else { "no" },
         thresholds_met: recipe_thresholds_met,
         reason: format!(
-            "{} of {} recipe scenarios meet the reduction/advanced-object rule \
-             (need >={}) with no extra calls; projected catalog growth {:.1}% (limit {:.0}%)",
+            "{} of {} recipe scenarios meet the reduction or advanced-object rule \
+             (minimum {}) with no extra calls; projected catalog growth is {:.1}% (maximum {:.0}%)",
             recipe_met_count,
             m.recipe_comparisons.len(),
             RECIPE_MIN_SCENARIOS,
@@ -292,8 +292,8 @@ pub fn evaluate(m: &AggregateMetrics) -> Decisions {
         ),
     };
 
-    // Facade: common-task median saves >=1 call and >=30% request bytes,
-    // 100% modeled completion, growth <=10%.
+    // Facade requires common-task median savings of >=1 call and >=30% fewer
+    // request bytes, complete modeled coverage, and growth <=10%.
     let facade_all_modeled = m
         .facade_comparisons
         .iter()
@@ -307,8 +307,8 @@ pub fn evaluate(m: &AggregateMetrics) -> Decisions {
         decision: if facade_thresholds_met { "yes" } else { "no" },
         thresholds_met: facade_thresholds_met,
         reason: format!(
-            "common-task median facade call savings {:.1} (need >={}), byte \
-             reduction {:.1}% (need >={:.0}%), modeled completion 100%: {}",
+            "Common-task median facade savings: {:.1} calls (minimum {}), {:.1}% \
+             fewer request bytes (minimum {:.0}%); modeled completion is 100%: {}",
             m.common_median_facade_call_savings,
             FACADE_MIN_CALL_SAVINGS,
             m.common_median_facade_byte_reduction_pct,
@@ -317,21 +317,21 @@ pub fn evaluate(m: &AggregateMetrics) -> Decisions {
         ),
     };
 
-    // capture_boot: removes the arm/reset race or stale-data window AND
-    // reduces composition calls.
+    // capture_boot must remove the arm/reset race or stale-data window and
+    // reduce composition calls.
     let capture_reduces_calls = m.capture_boot.alternative_calls < m.capture_boot.current_calls;
     let capture_thresholds_met = m.boot_stale_race && capture_reduces_calls;
     let phase5_capture_boot = Decision {
         decision: if capture_thresholds_met { "yes" } else { "no" },
         thresholds_met: capture_thresholds_met,
         reason: format!(
-            "boot capture composition has a stale-data/arm-reset race: {}; \
-             capture_boot reduces {} calls to {}",
+            "Stale-data/arm-reset race in boot capture composition: {}; \
+             capture_boot reduces the call count from {} to {}",
             m.boot_stale_race, m.capture_boot.current_calls, m.capture_boot.alternative_calls,
         ),
     };
 
-    // Automatic profiles (shipped behavior) vs explicit management.
+    // Compare shipped automatic profile reuse with explicit management.
     let auto_thresholds_met = m.automatic_profiles.call_savings >= AUTOMATIC_MIN_CALL_SAVINGS
         && m.automatic_profiles.byte_reduction_pct >= AUTOMATIC_MIN_BYTE_REDUCTION_PCT
         && m.automatic_profiles.invalid_calls == 0;
@@ -339,11 +339,12 @@ pub fn evaluate(m: &AggregateMetrics) -> Decisions {
         decision: if auto_thresholds_met { "yes" } else { "no" },
         thresholds_met: auto_thresholds_met,
         reason: format!(
-            "automatic reuse saves {} call(s) (need >={}) and {:.1}% request bytes \
-             (need >={:.0}%) vs explicit management; identity rules unchanged",
+            "Automatic reuse saves {} call(s) and {:.1}% request bytes versus explicit \
+             management (minimum call savings: {}; minimum byte reduction: {:.0}%); identity \
+             rules are unchanged",
             m.automatic_profiles.call_savings,
-            AUTOMATIC_MIN_CALL_SAVINGS,
             m.automatic_profiles.byte_reduction_pct,
+            AUTOMATIC_MIN_CALL_SAVINGS,
             AUTOMATIC_MIN_BYTE_REDUCTION_PCT,
         ),
     };
@@ -357,14 +358,13 @@ pub fn evaluate(m: &AggregateMetrics) -> Decisions {
     }
 }
 
-/// Dominant friction source, chosen by a fixed deterministic rule over the
-/// measured metrics:
+/// Select the dominant friction source with a fixed rule over measured metrics:
 ///
-/// 1. `schema size` — aggregate `tools/list` payload >= 64 KiB;
-/// 2. `call shape` — median common-task call count >= 3;
-/// 3. `setup` — the first-connect scenario needs >= 4 calls;
-/// 4. `orchestration` — any scenario requires retries/fallbacks;
-/// 5. otherwise `no dominant source`.
+/// 1. `schema size`: aggregate `tools/list` payload >= 64 KiB.
+/// 2. `call shape`: median common-task call count >= 3.
+/// 3. `setup`: the first-connect scenario needs >= 4 calls.
+/// 4. `orchestration`: any scenario requires retries or fallbacks.
+/// 5. Otherwise, return `no dominant source`.
 ///
 /// Documentation friction is not measurable by a static harness and is
 /// reported as a limitation instead.
@@ -394,7 +394,7 @@ pub fn dominant_friction(
     }
 }
 
-/// Catalog regression warning vs a previous baseline.
+/// Catalog regression warning compared with a previous baseline.
 #[derive(Debug, Clone, Serialize)]
 pub struct CatalogRegression {
     pub status: String,
@@ -421,7 +421,8 @@ impl CatalogRegression {
     }
 }
 
-/// Fixed regression thresholds: aggregate >=5%; per-tool >=10% or +2 KiB.
+/// Regression thresholds fixed before measurement: aggregate >=5%; per-tool
+/// >=10% or +2 KiB.
 const REGRESSION_AGGREGATE_PCT: f64 = 5.0;
 const REGRESSION_PER_TOOL_PCT: f64 = 10.0;
 const REGRESSION_PER_TOOL_BYTES: i64 = 2048;
@@ -490,7 +491,7 @@ mod tests {
         }
     }
 
-    /// A shorthand comparison that comfortably beats the 20% threshold.
+    /// A shorthand comparison that exceeds the 20% threshold.
     #[test]
     fn shorthand_decision_requires_three_scenarios() {
         let s = fake_scenario("x", 2, 1000);
@@ -602,10 +603,10 @@ mod tests {
         };
         let grown = CatalogMetrics {
             tool_count: 26,
-            aggregate_bytes: 106_000, // +6% -> warning
+            aggregate_bytes: 106_000, // +6% means warning
             per_tool_bytes: vec![crate::agent_eval::catalog::ToolBytes {
                 name: "big".into(),
-                total_bytes: 11_000, // +10%
+                total_bytes: 11_000, // +10% means regression
                 description_bytes: 100,
                 input_schema_bytes: 9900,
                 output_schema_bytes: 1000,

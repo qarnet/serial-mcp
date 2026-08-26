@@ -1,16 +1,15 @@
 //! Frame-content parsers.
 //!
-//! The parser factory (`build_parser`) and the AT command, JSON lines, shell
-//! prompt, raw, NMEA-0183, and Modbus ASCII parsers. Parser-only helpers
-//! (trailing-newline/leading-marker stripping, checksum validation) live here
-//! beside their sole consumers.
+//! Contains the parser factory (`build_parser`) and AT command, JSON lines,
+//! shell prompt, raw, NMEA-0183, and Modbus ASCII parsers. Helpers for newline
+//! and marker stripping and checksum validation stay beside their consumers.
 
 use crate::checksums::{lrc, xor_checksum};
 
 use super::config::{ParserConfig, ParserType};
 use super::decoder::{FrameDecodeError, FrameParser, ParsedFrame};
 
-// ---- Parser implementations ------------------------------------------------
+// Parser implementations.
 
 pub(crate) fn build_parser(config: &ParserConfig) -> Result<Box<dyn FrameParser>, String> {
     match config.parser_type {
@@ -36,7 +35,7 @@ pub(crate) fn build_parser(config: &ParserConfig) -> Result<Box<dyn FrameParser>
     }
 }
 
-// AT command parser
+// AT command parser.
 
 struct AtCommandParser;
 
@@ -95,7 +94,7 @@ impl FrameParser for AtCommandParser {
     }
 }
 
-// JSON lines parser
+// JSON lines parser.
 
 struct JsonLinesParser;
 
@@ -108,7 +107,7 @@ impl FrameParser for JsonLinesParser {
     }
 }
 
-// Shell prompt parser
+// Shell prompt parser.
 
 struct ShellPromptParser {
     custom: Option<regex::bytes::Regex>,
@@ -151,7 +150,7 @@ impl FrameParser for ShellPromptParser {
     }
 }
 
-// Raw parser (passthrough)
+// Raw parser (passthrough).
 
 struct RawParser;
 
@@ -161,8 +160,9 @@ impl FrameParser for RawParser {
     }
 }
 
-/// Strip a trailing `\r\n` or bare `\n` from `content` in place (defensive:
-/// handles frames where the end marker was NOT stripped by the framing layer).
+/// Remove trailing `\r\n` or bare `\n` from `content` in place.
+///
+/// Handles frames whose end marker was retained by the framing layer.
 fn strip_trailing_newline(content: &mut Vec<u8>) {
     if content.ends_with(b"\r\n") {
         content.truncate(content.len() - 2);
@@ -184,8 +184,8 @@ mod strip_tests {
 
     #[test]
     fn strip_trailing_newline_removes_bare_lf() {
-        // Pins the bare-`\n` branch: a mutation turning `len() - 1` into
-        // `len() + 1` (or `/ 1`) must fail this test.
+        // Pins bare-`\n`: changing `len() - 1` to `len() + 1` (or `/ 1`) must
+        // fail this test.
         let mut content = b"GPGLL,1,2\n".to_vec();
         strip_trailing_newline(&mut content);
         assert_eq!(content, b"GPGLL,1,2");
@@ -199,8 +199,9 @@ mod strip_tests {
     }
 }
 
-/// Strip a leading byte if it matches any of `markers` (defensive: handles
-/// frames where the start marker was NOT stripped by the framing layer).
+/// Remove the first byte when it matches any `markers`.
+///
+/// Handles frames whose start marker was retained by the framing layer.
 fn strip_leading_if_any(content: &mut Vec<u8>, markers: &[u8]) {
     if let Some(&first) = content.first() {
         if markers.contains(&first) {
@@ -209,7 +210,7 @@ fn strip_leading_if_any(content: &mut Vec<u8>, markers: &[u8]) {
     }
 }
 
-/// Shared checksum-validate ladder for NMEA XOR and Modbus ASCII LRC.
+/// Apply shared checksum validation for NMEA XOR and Modbus ASCII LRC.
 ///
 /// Returns `Ok(Some(true))` if computed == received, `Ok(Some(false))` if
 /// validate is false and they differ, or `Err(ChecksumMismatch)` if validate is
@@ -238,7 +239,7 @@ fn check_checksum(
     }
 }
 
-// NMEA-0183 parser
+// NMEA-0183 parser.
 
 struct NmeaParser {
     validate: bool,
@@ -260,7 +261,7 @@ impl FrameParser for NmeaParser {
         //    was stripped by step 1 above. In either case, a valid NMEA
         //    sentence always contains at least one comma (separating address
         //    from fields). Non-NMEA frames (e.g. "hello world", "AT+CGMI")
-        //    have no comma and return Raw — the parser is opt-in; bare callers
+        //    have no comma and return Raw. The parser is opt-in, so callers
         //    mixing data types see Raw for non-matching frames.
         if !content.contains(&b',') {
             return Ok(ParsedFrame::Raw);
@@ -288,7 +289,7 @@ impl FrameParser for NmeaParser {
                     .and_then(|s| u8::from_str_radix(s, 16).ok())
                 {
                     Some(received_val) => {
-                        // Valid hex — compare against computed checksum.
+                        // Valid hex: compare against computed checksum.
                         check_checksum(
                             self.validate,
                             computed_byte,
@@ -297,7 +298,7 @@ impl FrameParser for NmeaParser {
                         )?
                     }
                     None => {
-                        // Invalid hex chars — guaranteed mismatch (None).
+                        // Invalid hex chars: guaranteed mismatch (None).
                         check_checksum(self.validate, computed_byte, None, hex.clone())?
                     }
                 }
@@ -311,7 +312,7 @@ impl FrameParser for NmeaParser {
         };
 
         // 5. Parse the sentence body: split into address + comma fields.
-        // NMEA spec is ASCII; invalid UTF-8 is non-NMEA input → Raw
+        // NMEA spec is ASCII; invalid UTF-8 is non-NMEA input and returns Raw
         // (mirrors ModbusAsciiParser).
         let body_str = match std::str::from_utf8(&body) {
             Ok(s) => s,
@@ -360,7 +361,7 @@ impl FrameParser for NmeaParser {
     }
 }
 
-// Modbus ASCII parser
+// Modbus ASCII parser.
 
 struct ModbusAsciiParser {
     validate: bool,
@@ -368,20 +369,18 @@ struct ModbusAsciiParser {
 
 impl FrameParser for ModbusAsciiParser {
     fn parse(&self, data: &[u8]) -> Result<ParsedFrame, FrameDecodeError> {
-        // 1. Strip optional leading ':' and trailing \r\n (defensive — the
-        //    preset uses include_markers=false so data is the body between
-        //    ':' and \r\n; a bare caller with include_markers=true would
-        //    include them).
+        // 1. Strip optional leading ':' and trailing \r\n. The preset uses
+        //    include_markers=false, so data is the body between ':' and \r\n;
+        //    a bare caller with include_markers=true may include them.
         let mut content = data.to_vec();
         strip_leading_if_any(&mut content, b":");
         strip_trailing_newline(&mut content);
 
         // 2. Modbus ASCII body is all hex chars (0-9, A-F, a-f). Validate:
-        //    if any non-hex byte is present, return Ok(ParsedFrame::Raw) —
-        //    non-Modbus frames routed through this parser see Raw (mirror
-        //    Nmea's non-NMEA → Raw behavior). The body MUST have an even
-        //    number of hex chars (each decoded byte = 2 hex chars). Odd
-        //    length → Raw (malformed).
+        //    if any non-hex byte is present, return Ok(ParsedFrame::Raw);
+        //    non-Modbus frames routed through this parser see Raw, as with
+        //    NMEA's non-NMEA fallback. The body must have an even number of
+        //    hex chars (each decoded byte = 2 hex chars). Odd length is Raw.
         let body_str = match std::str::from_utf8(&content) {
             Ok(s) => s,
             Err(_) => return Ok(ParsedFrame::Raw),
@@ -401,7 +400,8 @@ impl FrameParser for ModbusAsciiParser {
         // decoded = [address, function_code, data..., lrc]
 
         // 4. Split off the LRC (last byte). Need at least 3 bytes
-        //    (address + function + lrc) for a minimal frame; fewer → Raw.
+        //    (address + function + lrc) for a minimal frame; fewer bytes return
+        //    Raw.
         if decoded.len() < 3 {
             return Ok(ParsedFrame::Raw);
         }
@@ -411,7 +411,8 @@ impl FrameParser for ModbusAsciiParser {
         let function_code = pdu[1];
         let data = pdu[2..].to_vec();
 
-        // 5. Validate LRC over the PDU (address + function + data — NOT the LRC byte).
+        // 5. Validate LRC over the PDU (address + function + data), excluding
+        //    the LRC byte.
         let computed_val = lrc(pdu);
         let checksum_valid = check_checksum(
             self.validate,
@@ -420,7 +421,7 @@ impl FrameParser for ModbusAsciiParser {
             vec![lrc_received],
         )?;
 
-        // 6. Return ParsedFrame::ModbusAscii.
+        // 6. Return the parsed Modbus ASCII frame.
         Ok(ParsedFrame::ModbusAscii {
             address,
             function_code,
@@ -436,7 +437,7 @@ mod tests {
     use crate::framing::config::{LineEnding, RxFramingConfig, RxFramingMode};
     use crate::framing::decoder::FrameDecoder;
 
-    // ── Parser tests ────────────────────────────────────────────────────
+    // Parser tests.
 
     #[test]
     fn at_parser_ok() {
@@ -536,9 +537,8 @@ mod tests {
 
     #[test]
     fn shell_prompt_bare_generic_arrow() {
-        // Bare `>` (no trailing space) must classify as a generic prompt; a
-        // mutation turning the `||` into `&&` would make this fall through
-        // to Raw.
+        // Bare `>` (no trailing space) must classify as a generic prompt. A
+        // mutation turning `||` into `&&` would make this fall through to Raw.
         let p = ShellPromptParser { custom: None };
         let result = p.parse(b">").unwrap();
         assert!(
@@ -583,9 +583,9 @@ mod tests {
 
     #[test]
     fn at_parser_cme_error_fields_are_split() {
-        // Pins the +CME ERROR branch (bare form without a colon, which does
-        // NOT hit the `+`-prefix response branch): a mutation turning the
-        // `||` into `&&` must fail this test.
+        // Pins the +CME ERROR branch (bare form without a colon, which does not
+        // hit the `+`-prefix response branch). A mutation turning `||` into
+        // `&&` must fail this test.
         let p = AtCommandParser;
         let result = p.parse(b"+CME ERROR").unwrap();
         assert!(matches!(
@@ -650,7 +650,7 @@ mod tests {
         assert!(matches!(result, ParsedFrame::Raw));
     }
 
-    // ── NMEA parser tests ──────────────────────────────────────────────
+    // NMEA parser tests.
 
     /// Helper: build a NMEA sentence body with a computed XOR checksum.
     fn nmea_checksum_body(body: &[u8]) -> String {
@@ -702,7 +702,7 @@ mod tests {
     #[test]
     fn nmea_parser_valid_gll_sentence() {
         // Known-good sentence from checksums::tests::xor_checksum_known_nmea_sentence
-        // Body: "GPGLL,3751.65,N,12226.54,W" → XOR checksum 0x7E
+        // Body: "GPGLL,3751.65,N,12226.54,W" has XOR checksum 0x7E.
         let sentence = b"GPGLL,3751.65,N,12226.54,W*7E";
         let p = NmeaParser { validate: true };
         let result = p.parse(sentence).unwrap();
@@ -747,7 +747,7 @@ mod tests {
 
     #[test]
     fn nmea_parser_bad_checksum_returns_error_when_validate_true() {
-        // GLL sentence with correct checksum 0x7E, but we pass *00 (wrong).
+        // GLL sentence with correct checksum 0x7E, but pass *00 (wrong).
         let sentence = b"GPGLL,3751.65,N,12226.54,W*00";
         let p = NmeaParser { validate: true };
         let result = p.parse(sentence);
@@ -784,7 +784,7 @@ mod tests {
             }
             other => panic!("expected Nmea frame, got {other:?}"),
         }
-        // Also test with validate: false
+        // With validate=false, the frame is still accepted.
         let p2 = NmeaParser { validate: false };
         let result2 = p2.parse(sentence).unwrap();
         match result2 {
@@ -807,8 +807,8 @@ mod tests {
 
     #[test]
     fn nmea_parser_invalid_utf8_body_returns_raw() {
-        // NMEA spec is ASCII; invalid UTF-8 is non-NMEA → Raw (mirrors Modbus).
-        // The NmeaParser now uses from_utf8 (not from_utf8_lossy) for the body.
+        // NMEA is ASCII; invalid UTF-8 is non-NMEA and returns Raw, as in
+        // ModbusAsciiParser. The body uses from_utf8, not from_utf8_lossy.
         let parser = build_parser(&ParserConfig {
             parser_type: ParserType::Nmea,
             custom_prompt: None,
@@ -826,7 +826,7 @@ mod tests {
 
     #[test]
     fn nmea_parser_strips_leading_start_char_if_present() {
-        // Simulate include_markers: true — the $ is included in the data.
+        // Simulate include_markers=true: `$` is included in the data.
         let body = b"GPGLL,3751.65,N,12226.54,W";
         let cs_hex = nmea_checksum_body(body);
         let sentence = format!("$GPGLL,3751.65,N,12226.54,W*{cs_hex}");
@@ -849,7 +849,7 @@ mod tests {
 
     #[test]
     fn nmea_parser_strips_trailing_crlf_if_present() {
-        // Simulate include_markers: true — the trailing \r\n is included.
+        // Simulate include_markers=true: trailing `\r\n` is included.
         let body = b"GPGLL,3751.65,N,12226.54,W";
         let cs_hex = nmea_checksum_body(body);
         let sentence = format!("GPGLL,3751.65,N,12226.54,W*{cs_hex}\r\n");
@@ -872,7 +872,7 @@ mod tests {
 
     #[test]
     fn nmea_parser_proprietary_sentence() {
-        // $PGRMZ proprietary sentence without the $.
+        // $PGRMZ proprietary sentence without `$`.
         let body = b"PGRMZ,2010,f,3";
         let cs_hex = nmea_checksum_body(body);
         let sentence = format!("PGRMZ,2010,f,3*{cs_hex}");
@@ -885,7 +885,7 @@ mod tests {
                 fields,
                 checksum_valid,
             } => {
-                // Proprietary $PGRMZ: talker = "P", sentence_type = rest = "GRMZ"
+                // Proprietary $PGRMZ: talker = "P", sentence_type = rest = "GRMZ".
                 assert_eq!(talker_id, "P");
                 assert_eq!(sentence_type, "GRMZ");
                 assert_eq!(fields, vec!["2010", "f", "3"]);
@@ -897,12 +897,12 @@ mod tests {
 
     #[test]
     fn nmea_parser_non_ascii_body_returns_raw() {
-        // Two branches: valid-UTF-8-but-non-ASCII and invalid-UTF-8.
+        // Cover valid UTF-8 that is non-ASCII and invalid UTF-8.
         //
-        // Case 1: valid UTF-8 but non-ASCII → is_ascii fails, returns Raw.
+        // Case 1: valid UTF-8 but non-ASCII; is_ascii fails, so result is Raw.
         // b"a\xC3\xA9,x" = "aé,x" where é is U+00E9 (2-byte UTF-8, non-ASCII).
         // This passes the contains(',') guard and from_utf8 but hits the ASCII
-        // guard — byte index 2 is not a char boundary, so slicing panicked
+        // guard. Byte index 2 is not a char boundary, so slicing panicked
         // before the ASCII guard was added.
         let p = NmeaParser { validate: true };
         let body1 = b"a\xC3\xA9,x";
@@ -912,7 +912,7 @@ mod tests {
             "valid-UTF-8 non-ASCII body should return Raw, got {result1:?}"
         );
 
-        // validate: false variant — same behavior.
+        // validate=false has the same behavior.
         let p2 = NmeaParser { validate: false };
         let result1b = p2.parse(body1).unwrap();
         assert!(
@@ -920,8 +920,8 @@ mod tests {
             "valid-UTF-8 non-ASCII body (validate=false) should return Raw, got {result1b:?}"
         );
 
-        // Case 2: invalid UTF-8 → from_utf8 returns Err → Raw.
-        // b"\xFFx,y" — 0xFF is a lone byte >0x7F and not a valid UTF-8
+        // Case 2: invalid UTF-8; from_utf8 returns Err, so result is Raw.
+        // b"\xFFx,y": 0xFF is a lone byte >0x7F and not a valid UTF-8
         // lead byte. from_utf8 returns Err immediately.
         let body2 = b"\xFFx,y";
         let result2 = p.parse(body2).unwrap();
@@ -930,7 +930,7 @@ mod tests {
             "invalid-UTF-8 body should return Raw, got {result2:?}"
         );
 
-        // Sanity: a valid NMEA sentence with the same parser DOES parse to Nmea.
+        // A valid NMEA sentence with the same parser parses to Nmea.
         let sentence = b"GPGGA,123519,4807.038,N,01131.000,E,1,08,0.9,545.4,M,46.9,M,,";
         let cs_hex = nmea_checksum_body(sentence);
         let valid_sentence =
@@ -1018,8 +1018,8 @@ mod tests {
 
     #[test]
     fn nmea_parser_invalid_hex_checksum_validate_false_returns_full_body() {
-        // Sentence with non-hex checksum chars (*GG), validate: false →
-        // full body parse + checksum_valid: Some(false).
+        // Sentence with non-hex checksum chars (*GG), validate=false: parse the
+        // full body and report checksum_valid: Some(false).
         let sentence = b"GPGGA,123519,4807.038,N,01131.000,E,1,08,0.9,545.4,M,46.9,M,,*GG";
         let p = NmeaParser { validate: false };
         let result = p.parse(sentence).unwrap();
@@ -1059,8 +1059,8 @@ mod tests {
 
     #[test]
     fn nmea_parser_too_short_checksum_validate_false_returns_full_body() {
-        // Sentence with 1-hex-char checksum (*7), validate: false →
-        // full body parse + checksum_valid: Some(false).
+        // Sentence with 1-hex-char checksum (*7), validate=false: parse the
+        // full body and report checksum_valid: Some(false).
         let sentence = b"GPGLL,3751.65,N,12226.54,W*7";
         let p = NmeaParser { validate: false };
         let result = p.parse(sentence).unwrap();
@@ -1082,7 +1082,7 @@ mod tests {
 
     #[test]
     fn nmea_parser_invalid_hex_checksum_validate_true_returns_err() {
-        // Sentence with non-hex checksum chars (*GG), validate: true →
+        // Sentence with non-hex checksum chars (*GG), validate=true: return
         // Err(ChecksumMismatch). The received vec contains the raw hex bytes.
         let sentence = b"GPGGA,123519,4807.038,N,01131.000,E,1,08,0.9,545.4,M,46.9,M,,*GG";
         let p = NmeaParser { validate: true };
@@ -1098,7 +1098,7 @@ mod tests {
 
     #[test]
     fn nmea_parser_too_short_checksum_validate_true_returns_err() {
-        // Sentence with 1-hex-char checksum (*7), validate: true →
+        // Sentence with 1-hex-char checksum (*7), validate=true: return
         // Err(ChecksumMismatch). The received vec contains the raw hex bytes.
         let sentence = b"GPGLL,3751.65,N,12226.54,W*7";
         let p = NmeaParser { validate: true };
@@ -1112,7 +1112,7 @@ mod tests {
         }
     }
 
-    // ── Modbus ASCII parser unit tests ───────────────────────────────────
+    // Modbus ASCII parser tests.
 
     // Helper: compute LRC over a PDU byte slice and return the 1-byte hex string.
     fn modbus_lrc(pdu: &[u8]) -> String {
@@ -1131,7 +1131,7 @@ mod tests {
 
     #[test]
     fn modbus_ascii_parser_valid_read_holding_registers() {
-        // :010300000001FB\r\n — address=1, fc=3, data=[0,0,0,1], LRC=FB
+        // :010300000001FB\r\n: address=1, fc=3, data=[0,0,0,1], LRC=FB.
         let body = modbus_body("010300000001");
         let p = ModbusAsciiParser { validate: true };
         let result = p.parse(body.as_bytes()).unwrap();
@@ -1284,7 +1284,7 @@ mod tests {
 
     #[test]
     fn modbus_ascii_parser_too_short_returns_raw() {
-        // "01" → 1 decoded byte, < 3
+        // "01" decodes to 1 byte, below the 3-byte minimum.
         let p = ModbusAsciiParser { validate: true };
         let result = p.parse(b"01").unwrap();
         assert!(matches!(result, ParsedFrame::Raw));
@@ -1292,7 +1292,7 @@ mod tests {
 
     #[test]
     fn modbus_ascii_parser_strips_leading_colon_and_trailing_crlf() {
-        // Body with markers included — defensive stripping should still work.
+        // Body with markers included; defensive stripping should still work.
         let pdu = [0x01u8, 0x03, 0x00, 0x00, 0x00, 0x01];
         let lrc_hex = modbus_lrc(&pdu);
         let frame = format!(":010300000001{lrc_hex}\r\n");
@@ -1337,9 +1337,9 @@ mod tests {
     fn nmea_parser_multi_fragment_ais_first_sentence() {
         use crate::checksums::xor_checksum;
 
-        // AIS multi-fragment messages are NOT reassembled by the parser —
-        // each fragment is its own frame. This test pins the first-fragment
-        // parse and documents the no-reassembly behavior.
+        // AIS multi-fragment messages are not reassembled; each fragment is
+        // its own frame. This pins first-fragment parsing and documents the
+        // no-reassembly behavior.
         //
         // Verify the XOR checksum of the body between ! and * (exclusive).
         let checksum_body = b"AIVDM,2,1,3,B,55?MbV02;H0000,0";
@@ -1393,8 +1393,8 @@ mod tests {
             } => {
                 assert_eq!(talker_id, "GP");
                 assert_eq!(sentence_type, "VTG");
-                // The first data field (fields[0]) has leading + trailing
-                // spaces — they are NOT trimmed.
+                // The first data field (fields[0]) has leading and trailing
+                // spaces; they are not trimmed.
                 assert_eq!(fields[0], "  48.7  ");
                 assert_eq!(checksum_valid, Some(true));
             }
@@ -1406,10 +1406,10 @@ mod tests {
     fn modbus_ascii_parser_non_ascii_body_returns_raw() {
         // Two branches in ModbusAsciiParser::parse that lead to Raw:
         //
-        // Case 1: valid UTF-8 but non-ASCII → is_ascii_hexdigit fails.
+        // Case 1: valid UTF-8 but non-ASCII; is_ascii_hexdigit fails.
         // b"01\xC3\xA900" = "01é00" where é is U+00E9 (valid UTF-8, non-
         // hex-digit byte 0xC3). The parser calls from_utf8 (Ok), then
-        // is_ascii_hexdigit fails → Raw.
+        // is_ascii_hexdigit fails, so the result is Raw.
         let p = ModbusAsciiParser { validate: true };
         let body1 = b"01\xC3\xA900";
         let result1 = p.parse(body1).unwrap();
@@ -1418,8 +1418,8 @@ mod tests {
             "non-ASCII valid-UTF-8 body should return Raw, got {result1:?}"
         );
 
-        // Case 2: invalid UTF-8 → from_utf8 returns Err → Raw.
-        // b"01\xFF00" — 0xFF is a lone byte >0x7F and not a valid UTF-8
+        // Case 2: invalid UTF-8; from_utf8 returns Err, so the result is Raw.
+        // b"01\xFF00": 0xFF is a lone byte >0x7F and not a valid UTF-8
         // continuation. from_utf8 returns Err immediately.
         let body2 = b"01\xFF00";
         let result2 = p.parse(body2).unwrap();
@@ -1428,7 +1428,7 @@ mod tests {
             "invalid-UTF-8 body should return Raw, got {result2:?}"
         );
 
-        // Sanity: a valid hex body with the same parser DOES parse to ModbusAscii.
+        // A valid hex body with the same parser parses to ModbusAscii.
         let pdu = [0x01u8, 0x03, 0x00, 0x00, 0x00, 0x01];
         let lrc_hex = {
             let cs = lrc(&pdu);

@@ -1,43 +1,40 @@
-# Protocol Guide
+# Protocol guide
 
-serial-mcp ships a framing/parser/preset system that turns a raw serial byte
-stream into structured frames you can match against, inspect, and react to.
-This guide documents the seven built-in protocol presets, the four-layer
-precedence model that decides which framing/parser wins, and the checksum
-behavior that governs validated protocols (NMEA-0183, Modbus ASCII).
+serial-mcp's framing, parser, and preset system turns a raw serial byte stream
+into structured frames for matching and inspection. This guide covers the seven
+built-in protocol presets, the four-layer precedence model for choosing framing
+and parsers, and checksum behavior for NMEA-0183 and Modbus ASCII.
 
-It is the product's most differentiating feature. If you are an agent
-reading this before talking to a device, read at least the
-[Presets](#presets) and [Precedence](#precedence) sections.
+For a quick overview, start with [Presets](#presets) and
+[Precedence](#precedence).
 
 ## Framing and parsers at a glance
 
-RX fields `rx_framing`, `rx_parser`, and `protocol` apply on `read`, the
-`transact` read half, and `capture_boot`; TX fields `tx_framing` and
-`protocol` apply on `write` and the `transact` write half. The sibling
-fields are:
+RX fields `rx_framing`, `rx_parser`, and `protocol` apply to `read`, the
+`transact` read half, and `capture_boot`. TX fields `tx_framing` and `protocol`
+apply to `write` and the `transact` write half. The fields are siblings.
 
-- **`rx_framing` / `tx_framing`** — how the byte stream is split into
-  frames. RX modes: `line`, `delimiter`, `length_prefixed`, `start_end`,
-  `slip`, `cobs`. TX modes mirror these minus `auto` line ending and minus
-  `max_frames`/`include_terminators`/`parser`.
-- **`rx_parser`** — interprets each frame's bytes. Parsers: `at_command`,
-  `json_lines`, `shell_prompt`, `raw`, `nmea`, `modbus_ascii`. `rx_parser`
-  is a **sibling** to `rx_framing`, not nested inside it. `write` has no
-  parser (TX frames are outbound payloads, not parsed).
-- **`protocol`** — a named preset that fills in defaults for the above. A
-  single field instead of three.
+- `rx_framing` and `tx_framing` split the byte stream into frames. RX modes are
+  `line`, `delimiter`, `length_prefixed`, `start_end`, `slip`, and `cobs`. TX
+  modes mirror these modes except for the `auto` line ending and
+  `max_frames`, `include_terminators`, and `parser`.
+- `rx_parser` interprets each frame's bytes. Parsers are `at_command`,
+  `json_lines`, `shell_prompt`, `raw`, `nmea`, and `modbus_ascii`. `rx_parser` is
+  a sibling of `rx_framing`, not a nested field. `write` has no parser because
+  TX frames are outbound payloads.
+- `protocol` is a named preset that fills defaults for the fields above. It
+  replaces the three individual settings when their bundled defaults are
+  sufficient.
 
-`match` (byte-pattern detection) is independent of framing and can be
-combined with any of the above. In framed mode the matcher runs per-frame
-(window reset between frames); in raw mode it runs across the whole
-accumulated byte stream.
+`match` is independent of framing and can be combined with any of these fields.
+In framed mode, the matcher runs once per frame and resets its window between
+frames. In raw mode, it runs across the accumulated byte stream.
 
 ## Presets
 
-A preset is a tag-object: `{"type": "<name>"}`. Seven ship today. The table
-shows what each one wires up; the sections below show concrete
-`write`/`read` examples and the decoded frame shape.
+A preset is a tag object such as `{"type": "<name>"}`. The seven available
+presets are listed below. The sections that follow show `write` and `read`
+examples and the decoded frame shape.
 
 | Preset | TX framing | RX framing | RX parser | `validate` default |
 |---|---|---|---|---|
@@ -46,21 +43,21 @@ shows what each one wires up; the sections below show concrete
 | `json_lines` | line (`\n`) | line (`auto`) | `json_lines` | false |
 | `cobs` | COBS | COBS | `raw` | false |
 | `ndjson` | line (`\n`) | line (`auto`, `skip_empty`) | `json_lines` | false |
-| `nmea0183` | start_end (`$`…`\r\n`) | start_end (`$`/`!`…`\r\n`) | `nmea` | **true** |
-| `modbus_ascii` | start_end (`:`…`\r\n`) | start_end (`:`…`\r\n`) | `modbus_ascii` | **true** |
+| `nmea0183` | start_end (`$`…`\r\n`) | start_end (`$`/`!`…`\r\n`) | `nmea` | true |
+| `modbus_ascii` | start_end (`:`…`\r\n`) | start_end (`:`…`\r\n`) | `modbus_ascii` | true |
 
-`nmea0183` and `modbus_ascii` default to `validate: true` because their
-specs define mandatory checksums. The other presets have no checksum to
-validate, so `validate` is inert for them.
+`nmea0183` and `modbus_ascii` default to `validate` enabled because their
+specifications require checksums. The other presets have no checksum to
+validate, so `validate` has no effect for them.
 
-### `at_command` — AT-command modem protocol
+### `at_command` modem protocol
 
-TX appends `\r`; RX splits on line endings (auto LF/CRLF/bare-CR
-detection); RX frames are parsed as AT command responses or URCs
-(Unsolicited Result Codes).
+TX appends `\r`. RX splits on line endings. It detects LF, CRLF, and bare-CR
+endings automatically. RX frames are parsed as AT command responses or URCs.
+URCs are Unsolicited Result Codes.
 
 ```jsonc
-// write: send AT+CGMI and read the model name
+// Send AT+CGMI and read the model name
 { "connection_id": "cell0",
   "write": { "data": "AT+CGMI", "protocol": {"type": "at_command"} } }
 { "connection_id": "cell0",
@@ -77,11 +74,12 @@ Decoded frame `parsed` shape:
   "fields": ["Quectel", "EC25"] } // response lines between echo and status
 ```
 
-### `slip` — RFC 1055 byte-stuffed framing
+### `slip` framing
 
-SLIP wraps a payload between `END` (0xC0) bytes, escaping `END`/`ESC`
-occurrences inside the payload. Raw payload — no parser. Used for IP-style
-or binary packet streams where the delimiter must never appear in the data.
+SLIP wraps a payload between `END` bytes, 0xC0. It escapes `END` and `ESC`
+occurrences inside the payload. It returns raw payload with no parser. It is
+used for IP-style or binary packet streams. The delimiter must not appear in
+the data.
 
 ```jsonc
 { "connection_id": "radio0",
@@ -91,16 +89,16 @@ or binary packet streams where the delimiter must never appear in the data.
   "read":  { "protocol": {"type": "slip"} } }
 ```
 
-A malformed SLIP escape sequence (0xDB followed by anything other than 0xDC
-or 0xDD) is a **stream-fatal** decode error: the call/read pipeline stops
-with `stop_reason: "framing_error"`, returning the frames decoded before
-the error as a partial result. See [Checksum and error behavior](#checksum-and-error-behavior).
+A malformed SLIP escape, 0xDB followed by anything other than 0xDC or 0xDD, is
+a stream-fatal decode error. The call or read pipeline stops with
+`stop_reason: "framing_error"` and returns frames decoded before the error as a
+partial result. See [Checksum and error behavior](#checksum-and-error-behavior).
 
-### `json_lines` / `ndjson` — one JSON value per line
+### `json_lines` and `ndjson`
 
-Both use line framing + the `json_lines` parser. `ndjson` additionally sets
-`skip_empty: true` so blank/whitespace-only lines are skipped per the
-NDJSON spec; `json_lines` emits them (which you usually don't want).
+Both presets use line framing and the `json_lines` parser. The `ndjson` preset
+sets `skip_empty` to true. It skips blank or whitespace-only lines as required
+by the NDJSON convention. `json_lines` emits those lines.
 
 ```jsonc
 { "connection_id": "telem0",
@@ -108,29 +106,31 @@ NDJSON spec; `json_lines` emits them (which you usually don't want).
             "match": {"pattern": "\"temp\"", "config": {"mode": "literal_substring"}} } }
 ```
 
-Decoded `parsed` is the JSON value itself, inlined alongside the `"parser":
-"json"` tag:
+The decoded `parsed` value is the JSON value itself, inlined next to the
+`"parser": "json"` tag:
 
 ```jsonc
 { "parser": "json", "sensor": "temp", "value": 25.5 }
 ```
 
-### `cobs` — Consistent Overhead Byte Stuffing (plain 0x00-delimited)
+### `cobs` framing
 
-COBS encodes a payload so that 0x00 never appears inside it, then delimits
-frames with a bare 0x00. Useful on noisy serial links where a delimiter
-byte must be unambiguous. Raw payload — no parser. Like SLIP, a COBS decode
-error is stream-fatal and yields a partial result with
-`stop_reason: "framing_error"`. (Note: the canonical plain-COBS decoder
-accepts all code bytes 0x01–0xFF as valid, so decode errors are rare in
-practice; the error path exists for forward-compatibility.)
+COBS encodes a payload so that 0x00 never appears inside it. It then delimits
+frames with a bare 0x00. This is useful on noisy serial links where a delimiter
+byte must be unambiguous. It returns raw payload with no parser. Like SLIP, a
+COBS decode error is stream-fatal. It produces a partial result with
+`stop_reason: "framing_error"`.
 
-### `nmea0183` — marine sentence protocol
+The canonical plain-COBS decoder accepts every code byte from 0x01 through 0xFF.
+Decode errors are rare in practice. The error path remains for
+forward-compatibility.
 
-StartEnd framing with start markers `$` or `!` (standard and AIS) and end
-`\r\n`; the NMEA parser splits the sentence into talker ID, sentence type,
-and comma-separated fields, and validates the `*XX` XOR checksum. The
-preset defaults to `validate: true`.
+### `nmea0183` marine sentence protocol
+
+Start/end framing uses `$` or `!` as start markers and `\r\n` as the end. The
+NMEA parser splits each sentence into talker ID, sentence type, and
+comma-separated fields. It validates the `*XX` XOR checksum. The preset
+defaults to `validate` enabled.
 
 ```jsonc
 { "connection_id": "gps0",
@@ -148,16 +148,17 @@ Sample input `$GPGLL,3751.65,N,12226.54,W*7E\r\n` decodes to:
   "checksum_valid": true }
 ```
 
-Proprietary sentences (`$P...`) split as `talker_id: "P"` + the rest as
-`sentence_type` (e.g. `$PGRMM` → `P` + `GRMM`), per the NMEA proprietary
-convention. AIS sentences start with `!` and are handled by the same
+Proprietary sentences (`$P...`) use `talker_id: "P"` and the remaining text as
+`sentence_type`. For example, `$PGRMM` becomes `P` and `GRMM`. This follows the
+NMEA proprietary convention. AIS sentences start with `!` and use the same
 start-marker set.
 
-### `modbus_ascii` — Modbus ASCII mode
+### `modbus_ascii` mode
 
-StartEnd framing with start `:` and end `\r\n`; the Modbus ASCII parser
-hex-decodes the body, exposes slave address + function code + data bytes,
-and validates the trailing LRC. Defaults to `validate: true`.
+Start/end framing uses `:` as the start marker and `\r\n` as the end. The
+Modbus ASCII parser hex-decodes the body. It exposes the slave address, function
+code, and data bytes. It validates the trailing LRC. The preset defaults to
+`validate` enabled.
 
 ```jsonc
 { "connection_id": "plc0",
@@ -165,8 +166,8 @@ and validates the trailing LRC. Defaults to `validate: true`.
 }
 ```
 
-Sample input `:010300000001FB\r\n` (read holding registers, address 1,
-function 3, start 0, qty 1, LRC 0xFB) decodes to:
+Sample input `:010300000001FB\r\n` represents a read of holding registers at
+address 1, function 3, start 0, quantity 1, with LRC 0xFB. It decodes to:
 
 ```jsonc
 { "parser": "modbus_ascii",
@@ -178,111 +179,106 @@ function 3, start 0, qty 1, LRC 0xFB) decodes to:
 
 ## Precedence
 
-When a call provides more than one source for a framing/parser field, the
-**first non-`None` source wins**, in this order:
+When a call provides more than one source for a framing or parser field, the
+first non-`None` source wins:
 
-1. **explicit call field** — `rx_framing` / `rx_parser` / `tx_framing`
-   passed directly on the call.
-2. **call-time `protocol` preset** — the `protocol` field on the call,
-   mapped through the preset's `preset_*` functions.
-3. **connection default** — the default stored on the connection (from
-   `open`/`open_profile`/profile defaults).
-4. **connection `protocol` preset** — the `protocol` stored on the
-   connection.
+1. The explicit call field has highest priority. It is `rx_framing`, `rx_parser`, or `tx_framing` passed directly on the call.
+2. The call-time `protocol` preset comes next. It is the call's `protocol` field, mapped through the preset's `preset_*` functions.
+3. The connection default comes next. It is stored on the connection from `open`, `open_profile`, or profile defaults.
+4. The connection `protocol` preset has lowest priority. It is the `protocol` stored on the connection.
 
-Example: a call with `protocol: {"type": "nmea0183"}` and an explicit
-`rx_framing` of `{"type": "line", "ending": "lf"}` uses the explicit line
-framing (layer 1) but the NMEA parser from the preset (layer 2, since no
-explicit `rx_parser` was given). This lets you override one layer without
-rewriting the whole bundle.
+For example, a call can set `protocol: {"type":"nmea0183"}` and explicit
+`rx_framing` to `{"type":"line", "ending":"lf"}`. The call then uses the
+explicit line framing from layer 1. It uses the NMEA parser from layer 2 because
+no explicit `rx_parser` was supplied. One layer can be overridden without
+replacing the whole bundle.
 
-The resolution lives in `src/precedence.rs` (`resolve_field`) and is shared
-by `write`, `read`, `transact`, and `capture_boot` so these cannot drift.
+The resolution lives in `src/precedence.rs` (`resolve_field`) and is shared by
+`write`, `read`, `transact`, and `capture_boot`.
 
 ## Checksum and error behavior
 
-This is the part most likely to surprise an agent. Two distinct cases:
+Checksum handling has two separate cases.
 
-### Per-frame checksum mismatch (NMEA, Modbus ASCII with `validate: true`)
+### Per-frame checksum mismatch for validated NMEA and Modbus ASCII
 
-A single corrupted sentence in a burst does **not** abort the call. The
-frame is:
+A corrupted sentence in a burst does not abort the call. The frame is dropped,
+counted, and logged.
 
-- **dropped** (not emitted, not counted in `Frame.index`),
-- **counted** in `ReadResult.frames_dropped` (`TransactResult.read` and
-  `CaptureBootResult.read` carry the same result shape),
-- logged at `WARN` with the expected/received checksum values,
+- It is not emitted or counted in `Frame.index`.
+- It is counted in `ReadResult.frames_dropped`. `TransactResult.read` and
+  `CaptureBootResult.read` carry the same result shape.
+- It is logged at `WARN` with the expected and received checksum values.
 
-and decoding continues with the next frame. `Frame.index` stays contiguous
-across the dropped frame.
+Decoding continues with the next frame. `Frame.index` remains contiguous across
+the dropped frame.
 
-This is deliberate: real NMEA streams (marine RS-422) routinely contain
-occasional corrupt sentences, and aborting the whole read on one bad
-checksum made the preset unusable on exactly the streams it targets. The
-drop is always observable — never silent.
+This behavior handles occasional corrupt sentences in real NMEA marine RS-422
+streams. Aborting a read on one bad checksum would make the preset unusable for
+those streams. The drop remains observable.
 
-With `validate: false` the frame is emitted with `checksum_valid: false`
-and nothing is dropped.
+With `validate` disabled, the frame is emitted with `checksum_valid: false` and
+nothing is dropped.
 
 ### Stream-fatal decode error (SLIP malformed escape, COBS invalid code)
 
-These mean the byte stream itself is corrupt, not just one frame's
-payload. The call stops with `stop_reason: "framing_error"` and returns
-the frames/bytes decoded **before** the error as a partial result. `read`
-returns a normal tool result (not `is_error`) carrying the partial data and
-an `error` field; `TransactResult.read` and `CaptureBootResult.read` carry
-the same shape. The frames already decoded this chunk are preserved — they
-are not discarded.
+These errors indicate corruption of the byte stream, not only one frame's
+payload. The call stops with `stop_reason: "framing_error"`. It returns the
+frames and bytes decoded before the error as a partial result.
 
-Summary table:
+`read` returns a normal tool result, not `is_error`. It includes the partial
+data and an `error` field. `TransactResult.read` and `CaptureBootResult.read`
+carry the same shape. Frames decoded in the same chunk are preserved.
+
+The cases are summarized below.
 
 | Event | `validate` | Frame emitted? | `frames_dropped` | `stop_reason` |
 |---|---|---|---|---|
 | Checksum valid | either | yes, `checksum_valid: true` | 0 | normal |
 | Checksum invalid | `false` | yes, `checksum_valid: false` | 0 | normal |
-| Checksum invalid | `true` | **no (dropped)** | +1 | normal (continues) |
+| Checksum invalid | `true` | no (dropped) | +1 | normal (continues) |
 | SLIP invalid escape | n/a | no | 0 | `framing_error` (partial result) |
 | COBS invalid code | n/a | no | 0 | `framing_error` (partial result) |
 
 ## Field reference
 
-- `ReadResult.frames_dropped` — count of frames dropped by the decoder
-  (checksum mismatches with `validate: true`) plus frames dropped when even
-  the hex encoding fallback fails (effectively unreachable — hex is total).
-  A successful per-frame encoding fallback (bytes re-encoded as `hex`) is
-  emitted normally and does NOT increment this counter. Always observable.
-- `ReadResult.encoding` / `FrameResult.encoding` — the effective encoding of
-  the payload: the requested encoding on direct success, `"hex"` after a
-  lossless fallback. Each frame is encoded independently from the requested
-  encoding, so a valid UTF-8 frame preceding malformed binary data stays
-  UTF-8 while the raw bytes use hex.
-- `ReadResult.stop_reason` — includes `"framing_error"` for stream-fatal
-  decode errors. Not a normal stop; the result still carries partial data.
-- `Frame.index` — 0-based, contiguous across dropped frames and across
+- `ReadResult.frames_dropped` counts frames dropped for checksum mismatches with
+  `validate` enabled. It also counts frames dropped when the hex encoding
+  fallback fails. That failure is effectively unreachable because hex encoding is
+  total. A successful per-frame fallback re-encodes bytes as `hex`. It emits the
+  frame normally and does not increment this counter.
+- `ReadResult.encoding` and `FrameResult.encoding` report the effective payload
+  encoding. Direct success uses the requested encoding. A lossless fallback uses
+  `hex`. Frames are encoded independently, so a valid UTF-8 frame before
+  malformed binary data stays UTF-8 while raw bytes use hex.
+- `ReadResult.stop_reason` includes `framing_error` for stream-fatal decode
+  errors. It is not a normal stop. The result still carries partial data.
+- `Frame.index` is zero-based and contiguous across dropped frames and
   `skip_empty` skips. A dropped frame consumes no index.
-- `ParsedFrame.Nmea.checksum_valid` / `ParsedFrame.ModbusAscii.checksum_valid`
-  — `Some(true)` valid, `Some(false)` invalid (only with `validate: false`),
-  `None` no checksum present.
+- `ParsedFrame.Nmea.checksum_valid` and
+  `ParsedFrame.ModbusAscii.checksum_valid` use `Some(true)` for a valid checksum,
+  `Some(false)` for an invalid checksum when `validate` is false, and `None`
+  when no checksum is present.
 
 ## Choosing a preset
 
-- **AT modem** → `at_command`.
-- **Line-delimited JSON** → `ndjson` (skips blank lines; preferred over
-  `json_lines` for telemetry streams).
-- **NMEA GPS/AIS** → `nmea0183`.
-- **Modbus ASCII PLC** → `modbus_ascii`.
-- **Binary packets with a reserved delimiter** → `slip` (0xC0-delimited) or
-  `cobs` (0x00-delimited). COBS is more robust on links that may strip
-  0xC0; SLIP is simpler and widely supported.
-- **Custom line protocol** → `rx_framing: {"type": "line", …}` with
-  `rx_parser: {"type": "shell_prompt"}` or `raw`.
+- For an AT modem, use `at_command`.
+- For line-delimited JSON, use `ndjson`. It skips blank lines and is preferred
+  for telemetry streams over `json_lines`.
+- For NMEA GPS or AIS, use `nmea0183`.
+- For a Modbus ASCII PLC, use `modbus_ascii`.
+- For binary packets with a reserved delimiter, use `slip` for 0xC0-delimited
+  packets or `cobs` for 0x00-delimited packets. COBS is more robust on links
+  that may strip 0xC0. SLIP is simpler and widely supported.
+- For a custom line protocol, set `rx_framing: {"type": "line", …}`.
+  Set `rx_parser: {"type": "shell_prompt"}` or `raw`.
 
-If none of the presets fit, drop down to explicit `rx_framing` + `rx_parser`
-— the preset is just a convenience bundle, and every layer can be set
-independently per the [precedence](#precedence) rules.
+If no preset fits, use explicit `rx_framing` and `rx_parser`. Presets are
+convenience bundles, and each layer can be set independently under the
+[precedence](#precedence) rules.
 
 ## References
 
-Normative spec citations for each implemented framing mode, parser, and
-preset are in [references.md](protocols/references.md). Cite-only — no spec
-text is committed to this repository.
+Normative citations for each implemented framing mode, parser, and preset are in
+[references.md](protocols/references.md). This repository includes citations
+only, not specification text.

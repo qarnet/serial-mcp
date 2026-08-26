@@ -1,7 +1,7 @@
-//! Protocol emulator integration test.
+//! MCP workflow against a weather-station emulator over a Linux PTY pair.
 //!
-//! Simulates a full MCP agent session against an ESP32 weather-station
-//! firmware emulator running over a PTY pair — no hardware required.
+//! The emulator returns fixed sensor values for three response formats, so the
+//! workflow runs without hardware.
 
 #![cfg(target_os = "linux")]
 
@@ -15,9 +15,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 mod common;
 use common::{connect_client, pty::PtyPair, tool_request, TestServer};
 
-// ------------------------------------------------------------------
-// Device emulator: implements the ESP32 weather-station serial protocol
-// ------------------------------------------------------------------
+// The emulator accepts READ, READ KV, READ CSV, and READ FL and returns fixed
+// sensor data.
 
 static SENSOR_DATE: &str = "26.05.2026T23:19:02";
 const SENSOR_TEMP: f64 = 26.75;
@@ -53,8 +52,8 @@ fn parse_command(line: &[u8]) -> Option<Format> {
         "KV" => Some(Format::Kv),
         "CSV" => Some(Format::Csv),
         "FL" => Some(Format::Fl),
-        "" => Some(Format::Kv), // default format
-        _ => None,              // unknown — no response
+        "" => Some(Format::Kv), // omitted format uses KV
+        _ => None,              // unknown command produces no response
     }
 }
 
@@ -118,14 +117,8 @@ async fn emulator_task(mut master: File) {
     }
 }
 
-// ------------------------------------------------------------------
-// Full agent workflow test
-// ------------------------------------------------------------------
-
-// Ignored: the read stages now run through the ring-based read pipeline.
 #[tokio::test]
 async fn protocol_emulator_workflow() {
-    // ---- Stage 0: Open PTY, spawn emulator, start server, open port ----
     let pty = PtyPair::open().expect("openpty");
     let slave_path = pty.slave_path.to_string_lossy().into_owned();
     let (master, _slave_fd) = pty.into_parts(); // keep slave_fd alive
@@ -156,7 +149,6 @@ async fn protocol_emulator_workflow() {
         .to_string();
     assert!(!connection_id.is_empty());
 
-    // ---- Stage 1: list_ports includes PTY slave ----
     let ports_result = client
         .peer()
         .call_tool(tool_request("list_ports", json!({})))
@@ -169,7 +161,6 @@ async fn protocol_emulator_workflow() {
         "ports must be an array"
     );
 
-    // ---- Stage 2: write + read (KV) ----
     let _flush = client
         .peer()
         .call_tool(tool_request(
@@ -199,9 +190,8 @@ async fn protocol_emulator_workflow() {
         "expected >=9 bytes written"
     );
 
-    // The emulator responds synchronously; give the always-on pump a moment
-    // to capture the full response, then read it back with a match spanning
-    // the complete KV line (so the matched payload carries every field).
+    // The emulator responds synchronously. Let the always-on pump capture the
+    // complete line before matching so the payload carries every field.
     tokio::time::sleep(Duration::from_millis(100)).await;
     let kv_result = client
         .peer()
@@ -228,7 +218,6 @@ async fn protocol_emulator_workflow() {
     assert!(collected.contains("P=980.9"), "data must contain pressure");
     assert!(collected.contains("C=409"), "data must contain co2");
 
-    // ---- Stage 3: write + read (CSV) ----
     client
         .peer()
         .call_tool(tool_request(
@@ -250,6 +239,8 @@ async fn protocol_emulator_workflow() {
         ))
         .await
         .unwrap();
+    // Wait for the pump to capture the complete CSV response before reading
+    // buffered history.
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     let read_result = client
@@ -283,7 +274,6 @@ async fn protocol_emulator_workflow() {
     );
     assert!(read_structured.get("elapsed_ms").is_some());
 
-    // ---- Stage 4: hex roundtrip ----
     client
         .peer()
         .call_tool(tool_request(
@@ -330,7 +320,6 @@ async fn protocol_emulator_workflow() {
         "hex roundtrip must contain temp"
     );
 
-    // ---- Stage 5: read with pattern match ----
     client
         .peer()
         .call_tool(tool_request(
@@ -340,11 +329,9 @@ async fn protocol_emulator_workflow() {
         .await
         .unwrap();
 
-    // Write the command; the emulator responds synchronously so data
-    // will be waiting in the serial buffer when read starts. Under the
-    // ring model, give the always-on pump a moment to capture the full
-    // response before the read checks buffered history (otherwise the
-    // match may fire on a partial "T=" before "26.75" arrives).
+    // The emulator responds synchronously. Let the always-on pump capture the
+    // complete response before read inspects buffered history; otherwise the
+    // match can fire on partial "T=" data.
     client
         .peer()
         .call_tool(tool_request(
@@ -383,7 +370,6 @@ async fn protocol_emulator_workflow() {
         "read with match result must contain temp: {match_data}"
     );
 
-    // ---- Stage 6: read with match timeout ----
     let _flush = client
         .peer()
         .call_tool(tool_request(
@@ -407,8 +393,8 @@ async fn protocol_emulator_workflow() {
         ))
         .await
         .unwrap();
-    // Pattern match timeout returns isError=false with stop_reason=timeout
-    // and matched=false (pattern not found within timeout).
+    // A match timeout is normal and reports stop_reason=timeout with
+    // matched=false.
     assert_ne!(
         timeout_result.is_error,
         Some(true),
@@ -426,7 +412,6 @@ async fn protocol_emulator_workflow() {
         "must have matched=false"
     );
 
-    // ---- Stage 8: read timeout ----
     client
         .peer()
         .call_tool(tool_request(
@@ -466,7 +451,7 @@ async fn protocol_emulator_workflow() {
         Some(true),
         "read timeout should not be isError"
     );
-    // Timeout is a normal stop reason. Verify structured content contains stop_reason.
+    // A read timeout is a normal stop reason.
     let rt_structured = rt_result
         .structured_content
         .expect("read timeout must have structured content");
@@ -476,7 +461,6 @@ async fn protocol_emulator_workflow() {
         "read timeout stop_reason must be 'timeout'"
     );
 
-    // ---- Stage 10: flushes, DTR/RTS, break ----
     let flush_out = client
         .peer()
         .call_tool(tool_request(
@@ -510,8 +494,8 @@ async fn protocol_emulator_workflow() {
         .await
         .unwrap();
 
-    // PTYs do not support modem control lines (ENOTTY); on real hardware
-    // this would succeed. Just confirm the tool is reachable.
+    // PTYs return ENOTTY for modem-control operations; real hardware may
+    // succeed. Keep this check focused on tool reachability.
     if dtr_result.is_error != Some(true) {
         let dtr_structured = dtr_result.structured_content.expect("structured");
         assert_eq!(dtr_structured["dtr"], json!(true));
@@ -550,7 +534,6 @@ async fn protocol_emulator_workflow() {
         "send_break actual_duration {actual_duration} should be >= 30"
     );
 
-    // ---- Stage 11: resources ----
     let ports_res = client
         .peer()
         .read_resource(ReadResourceRequestParams::new("serial://ports"))
@@ -562,16 +545,13 @@ async fn protocol_emulator_workflow() {
         _ => panic!("expected text resource"),
     };
     let ports_json: serde_json::Value = serde_json::from_str(&ports_text).expect("valid JSON");
-    // PTYs created with openpty() may not be reported by serialport::available_ports().
-    // This assertion is informational rather than hard on all Linux kernels.
+    // openpty() PTYs may not appear in serialport::available_ports(); visibility
+    // varies by kernel, so keep this resource check informational.
     let _found_pty_in_ports = ports_json["ports"]
         .as_array()
         .unwrap()
         .iter()
         .any(|p| p["name"].as_str() == Some(&slave_path));
-    // We skip the strict assert here because PTY visibility is kernel-dependent.
-    // The list_ports tool assertion above already confirmed the port exists.
-
     let conns_res = client
         .peer()
         .read_resource(ReadResourceRequestParams::new("serial://connections"))
@@ -603,7 +583,6 @@ async fn protocol_emulator_workflow() {
         "connection detail must have correct port"
     );
 
-    // ---- Stage 12: close + read-after-close fails ----
     let close_result = client
         .peer()
         .call_tool(tool_request(
@@ -632,7 +611,6 @@ async fn protocol_emulator_workflow() {
         "read after close must fail"
     );
 
-    // ---- Stage 13: cleanup ----
     client.cancel().await.ok();
     drop(_slave_fd);
     drop(emulator_handle);

@@ -7,8 +7,8 @@ use tokio::process::Command;
 
 mod common;
 
-/// A stdio server command isolated from the user's actual default profile
-/// config via a temporary `--profiles-path`.
+/// Build a stdio server command with profile storage isolated from user
+/// configuration through a temporary `--profiles-path`.
 fn isolated_stdio_command() -> (tokio::process::Command, TempDir) {
     let profiles_dir = TempDir::new().expect("temp dir for isolated blob profile store");
     let profiles_path = profiles_dir.path().join("profiles.toml");
@@ -58,8 +58,8 @@ async fn resource_uri_parsing_includes_raw_suffix() {
     let transport = TokioChildProcess::new(cmd).expect("spawn stdio server");
     let client = ().serve(transport).await.expect("initialize client");
 
-    // Verify /raw URIs are recognized (will fail since no connection exists,
-    // but should fail with "connection_not_found" not "resource_not_found")
+    // With no connection, a /raw URI may return either "connection_not_found"
+    // or "resource_not_found".
     let result = client
         .read_resource(rmcp::model::ReadResourceRequestParams::new(
             "serial://connections/test-id/raw",

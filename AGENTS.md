@@ -5,11 +5,11 @@
 - Root server: `src/main.rs` selects stdio vs HTTP transport, parses CLI limits (`--profiles-path`, `--capture-dir` + capture quotas included), and mounts HTTP at `/mcp`.
 - MCP surface lives in `src/server.rs`; tool handlers are split under `src/tools/`, prompts under `src/prompts/`, resources under `src/resources/`.
 - MCP version policy (`src/mcp_protocol.rs`): the product-owned `SUPPORTED_PROTOCOLS` table is the SINGLE source for advertised versions, lifecycle admission, capability views, and cache shaping. Exactly two rows — `2026-07-28` (preferred, `DiscoverStateless`, `ImmediatePrivate` cache, subscriptions on) and permanent `2025-11-25` (`InitializeSession`, `Omit` cache, subscriptions off). Lookup is exact-match only (`policy_for`); `cache_fields_for(Option<ProtocolVersion>)` grants fields ONLY to rows with `CachePolicy::ImmediatePrivate` — never by date/range, and unknown/future versions inherit no policy. `supported_protocol_versions()` / preferred policy derive from the table, never from `ProtocolVersion::KNOWN_VERSIONS`.
-- Dual MCP lifecycle (`src/server.rs`): preferred modern `2026-07-28` discovery/stateless requests (`server/discover` + self-contained per-request `_meta`) and compatible legacy `2025-11-25` initialize/session requests. `get_info()` serves the MODERN view (rmcp intersects `subscriptions/listen` filters against `get_info().capabilities`), `initialize()` returns the legacy view with subscription disabled, `discover()` the modern view with `resources.subscribe: true`. Common surface: tools/resources/prompts/completions (no logging, list-change, or tasks). Phase 3 implements `accepted_subscription_filter`/`listen` backed by one process-wide `ResourceEventHub` (`src/resource_events.rs`, capacity 256) shared by every stdio/HTTP handler and the port hotplug watcher; legacy `subscriptions/listen` stays `-32601`.
+- Dual MCP lifecycle (`src/server.rs`): preferred modern `2026-07-28` discovery/stateless requests (`server/discover` + self-contained per-request `_meta`) and compatible legacy `2025-11-25` initialize/session requests. `get_info()` serves the MODERN view (rmcp intersects `subscriptions/listen` filters against `get_info().capabilities`), `initialize()` returns the legacy view with subscription disabled, `discover()` the modern view with `resources.subscribe: true`. Common surface: tools/resources/prompts/completions (no logging, list-change, or tasks). `accepted_subscription_filter`/`listen` are backed by one process-wide `ResourceEventHub` (`src/resource_events.rs`, capacity 256) shared by every stdio/HTTP handler and the port hotplug watcher; legacy `subscriptions/listen` stays `-32601`.
 - `SerialHandler` is built via `SerialHandler::builder()...build()` (`src/server.rs`); the old `with_manager*` telescoping constructors are gone and `with_profiles()` is gone. The builder defaults `profile_store` to an ephemeral store and `capture_store` to disabled. `SerialHandler::new()` tries the OS default profile store and falls back to an ephemeral store with a warning. Production `main.rs` injects the resolved `profile_store`, a `CaptureStore` built from `--capture-dir` + quota flags (disabled by default), and `SystemPortProvider` through the builder.
 - Profiles live in a process-wide `Arc<ProfileStore>` (`src/profile_store.rs`), shared by every stdio/HTTP session handler. `main.rs` resolves the path (`--profiles-path` or the OS user-config default, failing startup on an unavailable config dir or invalid file) and injects one store. Persistent mutations take a process-local async mutex, then `spawn_blocking` + an advisory lock on `<file>.lock`, reload-under-lock, `NamedTempFile` + `sync_all` + rename; the cache (shared `Arc<RwLock>`) is published from inside the blocking transaction right after the durable write, before the lock is released — so a cancelled awaiting tool still converges (cache never changes on failed write). `update_defaults_preserving_selector` returns the effective profile atomically (no racy second lookup). File format is schema-versioned TOML (v1 legacy auto-migrates in memory; `schema_version == 0` or `> 2` rejects startup). `Profile` carries `metadata` (revision/timestamps/generated/use_count) and a bounded `revisions` history (max 5 prior snapshots) for the profile-session feature.
 - Shared RX framing lives in `src/tools/rx_consume.rs` (`consume_frames` + `RxFrameSink` trait + `disconnect_state`); `read` routes framing through it, but its raw (no-framing) path stays per-tool by design (see "Invariants easy to break").
-- Connection lifecycle is in `src/serial/`; shared RX/TX coordination is in `src/rx_session.rs` (always-on pump + ring buffer), `src/tx_session.rs`, and `src/stop_controller.rs`. The pump appends all received bytes to `src/rx_ring.rs`; `read` reads from the ring via cursors. `ConnectionManager`'s connection-opening boundary is an injectable `ConnectionOpener` (`with_opener`): production uses `SystemConnectionOpener` (`SerialConnection::open`); tests inject in-memory backends (`tests/common/controlled.rs::ControlledConnectionOpener`) so the public MCP surface runs cross-platform without an OS serial port (macOS `serialport` baud setup invokes `IOSSIOSPEED`, which macOS PTYs reject with `ENOTTY`; no production fallback is used).
+- Connection lifecycle is in `src/serial/`; shared RX/TX coordination is in `src/rx_session.rs` (always-on pump + ring buffer), `src/tx_session.rs`, and `src/stop_controller.rs`. The pump appends all received bytes to `src/rx_ring.rs`; `read` reads from the ring via cursors. `ConnectionManager`'s connection-opening boundary is an injectable `ConnectionOpener` (`with_opener`): production uses `SystemConnectionOpener` (`SerialConnection::open`); tests inject in-memory backends (`tests/common/controlled.rs::ControlledConnectionOpener`) so the public MCP surface runs cross-platform without an OS serial port. Linux production-path PTY tests use real PTYs; macOS and Windows use normal Rust and controlled-backend coverage.
 - Low-level shared primitives: `src/util.rs` (`find_subsequence`, the byte-substring search imported directly by `framing` and the matcher) and `src/precedence.rs` (`resolve_field`, the four-layer framing/parser/protocol precedence helper shared by `io_ops`). Both `pub(crate)`.
 - `build.rs` injects `GIT_HASH` / `GIT_HASH_AVAILABLE` / `BUILD_TARGET`.
 
@@ -37,7 +37,7 @@ cargo test --locked --test device_fixture -- --test-threads=1
 cargo test --locked --test device_command_parity -- --test-threads=1
 cargo test --locked --test device_framing_parity -- --test-threads=1
 cargo test --locked --test device_protocol_parity -- --test-threads=1
-cargo test --locked --test device_parity_repeat phase_e_public_boundary_repeat_gate \
+cargo test --locked --test device_parity_repeat public_boundary_repeat_gate \
   -- --ignored --test-threads=1
 
 # The one complete MCP version compatibility gate (local and CI share this
@@ -58,12 +58,9 @@ cargo clippy --locked --manifest-path compat/rmcp-1-client/Cargo.toml \
 # registry manifest builder unittest suite (offline, deterministic)
 python3 -m unittest discover -s scripts/tests -v
 
-# storage hygiene audit and Cargo-clean dry-run (read-only)
-python3 scripts/storage_hygiene.py audit --all-worktrees
-python3 scripts/storage_hygiene.py clean --all-worktrees --dry-run
 ```
 
-- CI runs exactly: fmt -> build -> test -> clippy, plus named Ubuntu gates for config-schema validation (`cargo test --locked --test config_schema_validation`) and the pinned `mcp-conformance` gate, which delegates ALL compatibility execution to `scripts/test-mcp-compat.sh` (lockfile-pinned conformance + Inspector tooling installed with `npm ci --ignore-scripts` and invoked as local binaries — no npx, no lifecycle scripts, no dynamic resolution — plus current typed/raw/stdio/subscription tests, actual rmcp 1.7.0 HTTP + stdio, both official conformance sets, and the Inspector 2.0.0 smoke — see the Phase 4 section).
+- CI matrix runs fmt -> build -> test -> clippy. Ubuntu also runs required real-PTY suites, config-schema validation (`cargo test --locked --test config_schema_validation`), registry manifest builder unit tests, and `nix flake check`. A separate `mcp-conformance` job delegates all compatibility execution to `scripts/test-mcp-compat.sh` using lockfile-pinned tooling installed with `npm ci --ignore-scripts`, invoked via local binaries (no npx, no lifecycle scripts, no dynamic resolution), with a real rmcp 1.7.0 historical client fixture over stdio + HTTP, both official conformance sets, and the Inspector 2.0.0 smoke.
 - CI and schema workflows set `RUSTFLAGS="-D warnings"`. Treat warnings as errors locally too.
 - `nix flake check` is part of CI. The source filter admits the complete `schemas/` tree (all four vendored schemas validate hermetically offline — missing fixtures fail) plus the `scripts/` tree (registry-manifest builder tests read it at runtime — missing fixtures fail). The flake checks prove the builder unittest suite passes (`registry-manifest-builder-tests`). On Nix, prefer `nix develop` before changing release workflow bits.
 
@@ -168,9 +165,8 @@ python3 scripts/storage_hygiene.py clean --all-worktrees --dry-run
 
 - `cargo test --lib` covers core logic (incl. `serial::schema` uint-format regression tests and `profile_store` migration/revision/metadata unit tests).
 - `tests/http_integration.rs` exercises real MCP HTTP transport in-process, including profile persistence: real-binary restart (`profiles_survive_real_process_restart`), shared HTTP sessions, concurrent same-process and cross-process writers (`concurrent_*_keep_both`), legacy migration, startup rejection of corrupt/future files, and Unix failed-write preservation. In-process servers: simple tests use `TestServer::start()`/`start_with`; specialized dependencies (port provider, profiles path, capture store, security) go through `TestServerBuilder` (`tests/common/mod.rs`).
-- `tests/serial_pty.rs` is Linux-only real-PTY serial I/O. macOS `serialport`
-  baud setup invokes `IOSSIOSPEED`, which macOS PTYs reject with `ENOTTY`; macOS
-  still gets normal Rust build/test/clippy and controlled-backend coverage.
+- `tests/serial_pty.rs` is Linux-only real-PTY serial I/O. macOS and Windows
+  get normal Rust build/test/clippy and controlled-backend coverage.
 - `tests/stdio_integration.rs` spawns binary over stdin/stdout.
 - `tests/protocol_emulator*.rs` are protocol hardening tests.
 - `tests/allowlist.rs` — port allowlist enforcement via the HTTP harness.
@@ -182,9 +178,9 @@ python3 scripts/storage_hygiene.py clean --all-worktrees --dry-run
 - `tests/blob_resources.rs` — blob resources and resource templates.
 - `tests/tx_session.rs` — cross-module TxSession wiring.
 - `tests/proptest.rs` — property-based and boundary-value tests.
-- `tests/protocol_compatibility.rs` — version-indexed compatibility matrix indexed by exact `TestProtocol::{V2026_07_28,V2025_11_25}` (a table-driven coverage lock compares `TestProtocol::ALL` against the raw `server/discover` `supportedVersions` wire output) plus the Phase 4 cache wire proofs: typed modern `ttlMs: Some(0)` / `cacheScope: Private` on every cacheable family and typed legacy absence; raw modern `ttlMs: 0` / `cacheScope: "private"` presence and raw legacy absence; `resultType` modern-present/legacy-absent; cursor-page behavior of the manual `tools/list`/`prompts/list` handlers. Raw expectations are fixture-local, never derived from production `src/mcp_protocol.rs`.
+- `tests/protocol_compatibility.rs` — version-indexed compatibility matrix indexed by exact `TestProtocol::{V2026_07_28,V2025_11_25}` (a table-driven coverage lock compares `TestProtocol::ALL` against the raw `server/discover` `supportedVersions` wire output) plus cache wire proofs: typed modern `ttlMs: Some(0)` / `cacheScope: Private` on every cacheable family and typed legacy absence; raw modern `ttlMs: 0` / `cacheScope: "private"` presence and raw legacy absence; `resultType` modern-present/legacy-absent; cursor-page behavior of the manual `tools/list`/`prompts/list` handlers. Raw expectations are fixture-local, never derived from production `src/mcp_protocol.rs`.
 - `tests/config_schema_validation.rs` validates all three vendored example configs (Claude Code, Codex, opencode) hermetically and offline — the vendored `models.dev` document is registered in memory under its original URI, a no-network retriever fails on anything else, and missing/malformed schema or instance fixtures fail the run (no skip path). Only the ignored case fetches latest upstream schemas.
-- Required Linux real-PTY fixture targets are `tests/device_fixture.rs` (7), `tests/device_command_parity.rs` (19), `tests/device_framing_parity.rs` (8), and Linux-only `tests/device_protocol_parity.rs` (15). Linux x86_64 CI runs all four explicitly after ordinary `cargo test`. macOS arm64 runs normal Rust fmt/build/test/clippy; these Linux-only targets compile as zero tests there, while controlled-backend coverage remains active. Windows stays compile + controlled-backend only. Linux x86_64 also runs ignored `device_parity_repeat::phase_e_public_boundary_repeat_gate` explicitly: 100 fixed-order public MCP lifecycles, seed `0x50484153455f4545`, with bounded real fixture/server/client teardown.
+- Required Linux real-PTY fixture targets are `tests/device_fixture.rs` (7), `tests/device_command_parity.rs` (19), `tests/device_framing_parity.rs` (8), and Linux-only `tests/device_protocol_parity.rs` (15). Linux x86_64 CI runs all four explicitly after ordinary `cargo test`. macOS arm64 runs normal Rust fmt/build/test/clippy; these Linux-only targets compile as zero tests there, while controlled-backend coverage remains active. Windows runs normal Rust fmt/build/test/clippy plus controlled-backend coverage. Linux x86_64 also runs ignored `device_parity_repeat::public_boundary_repeat_gate` explicitly: 100 fixed-order public MCP lifecycles, seed `0x50484153455f4545`, with bounded real fixture/server/client teardown.
 - There are no hardware-required tests in this repo. All test coverage is runnable on a normal Linux host.
 
 ## Release workflow
@@ -250,10 +246,6 @@ bounded; a hung or slow run must fail the job, not idle.
 - Rust toolchain policy: CI, release, and schema-drift workflows install Rust 1.97.1 (`dtolnay/rust-toolchain@1.97.1`, each followed by a `rustc --version --verbose` report step); Nix derives the same version from `rust-toolchain.toml`. Bump both together.
 - Conventional commits used here: `feat:`, `fix:`, `docs:`, `test:`, `refactor:`.
 - Never add attribution footers or co-author lines.
-- Storage hygiene audit is read-only. Cleanup defaults to Cargo dry-run; invoke
-  `clean --apply` only after active `Cargo`/`rustc`/`ninja` work has stopped.
-  Protected corpus, artifacts, reports, and build paths stay out of cleanup
-  actions.
 
 ## Orchestrator (xtask)
 
@@ -277,7 +269,7 @@ cargo run --manifest-path xtask/Cargo.toml -- print-paths
   tests provide cross-platform production-surface coverage. Ignored
   `device_parity_repeat` stays out of xtask so its 100 iterations run only in
   explicit Linux CI/verification commands.
-- Normal suites (stdio, blob, http) run without `--ignored`. The only non-firmware `#[ignore]` is `config_schema_validation::example_configs_match_latest_upstream_schemas` (network fetch; run via `cargo test --test config_schema_validation -- --ignored`).
+- Normal suites (stdio, blob, http) run without `--ignored`. Exactly two ignored tests remain: `config_schema_validation::example_configs_match_latest_upstream_schemas` (network fetch; run via `cargo test --test config_schema_validation -- --ignored`) and `device_parity_repeat::public_boundary_repeat_gate` (100-iteration Linux real-PTY repeat gate).
 - Test helpers (`tests/common/binaries.rs`, `tests/common/spawned.rs`) auto-build missing test assets on first use.
 
 ## Connection defaults & profiles
@@ -300,7 +292,7 @@ cargo run --manifest-path xtask/Cargo.toml -- print-paths
 - **`delete_profile`** refuses while any same-process open connection binds the profile (error lists connection IDs).
 - **Never persisted:** DTR/RTS, BREAK, read cursor, flush, payloads/encoding/match, per-call read/write/transact framing/parser/protocol overrides, health/reconnect counters/logs.
 
-## Dual MCP lifecycle (Phase 2 + Phase 3 subscriptions)
+## Dual MCP lifecycle
 
 - `src/server.rs` overrides `ServerHandler::supported_protocol_versions()`
   with the product slice `[V_2026_07_28, V_2025_11_25]` (NOT
@@ -319,7 +311,7 @@ cargo run --manifest-path xtask/Cargo.toml -- print-paths
   `resources.subscribe: true`, legacy stays the common set.
 - Modern stateless HTTP requests additionally require SEP-2243
   `Mcp-Method`/`Mcp-Name` headers and an `MCP-Protocol-Version` header
-  matching the request `_meta` (rmcp 3.0.1 transport enforcement). A
+  matching the request `_meta` (rmcp 3.1.0 transport enforcement). A
   modern `initialize` is rejected by the handler and rmcp maps the
   `-32601` through the stateless routing to HTTP 404 (direct JSON, no
   `Mcp-Session-Id` header). Modern `ping`/`logging/setLevel`/
@@ -327,10 +319,10 @@ cargo run --manifest-path xtask/Cargo.toml -- print-paths
   are `-32601` mapped to HTTP 404; legacy keeps `ping` working and
   `resources/subscribe`/`resources/unsubscribe`/`subscriptions/listen`
   at `-32601` inside SSE 200 responses (modern `subscriptions/listen` is
-  implemented — Phase 3). Modern unknown resources are
+  implemented). Modern unknown resources are
   remapped to `-32602` (SEP-2164); legacy keeps `-32002`. Cache policy
-  (`ttlMs`/`cacheScope`) is Phase 4 scope — see the Phase 4 section below.
-- **Resource subscriptions (Phase 3):** one process-wide
+  (`ttlMs`/`cacheScope`) follows the exact protocol policy row.
+- **Resource subscriptions:** one process-wide
   `ResourceEventHub` (`src/resource_events.rs`, `ResourceEvent::Updated`,
   capacity 256, synchronous non-blocking `publish_updated`) is created in
   production `main.rs` and injected through `SerialHandlerOptions`/builder
@@ -343,7 +335,7 @@ cargo run --manifest-path xtask/Cargo.toml -- print-paths
   order and strips list-change flags/templates/unknown URIs; `listen`
   notifies matching `Updated(uri)` events, ignores unrelated ones, and on
   broadcast lag notifies every accepted URI once — never blocking the
-  publisher or pump. **rmcp 3.0.1 ack artifact (documented, not patched):**
+  publisher or pump. **rmcp 3.1.0 ack artifact (documented, not patched):**
   the wire acknowledgement may echo a repeated requested VALID URI because
   rmcp computes the final accepted filter via
   `requested.intersection(&candidate).intersection(&advertised)`, both
@@ -381,7 +373,7 @@ cargo run --manifest-path xtask/Cargo.toml -- print-paths
   variants, `VersionedClientHandler`, `connect_protocol_client` +
   spawned mirrors) in `tests/common/{mod,spawned}.rs`.
 
-## Cache compliance + pinned conformance gates (Phase 4)
+## Cache compliance + pinned conformance gates
 
 The full scenario/pin matrix (exact per-version conformance scenario sets,
 package pins, report layout) lives in
@@ -475,7 +467,7 @@ only the implementation invariants an agent must not break.
 - **`list_ports` previews profile selection**: `ListPortsResult.profile_matches` parallels `ports` (same length/order, always serialized). Per-port: `confidence` + `outcome` (`selected`/`ambiguous`/`ineligible`/`duplicate`/`none`), `selected_profile`, and ordered `candidates` (name/generated/revision/last_used_at_ms). Preview is read-only — no `mark_used`, no file mutation. Pure computation in `port_ops::compute_profile_matches(ports, profiles)`: one `ProfileStore::list_fresh()` per `list_ports` call (corrupt store = tool error); high identity reuses the identity rules exactly (unique max `last_used_at_ms`, `None` sorts oldest, equal top rank = `Ambiguous`; name is display-only and never breaks a tie); duplicate live fingerprints = `Duplicate` for every such port; weak identity lists explicitly matching non-empty selectors as `Ineligible`. The `serial://ports` resource serves the same map.
 - **Decision-tree teaching**: server `instructions` + the 12 common tool descriptions + README flow + both prompts teach `list_ports` → bare `open` → `transact`/`read`/`write` → inspect `profile`/`profile_persistence` → `open_profile` only for explicit choice/weak identity, `rollback_profile` for recovery → escalate to framing/cursor/reconnect/line-control/log tools only when needed. `from` wire examples stay tagged (`{"type":"now"}` etc.) — no string shorthand.
 - **Tool count: 25** — `server::tool_catalog()` returns the exact 25 `rmcp::model::Tool` attrs served by MCP (the `subscribe`/`unsubscribe` tools were removed with MCP logging in the rmcp 3 migration); schema tests and the xtask evaluator consume it (exact-count test `tool_catalog_has_exactly_twenty_five_tools` guards drift). Update all references when adding/removing tools.
-- **Evaluator**: `cargo run --manifest-path xtask/Cargo.toml -- agent-eval [--output-dir PATH] [--baseline PATH] [--write-baseline PATH]` — deterministic catalog + scenario metrics under `target/agent-interface-eval/` (`report.json`/`report.md`), no network/user config/timestamps. Committed baseline `docs/development/agent-interface-baseline.json` (26 tools / 258964 bytes) is HISTORICAL — it measures the pre-`capture_boot` catalog; the consolidated current report lives in `docs/development/agent-interface-evaluation.md` (25 tools / 268802 bytes). Thresholds and yes/no decisions (automatic profiles + `transact` + atomic `capture_boot` accepted; shorthand/recipes/versioned facade rejected) are computed by the evaluator from fixed rules. Modeled (non-implemented) candidates are marked `modeled` with their expansion into current calls.
+- **Evaluator**: `cargo run --manifest-path xtask/Cargo.toml -- agent-eval [--output-dir PATH] [--baseline PATH] [--write-baseline PATH]` — deterministic catalog + scenario metrics under `target/agent-interface-eval/` (`report.json`/`report.md`), no network/user config/timestamps. Committed baseline `docs/development/agent-interface-baseline.json` (26 tools / 258964 bytes) is HISTORICAL — it measures the pre-`capture_boot` catalog; the consolidated current report lives in `docs/development/agent-interface-evaluation.md` (25 tools / 267742 bytes). Thresholds and yes/no decisions (automatic profiles + `transact` + atomic `capture_boot` accepted; shorthand/recipes/versioned facade rejected) are computed by the evaluator from fixed rules. Modeled (non-implemented) candidates are marked `modeled` with their expansion into current calls.
 
 ## Atomic boot capture
 

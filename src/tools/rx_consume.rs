@@ -26,7 +26,8 @@ pub enum FrameOutcome {
     MaxFrames,
     /// The sink returned [`SinkFlow::Stop`].
     SinkStop(RxStopReason),
-    /// A runtime decode error occurred (e.g. SLIP malformed escape).
+    /// A runtime decode error occurred, such as a malformed SLIP escape or an
+    /// invalid COBS code.
     DecodeError(FrameDecodeError),
 }
 
@@ -60,9 +61,8 @@ pub async fn consume_frames<S: RxFrameSink>(
     let outcome = decoder.push(chunk);
     *frames_dropped += outcome.frames_dropped;
     let frames = outcome.frames;
-    // Dispatch frames decoded before the error FIRST, then return the
-    // decode error if one occurred. This preserves frames-before-error
-    // for the read result.
+    // Dispatch frames decoded before an error, then return that error. The read
+    // result preserves frames decoded before the error.
     for frame in frames {
         *frames_seen += 1;
         let match_index = match matcher.as_mut() {
@@ -95,12 +95,12 @@ pub async fn consume_frames<S: RxFrameSink>(
 
 /// Connection liveness for the RX loop's pause check.
 pub enum DisconnectState {
-    /// Connected — proceed normally.
+    /// Connected; proceed normally.
     Active,
-    /// Disconnected/reconnecting with reconnect enabled — caller should pause
-    /// (sleep) and continue. The silence timer has been reset.
+    /// Disconnected or reconnecting with reconnect enabled; caller should
+    /// pause, sleep, and continue. The silence timer has been reset.
     Reconnecting,
-    /// Disconnected with reconnect disabled — caller should stop with
+    /// Disconnected with reconnect disabled; caller should stop with
     /// `connection_closed`.
     Closed,
 }
@@ -328,7 +328,7 @@ mod tests {
 
     #[tokio::test]
     async fn consume_frames_match_takes_priority_over_max_frames_read_semantics() {
-        // read: collect post-match frames, so MaxFrames triggers after all 3.
+        // For read, collect post-match frames, so MaxFrames triggers after all 3.
         let mut dec = line_decoder();
         let mut matcher = Matcher::new_literal(b"b".to_vec());
         let mut seen = 0;
@@ -436,8 +436,8 @@ mod tests {
     }
 
     /// Valid frames decoded before a stream-fatal error are dispatched first,
-    /// then the DecodeError is returned. The malformed bytes are NOT counted
-    /// as frames_dropped (they're a stream-fatal error, not a per-frame drop).
+    /// then `DecodeError` is returned. Malformed bytes are not counted as
+    /// `frames_dropped`; they are a stream-fatal error, not a per-frame drop.
     #[tokio::test]
     async fn consume_frames_decodes_frames_before_slip_decode_error() {
         // SLIP constants from RFC 1055 (private; use literal bytes).
@@ -451,7 +451,7 @@ mod tests {
         let mut dec = FrameDecoder::new(&rx_config, None).unwrap();
 
         // One valid SLIP frame (END OK END) followed by a malformed escape
-        // (ESC 0xFF — invalid escape code).
+        // (ESC 0xFF is an invalid escape code).
         let mut chunk = Vec::new();
         chunk.push(END);
         chunk.extend_from_slice(b"OK");

@@ -91,13 +91,13 @@ jobs:
       - name: cargo test
         run: cargo test --locked
 
-      # Required Linux Rust PTY replacement evidence. Linux executes all
-      # real-PTY targets plus the bounded 100-iteration Phase E gate. macOS
-      # runs normal build/test/clippy; Linux-only fixture targets compile as
-      # zero tests there, with controlled-backend coverage remaining active.
-      # Windows likewise retains compile + controlled-backend coverage because
-      # no real COM fixture exists there.
-      - name: Run required Rust PTY replacement suites
+      # Required Linux Rust PTY evidence. Linux executes all real-PTY targets
+      # plus the bounded 100-iteration repeat gate. macOS runs normal
+      # build/test/clippy; Linux-only fixture targets compile as zero tests
+      # there, with controlled-backend coverage remaining active. Windows
+      # likewise runs normal build/test/clippy with controlled-backend coverage
+      # because no real COM fixture exists there.
+      - name: Run required Rust PTY suites
         if: matrix.os == 'ubuntu-latest'
         run: |
           cargo test --locked --test device_fixture -- --test-threads=1
@@ -105,7 +105,7 @@ jobs:
           cargo test --locked --test device_framing_parity -- --test-threads=1
           cargo test --locked --test device_protocol_parity -- --test-threads=1
           if [ "${{ matrix.os }}" = "ubuntu-latest" ]; then
-            cargo test --locked --test device_parity_repeat phase_e_public_boundary_repeat_gate -- --ignored --test-threads=1
+            cargo test --locked --test device_parity_repeat public_boundary_repeat_gate -- --ignored --test-threads=1
           fi
 
       - name: cargo clippy

@@ -4,21 +4,19 @@ use libfuzzer_sys::fuzz_target;
 use serial_mcp::codec::{decode, encode, Encoding};
 
 fuzz_target!(|data: &[u8]| {
-    // Hex roundtrip
     if let Ok(hex_str) = encode(Encoding::Hex, data) {
         if let Ok(decoded) = decode(Encoding::Hex, &hex_str) {
             assert_eq!(decoded, data, "hex roundtrip mismatch");
         }
     }
 
-    // Base64 roundtrip
     if let Ok(b64_str) = encode(Encoding::Base64, data) {
         if let Ok(decoded) = decode(Encoding::Base64, &b64_str) {
             assert_eq!(decoded, data, "base64 roundtrip mismatch");
         }
     }
 
-    // UTF-8: if valid, must roundtrip; if invalid, encode must error
+    // Valid UTF-8 must encode to the same text; invalid bytes must be rejected.
     match std::str::from_utf8(data) {
         Ok(valid) => {
             let encoded = encode(Encoding::Utf8, data).unwrap();
@@ -29,7 +27,9 @@ fuzz_target!(|data: &[u8]| {
         }
     }
 
-    // COBS roundtrip (plain COBS, delimiter 0x00)
+    // Plain COBS uses 0x00 as delimiter. Its round trip must preserve every
+    // payload, including embedded or trailing zero bytes and the 254-byte
+    // continuation boundary.
     {
         use serial_mcp::framing;
         let mode = framing::TxFramingMode::Cobs;

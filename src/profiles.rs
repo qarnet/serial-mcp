@@ -46,8 +46,8 @@ pub enum IdentityConfidence {
 pub enum ProfilePersistenceState {
     /// The effective defaults were durably written to the bound profile.
     Persisted,
-    /// No persistence was needed — the durable defaults already equal the
-    /// connection's effective defaults (no file write happened).
+    /// No persistence was needed. The durable defaults already equal the
+    /// connection's effective defaults, so no file write happened.
     NotNeeded,
     /// The connection is not backed by a durable profile (transient,
     /// disabled, or no binding); nothing was persisted.
@@ -292,7 +292,7 @@ pub fn normalize_generated_label(label: &str) -> String {
 }
 
 /// Choose the first free generated profile name for `base`: `base`, then
-/// `base-2`, `base-3`, ... — never overwriting an existing profile.
+/// `base-2`, `base-3`, and so on. Never overwrite an existing profile.
 pub fn allocate_generated_name(existing: &[Profile], base: &str) -> String {
     let taken: HashSet<&str> = existing.iter().map(|p| p.name.as_str()).collect();
     if !taken.contains(base) {
@@ -364,9 +364,9 @@ pub struct ProfileRevision {
 
 /// Rules for matching a live serial port against this profile.
 ///
-/// All fields are optional. A port matches when every non-empty field
-/// agrees with the port's identity. An empty selector (all fields
-/// `None`) matches any port — not recommended outside testing.
+/// All fields are optional. A port matches when every selector field set to
+/// `Some` agrees with the port's identity. A selector with every field `None`
+/// matches every port; avoid it outside testing.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct ProfileSelector {
     #[schemars(schema_with = "crate::schema_helpers::option_uint_schema")]
@@ -391,9 +391,9 @@ pub struct ProfileSelector {
 }
 
 impl ProfileSelector {
-    /// Whether every selector field is `None` — an empty selector matches
-    /// ANY port and must never appear as a weak candidate in `list_ports`
-    /// profile previews. Empty selectors remain valid for
+    /// Whether every selector field is `None`. An empty selector matches every
+    /// port and must never appear as a weak candidate in `list_ports` profile
+    /// previews. Empty selectors remain valid for
     /// `Profile::matches` (used by tests and the `configure` profile mode
     /// creation path), but they carry no discoverable device knowledge.
     pub fn is_empty(&self) -> bool {
@@ -444,8 +444,7 @@ pub struct ProfileDefaults {
     #[serde(default = "default_rx_buffer_size_profile")]
     #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
     pub rx_buffer_size: usize,
-    /// Default max buffered bytes for `read` (was per-call, now profile-level).
-    /// Default 32768 (32 KiB).
+    /// Default maximum buffered bytes for `read`. Default: 32768 (32 KiB).
     #[serde(default = "default_max_buffered_bytes_profile")]
     #[schemars(schema_with = "crate::schema_helpers::read_max_buffered_bytes_schema")]
     pub max_buffered_bytes: usize,
@@ -512,9 +511,8 @@ impl Default for ProfileDefaults {
 }
 
 impl Profile {
-    /// Check whether `port` matches this profile's selector. Returns
-    /// `true` when every non-empty field in the selector agrees with
-    /// the port's identity.
+    /// Check whether `port` matches this profile's selector. Returns `true`
+    /// when every selector field set to `Some` agrees with the port's identity.
     pub fn matches(&self, port: &PortInfo) -> bool {
         let s = &self.selector;
 
@@ -582,9 +580,9 @@ impl Profile {
 /// Default location for the profiles configuration file: the OS user
 /// config directory plus `serial-mcp/profiles.toml`.
 ///
-/// Returns an error when the OS config directory is unavailable. There is
-/// deliberately no silent fallback to the current working directory — an
-/// agent's `profiles.toml` must never accidentally land in a repository.
+/// Returns an error when the OS config directory is unavailable. There is no
+/// silent fallback to the current working directory. This keeps
+/// `profiles.toml` out of an agent's repository by accident.
 pub fn default_profiles_path() -> Result<PathBuf, String> {
     let dir = dirs::config_dir().ok_or_else(|| {
         "OS user config directory is unavailable; pass --profiles-path".to_string()
@@ -823,7 +821,7 @@ mod tests {
         assert!(!p.matches(&make_port("/dev/ttyUSB0", None, None, None)));
     }
 
-    // ── transport / hardware_id selector ───────────────────────────────
+    // Transport and hardware_id selector tests.
 
     #[test]
     fn transport_match_usb() {
@@ -872,7 +870,7 @@ mod tests {
             metadata: ProfileMetadata::default(),
             revisions: Vec::new(),
         };
-        // Display output is lowercase — "USB" does not match "usb"
+        // Display output is lowercase. "USB" does not match "usb".
         assert!(!p.matches(&make_port("/dev/ttyACM0", None, None, None)));
     }
 
@@ -914,8 +912,8 @@ mod tests {
 
     #[test]
     fn profile_defaults_has_no_dead_fields() {
-        // Deserializing a JSON object with ONLY the two removed field names
-        // must succeed (fields silently ignored — no deny_unknown_fields).
+        // Deserializing a JSON object with only the two removed field names
+        // must succeed because unknown fields are ignored.
         let json = serde_json::json!({
             "decoder": "y",
             "safety_policy": "z"
@@ -923,7 +921,7 @@ mod tests {
         let _: ProfileDefaults =
             serde_json::from_value(json).expect("dead fields must be silently ignored");
 
-        // Serializing ProfileDefaults::default() must NOT contain the
+        // Serializing ProfileDefaults::default() must not contain the
         // removed field names. (reconnect_policy is now a real field in
         // v0.8.1 so it IS expected to appear.)
         let value = serde_json::to_value(ProfileDefaults::default())
@@ -935,7 +933,7 @@ mod tests {
         assert!(!obj.contains_key("safety_policy"));
     }
 
-    // ── Identity confidence / canonical selector ─────────────────────────
+    // Identity confidence and canonical selector tests.
 
     fn usb_port(name: &str, vid: Option<u16>, pid: Option<u16>, serial: Option<&str>) -> PortInfo {
         let mut port = make_port(name, vid, pid, serial);
@@ -996,7 +994,7 @@ mod tests {
 
         let selector = canonical_high_selector(&port).expect("high identity selector");
 
-        // Path/description/manufacturer/product/hardware_id must NOT be in
+        // Path, description, manufacturer, product, and hardware_id must not be in
         // the canonical selector.
         assert_eq!(selector.port_pattern, None);
         assert_eq!(selector.description_pattern, None);
@@ -1046,7 +1044,7 @@ mod tests {
             &id
         ));
 
-        // Empty selector (matches any port) must NOT count as high identity.
+        // An empty selector matches any port but must not count as high identity.
         assert!(!selector_matches_high_identity(
             &ProfileSelector::default(),
             &id
@@ -1080,7 +1078,7 @@ mod tests {
         assert!(selector_matches_high_identity(&no_interface, &no_iface_id));
     }
 
-    // ── Candidate ranking ─────────────────────────────────────────────────
+    // Candidate ranking tests.
 
     fn ranked_profile(name: &str, last_used: Option<u64>) -> Profile {
         Profile {
@@ -1119,7 +1117,7 @@ mod tests {
         assert_eq!(top_ts, next_ts, "equal top timestamps must tie");
     }
 
-    // ── Generated name normalization / allocation ────────────────────────
+    // Generated name normalization and allocation tests.
 
     #[test]
     fn generated_label_normalization() {

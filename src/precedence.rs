@@ -17,11 +17,11 @@ use crate::framing::ProtocolPreset;
 /// ladder.
 ///
 /// Precedence (first non-`None` source wins):
-/// 1. `explicit` — the per-call field.
-/// 2. `call_protocol` — the per-call `protocol` preset, mapped through
+/// 1. `explicit`: the per-call field.
+/// 2. `call_protocol`: the per-call `protocol` preset, mapped through
 ///    `apply_preset`.
-/// 3. `conn_default` — the connection default for this field (taken by value).
-/// 4. `conn_protocol` — the connection `protocol` preset, mapped through
+/// 3. `conn_default`: the connection default for this field (taken by value).
+/// 4. `conn_protocol`: the connection `protocol` preset, mapped through
 ///    `apply_preset`.
 ///
 /// `apply_preset` is the matching `preset_*` function from `crate::framing`
@@ -108,8 +108,6 @@ mod tests {
         }
     }
 
-    // --- TxFramingConfig tests ---
-
     #[test]
     fn explicit_beats_call_protocol() {
         let explicit = explicit_tx();
@@ -186,8 +184,6 @@ mod tests {
         assert_eq!(rx_parser, Some(preset_rx_parser(ProtocolPreset::AtCommand)));
     }
 
-    // --- RxFramingConfig generic boundary test ---
-
     #[test]
     fn rx_framing_call_protocol_beats_conn_default() {
         let conn_def = conn_default_rx();
@@ -202,8 +198,6 @@ mod tests {
         assert_ne!(result, Some(conn_def.clone()));
     }
 
-    // --- ParserConfig generic boundary test ---
-
     #[test]
     fn parser_call_protocol_beats_conn_default() {
         let conn_def = conn_default_parser();
@@ -217,8 +211,6 @@ mod tests {
         assert_eq!(result, Some(preset_rx_parser(ProtocolPreset::AtCommand)));
         assert_ne!(result, Some(conn_def.clone()));
     }
-
-    // --- Slip + JsonLines preset precedence tests ---
 
     #[test]
     fn slip_preset_explicit_framing_wins_over_preset() {
@@ -262,8 +254,6 @@ mod tests {
         assert_ne!(result, Some(preset_rx_framing(ProtocolPreset::JsonLines)));
     }
 
-    // --- COBS preset precedence test ---
-
     #[test]
     fn cobs_preset_explicit_framing_wins_over_preset() {
         // Explicit tx_framing (Line/Crlf) wins over call_protocol=Cobs.
@@ -306,8 +296,6 @@ mod tests {
         assert_ne!(result, Some(preset_rx_framing(ProtocolPreset::Ndjson)));
     }
 
-    // --- Nmea0183 preset precedence test ---
-
     #[test]
     fn nmea0183_preset_explicit_framing_wins_over_preset() {
         // Explicit tx_framing (Line/Crlf) wins over call_protocol=Nmea0183.
@@ -326,8 +314,6 @@ mod tests {
         assert_eq!(result, Some(explicit));
         assert_ne!(result, Some(preset_tx_framing(ProtocolPreset::Nmea0183)));
     }
-
-    // --- ModbusAscii preset precedence test ---
 
     #[test]
     fn modbus_ascii_preset_explicit_framing_wins_over_preset() {
@@ -348,8 +334,6 @@ mod tests {
         assert_eq!(result, Some(explicit));
         assert_ne!(result, Some(preset_rx_framing(ProtocolPreset::ModbusAscii)));
     }
-
-    // ── Four-layer and parser-precedence coverage ────────────────────────
 
     #[test]
     fn nmea0183_full_four_layer_precedence() {

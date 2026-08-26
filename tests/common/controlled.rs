@@ -1,19 +1,19 @@
 //! Controlled `SerialIo` backend for `capture_boot` tests.
 //!
-//! A real in-memory byte stream (like `QueuedTxIo`) plus observability hooks
-//! that let tests prove reset-pulse atomicity through the PUBLIC MCP surface
-//! without mocking tool or store logic:
+//! Provides a real in-memory byte stream, like `QueuedTxIo`, plus observability
+//! hooks. Tests use them to prove reset-pulse atomicity through the public MCP
+//! surface without mocking tool or store logic:
 //!
-//! - `line_log` records every `set_dtr_rts` call in order — tests assert
-//!   assert/release ordering and that no line-control call can interleave
+//! - `line_log` records every `set_dtr_rts` call in order, allowing tests to
+//!   assert assert/release ordering and that no line-control call interleaves
 //!   inside a pulse.
-//! - `on_line_change` fires SYNCHRONOUSLY inside the line-change call, so a
-//!   test can inject RX bytes at the exact instant the reset line is
-//!   asserted/released (the "immediate boot bytes" case).
-//! - `fail_next_set` makes the next `set_dtr_rts` fail (assert or release
-//!   failure injection).
-//! - `os_input_flush_count` counts `clear_os_buffers(Input)` calls so tests
-//!   can assert the purge happened before any line assertion.
+//! - `on_line_change` fires synchronously inside the line-change call, so a
+//!   test can inject RX bytes at the instant the reset line is asserted or
+//!   released (the "immediate boot bytes" case).
+//! - `fail_next_set` makes the next `set_dtr_rts` fail for assert or release
+//!   failure injection.
+//! - `os_input_flush_count` counts `clear_os_buffers(Input)` calls, allowing
+//!   tests to assert that purge happened before line assertion.
 
 #![allow(dead_code)]
 
@@ -38,9 +38,9 @@ pub struct ControlledState {
     line_log: StdMutex<Vec<(bool, bool)>>,
     /// Number of `set_dtr_rts` calls to fail (assert/release injection).
     fail_next_set: AtomicUsize,
-    /// Synchronous hook fired inside `set_dtr_rts` (before recording). The
-    /// hook receives the line state being set so tests can inject RX bytes
-    /// only at the assertion instant (not at release).
+    /// Synchronous hook fired inside `set_dtr_rts`, before recording. It
+    /// receives the line state being set so tests can inject RX bytes at the
+    /// assertion instant, not at release.
     #[allow(clippy::type_complexity)]
     on_line_change: StdMutex<Option<Arc<dyn Fn(bool, bool) + Send + Sync>>>,
     /// Count of `clear_os_buffers(Input)` calls.
@@ -86,7 +86,7 @@ impl ControlledState {
     }
 
     /// Install (or clear) a hook fired synchronously inside every
-    /// `set_dtr_rts` call — used to inject RX bytes at assertion/release
+    /// `set_dtr_rts` call. Use it to inject RX bytes at assertion/release
     /// time. The hook receives the line state `(dtr, rts)` being set.
     pub fn set_on_line_change(&self, hook: Option<Arc<dyn Fn(bool, bool) + Send + Sync>>) {
         *self.on_line_change.lock().expect("hook poisoned") = hook;
@@ -108,9 +108,9 @@ pub struct ControlledIo {
     state: Arc<ControlledState>,
 }
 
-/// Build a `SerialConnection` backed by a [`ControlledIo`] with a specific
-/// ring size (the connection stores `rx_buffer_size`; `capture_boot` creates
-/// the RX session with it).
+/// Build a `SerialConnection` backed by [`ControlledIo`] with a specific ring
+/// size. The connection stores `rx_buffer_size`; `capture_boot` creates the RX
+/// session with it.
 pub fn controlled_connection(
     port: &str,
     rx_buffer_size: usize,
@@ -143,13 +143,12 @@ pub fn controlled_connection(
     (conn, state)
 }
 
-/// Cross-platform [`serial_mcp::serial::ConnectionOpener`]: builds every
-/// connection from the EXACT config passed by the public `open` path,
-/// backed by a fresh [`ControlledIo`]. This lets the full MCP surface
-/// (allowlist, identity capture, profile session, resource hints) run
-/// without an OS serial port — which also keeps it working on macOS and
-/// Windows where tty/PTY opens are unavailable or fail (macOS tty open
-/// returns ENOTTY).
+/// Cross-platform [`serial_mcp::serial::ConnectionOpener`]. Builds each
+/// connection from the exact config passed by the public `open` path and
+/// backs it with a fresh [`ControlledIo`]. This lets the full MCP surface
+/// (allowlist, identity capture, profile session, resource hints) run without
+/// an OS serial port. It also keeps tests working on macOS and Windows, where
+/// tty/PTY opens are unavailable or fail (macOS tty open returns ENOTTY).
 pub struct ControlledConnectionOpener {
     /// Every connection's shared state, in open order.
     states: StdMutex<Vec<Arc<ControlledState>>>,
@@ -189,7 +188,8 @@ impl AsyncRead for ControlledIo {
     ) -> Poll<std::io::Result<()>> {
         let mut queue = self.state.rx_queue.lock().expect("rx queue poisoned");
         if queue.is_empty() {
-            // Park with the waker registered so a later `inject_rx` wakes us.
+            // Park with the waker registered so a later `inject_rx` wakes the
+            // reader.
             *self.state.rx_waker.lock().expect("waker poisoned") = Some(cx.waker().clone());
             return Poll::Pending;
         }
@@ -237,8 +237,9 @@ impl SerialIo for ControlledIo {
     }
 
     fn set_dtr_rts(&mut self, dtr: bool, rts: bool) -> std::io::Result<()> {
-        // Failure injection: record the attempted state (DTR applied, RTS
-        // failed — like the production setter's partial failure), then fail.
+        // Failure injection records the attempted state before returning an
+        // error. This models the production setter's partial failure: DTR is
+        // applied, but RTS fails.
         if self.state.fail_next_set.swap(0, Ordering::SeqCst) > 0 {
             self.state
                 .line_log
@@ -247,8 +248,8 @@ impl SerialIo for ControlledIo {
                 .push((dtr, rts));
             return Err(std::io::Error::other("injected set_dtr_rts failure"));
         }
-        // Fire the hook synchronously INSIDE the line-change call so tests
-        // can emit bytes at the exact assertion/release instant.
+        // Fire the hook synchronously inside the line-change call so tests can
+        // emit bytes at the exact assertion/release instant.
         if let Some(hook) = self
             .state
             .on_line_change

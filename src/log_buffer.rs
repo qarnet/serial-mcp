@@ -11,7 +11,7 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-// ---- Event types -----------------------------------------------------------
+// Event types.
 
 /// A single log event with timestamp, direction, and event data.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -28,8 +28,8 @@ pub struct LogEntry {
 
 /// Typed event payloads stored in the log buffer.
 ///
-/// The `#[serde(tag = "event")]` attribute ensures each entry carries a
-/// `"event"` field naming the variant, producing clean JSONL output.
+/// `#[serde(tag = "event")]` adds an `"event"` field naming each variant to
+/// serialized entries, including JSONL snapshots.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum LogEvent {
@@ -91,7 +91,7 @@ pub enum LogEvent {
     Error { message: String },
 }
 
-// ---- Log buffer ------------------------------------------------------------
+// Log buffer.
 
 /// Thread-safe, bounded ring buffer of timestamped log events.
 #[derive(Debug)]
@@ -150,12 +150,11 @@ impl LogBuffer {
 
     /// Serialize the buffer to a bounded JSONL snapshot.
     ///
-    /// Locks the log exactly once for a consistent point-in-time snapshot,
-    /// serializes one entry per line with a trailing newline, and checks the
-    /// projected size before extending the output (checked arithmetic).
-    /// Fails — leaving no output — when the exact snapshot exceeds
-    /// `max_bytes` (the capture per-file quota). The event deque itself is
-    /// never cloned and no second full output String is built.
+    /// Hold the log lock once for a point-in-time snapshot, serialize one entry
+    /// per newline-terminated line, and use checked arithmetic before extending
+    /// output. If the exact snapshot exceeds `max_bytes`, return an error
+    /// without a partial snapshot. Do not clone the event deque or build a
+    /// second full output string.
     pub fn jsonl_snapshot(&self, max_bytes: u64) -> Result<JsonlSnapshot, String> {
         let events = self.events.lock().expect("log mutex poisoned");
         let mut out: Vec<u8> = Vec::new();
@@ -367,14 +366,14 @@ mod tests {
 
     #[test]
     fn jsonl_snapshot_is_point_in_time_under_concurrent_records() {
-        // The lock is held across the whole serialization: events recorded
-        // during the snapshot either appear fully or not at all — never
+        // The lock is held across the whole serialization. Events recorded
+        // during the snapshot either appear fully or not at all, never
         // partially interleaved.
         let log = LogBuffer::new(1000, true);
         log.rx_data(1);
         let snap = log.jsonl_snapshot(u64::MAX).unwrap();
         assert_eq!(snap.events, 1);
-        // Events recorded AFTER the snapshot are not in its bytes.
+        // Events recorded after the snapshot are not in its bytes.
         log.rx_data(2);
         log.rx_data(3);
         let lines = String::from_utf8(snap.bytes).unwrap();

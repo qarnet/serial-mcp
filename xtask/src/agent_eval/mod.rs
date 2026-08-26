@@ -1,14 +1,13 @@
 //! Deterministic agent-interface evaluation.
 //!
-//! `xtask agent-eval` measures the real `tools/list` catalog (via
-//! `serial_mcp::server::tool_catalog`) plus representative fixed call
-//! scenarios, applies fixed decision thresholds, and writes `report.json` +
-//! `report.md` under
-//! `target/agent-interface-eval/` (or `--output-dir`).
+//! `xtask agent-eval` measures the live `tools/list` catalog from
+//! `serial_mcp::server::tool_catalog`, evaluates fixed call-shape scenarios,
+//! and applies fixed decision thresholds. It writes `report.json` and
+//! `report.md` under `target/agent-interface-eval/` or the `--output-dir` path.
 //!
-//! Determinism contract: no timestamps, hostnames, absolute temp paths,
-//! network access, user profiles, or payload captures appear in the
-//! output. Rerunning yields byte-identical reports.
+//! Reports contain no timestamps, hostnames, absolute temporary paths, network
+//! access, user profiles, or payload captures. Repeated runs produce
+//! byte-identical reports.
 
 use std::path::PathBuf;
 
@@ -19,20 +18,20 @@ pub mod decisions;
 pub mod report;
 pub mod scenarios;
 
-/// Default output directory for the evaluation report.
+/// Default directory for evaluation reports.
 pub const DEFAULT_OUTPUT_DIR: &str = "target/agent-interface-eval";
 
-/// Fixed normalized connection id used in scenario envelopes (never a real
-/// runtime UUID, so reruns are byte-identical).
+/// Fixed normalized connection ID for scenario envelopes. It is not a runtime
+/// UUID, which keeps repeated runs byte-identical.
 pub const FIXED_CONNECTION_ID: &str = "9f1e3c2a-b3d4-4a5b-9c2d-1e2f3a4b5c6d";
 
-/// Fixed port placeholder used in scenario envelopes.
+/// Fixed port placeholder in scenario envelopes.
 pub const FIXED_PORT: &str = "/dev/ttyACM0";
 
-/// Fixed JSON-RPC id used in scenario envelopes.
+/// Fixed JSON-RPC ID in scenario envelopes.
 pub const FIXED_ENVELOPE_ID: &str = "1";
 
-/// Agent-eval CLI options.
+/// Options for the `agent-eval` CLI command.
 #[derive(Debug, Default, Clone)]
 pub struct EvalOptions {
     pub output_dir: Option<PathBuf>,
@@ -40,7 +39,7 @@ pub struct EvalOptions {
     pub write_baseline: Option<PathBuf>,
 }
 
-/// The complete deterministic evaluation result.
+/// Complete deterministic evaluation result.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct EvalReport {
     pub schema: &'static str,
@@ -52,14 +51,13 @@ pub struct EvalReport {
     pub regression: decisions::CatalogRegression,
 }
 
-/// The subset of a previous `report.json` needed for the catalog
-/// regression comparison.
+/// Catalog data loaded from a previous `report.json` for regression comparison.
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct BaselineFile {
     pub catalog: catalog::CatalogMetrics,
 }
 
-/// Run the evaluation and write the report files.
+/// Run the evaluation and write report files.
 pub fn run(options: &EvalOptions) -> Result<()> {
     let catalog_metrics = catalog::catalog_metrics();
     let scenarios = scenarios::scenarios();

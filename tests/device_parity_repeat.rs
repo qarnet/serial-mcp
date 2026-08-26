@@ -1,4 +1,5 @@
-//! Deterministic Phase E repeat gate over the real Rust PTY fixture.
+//! Deterministic 100-iteration public-boundary repeat gate over the real Rust
+//! PTY fixture.
 //!
 //! This remains ignored in the broad default suite so it does not multiply
 //! runtime across every platform. Linux x86_64 CI invokes its exact test name.
@@ -18,8 +19,8 @@ use rmcp::service::{RoleClient, RunningService};
 use serde_json::{json, Value};
 
 const REPEAT_ITERATIONS: usize = 100;
-/// Fixed seed recorded in the Phase E traceability and research documents.
-const PHASE_E_REPEAT_SEED: u64 = 0x5048_4153_455F_4545;
+/// Fixed seed for deterministic iteration data.
+const REPEAT_SEED: u64 = 0x5048_4153_455F_4545;
 const WAIT: Duration = Duration::from_secs(2);
 const TOOL_CALL_TIMEOUT: Duration = Duration::from_secs(3);
 const READ_TIMEOUT_MS: u64 = 1_500;
@@ -29,15 +30,15 @@ const FLOOD_BYTES: usize = 1_024;
 type TestClient = RunningService<RoleClient, TestClientHandler>;
 
 #[tokio::test]
-#[ignore = "required Phase E repeat gate"]
-async fn phase_e_public_boundary_repeat_gate() -> Result<()> {
+#[ignore = "100-iteration public-boundary repeat gate"]
+async fn public_boundary_repeat_gate() -> Result<()> {
     for iteration in 0..REPEAT_ITERATIONS {
         if let Err(error) = run_iteration(iteration).await {
             eprintln!(
-                "Phase E repeat gate failed: iteration={iteration} seed=0x{PHASE_E_REPEAT_SEED:016x}"
+                "100-iteration public-boundary repeat gate failed: iteration={iteration} seed=0x{REPEAT_SEED:016x}"
             );
             return Err(error.context(format!(
-                "Phase E repeat gate iteration {iteration} failed with seed 0x{PHASE_E_REPEAT_SEED:016x}"
+                "100-iteration public-boundary repeat gate iteration {iteration} failed with seed 0x{REPEAT_SEED:016x}"
             )));
         }
     }
@@ -209,7 +210,7 @@ async fn run_iteration(iteration: usize) -> Result<()> {
 }
 
 fn iteration_tag(iteration: usize) -> String {
-    let value = PHASE_E_REPEAT_SEED ^ (iteration as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    let value = REPEAT_SEED ^ (iteration as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
     format!("{value:016x}")
 }
 

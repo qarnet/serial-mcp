@@ -2,38 +2,37 @@
 //!
 //! Establishes the containment, symlink, quota, atomicity, and lifecycle
 //! policy required before any future continuous raw capture feature. No
-//! continuous capture tool exists yet — the store only hardens
-//! `export_log`.
+//! continuous capture tool exists yet. The store only hardens `export_log`.
 //!
 //! Policy summary:
 //!
-//! - **Disabled by default.** The store only persists when the server
+//! - Disabled by default. The store only persists when the server
 //!   starts with an explicit absolute `--capture-dir`. There is no fallback
 //!   to cwd, OS config, or temp directories.
-//! - **Flat portable filename contract.** Exports are written as one
+//! - Flat portable filename contract. Exports are written as one
 //!   portable `.jsonl` filename inside the root. No subdirectories, no
 //!   separators, no traversal, no Windows-reserved stems, no internal
 //!   `.serial-mcp-` reserved prefix (which owns the lock and temp files).
-//! - **Root and symlink policy.** The configured root must be absolute,
+//! - Root and symlink policy. The configured root must be absolute,
 //!   existing, a directory, and not itself a symlink; it is canonicalized
 //!   once at startup. The advisory lock path must be a regular non-symlink
 //!   file. Managed-name symlink entries inside the root are rejected and
 //!   never followed. The configured root and its ancestors remain the
-//!   operator-controlled trust boundary — the store deliberately does not
+//!   operator-controlled trust boundary. The store deliberately does not
 //!   defend against an operator replacing trusted root ancestors while the
 //!   server runs (portable std/tempfile/fs2 APIs cannot provide
 //!   directory-handle-relative guarantees).
-//! - **Quotas.** Per-file, total-byte, and file-count quotas are enforced
+//! - Quotas. Per-file, total-byte, and file-count quotas are enforced
 //!   from a fresh scan of direct children under a process-local async mutex
 //!   and a cross-process advisory lock, so cooperating serial-mcp processes
 //!   sharing a root cannot exceed the quotas.
-//! - **Atomic no-clobber commit.** Bytes are written to a same-root temp
+//! - Atomic no-clobber commit. Bytes are written to a same-root temp
 //!   file (reserved internal prefix), `sync_all`-ed, then committed with
-//!   `persist_noclobber`. A PRE-commit failure leaves no final file and
+//!   `persist_noclobber`. A pre-commit failure leaves no final file and
 //!   changes no existing capture. A temp file may survive a process crash;
 //!   the store never silently treats it as committed and never deletes
 //!   arbitrary files. On Unix the root directory is synced after commit; a
-//!   POST-commit root-sync failure is reported as a `durability_warning` on
+//!   post-commit root-sync failure is reported as a `durability_warning` on
 //!   the successful result (the file is committed and counted; it is never
 //!   deleted). Windows crash-durability of the rename is a documented
 //!   portable limitation (no root sync, so no warning is produced).
@@ -83,7 +82,7 @@ pub struct CaptureLimits {
 
 /// Outcome of a successful [`CaptureStore::write_new`] commit.
 ///
-/// A `Some` [`Self::durability_warning`] marks a POST-commit condition: the
+/// A `Some` [`Self::durability_warning`] marks a post-commit condition: the
 /// file is committed and counts toward quota, but crash-durability of the
 /// rename could not be confirmed on this filesystem (the only post-persist
 /// fallible step is the root-directory sync on Unix). Pre-commit failures
@@ -177,7 +176,7 @@ impl CaptureStore {
             .canonicalize()
             .map_err(|e| format!("cannot canonicalize capture dir {}: {e}", root.display()))?;
 
-        // Prove the advisory lock works at startup: acquire and release.
+        // Prove the advisory lock works at startup by acquiring and releasing it.
         let lock_file = acquire_root_lock(&canonical)?;
         fs2::FileExt::unlock(&lock_file)
             .map_err(|e| format!("cannot release capture lock: {e}"))?;
@@ -207,8 +206,8 @@ impl CaptureStore {
     /// Atomically commit `bytes` as a new file named `requested_name`
     /// inside the root.
     ///
-    /// Order: disabled/name validation, per-file quota (checked `usize` →
-    /// `u64` conversion) BEFORE the process-local mutex or any blocking
+    /// Order: disabled/name validation, per-file quota (checked `usize` to
+    /// `u64` conversion) before the process-local mutex or any blocking
     /// work, then blocking work under the exclusive advisory root lock:
     /// fresh scan of managed files, no-clobber destination check, count and
     /// total quotas (checked arithmetic), same-root temp write + `sync_all`,
@@ -226,9 +225,9 @@ impl CaptureStore {
             return Err(CAPTURE_DISABLED_ERROR.to_string());
         };
         validate_capture_filename(&requested_name)?;
-        // Per-file quota rejection runs before any mutex/spawn_blocking
-        // work; `commit_new_file` re-checks under the lock (defense in
-        // depth — limits are Copy, so the in-lock check can never disagree).
+        // Per-file quota rejection runs before any mutex/spawn_blocking work;
+        // `commit_new_file` re-checks under the lock as defense in depth.
+        // Limits are Copy, so the in-lock check cannot disagree.
         let bytes_len = u64::try_from(bytes.len())
             .map_err(|_| "capture file size does not fit a u64 counter".to_string())?;
         if bytes_len > self.limits.max_file_bytes {
@@ -371,7 +370,7 @@ fn acquire_root_lock(root: &Path) -> Result<File, String> {
 /// of direct children only. Unknown/orphan entries are ignored (never
 /// deleted); symlink entries with managed names are rejected (never
 /// followed). Directory/special entries with managed names are not counted
-/// — the no-clobber check on a new destination rejects them instead.
+/// because the no-clobber check rejects the destination.
 #[derive(Debug)]
 struct RootUsage {
     files: usize,
@@ -495,9 +494,9 @@ fn commit_new_file(
         .map_err(|e| format!("capture commit failed: {}", e.error))?;
     drop(committed);
     // Post-commit step: the only fallible operation after the no-clobber
-    // persist succeeded. A failure here must NOT turn the commit into an
-    // error (the final file already exists and counts toward quota) — it is
-    // reported as a durability warning on the successful result.
+    // persist succeeded. A failure here must not turn the commit into an
+    // error because the final file already exists and counts toward quota. It
+    // is reported as a durability warning on the successful result.
     let durability_warning = sync_root_dir(root).err();
 
     Ok(CaptureWriteResult {
@@ -511,7 +510,7 @@ fn commit_new_file(
 
 /// Sync the root directory so the rename is durable on crash. Portable
 /// std APIs cannot sync a directory on Windows; that crash-durability
-/// limitation is documented. Callers must treat an `Err` as a POST-commit
+/// limitation is documented. Callers must treat an `Err` as a post-commit
 /// durability warning, never as a failed commit.
 #[cfg(unix)]
 fn sync_root_dir(root: &Path) -> Result<(), String> {
@@ -589,7 +588,7 @@ mod tests {
             "COM9.jsonl",
             "lpt1.jsonl",
             "LPT9.jsonl",
-            "com10.jsonl", // COM10 is NOT reserved (only COM1-9); must be valid
+            "com10.jsonl", // COM10 is not reserved (only COM1-9); must be valid
         ] {
             // "com10.jsonl" must be accepted; the rest rejected.
             let expected_ok = name == "com10.jsonl";
@@ -902,7 +901,7 @@ mod tests {
 
     #[tokio::test]
     async fn concurrent_independent_stores_cannot_exceed_quota() {
-        // Two stores with INDEPENDENT process-local mutexes share one root.
+        // Two stores with independent process-local mutexes share one root.
         // Only the cross-process advisory lock serializes them, so count
         // and total quotas hold across processes.
         let dir = StdArc::new(tempfile::tempdir().unwrap());

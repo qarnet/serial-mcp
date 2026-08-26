@@ -1,18 +1,18 @@
-//! Serial port discovery, configuration, and a session-less connection manager.
+//! Serial port discovery, configuration, and connection management.
 //!
 //! Public surface:
 //! - [`PortInfo::list_available`] enumerates serial ports on the host.
 //! - [`SerialConnection::open`] opens a single configured port.
-//! - [`ConnectionManager`] holds a set of open connections indexed by id and
-//!   rejects double-opens of the same port. Its connection-opening boundary
-//!   ([`ConnectionOpener`]) is injectable so alternate backends can drive
-//!   the full surface without an OS serial port.
+//! - [`ConnectionManager`] tracks open connections by ID and rejects duplicate
+//!   opens of the same port. Its connection-opening boundary
+//!   ([`ConnectionOpener`]) is injectable, so alternate backends can drive the
+//!   full surface without an OS serial port.
 //!
-//! The implementation is split into focused submodules: configuration types
-//! and defaults (`config`), OS port enumeration (`port_info`), the connection
-//! and its I/O backend (`connection`), the multi-connection registry
-//! (`manager`), and in-memory test backends (`test_support`). Public types are
-//! re-exported at `crate::serial::*`.
+//! Focused submodules cover configuration types and defaults (`config`), OS
+//! port enumeration (`port_info`), the connection and I/O backend
+//! (`connection`), the multi-connection registry (`manager`), and in-memory
+//! test backends (`test_support`). Public types are re-exported at
+//! `crate::serial::*`.
 
 mod config;
 mod connection;
@@ -30,36 +30,36 @@ pub use connection::{SerialConnection, SerialIo};
 pub use manager::{ConnectionManager, ConnectionOpener};
 pub use port_info::{PortInfo, PortProvider, PortTransport, SystemPortProvider};
 
-// =============================================================================
 // JSON Schema unsigned-integer regression guards.
 //
-// schemars (1.x) emits a `"format": "uintN"` keyword for unsigned integer
-// types: `uint8`, `uint16`, `uint32`, `uint64`, `uint`. None of these are part
-// of the JSON Schema spec. Validators (jsonschema, AJV, …) log a warning like
+// schemars 1.x emits a `"format": "uintN"` keyword for unsigned integer types:
+// `uint8`, `uint16`, `uint32`, `uint64`, and `uint`. None is part of the JSON
+// Schema specification. Validators (jsonschema, AJV, and others) log a warning
+// like
 //     unknown format "uint16" ignored in schema at path "#/properties/vid"
-// and then drop the constraint. Functionally harmless but noisy, and a sign
-// that a field was added without the required `#[schemars(schema_with = ...)]`
+// and drop the constraint. The result is functionally harmless but noisy and
+// indicates a field lacks the required `#[schemars(schema_with = ...)]`
 // override.
 //
-// Every time a new struct with a `uN`/`Option<uN>` field is added and derives
-// `JsonSchema`, it MUST annotate that field with `crate::schema_helpers::uint_schema`
-// (for `uN`) or `crate::schema_helpers::option_uint_schema` (for `Option<uN>`).
+// A new struct with a `uN`/`Option<uN>` field that derives `JsonSchema` must
+// annotate the field with `crate::schema_helpers::uint_schema` (for `uN`) or
+// `crate::schema_helpers::option_uint_schema` (for `Option<uN>`).
+//
 // The previous guard (`tool_schemas_have_no_nonstandard_uint_formats` in
-// `src/tools/mod.rs`) only checked the tool `outputSchema` strings and only
+// `src/tools/mod.rs`) checked only tool `outputSchema` strings and only
 // asserted on `uint`/`uint32`/`uint64`. It missed:
 //   1. `u8`/`u16` formats (this regression's `PortInfo.vid`/`pid`/`interface`).
 //   2. Types that appear in resource/prompt schemas but are also reachable via
 //      tool outputs (e.g. `PortInfo` is in `ListPortsResult` AND
 //      `ConnectionStatus.port_info`).
-// These tests close both gaps:
-//   - They enumerate every known public `JsonSchema`-deriving struct and
-//     reject *any* `uint*` format keyword.
-//   - They also keep the tool-level string scan, now covering uint8/uint16
-//     (see `src/tools/mod.rs`).
-// If you add a new public type that derives `JsonSchema` and has unsigned
-// integer fields, ADD IT to the `check_schema!` list below. The compile-time
-// cost is tiny; the cost of shipping noisy schemas to every MCP client is not.
-// =============================================================================
+// These tests cover both gaps:
+//   - Per-type guards enumerate public `JsonSchema` types used by tool,
+//     resource, and prompt schemas and reject any `uint*` format keyword.
+//   - The tool-level string scan remains in `src/tools/mod.rs` and now covers
+//     `uint8`/`uint16` too.
+// Add every new public `JsonSchema` type with unsigned fields to the
+// `check_schema!` list below. The test cost is small; shipping noisy schemas
+// to MCP clients is not.
 #[cfg(test)]
 mod schema {
     use schemars::schema_for;
@@ -142,23 +142,22 @@ mod schema {
         };
     }
 
-    // Core identity + status types (the source of this regression).
+    // Core identity and status types, which exposed this regression.
     check_schema!(port_info_has_no_uint_formats, PortInfo);
     check_schema!(connection_status_has_no_uint_formats, ConnectionStatus);
 
-    /// Regression guard for the `PortInfo` `required` bug: schemars 1.2.2
-    /// does not recognise `Option<T>` through `#[schemars(schema_with = ...)]`,
-    /// so `vid`/`pid`/`interface` used to land in the schema's `required`
-    /// array even though non-USB ports (e.g. `/dev/ttyS0`) omit those fields
-    /// during serialization (`skip_serializing_if`). Strict MCP clients then
-    /// rejected `list_ports` output with
+    /// Regression guard for the `PortInfo` `required` bug. schemars 1.2.2 does
+    /// not recognise `Option<T>` through `#[schemars(schema_with = ...)]`, so
+    /// `vid`/`pid`/`interface` used to land in the schema's `required` array
+    /// even though non-USB ports (such as `/dev/ttyS0`) omit those fields during
+    /// serialization (`skip_serializing_if`). Strict MCP clients then rejected
+    /// `list_ports` output with
     /// `Invalid structured content: 'vid' is a required property`.
     ///
-    /// The fix keeps the `schema_with` override (it suppresses the
-    /// non-standard `uint16` format) and adds `#[serde(default)]`, which
-    /// makes schemars treat the field as optional without emitting any
-    /// `"default"` key (the default is `None`, so `skip_serializing_if`
-    /// skips it). Serialized output is unchanged.
+    /// Keep the `schema_with` override to suppress non-standard `uint16`, and
+    /// add `#[serde(default)]` so schemars treats the field as optional without
+    /// emitting a `"default"` key. The default is `None`, so
+    /// `skip_serializing_if` skips it. Serialized output is unchanged.
     #[test]
     fn port_info_optional_usb_fields_not_required() {
         let schema = schema_for!(PortInfo);
@@ -171,7 +170,7 @@ mod schema {
             .filter_map(Value::as_str)
             .collect();
 
-        // Optional USB-identity fields: must stay OUT of `required`.
+        // Optional USB identity fields must stay out of `required`.
         for field in ["vid", "pid", "interface"] {
             assert!(
                 !required.contains(&field),
@@ -197,9 +196,8 @@ mod schema {
             );
         }
 
-        // Serialized output is unchanged: `None` USB-identity fields are still
-        // omitted, so `skip_serializing_if` behaviour is intact even with
-        // `default` present.
+        // Serialization stays unchanged: `None` USB identity fields remain
+        // omitted, so `skip_serializing_if` still works with `default`.
         let non_usb = PortInfo {
             name: "/dev/ttyS0".into(),
             display_name: "ttyS0".into(),
@@ -225,9 +223,8 @@ mod schema {
             );
         }
 
-        // The `default` evaluates to `None` (skipped), so the schema must not
-        // advertise a `"default"` key on the property — locks the claim made
-        // in the doc comment above.
+        // `default` evaluates to `None` and is skipped, so the schema must not
+        // advertise a `"default"` key. This checks the doc comment above.
         for field in ["vid", "pid", "interface"] {
             let prop = json
                 .pointer(&format!("/properties/{field}"))
@@ -240,12 +237,12 @@ mod schema {
         }
     }
 
-    /// Same schemars `required` bug as `PortInfo` vid/pid/interface, on the
-    /// prompt arguments type: `DiagnosePortArgs.baud_rate` is
-    /// `Option<u32>` with `schema_with` + `skip_serializing_if`, so before
-    /// the fix it landed in the schema's `required` array while callers
-    /// omit it during serialization. Strict MCP clients reject prompt
-    /// arguments on the same validation path as tool output.
+    /// Regression guard for the same schemars `required` bug on prompt
+    /// arguments. `DiagnosePortArgs.baud_rate` is `Option<u32>` with
+    /// `schema_with` plus `skip_serializing_if`; before the fix it landed in the
+    /// schema's `required` array while callers omitted it during serialization.
+    /// Strict MCP clients reject prompt arguments through the same validation
+    /// path as tool output.
     #[test]
     fn diagnose_port_args_baud_rate_not_required() {
         let schema = schema_for!(crate::prompts::types::DiagnosePortArgs);
@@ -258,7 +255,7 @@ mod schema {
             .filter_map(Value::as_str)
             .collect();
 
-        // Optional field: must stay OUT of `required`.
+        // Optional field must stay out of `required`.
         assert!(
             !required.contains(&"baud_rate"),
             "DiagnosePortArgs schema lists optional field `baud_rate` in \
@@ -272,8 +269,8 @@ mod schema {
             json.pointer("/properties/baud_rate").is_some(),
             "DiagnosePortArgs schema is missing the `baud_rate` property"
         );
-        // No `"default"` key leaks into the schema (the default is `None`,
-        // so `skip_serializing_if` omits it from serialized output).
+        // No `"default"` key leaks into the schema. The default is `None`, so
+        // `skip_serializing_if` omits it from serialized output.
         let prop = json
             .pointer("/properties/baud_rate")
             .expect("DiagnosePortArgs schema must declare `baud_rate`");
@@ -283,7 +280,7 @@ mod schema {
              \"default\" key, got: {prop}"
         );
 
-        // Serialized output unchanged: `None` is still omitted.
+        // Serialization stays unchanged: `None` is still omitted.
         let args = crate::prompts::types::DiagnosePortArgs {
             port: "/dev/ttyUSB0".into(),
             baud_rate: None,
@@ -300,24 +297,23 @@ mod schema {
         );
     }
 
-    // Profile types (already fixed in b12b09fd; guarded against regressions).
+    // Profile types, fixed in b12b09fd and guarded against regressions.
     check_schema!(profile_has_no_uint_formats, Profile);
     check_schema!(profile_selector_has_no_uint_formats, ProfileSelector);
     check_schema!(profile_metadata_has_no_uint_formats, ProfileMetadata);
     check_schema!(profile_revision_has_no_uint_formats, ProfileRevision);
-    // Session-result shape exposed on open/status/connection
-    // summaries (guards the Option<u64> revision field).
+    // Session-result shape exposed by open/status/connection summaries. This
+    // guards the Option<u64> revision field.
     check_schema!(
         profile_session_result_has_no_uint_formats,
         ProfileSessionResult
     );
 
-    // Tool result types reachable by clients.
-    // Keep this list in sync with the `#[tool]` methods in `src/server.rs`
-    // and with `tool_catalog()` in `src/server.rs`.
+    // Tool result types exposed to clients. Keep this list in sync with the
+    // `#[tool]` methods and `tool_catalog()` in `src/server.rs`.
     check_schema!(list_ports_result_has_no_uint_formats, ListPortsResult);
-    // `list_ports` profile-match preview types (guards the u64
-    // revision / Option<u64> last_used_at_ms fields).
+    // `list_ports` profile-match preview types. These guard the u64 revision
+    // and Option<u64> last_used_at_ms fields.
     check_schema!(
         profile_match_candidate_has_no_uint_formats,
         ProfileMatchCandidate
@@ -356,8 +352,8 @@ mod schema {
         ComputeChecksumResult
     );
     check_schema!(transact_result_has_no_uint_formats, TransactResult);
-    // Atomic boot capture (guards mark_offset, pre_mark_bytes,
-    // and the nested ReadResult's uint fields).
+    // Atomic boot capture. Guards mark_offset, pre_mark_bytes, and nested
+    // ReadResult unsigned fields.
     check_schema!(capture_boot_args_has_no_uint_formats, CaptureBootArgs);
     check_schema!(capture_boot_reset_has_no_uint_formats, CaptureBootReset);
     check_schema!(capture_boot_result_has_no_uint_formats, CaptureBootResult);
@@ -374,21 +370,21 @@ mod schema {
         ProfilePersistenceResult
     );
 
-    // Framing config types (checked for uint format regressions on fields like
-    // prefix_size, max_frames, and cobs delimiter).
+    // Framing config types, including fields such as prefix_size, max_frames,
+    // and the COBS delimiter.
     check_schema!(tx_framing_config_has_no_uint_formats, TxFramingConfig);
     check_schema!(tx_framing_mode_has_no_uint_formats, TxFramingMode);
     check_schema!(rx_framing_config_has_no_uint_formats, RxFramingConfig);
     check_schema!(rx_framing_mode_has_no_uint_formats, RxFramingMode);
 
-    // Parsed frame enum (guards uint fields on ParsedFrame::ModbusAscii
-    // and any future variants that carry unsigned integers).
+    // Parsed frame enum. Guards ParsedFrame::ModbusAscii and future variants
+    // that carry unsigned integers.
     check_schema!(parsed_frame_has_no_uint_formats, ParsedFrame);
 
-    // Decoded frame (guards the Vec<u8> data field + the usize index field).
+    // Decoded frame. Guards the Vec<u8> data field and usize index field.
     check_schema!(frame_has_no_uint_formats, Frame);
 
-    // Profile defaults (framing fields — no unsigned fields, but guard).
+    // Profile defaults. They have no unsigned fields, but remain guarded.
     check_schema!(
         profile_defaults_has_no_uint_formats,
         crate::profiles::ProfileDefaults

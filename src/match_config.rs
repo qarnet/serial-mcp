@@ -6,10 +6,10 @@
 //! how the `pattern` string is decoded into the byte needle.
 //!
 //! This module provides:
-//! - `MatchRequest` — the JSON-serialisable request shape
-//! - `MatchMode` — literal substring, byte-regex, or whole-line glob matching
-//! - `PatternEncoding` — alias for the encoding used to decode the pattern
-//! - `Matcher` — stateful pattern matcher supporting literal, regex, and glob
+//! - `MatchRequest`: the JSON-serialisable request shape
+//! - `MatchMode`: literal substring, byte-regex, or whole-line glob matching
+//! - `PatternEncoding`: encoding used to decode the pattern
+//! - `Matcher`: stateful pattern matcher supporting literal, regex, and glob
 //!
 //! # Bounded-window policy
 //!
@@ -49,7 +49,7 @@ use serde::{Deserialize, Serialize};
 use crate::codec;
 use crate::util::find_subsequence;
 
-// ---- Request shape --------------------------------------------------------
+// Request shape.
 
 /// Match configuration supplied alongside a `read` request (also used by the
 /// `transact` read half and `capture_boot`).
@@ -122,8 +122,8 @@ impl std::fmt::Display for MatchMode {
     }
 }
 
-/// Pattern encoding — just an alias for the codec `Encoding` type with a
-/// different JSON schema name so the MCP tool description is clear.
+/// Pattern encoding uses the same wire values as codec
+/// [`crate::codec::Encoding`], with a distinct schema name for MCP descriptions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum PatternEncoding {
@@ -157,7 +157,7 @@ impl From<PatternEncoding> for codec::Encoding {
     }
 }
 
-// ---- Byte matcher ----------------------------------------------------------
+// Byte matcher.
 
 /// Conservative overlap allowance (bytes) retained beyond
 /// `max_buffered_bytes` for regex and glob windows. Regex patterns have no
@@ -168,9 +168,9 @@ pub(crate) const REGEX_GLOB_OVERLAP_ALLOWANCE: usize = 256;
 /// Saved matcher-owned literal context for the most recent push.
 ///
 /// Stored so a later stop-outcome match index can be shaped over the bytes
-/// retained at match time — the bounded retained window for raw paths, the
-/// frame bytes for framed paths. The `global_index` lets the accessor verify
-/// it is answering for the most recent `Found`.
+/// retained at match time. Raw paths use the bounded retained window;
+/// framed paths use the frame bytes. The `global_index` lets the accessor
+/// verify that it answers for the most recent `Found`.
 ///
 /// Internal matcher state; exposed only because `Matcher` is a public enum.
 #[doc(hidden)]
@@ -243,7 +243,8 @@ pub enum Matcher {
 pub enum MatchResult {
     /// No match found yet after processing the latest chunk.
     NoMatch,
-    /// Match found at the given byte offset within the total accumulated data.
+    /// Match found at an offset relative to bytes fed since the last
+    /// [`Matcher::reset_window`].
     Found(usize),
 }
 
@@ -374,9 +375,8 @@ impl Matcher {
         }
     }
 
-    /// Append a chunk to the internal window and check for a match in the
-    /// combined data. Returns the byte offset within the total accumulated
-    /// buffer where the match starts, or `NoMatch`.
+    /// Append a chunk and check the retained combined window. `Found(index)` is
+    /// relative to bytes fed since the last [`Matcher::reset_window`].
     ///
     /// For literal matchers with configured context, a `Found` also saves the
     /// shaped payload over the current window. Framed callers reset the
@@ -462,11 +462,10 @@ impl Matcher {
     /// global (relative to the last [`Matcher::reset_window`]). For literal
     /// matchers with configured context, the shaped payload for this match is
     /// saved with pre-match context capped at
-    /// `min(configured_context, max_buffered_bytes)` — the payload still
-    /// contains the full matched literal, but requested context can never
-    /// bypass the connection memory/result bound. The retained window after
-    /// the call never exceeds [`Matcher::retained_window_limit`], including
-    /// after `NoMatch`.
+    /// `min(configured_context, max_buffered_bytes)`. The payload still contains
+    /// the full matched literal, but requested context can never bypass the
+    /// connection memory/result bound. The retained window after the call never
+    /// exceeds [`Matcher::retained_window_limit`], including after `NoMatch`.
     pub fn push_bounded(&mut self, chunk: &[u8], max_buffered_bytes: usize) -> MatchResult {
         // `push` clears any previously saved context and saves the full
         // configured-context shape on `Found`; overwrite that shape with the
@@ -598,7 +597,7 @@ impl Matcher {
     }
 }
 
-// ---- Validation helper ------------------------------------------------------
+// Validation helper.
 
 /// Validate a `MatchRequest`, decode the pattern into raw bytes, and return
 /// a `Matcher` ready to use.
@@ -640,7 +639,7 @@ pub fn validate_match_request(req: &MatchRequest) -> Result<Matcher, String> {
     }
 }
 
-// ---- Context shaping -------------------------------------------------------
+// Context shaping.
 
 /// Result of shaping a matched payload with pre-match context.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -696,7 +695,7 @@ pub fn shape_match_context(
     }
 }
 
-// ---- Tests ------------------------------------------------------------------
+// Tests.
 
 #[cfg(test)]
 mod tests {
@@ -862,7 +861,7 @@ mod tests {
         assert_eq!(matcher.context_amount(), Some(128));
     }
 
-    // ── Regex matching ─────────────────────────────────────────────────
+    // Regex matching.
 
     #[test]
     fn regex_matches_simple_pattern() {
@@ -926,7 +925,7 @@ mod tests {
         assert!(validate_match_request(&req).is_err());
     }
 
-    // ── Glob matching ──────────────────────────────────────────────────
+    // Glob matching.
 
     #[test]
     fn glob_matches_line() {
@@ -973,7 +972,7 @@ mod tests {
             base: 0,
             first_line_partial: false,
         };
-        // No trailing newline — last line still tested
+        // No trailing newline. The last line is still tested.
         assert_eq!(m.push(b"boot\r\npong"), MatchResult::Found(6));
     }
 
@@ -1017,7 +1016,7 @@ mod tests {
         assert!(validate_match_request(&req).is_err());
     }
 
-    // ── Bounded-window policy ───────────────────────────────────────────
+    // Bounded-window policy.
 
     #[test]
     fn retained_window_limit_uses_mode_overlap_allowance() {
@@ -1268,7 +1267,7 @@ mod tests {
             base: 0,
             first_line_partial: false,
         };
-        // "ready" truncated to its mid-line suffix "dy\n" must NOT match
+        // "ready" truncated to its mid-line suffix "dy\n" must not match
         // the glob "dy": the first retained line is partial.
         assert_eq!(m.push(b"ready\n"), MatchResult::NoMatch);
         m.truncate_front(3); // keep "dy\n", drop "rea" (mid-line)

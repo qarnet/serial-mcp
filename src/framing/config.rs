@@ -9,7 +9,7 @@ use crate::match_config::PatternEncoding;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-// ---- RX framing configuration ----------------------------------------------
+// RX framing configuration.
 
 /// RX framing configuration applied by `read`, the `transact` read half, and `capture_boot`.
 /// Specifies how to split the byte stream into frames and optionally parse
@@ -93,14 +93,14 @@ pub enum RxFramingMode {
         #[schemars(schema_with = "crate::schema_helpers::option_uint_schema")]
         initial_offset: Option<usize>,
     },
-    /// Split based on start and end marker byte sequences.
-    /// `start` is a list of marker strings; RX matches ANY of them
-    /// (finds the earliest one). TX uses `start[0]`.
+    /// Split on start and end marker byte sequences. RX selects the earliest
+    /// occurrence among `start`; equal offsets use start-list order. TX uses
+    /// `start[0]`.
     #[serde(rename_all = "snake_case")]
     StartEnd {
-        /// Start marker(s) (decoded per `marker_encoding`).
-        /// RX matches any marker in the list (earliest match wins).
-        /// TX uses the first marker (`start[0]`).
+        /// Start markers, decoded per `marker_encoding`. RX selects the
+        /// earliest occurrence and uses start-list order for equal offsets. TX
+        /// uses the first marker (`start[0]`).
         start: Vec<String>,
         /// End marker (decoded per `marker_encoding`).
         end: String,
@@ -126,17 +126,15 @@ pub enum RxFramingMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum LineEnding {
-    /// Adaptive: starts as LF/CRLF (splits on `\n`, strips preceding `\r`).
-    /// When a bare `\r` is detected (no `\n` follows in the same chunk), the
-    /// decoder enters a pending state. If the next received byte is `\n`, the
-    /// `\r\n` is treated as CRLF and decoding continues in LF/CRLF mode. If
-    /// the next byte is anything else (including end-of-stream), the `\r` is
-    /// confirmed as a bare CR line ending, the pending line is emitted, and
-    /// the decoder promotes to CR-split mode for the remainder of the call.
-    /// Promotion is per-call (resets on the next read).
+    /// Starts in LF/CRLF mode: splits on `\n` and removes a preceding `\r`.
+    /// A trailing `\r` waits for the next byte. `\n` confirms CRLF; any other
+    /// byte confirms bare CR, emits the pending line, and switches to CR mode
+    /// for the remainder of the call. An explicit `FrameDecoder::flush_partial`
+    /// call returns pending bytes as a partial frame. Each new decoder begins
+    /// in auto mode.
     #[default]
     Auto,
-    /// Split on `\n` only. Do NOT strip a preceding `\r`.
+    /// Split on `\n` only. Do not strip a preceding `\r`.
     Lf,
     /// Split on bare `\r` only.
     Cr,
@@ -148,7 +146,7 @@ fn default_encoding() -> PatternEncoding {
     PatternEncoding::Utf8
 }
 
-// ---- Protocol presets --------------------------------------------------------
+// Protocol presets.
 
 /// Built-in protocol preset. A named bundle of framing/parser primitives
 /// that a single `protocol` field expands into on `write`, `read`, `transact`, and `capture_boot`.
@@ -269,10 +267,9 @@ pub fn preset_rx_parser(p: ProtocolPreset) -> ParserConfig {
     }
 }
 
-// ---- TX framing configuration -----------------------------------------------
+// TX framing configuration.
 
-/// TX framing configuration for `write`.
-/// Mirrors the RX modes but directionally appropriate.
+/// TX framing configuration for `write` and `transact`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct TxFramingConfig {
     /// TX frame boundary mode. Flattened: its `type` discriminator and
@@ -286,7 +283,8 @@ pub struct TxFramingConfig {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case", tag = "type")]
 pub enum TxFramingMode {
-    /// Append a line terminator. No `auto` — agents must be explicit.
+    /// Append a line terminator. No `auto` mode; callers must select `lf`, `cr`,
+    /// or `crlf`.
     #[serde(rename_all = "snake_case")]
     Line {
         /// Line ending to append: `lf`, `cr`, or `crlf`.
@@ -343,7 +341,8 @@ pub enum TxFramingMode {
     Nmea,
 }
 
-/// Line ending for TX framing. No `auto` — agents must pick one.
+/// Line ending for TX framing. No `auto` mode; callers must select `lf`, `cr`,
+/// or `crlf`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum TxLineEnding {
@@ -355,7 +354,7 @@ pub enum TxLineEnding {
     Crlf,
 }
 
-// ---- Shared types -----------------------------------------------------------
+// Shared framing and parser types.
 
 /// Byte order for length-prefixed framing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
@@ -366,7 +365,7 @@ pub enum Endianness {
     Little,
 }
 
-/// Parser configuration — what to do with each frame's content.
+/// Parser configuration for each frame's content.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct ParserConfig {
     /// Which parser to use.
@@ -378,12 +377,12 @@ pub struct ParserConfig {
     pub custom_prompt: Option<String>,
     /// Whether to enforce a protocol checksum when present. Default: false.
     /// When true, a protocol parser that defines a checksum (currently NMEA's
-    /// *XX XOR, Modbus ASCII LRC) drops mismatched frames instead of emitting
+    /// *XX XOR and Modbus ASCII LRC) drops mismatched frames instead of emitting
     /// them. The dropped frame is counted in `PushOutcome.frames_dropped` and
-    /// does NOT halt the read (stream-fatal errors like SLIP
-    /// malformed escapes still stop the decode). When false, the frame is
-    /// emitted with `checksum_valid: Some(false)` (no-op for the caller).
-    /// A sentence/message WITHOUT a checksum is accepted regardless.
+    /// does not halt the read. Stream-fatal errors such as malformed SLIP
+    /// escapes still stop decoding. When false, the frame is emitted with
+    /// `checksum_valid: Some(false)`.
+    /// A sentence or message without a checksum is accepted regardless.
     #[serde(default)]
     pub validate: bool,
 }
@@ -398,7 +397,7 @@ pub enum ParserType {
     JsonLines,
     /// Detect shell prompt patterns.
     ShellPrompt,
-    /// No parsing — frames are returned as raw data.
+    /// Do not parse frames; return raw data.
     Raw,
     /// Parse NMEA-0183 sentences: talker ID + sentence type + comma fields,
     /// with optional *XX XOR checksum validation.
@@ -412,7 +411,7 @@ pub enum ParserType {
 mod tests {
     use super::*;
 
-    // ── Line ending default: `auto` when `ending` omitted ────────────────
+    // Line ending defaults to `auto` when `ending` is omitted.
 
     #[test]
     fn line_ending_default_is_auto() {
@@ -427,7 +426,7 @@ mod tests {
         ));
     }
 
-    // ── Protocol preset tests (table-driven) ────────────────────────────────
+    // Protocol preset tests use a table.
 
     /// Assert that a ProtocolPreset variant round-trips through the tagged-object
     /// JSON shape `{"type": "<variant_str>"}` and rejects the bare-string form.

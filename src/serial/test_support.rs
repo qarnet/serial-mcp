@@ -1,8 +1,6 @@
-//! In-memory implementations of [`SerialIo`] used by unit and integration
-//! tests that need a fake connection. The module is `pub` so that
-//! integration tests in `tests/` can build a [`SerialConnection`] backed
-//! by a [`tokio::io::DuplexStream`] without going through the OS serial
-//! layer.
+//! In-memory [`SerialIo`] implementations for unit and integration tests.
+//! Integration tests can build a [`SerialConnection`] backed by
+//! [`tokio::io::DuplexStream`] without using the OS serial layer.
 
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -11,7 +9,7 @@ use tokio::io::{AsyncRead, AsyncWrite, DuplexStream, ReadBuf};
 
 use super::*;
 
-/// Wraps a [`DuplexStream`] half so it satisfies the [`SerialIo`] trait.
+/// Wraps one [`DuplexStream`] half as a [`SerialIo`] backend.
 /// All control-line operations are no-ops.
 pub struct LoopbackIo(DuplexStream);
 
@@ -75,25 +73,15 @@ pub fn loopback_connection_with_config(
     (conn, b)
 }
 
-// ── QueuedTxIo ───────────────────────────────────────────────────────
+// QueuedTxIo.
 //
-// A `SerialIo` backend that models an OS transmit queue the way a real
-// serialport does on Linux: `write()` lands bytes in a TX queue, and
-// `clear_os_buffers(Output)` (the backend behind `flush(target=output)`)
-// discards bytes still in that queue before the device has drained them.
-//
-// Unlike `LoopbackIo` (which is backed by `tokio::io::duplex` and so
-// delivers every written byte to the peer immediately), `QueuedTxIo`
-// keeps written bytes in an internal queue until the test explicitly
-// drains them via the `QueuedTxHandle`. This lets unit tests exercise
-// the "flushed-before-delivery" path: write, flush(output), then assert
-// the device received nothing because the queued bytes were discarded
-// before the device drained them.
-//
-// RX direction (device -> host) is fed by `QueuedTxHandle::inject_rx`,
-// which pushes bytes the host can then `read`.
+// This `SerialIo` backend models an OS transmit queue: `write()` enqueues
+// bytes, output flush discards queued bytes before device drain, and input
+// flush discards injected RX bytes. Unlike `LoopbackIo`, it keeps written bytes
+// queued until the test drains them through `QueuedTxHandle`. The RX direction
+// is fed by `QueuedTxHandle::inject_rx`, which wakes pending reads.
 
-/// Shared state between [`QueuedTxIo`] and its [`QueuedTxHandle`].
+/// State shared by [`QueuedTxIo`] and [`QueuedTxHandle`].
 struct QueuedTxState {
     /// Bytes written by the host, awaiting delivery to the device.
     /// `clear_os_buffers(Output)` discards these.
@@ -120,14 +108,13 @@ pub struct QueuedTxIo {
     state: std::sync::Arc<std::sync::Mutex<QueuedTxState>>,
 }
 
-/// Test handle that can drain the TX queue (simulate the device reading),
-/// inject RX bytes (simulate the device writing), and inspect queue state.
+/// Handle for simulating device reads, device writes, and queue inspection.
 pub struct QueuedTxHandle {
     state: std::sync::Arc<std::sync::Mutex<QueuedTxState>>,
 }
 
-/// Build a [`SerialConnection`] backed by [`QueuedTxIo`] plus the
-/// [`QueuedTxHandle`] for driving the simulated device side.
+/// Build a [`SerialConnection`] backed by [`QueuedTxIo`] and a handle for the
+/// simulated device side.
 pub fn queued_tx_connection(port: &str) -> (SerialConnection, QueuedTxHandle) {
     let state = std::sync::Arc::new(std::sync::Mutex::new(QueuedTxState::new()));
     let conn = SerialConnection::from_io(
@@ -140,14 +127,13 @@ pub fn queued_tx_connection(port: &str) -> (SerialConnection, QueuedTxHandle) {
 }
 
 impl QueuedTxHandle {
-    /// Number of bytes currently queued in the OS TX queue (written by
-    /// the host, not yet drained by the device, not yet flushed).
+    /// Number of host-written bytes still queued for device delivery.
     pub fn tx_queue_len(&self) -> usize {
         self.state.lock().expect("tx state poisoned").tx_queue.len()
     }
 
-    /// Drain up to `max` bytes from the OS TX queue, simulating the
-    /// device reading its RX. Returns the drained bytes in order.
+    /// Drain up to `max` queued bytes, simulating the device reading its RX.
+    /// Returns drained bytes in order.
     pub fn drain_tx(&self, max: usize) -> Vec<u8> {
         let mut state = self.state.lock().expect("tx state poisoned");
         let take = max.min(state.tx_queue.len());
@@ -158,7 +144,7 @@ impl QueuedTxHandle {
         out
     }
 
-    /// Inject bytes for the host to read (simulates the device writing).
+    /// Inject bytes for the host to read, simulating a device write.
     pub fn inject_rx(&self, bytes: &[u8]) {
         let mut state = self.state.lock().expect("tx state poisoned");
         state.rx_queue.extend(bytes);
@@ -207,9 +193,8 @@ impl AsyncWrite for QueuedTxIo {
     }
 
     fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-        // No-op: bytes stay in tx_queue until drain_tx or
-        // clear_os_buffers(Output). This models a real OS TX queue where
-        // a successful write does not imply the device has consumed.
+        // Bytes stay in tx_queue until drain_tx or clear_os_buffers(Output).
+        // A successful write does not imply that the device consumed them.
         Poll::Ready(Ok(()))
     }
 

@@ -1,6 +1,5 @@
-//! The multi-connection registry: `ConnectionManager`, its private registry
-//! state, duplicate-port lookup, reconnect-task supervision, and
-//! manager-only tests. Depends on the `config` and `connection` siblings.
+//! Multi-connection registry, duplicate-port lookup, reconnect supervision,
+//! and manager tests. Depends on the `config` and `connection` siblings.
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -15,21 +14,19 @@ use super::connection::SerialConnection;
 
 /// The connection-opening boundary used by [`ConnectionManager::open`].
 ///
-/// This injects the *connection backend* only: reservation, registry, and
-/// lifecycle semantics live in the manager and are identical for every
-/// implementation. Production uses the internal `SystemConnectionOpener`;
-/// alternate backends (in-memory duplex streams, hardware simulators) can
-/// drive the entire public MCP surface without an OS serial port. This keeps
-/// such tests cross-platform.
+/// This injects the connection backend only. Reservation, registry, and
+/// lifecycle semantics stay in the manager for every implementation.
+/// Production uses `SystemConnectionOpener`; alternate backends such as
+/// in-memory duplex streams and hardware simulators can drive the public MCP
+/// surface without an OS serial port. This keeps tests cross-platform.
 #[async_trait::async_trait]
 pub trait ConnectionOpener: Send + Sync {
     /// Open a connection for `config` and return it. The returned
     /// connection must honor the requested config fields (the manager
     /// assumes nothing about the backend beyond this trait).
     ///
-    /// The `async_trait` macro supplies the dyn-compatible boxed future
-    /// internally, keeping the trait object-safe across the supported
-    /// toolchains.
+    /// `async_trait` supplies the dyn-compatible boxed future, keeping the trait
+    /// object-safe across supported toolchains.
     async fn open(&self, config: ConnectionConfig) -> Result<SerialConnection>;
 }
 
@@ -45,22 +42,20 @@ impl ConnectionOpener for SystemConnectionOpener {
     }
 }
 
-/// Registry of currently open serial connections, indexed by an opaque
-/// connection id. Rejects opening the same port twice.
+/// Registry of open serial connections, indexed by opaque connection ID.
+/// Rejects duplicate opens of the same port.
 pub struct ConnectionManager {
     /// Injectable connection-opening boundary (production: OS serial open).
     opener: Arc<dyn ConnectionOpener>,
-    /// Shared registry state. Wrapped in an `Arc` so the
-    /// [`OpeningReservationGuard`] can reach the registry from its `Drop`
-    /// (i.e. when a cancelled open must release its reservation).
+    /// Shared registry state. The [`OpeningReservationGuard`] uses this `Arc`
+    /// from `Drop` to release a reservation after cancellation.
     state: Arc<Mutex<ConnectionRegistry>>,
 }
 
 impl fmt::Debug for ConnectionManager {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // The opener is a backend, not registry state; callers never need
-        // to debug-inspect it, and we deliberately do not require
-        // implementations to provide a `Debug` impl.
+        // The opener is backend state, and implementations need not provide
+        // `Debug`.
         f.debug_struct("ConnectionManager")
             .field("opener", &"<dyn ConnectionOpener>")
             .field("state", &self.state)
@@ -76,23 +71,15 @@ impl Default for ConnectionManager {
 
 /// RAII owner of one `opening_ports` reservation.
 ///
-/// The reservation is released exactly once, no matter how the owning
-/// `open` future ends:
-/// - normal success: the caller removes the reservation and disarms via
-///   [`clear`](Self::clear) while holding the registry lock (atomic with
-///   the connection insert);
-/// - normal failure: the caller propagates the error and this guard's
-///   `Drop` removes the reservation;
-/// - cancellation (the future dropped mid-await): this guard's `Drop`
-///   removes the reservation, so a cancelled open can never wedge the port.
+/// Releases one `opening_ports` reservation exactly once:
+/// - success clears it under the registry lock while inserting the connection;
+/// - failure lets `Drop` remove it;
+/// - cancellation also lets `Drop` remove it, so an aborted open cannot wedge
+///   the port.
 ///
-/// `Drop` removes synchronously via `try_lock` when the registry is
-/// uncontended (the common cancellation case — nothing else holds the
-/// lock). When the lock is contended it falls back to a bounded async
-/// cleanup task on the current runtime, or a synchronous
-/// `blocking_lock` when there is no runtime at all (drop outside an
-/// async context). The fallback only ever waits for one short registry
-/// lock acquisition, never an unbounded queue.
+/// `Drop` removes it synchronously with `try_lock` when possible. If the lock
+/// is contended, it schedules one lock acquisition on the current runtime or
+/// uses `blocking_lock` when no runtime exists.
 struct OpeningReservationGuard {
     state: Arc<Mutex<ConnectionRegistry>>,
     port: String,
@@ -125,21 +112,18 @@ impl Drop for OpeningReservationGuard {
                 state.opening_ports.remove(&self.port);
             }
             Err(_) => {
-                // Contended: bounded async cleanup on the current runtime.
-                // The spawned task only waits for one registry lock
-                // acquisition, then removes the reservation.
+                // Contended: schedule cleanup on the current runtime. The task
+                // waits for one registry lock acquisition, then removes the
+                // reservation.
                 let state = Arc::clone(&self.state);
                 let port = self.port.clone();
                 if let Ok(handle) = tokio::runtime::Handle::try_current() {
-                    // The JoinHandle is dropped immediately, which detaches
-                    // the task (it keeps running to completion).
+                    // Dropping the JoinHandle detaches the cleanup task.
                     std::mem::drop(handle.spawn(async move {
                         state.lock().await.opening_ports.remove(&port);
                     }));
                 } else {
-                    // No runtime (drop in a plain sync context):
-                    // synchronous acquisition is safe here and cannot
-                    // deadlock the runtime.
+                    // No runtime: synchronous acquisition is safe here.
                     self.state.blocking_lock().opening_ports.remove(&self.port);
                 }
             }
@@ -160,15 +144,13 @@ impl ConnectionManager {
         Self::with_opener(Arc::new(SystemConnectionOpener))
     }
 
-    /// Build a manager whose connection opening is performed by `opener`
-    /// instead of the production OS serial backend.
+    /// Build a manager whose opening uses `opener` instead of the production OS
+    /// backend.
     ///
-    /// Production never calls this — [`Self::new`] / [`Default`] use the
-    /// system opener. It exists so alternate connection backends (in-memory
-    /// duplex streams, hardware simulators) can exercise the whole public
-    /// MCP surface without an OS serial port, which also keeps such tests
-    /// cross-platform. This injects the connection backend only; port
-    /// reservation, registry, and lifecycle semantics are unchanged.
+    /// [`Self::new`] and [`Default`] use the system opener. Alternate backends
+    /// can exercise the public MCP surface without an OS serial port. This
+    /// changes only the backend; reservation, registry, and lifecycle semantics
+    /// stay in the manager.
     pub fn with_opener(opener: Arc<dyn ConnectionOpener>) -> Self {
         Self {
             opener,
@@ -197,11 +179,9 @@ impl ConnectionManager {
 
         let opened = self.opener.open(config).await;
 
-        // Success or failure: the reservation is removed exactly once.
-        // On error, `?` propagates and the guard's `Drop` removes it. On
-        // success, removal happens here under the registry lock, atomic
-        // with the connection insert, then the guard is disarmed so its
-        // `Drop` becomes a no-op.
+        // On error, `?` propagates and the guard's `Drop` removes the
+        // reservation. On success, remove it under the registry lock while
+        // inserting the connection, then disarm the guard.
         let mut state = self.state.lock().await;
         let connection = Arc::new(opened?);
         let id = connection.id().to_string();
@@ -211,9 +191,8 @@ impl ConnectionManager {
         Ok(id)
     }
 
-    /// Insert an already-built [`SerialConnection`] (typically one backed
-    /// by an in-memory loopback) into the registry. Honours the same
-    /// port-uniqueness invariant as [`Self::open`].
+    /// Insert an already-built [`SerialConnection`], typically an in-memory
+    /// loopback. Uses the same port-uniqueness invariant as [`Self::open`].
     ///
     /// Exposed for integration tests that want to drive the MCP surface
     /// against a fake connection without going through the OS serial layer.
@@ -320,7 +299,7 @@ impl ConnectionManager {
             let mut delay_ms = policy.initial_delay_ms;
             let mut attempts: u32 = 0;
             loop {
-                // Check if still disconnected / not cancelled.
+                // Stop when the connection is open or closed.
                 let state = conn_clone.state();
                 if state == ConnectionState::Open || state == ConnectionState::Closed {
                     break;
@@ -491,9 +470,9 @@ mod tests {
         assert!(matches!(err, SerialError::ConnectionNotFound(_)));
     }
 
-    /// The injected opener receives the exact config passed to the public
-    /// `open`, and the successful open becomes retrievable through the
-    /// manager (observable behavior, not opener helper-call counts alone).
+    /// The injected opener receives the requested config, and the successful
+    /// open is retrievable through the manager. This checks behavior beyond
+    /// opener call counts.
     #[tokio::test]
     async fn injected_opener_receives_requested_config_and_open_is_retrievable() {
         struct RecordingOpener {
@@ -539,9 +518,8 @@ mod tests {
         assert_eq!(conn.baud_rate(), 9600);
     }
 
-    /// An opener failure must release the same-port opening reservation so
-    /// a later open of the same port succeeds (a failed open must never
-    /// wedge the port).
+    /// An opener failure releases the same-port reservation, so a later open
+    /// of that port succeeds. A failed open must not wedge the port.
     #[tokio::test]
     async fn opener_failure_releases_opening_reservation_for_later_open() {
         struct FailFirstOpener {
@@ -550,8 +528,7 @@ mod tests {
         #[async_trait::async_trait]
         impl ConnectionOpener for FailFirstOpener {
             async fn open(&self, config: ConnectionConfig) -> Result<SerialConnection> {
-                // One-shot: `swap(0)` never wraps (unlike `fetch_sub`,
-                // which would wrap to usize::MAX at zero).
+                // One-shot: `swap(0)` never wraps, unlike `fetch_sub` at zero.
                 if self.failures.swap(0, Ordering::SeqCst) > 0 {
                     return Err(SerialError::IoError(std::io::Error::other(
                         "injected opener failure",
@@ -573,7 +550,7 @@ mod tests {
             "first open fails through the opener: {first:?}"
         );
 
-        // The reservation was released: the same port opens successfully now.
+        // The reservation was released, so the same port opens successfully.
         let id = mgr
             .open(config)
             .await
@@ -582,12 +559,10 @@ mod tests {
         assert_eq!(conn.port(), "reservation-port");
     }
 
-    /// While an open is in flight, the opening reservation must stop a
-    /// concurrent same-port open BEFORE it reaches the opener, and the
-    /// in-flight open must still complete and register its connection.
-    /// The opener invocation count is paired with the observable results
-    /// (second open rejected, first open retrievable) so the assertion is
-    /// not a bare helper-call-count.
+    /// While an open is in flight, its reservation rejects a concurrent
+    /// same-port open before the opener runs. The in-flight open still
+    /// completes and registers its connection. Observable results accompany
+    /// the opener count, so this is not only a helper-call-count assertion.
     #[tokio::test]
     async fn concurrent_same_port_open_reserves_port_and_second_open_is_rejected() {
         struct GatedOpener {
@@ -618,8 +593,8 @@ mod tests {
         let mgr = Arc::new(ConnectionManager::with_opener(opener.clone()));
         let config = test_config("concurrent-port");
 
-        // First open runs on its own task and signals once the opener is
-        // inside (reservation held).
+        // First open runs on its own task and signals after entering the
+        // opener, while holding the reservation.
         let mgr_for_task = Arc::clone(&mgr);
         let config_for_task = config.clone();
         let first_task = tokio::spawn(async move { mgr_for_task.open(config_for_task).await });
@@ -632,8 +607,8 @@ mod tests {
         .expect("first open reached the opener within the hang guard")
         .expect("opener signalled entry");
 
-        // Second open on the same port: rejected as PortAlreadyOpening
-        // WITHOUT invoking the opener again.
+        // Second open on the same port is rejected as PortAlreadyOpening
+        // without invoking the opener again.
         let second = mgr.open(config).await.unwrap_err();
         assert!(
             matches!(second, SerialError::PortAlreadyOpening(ref port) if port == "concurrent-port"),
@@ -645,7 +620,7 @@ mod tests {
             "the reservation prevents a second opener invocation"
         );
 
-        // Release the in-flight open: it completes and registers.
+        // Release the in-flight open; it completes and registers.
         release.notify_one();
         let first_id = first_task
             .await
@@ -656,14 +631,13 @@ mod tests {
         assert_eq!(mgr.count().await, 1, "exactly one connection registered");
     }
 
-    /// A cancelled open must release its `opening_ports` reservation so a
-    /// later open of the same port succeeds — and a connection the opener
-    /// was about to produce must never register after the cancel.
+    /// A cancelled open releases its `opening_ports` reservation, so a later
+    /// open of the same port succeeds. A connection from the cancelled opener
+    /// must not register afterward.
     ///
-    /// The cleanup is deterministic, not polled: `JoinHandle::await` only
-    /// resolves after the aborted task's future (and with it the
-    /// reservation guard) is dropped, so by the time the handle returns the
-    /// reservation is already gone and the immediate retry succeeds.
+    /// Cleanup is deterministic: awaiting the `JoinHandle` completes only
+    /// after the aborted future drops the reservation guard, so the immediate
+    /// retry sees the reservation already released.
     #[tokio::test]
     async fn cancelled_open_releases_opening_reservation_for_later_open() {
         struct CancelGatedOpener {
@@ -674,15 +648,15 @@ mod tests {
         impl ConnectionOpener for CancelGatedOpener {
             async fn open(&self, config: ConnectionConfig) -> Result<SerialConnection> {
                 if self.invocations.fetch_add(1, Ordering::SeqCst) == 0 {
-                    // First call: signal entry and wait forever. The
-                    // test aborts this task; the guard's `Drop` then
-                    // releases the reservation.
+                    // First call: signal entry and wait forever. The test
+                    // aborts this task, then the guard's `Drop` releases the
+                    // reservation.
                     let _ = self.entered.send(true);
                     std::future::pending::<()>().await;
                     unreachable!("aborted before pending resolves");
                 }
-                // Second (and later) calls: succeed immediately — the
-                // opener must never wait on a cancelled predecessor.
+                // Later calls succeed immediately; the opener must not wait on
+                // a cancelled predecessor.
                 let (conn, _peer) = loopback_connection_with_config(config);
                 Ok(conn)
             }
@@ -708,8 +682,7 @@ mod tests {
         .expect("hang guard: first open reached the opener")
         .expect("opener signalled entry");
 
-        // Cancel the in-flight open; the reservation guard releases the
-        // port during task cancellation.
+        // Cancel the in-flight open; its reservation guard releases the port.
         task.abort();
         let join = tokio::time::timeout(std::time::Duration::from_secs(5), task)
             .await
@@ -719,8 +692,8 @@ mod tests {
             "open task was aborted, not completed: {join:?}"
         );
 
-        // The same port opens successfully immediately after the cancel,
-        // through the opener again, and registers exactly one connection.
+        // The same port opens successfully after cancellation, through the
+        // opener again, and registers one connection.
         let id = tokio::time::timeout(std::time::Duration::from_secs(5), mgr.open(config))
             .await
             .expect("hang guard: second open after cancellation")

@@ -5,9 +5,8 @@
 //! and drive the master end from the test process as if it were a USB-Serial
 //! device. Unlike the in-memory loopback tests in `tests/http_integration.rs`,
 //! these exercise the real `tokio_serial::SerialStream` code path inside
-//! `SerialConnection`. macOS `serialport` baud configuration invokes
-//! `IOSSIOSPEED`, which macOS PTYs reject with `ENOTTY`; macOS uses controlled-
-//! backend coverage instead.
+//! `SerialConnection`. Production-path real-PTY tests run on Linux; macOS and
+//! Windows use regular Rust and controlled-backend coverage.
 
 #![cfg(target_os = "linux")]
 
@@ -1350,9 +1349,9 @@ async fn session_harness(provider: Arc<StaticPortProvider>) -> SessionHarness {
     }
 }
 
-/// 1. First high-confidence bare open creates a generated persistent
-///    profile; open result, list_profiles, get_status, and list_connections
-///    all agree — and real serial traffic flows.
+/// High-confidence bare open creates a generated persistent profile. Open,
+/// list_profiles, get_status, and list_connections agree, and serial traffic
+/// flows through the real PTY.
 #[tokio::test]
 async fn auto_session_first_open_creates_generated_profile_and_pty_traffic_flows() {
     let mut pty = PtyPair::open().expect("openpty");
@@ -1443,8 +1442,8 @@ async fn auto_session_first_open_creates_generated_profile_and_pty_traffic_flows
     harness._client.cancel().await.ok();
 }
 
-/// 2. Close/reopen automatically selects the same profile and increments
-///    usage without bumping revision; real traffic still flows.
+/// Close/reopen automatically selects the same profile and increments usage
+/// without bumping revision; real traffic still flows.
 #[tokio::test]
 async fn auto_session_close_reopen_selects_same_profile_and_increments_usage() {
     let mut pty = PtyPair::open().expect("openpty");
@@ -1515,8 +1514,8 @@ async fn auto_session_close_reopen_selects_same_profile_and_increments_usage() {
     harness._client.cancel().await.ok();
 }
 
-/// 3. A different serial number with the same VID/PID gets a different
-///    generated profile.
+/// Different serial numbers with the same VID/PID get different generated
+/// profiles.
 #[tokio::test]
 async fn auto_session_different_serial_same_vid_pid_gets_different_profile() {
     let pty1 = PtyPair::open().expect("openpty");
@@ -1552,9 +1551,8 @@ async fn auto_session_different_serial_same_vid_pid_gets_different_profile() {
     harness._client.cancel().await.ok();
 }
 
-/// 4. Two live ports with a duplicate high fingerprint produce a transient
-///    ambiguity session — settings are never applied to an
-///    indistinguishable device.
+/// Duplicate high fingerprints across live ports produce a transient ambiguity
+/// session; settings are never applied to an indistinguishable device.
 #[tokio::test]
 async fn auto_session_duplicate_fingerprint_two_ports_is_transient() {
     let pty1 = PtyPair::open().expect("openpty");
@@ -1588,8 +1586,8 @@ async fn auto_session_duplicate_fingerprint_two_ports_is_transient() {
     harness._client.cancel().await.ok();
 }
 
-/// 5. Weak PTY identity opens with a transient session and leaves the
-///    profile store untouched (no durable profile, no file).
+/// Weak PTY identity opens with a transient session and leaves the profile
+/// store untouched (no durable profile, no file).
 #[tokio::test]
 async fn auto_session_weak_pty_identity_is_transient_and_store_stays_empty() {
     let pty = PtyPair::open().expect("openpty");
@@ -1622,8 +1620,8 @@ async fn auto_session_weak_pty_identity_is_transient_and_store_stays_empty() {
     harness._client.cancel().await.ok();
 }
 
-/// 6. `profile_mode="none"` disables automatic selection/creation and
-///    returns an observable disabled binding.
+/// `profile_mode="none"` disables automatic selection/creation and returns an
+/// observable disabled binding.
 #[tokio::test]
 async fn auto_session_profile_mode_none_disables_selection_and_creation() {
     let pty = PtyPair::open().expect("openpty");
@@ -1663,10 +1661,9 @@ async fn auto_session_profile_mode_none_disables_selection_and_creation() {
     harness._client.cancel().await.ok();
 }
 
-/// 7. An explicit open field overrides the selected profile's default for
-///    the live connection AND is persisted write-through immediately
-///    (open-override learning): the binding comes back clean with
-///    a bumped revision, and the next bare reopen applies the override.
+/// Explicit open fields override selected profile defaults and persist through
+/// open-override learning; the binding is clean with a bumped revision, and the
+/// next bare reopen applies the override.
 #[tokio::test]
 async fn learning_explicit_open_override_persists_immediately_and_next_reopen_uses_it() {
     let pty = PtyPair::open().expect("openpty");
@@ -1742,8 +1739,8 @@ async fn learning_explicit_open_override_persists_immediately_and_next_reopen_us
     harness._client.cancel().await.ok();
 }
 
-/// 8. A separate HTTP client observes the same active binding and the
-///    generated profile.
+/// A separate HTTP client observes the same active binding and generated
+/// profile.
 #[tokio::test]
 async fn auto_session_second_http_client_observes_binding_and_profile() {
     let pty = PtyPair::open().expect("openpty");
@@ -1816,9 +1813,8 @@ async fn auto_session_second_http_client_observes_binding_and_profile() {
     client_b.cancel().await.ok();
 }
 
-/// 9. `open_profile` with two matching ports returns a tool error; exactly
-///    one match works and becomes the last-used winner for a later bare
-///    open.
+/// `open_profile` with two matching ports returns a tool error; exactly one
+/// match works and becomes the last-used winner for a later bare open.
 #[tokio::test]
 async fn open_profile_two_matching_ports_errors_and_exact_one_becomes_last_used_winner() {
     let pty1 = PtyPair::open().expect("openpty");
@@ -1918,7 +1914,7 @@ async fn open_profile_two_matching_ports_errors_and_exact_one_becomes_last_used_
     harness._client.cancel().await.ok();
 }
 
-/// 10. Equal top-ranked profile timestamps produce observable ambiguity.
+/// Equal top-ranked profile timestamps produce observable ambiguity.
 #[tokio::test]
 async fn open_auto_equal_top_ranked_timestamps_produce_ambiguity() {
     let pty = PtyPair::open().expect("openpty");
@@ -2005,8 +2001,8 @@ use_count = 1
     client.cancel().await.ok();
 }
 
-/// 11. Per-call read/write/transact options do not alter usage, revision,
-///     or defaults of the bound profile.
+/// Per-call read/write/transact options do not alter usage, revision, or
+/// defaults of the bound profile.
 #[tokio::test]
 async fn per_call_io_does_not_alter_usage_revision_or_defaults() {
     let mut pty = PtyPair::open().expect("openpty");
@@ -2080,9 +2076,9 @@ async fn per_call_io_does_not_alter_usage_revision_or_defaults() {
     harness._client.cancel().await.ok();
 }
 
-/// 12. Review gate: explicit `open_profile` on a weak-identity port reports
-///     the matched port's OWN confidence (none/low), not a hardcoded high,
-///     while keeping source=explicit.
+/// Explicit `open_profile` on a weak-identity port reports the matched port's
+/// own confidence (none/low), not a hardcoded high, while keeping
+/// source=explicit.
 #[tokio::test]
 async fn open_profile_explicit_binding_reports_matched_port_confidence() {
     // Case 1: path-only PTY (unknown transport, no identity) → None.
@@ -2180,9 +2176,8 @@ async fn open_profile_explicit_binding_reports_matched_port_confidence() {
     harness_low._client.cancel().await.ok();
 }
 
-/// 13. Review gate (M6): explicit `save_profile` of a generated-bound
-///     connection creates a USER-owned profile (`generated=false`) — a
-///     deliberate promotion, not a blind copy of the generated flag.
+/// Explicit `save_profile` of a generated-bound connection creates a user-owned
+/// profile (`generated=false`) instead of copying the generated flag.
 #[tokio::test]
 async fn save_profile_on_generated_bound_connection_promotes_to_user_owned() {
     let pty = PtyPair::open().expect("openpty");
@@ -2274,8 +2269,8 @@ async fn reconfigure_baud(
     result.structured_content.expect("structured")
 }
 
-/// 1. Generated profile revision 1 → reconfigure baud → revision 2
-///    persisted; close/reopen applies the baud on live status.
+/// Reconfigure a generated profile's baud from revision 1 to revision 2;
+/// close/reopen applies the baud on live status.
 #[tokio::test]
 async fn learning_reconfigure_baud_bumps_revision_and_reopen_applies() {
     let pty = PtyPair::open().expect("openpty");
@@ -2328,7 +2323,7 @@ async fn learning_reconfigure_baud_bumps_revision_and_reopen_applies() {
     harness._client.cancel().await.ok();
 }
 
-/// 2. set_flow_control persists and applies on reopen.
+/// `set_flow_control` persists and applies on reopen.
 #[tokio::test]
 async fn learning_set_flow_control_persists_and_applies_on_reopen() {
     let pty = PtyPair::open().expect("openpty");
@@ -2383,8 +2378,8 @@ async fn learning_set_flow_control_persists_and_applies_on_reopen() {
     harness._client.cancel().await.ok();
 }
 
-/// 3. Connection-mode configure persists framing; reopen and an actual
-///    framed read prove it.
+/// Connection-mode configure persists framing; reopen and an actual framed read
+/// prove it.
 #[tokio::test]
 async fn learning_connection_configure_framing_persists_and_framed_read_proves_it() {
     let mut pty = PtyPair::open().expect("openpty");
@@ -2450,7 +2445,7 @@ async fn learning_connection_configure_framing_persists_and_framed_read_proves_i
     harness._client.cancel().await.ok();
 }
 
-/// 4. Multiple durable changes create a bounded revision history (max 5).
+/// Multiple durable changes create a bounded revision history (max 5).
 #[tokio::test]
 async fn learning_multiple_changes_create_bounded_revision_history() {
     let pty = PtyPair::open().expect("openpty");
@@ -2502,10 +2497,9 @@ async fn learning_multiple_changes_create_bounded_revision_history() {
     harness._client.cancel().await.ok();
 }
 
-/// 5. Non-durable operations never change profile defaults or revision:
-///    BREAK, flush, and per-call framing/match on read/write. (DTR/RTS is
-///    covered by the http_integration loopback suite; PTYs cannot drive
-///    modem lines — ENOTTY.)
+/// Non-durable operations never change profile defaults or revision: BREAK,
+/// flush, and per-call framing/match on read/write. DTR/RTS is covered by the
+/// http_integration loopback suite; PTYs cannot drive modem lines.
 #[tokio::test]
 async fn non_learning_operations_do_not_alter_profile() {
     let mut pty = PtyPair::open().expect("openpty");
@@ -2630,10 +2624,10 @@ async fn non_learning_operations_do_not_alter_profile() {
     harness._client.cancel().await.ok();
 }
 
-/// 6. Partial failure: live reconfigure succeeds, profile write fails
-///    (read-only dir) → result stays successful with `state="failed"`,
-///    binding dirty, cache/file old. Restoring permissions + clean close
-///    retries and persists; reopen uses the new baud.
+/// Partial failure: live reconfigure succeeds, profile write fails (read-only
+/// dir) → result stays successful with `state="failed"`, binding dirty, and
+/// cache/file old. Restoring permissions and clean close retries and persists;
+/// reopen uses the new baud.
 #[tokio::test]
 async fn learning_partial_failure_reports_failed_and_clean_close_retries() {
     use std::os::unix::fs::PermissionsExt;
@@ -2740,10 +2734,10 @@ async fn learning_partial_failure_reports_failed_and_clean_close_retries() {
     client.cancel().await.ok();
 }
 
-/// 7. CAS/stale: an external profile-mode configure bumps the bound
-///    profile; the next live reconfigure succeeds but reports a conflict,
-///    the binding turns stale, and the newer profile remains untouched.
-///    Close does not overwrite the stale profile.
+/// An external profile-mode configure bumps the bound profile; the next live
+/// reconfigure succeeds but reports a conflict, the binding turns stale, and
+/// the newer profile remains untouched. Close does not overwrite the stale
+/// profile.
 #[tokio::test]
 async fn learning_cas_conflict_marks_stale_and_close_does_not_overwrite() {
     let pty = PtyPair::open().expect("openpty");
@@ -2832,9 +2826,9 @@ async fn learning_cas_conflict_marks_stale_and_close_does_not_overwrite() {
     client_b.cancel().await.ok();
 }
 
-/// 8. Rollback restores a prior baud as a new monotonic revision; the
-///    active connection stays unchanged and stale; close cannot overwrite
-///    the rollback; reopen applies the rolled-back baud.
+/// Rollback restores a prior baud as a new monotonic revision; the active
+/// connection stays unchanged and stale; close cannot overwrite the rollback;
+/// reopen applies the rolled-back baud.
 #[tokio::test]
 async fn rollback_restores_prior_baud_and_active_connection_stays_unchanged() {
     let pty = PtyPair::open().expect("openpty");
@@ -2919,8 +2913,8 @@ async fn rollback_restores_prior_baud_and_active_connection_stays_unchanged() {
     harness._client.cancel().await.ok();
 }
 
-/// 9. Rollback of a framing revision: after reopen, actual framed traffic
-///    proves the restored framing default.
+/// Rollback of a framing revision: after reopen, actual framed traffic proves
+/// the restored framing default.
 #[tokio::test]
 async fn rollback_framing_revision_proves_framed_traffic_after_reopen() {
     let mut pty = PtyPair::open().expect("openpty");
@@ -3027,8 +3021,8 @@ async fn rollback_framing_revision_proves_framed_traffic_after_reopen() {
     harness._client.cancel().await.ok();
 }
 
-/// 10. Wrong expected revision and evicted revision are tool errors that
-///     leave the file unchanged.
+/// Wrong expected revision and evicted revision are tool errors that leave the
+/// file unchanged.
 #[tokio::test]
 async fn rollback_wrong_expected_and_evicted_revision_error_without_file_change() {
     let pty = PtyPair::open().expect("openpty");
@@ -3109,8 +3103,8 @@ async fn rollback_wrong_expected_and_evicted_revision_error_without_file_change(
     harness._client.cancel().await.ok();
 }
 
-/// 11. Deleting a profile bound to an open connection errors with the
-///     connection ID; after close, deletion succeeds.
+/// Deleting a profile bound to an open connection errors with the connection
+/// ID; after close, deletion succeeds.
 #[tokio::test]
 async fn delete_profile_bound_to_open_connection_errors_and_succeeds_after_close() {
     let pty = PtyPair::open().expect("openpty");
@@ -3177,8 +3171,8 @@ async fn delete_profile_bound_to_open_connection_errors_and_succeeds_after_close
     harness._client.cancel().await.ok();
 }
 
-/// 12. Rollback with no active bound connections reports zero and the
-///     reopened device applies the restored defaults.
+/// Rollback with no active bound connections reports zero, and the reopened
+/// device applies the restored defaults.
 #[tokio::test]
 async fn rollback_with_no_active_connections_reports_zero() {
     let pty = PtyPair::open().expect("openpty");
@@ -3266,9 +3260,8 @@ fn match_for<'a>(listed: &'a serde_json::Value, port: &str) -> &'a serde_json::V
         .unwrap_or_else(|| panic!("no profile_match entry for {port}: {listed}"))
 }
 
-/// 1. Empty store: one `none` entry per port, parallel to `ports`, with the
-///    `ports` array serialized exactly like the provider's raw PortInfo
-///    (match metadata never contaminates OS enumeration).
+/// Empty store returns one `none` entry per port, parallel to `ports`, with the
+/// `ports` array serialized exactly like the provider's raw PortInfo.
 #[tokio::test]
 async fn list_ports_preview_empty_store_reports_none_parallel_and_pure_ports() {
     let pty1 = PtyPair::open().expect("openpty");
@@ -3316,9 +3309,9 @@ async fn list_ports_preview_empty_store_reports_none_parallel_and_pure_ports() {
     harness._client.cancel().await.ok();
 }
 
-/// 2. Generated/saved high profiles preview as `selected` with the right
-///    name/revision, and the unique last-used winner matches what a later
-///    bare `open` actually selects.
+/// Generated/saved high profiles preview as `selected` with the right
+/// name/revision, and the unique last-used winner matches what a later bare
+/// `open` actually selects.
 #[tokio::test]
 async fn list_ports_preview_selected_winner_matches_later_bare_open() {
     let pty = PtyPair::open().expect("openpty");
@@ -3398,9 +3391,9 @@ async fn list_ports_preview_selected_winner_matches_later_bare_open() {
     harness._client.cancel().await.ok();
 }
 
-/// 3. Equal top rank (two saved profiles that were never used): `ambiguous`,
-///    both candidates listed, no selected profile — and a bare open stays
-///    transient instead of guessing.
+/// Equal top rank (two saved profiles that were never used) returns
+/// `ambiguous`, lists both candidates, and leaves bare open transient instead
+/// of guessing.
 #[tokio::test]
 async fn list_ports_preview_equal_timestamps_is_ambiguous_and_open_stays_transient() {
     let pty = PtyPair::open().expect("openpty");
@@ -3462,8 +3455,8 @@ async fn list_ports_preview_equal_timestamps_is_ambiguous_and_open_stays_transie
     harness._client.cancel().await.ok();
 }
 
-/// 4. Duplicate live high fingerprints: `duplicate` for BOTH ports, never a
-///    selection — even when a matching profile exists.
+/// Duplicate live high fingerprints return `duplicate` for both ports, never a
+/// selection, even when a matching profile exists.
 #[tokio::test]
 async fn list_ports_preview_duplicate_fingerprints_report_duplicate() {
     let pty1 = PtyPair::open().expect("openpty");
@@ -3513,9 +3506,9 @@ async fn list_ports_preview_duplicate_fingerprints_report_duplicate() {
     harness._client.cancel().await.ok();
 }
 
-/// 5. Medium identity (VID/PID, no serial): never auto-selected; explicitly
-///    matching non-empty selectors are `ineligible` candidates, and empty
-///    selectors (which match every port) are excluded.
+/// Medium identity (VID/PID, no serial) is never auto-selected; explicitly
+/// matching non-empty selectors are `ineligible` candidates, and empty
+/// selectors that match every port are excluded.
 #[tokio::test]
 async fn list_ports_preview_medium_identity_ineligible_and_empty_selector_excluded() {
     let pty = PtyPair::open().expect("openpty");
@@ -3572,7 +3565,7 @@ async fn list_ports_preview_medium_identity_ineligible_and_empty_selector_exclud
     harness._client.cancel().await.ok();
 }
 
-/// 6. Deleting the only matching profile returns the preview to `none`.
+/// Deleting the only matching profile returns the preview to `none`.
 #[tokio::test]
 async fn list_ports_preview_delete_profile_returns_to_none() {
     let pty = PtyPair::open().expect("openpty");
@@ -3614,8 +3607,7 @@ async fn list_ports_preview_delete_profile_returns_to_none() {
     harness._client.cancel().await.ok();
 }
 
-/// 7. Fresh read across store instances: a second store writing to the same
-///    file (as another process would) is visible to `list_ports` immediately.
+/// A fresh read across store instances sees a second store's write immediately.
 #[tokio::test]
 async fn list_ports_preview_fresh_read_sees_second_store_write() {
     let pty = PtyPair::open().expect("openpty");
@@ -3665,16 +3657,9 @@ async fn list_ports_preview_fresh_read_sees_second_store_write() {
     harness._client.cancel().await.ok();
 }
 
-/// 8. A real `list_ports` response (with candidates and a selection)
-///    validates against the generated schema's wire types, and the
-///    catalog schema carries no non-standard uint formats.
-///
-/// Note: the FULL generated `ListPortsResult` schema cannot validate raw OS
-/// enumeration output because schemars marks `PortInfo.vid`/`pid`/`interface`
-/// `required` while serde `skip_serializing_if` omits them when `None` — a
-/// pre-existing `PortInfo` schema quirk that the preview wire types must not
-/// touch (see the "Do not change `PortInfo`" non-scope). The preview wire
-/// types (`PortProfileMatch`/`ProfileMatchCandidate`) validate cleanly.
+/// A real `list_ports` response validates profile-preview entries against their
+/// generated schema definitions, and the catalog schema emits no non-standard
+/// uint formats.
 #[tokio::test]
 async fn list_ports_preview_output_validates_against_generated_schema() {
     let pty = PtyPair::open().expect("openpty");

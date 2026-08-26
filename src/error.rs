@@ -1,3 +1,5 @@
+//! Serial error types and result alias.
+
 use thiserror::Error;
 
 #[derive(Debug, Error)]

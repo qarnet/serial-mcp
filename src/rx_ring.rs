@@ -8,8 +8,8 @@
 //!
 //! ## Offset model
 //!
-//! - `end_offset` is monotonic — total bytes ever appended (never decreases,
-//!   even across `clear`).
+//! - `end_offset` is monotonic: total bytes ever appended. It never decreases,
+//!   even across `clear`.
 //! - `start_offset = max(0, end_offset - retained)` where `retained` is the
 //!   number of valid bytes currently in the ring (`≤ capacity`). Bytes below
 //!   `start_offset` are gone (wrapped out or never stored).
@@ -28,8 +28,6 @@ use std::sync::atomic::Ordering;
 use std::sync::Mutex;
 
 use tokio::sync::Notify;
-
-// ── Public types ──────────────────────────────────────────────────────────────
 
 /// A sliding-window ring buffer with absolute u64 stream offsets.
 ///
@@ -65,8 +63,6 @@ pub(crate) struct RingSlice {
     pub bytes_lost: u64,
 }
 
-// ── Internal state ───────────────────────────────────────────────────────────
-
 #[allow(dead_code)]
 struct Inner {
     /// Ring storage, always exactly `capacity` bytes long.
@@ -74,11 +70,9 @@ struct Inner {
     /// First valid stream offset in the buffer. Advances when old data is
     /// wrapped out or when `clear()` is called.
     start_offset: u64,
-    /// Total bytes appended since construction. Monotonic — never decreases.
+    /// Total bytes appended since construction. Monotonic and never decreases.
     end_offset: u64,
 }
-
-// ── Construction ─────────────────────────────────────────────────────────────
 
 #[allow(dead_code)]
 impl RxRing {
@@ -122,8 +116,6 @@ impl RxRing {
         self.bytes_wrapped_total.load(Ordering::Relaxed)
     }
 }
-
-// ── Append (pump only) ───────────────────────────────────────────────────────
 
 #[allow(dead_code)]
 impl RxRing {
@@ -178,8 +170,6 @@ impl RxRing {
         self.notify.notify_waiters();
     }
 }
-
-// ── Read (non-blocking, never fails) ─────────────────────────────────────────
 
 #[allow(dead_code)]
 impl RxRing {
@@ -245,15 +235,13 @@ impl RxRing {
     }
 }
 
-// ── Clear + wait ─────────────────────────────────────────────────────────────
-
 #[allow(dead_code)]
 impl RxRing {
     /// Flush all retained data.
     ///
     /// Sets `start_offset = end_offset`. The ring appears empty until
     /// subsequent `append` calls advance `end_offset` further. `end_offset`
-    /// remains monotonic — it is never reset.
+    /// remains monotonic and is never reset.
     pub fn clear(&self) {
         let mut inner = self.inner.lock().expect("ring mutex poisoned");
         inner.start_offset = inner.end_offset;
@@ -268,7 +256,7 @@ impl RxRing {
     /// avoid `clippy::await_holding_lock`.
     pub async fn wait_for_data(&self, after: u64) {
         loop {
-            // Register interest BEFORE checking the condition. This is the
+            // Register interest before checking the condition. This is the
             // canonical Notify pattern: if notify_waiters fires between
             // notified() creation and the lock acquisition, the future still
             // resolves immediately because Tokio stores the permit.
@@ -284,8 +272,6 @@ impl RxRing {
         }
     }
 }
-
-// ── Helpers: write / read with wrap ─────────────────────────────────────────
 
 /// Copy `src` into `buf` starting at physical index `phys`, wrapping around
 /// the buffer boundary as needed.
@@ -319,13 +305,9 @@ fn read_ring(buf: &[u8], phys: usize, take: usize) -> Vec<u8> {
     }
 }
 
-// ── Tests ────────────────────────────────────────────────────────────────────
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // ── Construction ──────────────────────────────────────────────────────
 
     #[test]
     fn new_ring_has_zero_offsets() {
@@ -345,8 +327,6 @@ mod tests {
     fn new_zero_capacity_panics() {
         let _ring = RxRing::new(0);
     }
-
-    // ── Basic append + read ───────────────────────────────────────────────
 
     #[test]
     fn append_advances_end_offset() {
@@ -414,8 +394,6 @@ mod tests {
         assert_eq!(slice.bytes_lost, 0);
     }
 
-    // ── Append empty ──────────────────────────────────────────────────────
-
     #[test]
     fn append_empty_is_noop() {
         let ring = RxRing::new(16);
@@ -426,8 +404,6 @@ mod tests {
         let slice = ring.read_from(0, 10);
         assert_eq!(slice.bytes, b"abc");
     }
-
-    // ── Wrap: append past capacity drops oldest ───────────────────────────
 
     #[test]
     fn append_wraps_and_drops_oldest() {
@@ -457,7 +433,7 @@ mod tests {
 
     #[test]
     fn append_larger_than_capacity_keeps_only_tail() {
-        // capacity 4, append 8 bytes — only last 4 survive.
+        // capacity 4, append 8 bytes, so only the last 4 survive.
         let ring = RxRing::new(4);
         ring.append(b"abcdefgh"); // 8 bytes
         assert_eq!(ring.start_offset(), 4);
@@ -518,8 +494,6 @@ mod tests {
         assert_eq!(slice.bytes_lost, 0);
     }
 
-    // ── Gap accounting ────────────────────────────────────────────────────
-
     #[test]
     fn read_from_gap_accounting_when_cursor_below_start() {
         let ring = RxRing::new(4);
@@ -544,8 +518,6 @@ mod tests {
         assert_eq!(slice.bytes_lost, 0);
         assert_eq!(slice.from_offset, 4);
     }
-
-    // ── Clear ─────────────────────────────────────────────────────────────
 
     #[test]
     fn clear_resets_retained_start_catches_up_to_end() {
@@ -584,8 +556,6 @@ mod tests {
         assert_eq!(slice.bytes_lost, 0);
     }
 
-    // ── Cursor at end_offset (caught up) ─────────────────────────────────
-
     #[test]
     fn read_from_caught_up_reader_gets_empty() {
         let ring = RxRing::new(16);
@@ -596,8 +566,6 @@ mod tests {
         assert_eq!(slice.next_offset, 3);
         assert_eq!(slice.bytes_lost, 0);
     }
-
-    // ── Notify wakeups ────────────────────────────────────────────────────
 
     #[tokio::test]
     async fn wait_for_data_wakes_on_append() {
@@ -612,7 +580,7 @@ mod tests {
         // Brief yield so the task parks.
         tokio::task::yield_now().await;
 
-        // Append — should wake the parked task.
+        // Append to wake the parked task.
         ring.append(b"x");
         handle.await.unwrap();
     }
@@ -639,10 +607,10 @@ mod tests {
 
         tokio::task::yield_now().await;
 
-        // Notify without appending data — spurious.
+        // Notify without appending data. This is spurious.
         ring.notify.notify_waiters();
 
-        // The task should re-check and park again, NOT return.
+        // The task should re-check and park again, not return.
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
         assert!(!handle.is_finished());
 
@@ -671,8 +639,6 @@ mod tests {
         r2.await.unwrap();
     }
 
-    // ── Send + Sync ───────────────────────────────────────────────────────
-
     #[test]
     fn ring_is_send_and_sync() {
         fn assert_send<T: Send>() {}
@@ -680,8 +646,6 @@ mod tests {
         assert_send::<RxRing>();
         assert_sync::<RxRing>();
     }
-
-    // ── End offset monotonicity ───────────────────────────────────────────
 
     #[test]
     fn end_offset_never_decreases_across_clear() {
@@ -693,7 +657,7 @@ mod tests {
     }
 
     /// bytes_wrapped_total accumulates lifetime wrap-loss across multiple wraps
-    /// and is NOT reset by clear().
+    /// and is not reset by clear().
     #[test]
     fn bytes_wrapped_total_accumulates_across_wraps_and_survives_clear() {
         let ring = RxRing::new(4);
@@ -704,7 +668,7 @@ mod tests {
         assert_eq!(ring.bytes_wrapped_total(), 4);
 
         // read_from with cursor below start reports per-slice bytes_lost,
-        // but does NOT increment bytes_wrapped_total (which is wrap-only).
+        // but does not increment bytes_wrapped_total (which is wrap-only).
         let s1 = ring.read_from(2, 4);
         assert_eq!(s1.bytes_lost, 2);
         assert_eq!(ring.bytes_wrapped_total(), 4); // unchanged by read
@@ -714,16 +678,14 @@ mod tests {
         // start 4→12, end 8→16, drop positions 4..12 (8 bytes lost on wrap).
         assert_eq!(ring.bytes_wrapped_total(), 12);
 
-        // clear() does NOT reset the lifetime accumulator.
+        // clear() does not reset the lifetime accumulator.
         ring.clear();
         assert_eq!(ring.bytes_wrapped_total(), 12);
 
-        // Append without wrap — no additional loss.
+        // Append without wrap, so there is no additional loss.
         ring.append(b"qr");
         assert_eq!(ring.bytes_wrapped_total(), 12);
     }
-
-    // ── Proptest: modeled append/read vs reference stream ─────────────────
 
     mod proptest_tests {
         use proptest::prelude::*;
@@ -736,7 +698,7 @@ mod tests {
             fn rx_ring_append_read_preserves_stream_and_offset_arithmetic(
                 ops in ops_strategy()
             ) {
-                let capacity = 4; // small — forces frequent wraps
+                let capacity = 4; // small, forcing frequent wraps
                 let ring = super::RxRing::new(capacity);
                 let mut total_appended: u64 = 0;
                 let mut stream: Vec<u8> = Vec::new();

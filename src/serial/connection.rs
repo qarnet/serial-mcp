@@ -1,8 +1,5 @@
-//! The single open serial connection: the `SerialIo` backend trait and its
-//! production `SerialStream` implementation, the `SerialConnection` struct
-//! with all methods, stream construction and baud validation, serialport
-//! error conversion, and connection/I/O/close/disconnect-state tests.
-//! Config types come from the `config` sibling; `PortInfo` from `port_info`.
+//! Single serial connection, `SerialIo` backends, lifecycle, and tests.
+//! Configuration types come from `config`; `PortInfo` comes from `port_info`.
 
 use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -26,20 +23,18 @@ use super::config::{
 };
 use super::port_info::PortInfo;
 
-// ---- I/O backend trait -------------------------------------------------------
+// I/O backend trait.
 
-/// Abstraction over the underlying byte stream plus the modem-control lines
-/// of a serial port.
+/// Abstraction over a serial byte stream and its modem-control lines.
 ///
-/// The production backend ([`SerialStream`]) talks to a real OS-level
-/// serial port. Tests substitute an in-memory implementation backed by
-/// [`tokio::io::duplex`] so that read/write/transact can be exercised
-/// without any hardware.
+/// The production backend ([`SerialStream`]) talks to an OS serial port.
+/// Tests use an in-memory [`tokio::io::duplex`] backend to exercise
+/// read/write/transact without hardware.
 ///
 /// Control-line operations (`clear_os_buffers`, `set_dtr_rts`,
-/// `set_flow_control`, `set_break_state`) are required methods so the trait can stay
-/// object-safe even when the backend doesn't have a real port behind it;
-/// in-memory backends typically implement them as no-ops.
+/// `set_flow_control`, `set_break_state`) are required to keep the trait
+/// object-safe for backends without a physical port. In-memory backends usually
+/// implement them as no-ops.
 pub trait SerialIo: AsyncRead + AsyncWrite + Send + Unpin {
     fn clear_os_buffers(&self, target: FlushTarget) -> std::io::Result<()>;
     fn set_dtr_rts(&mut self, dtr: bool, rts: bool) -> std::io::Result<()>;
@@ -113,10 +108,10 @@ fn io_error_from_serialport(err: serialport::Error) -> std::io::Error {
     std::io::Error::other(err.to_string())
 }
 
-// ---- Single open connection --------------------------------------------------
+// Single open connection.
 
-/// A single open serial port. Cheap to clone via [`Arc`] because all state lives
-/// behind a [`Mutex`].
+/// Open serial port. State lives behind mutexes, so sharing through [`Arc`] is
+/// cheap.
 pub struct SerialConnection {
     id: String,
     port: String,
@@ -133,15 +128,14 @@ pub struct SerialConnection {
     tx_bytes: AtomicU64,
     /// Total bytes read from the device and delivered through any RX path.
     rx_bytes: AtomicU64,
-    /// Wall-clock time of the last rx or tx byte operation.
+    /// Time of the most recent RX or TX byte operation.
     last_activity: StdMutex<Option<std::time::SystemTime>>,
     /// Number of successful read-pipeline operations (`read`, `transact` read
     /// half, `capture_boot`).
     read_ops: AtomicU64,
     /// Number of successful `write` operations.
     write_ops: AtomicU64,
-    /// Number of RX operations where data was truncated
-    /// (bytes_returned < bytes_observed).
+    /// Number of RX operations with truncation (`bytes_returned < bytes_observed`).
     truncation_count: AtomicU64,
     /// OS-level port identity captured at open time.
     port_info: Option<PortInfo>,
@@ -163,20 +157,19 @@ pub struct SerialConnection {
     rx_parser_default: StdMutex<Option<crate::framing::ParserConfig>>,
     /// Default protocol preset from profile/open call.
     protocol_default: StdMutex<Option<crate::framing::ProtocolPreset>>,
-    /// Default max buffered bytes for `read` (from profile/open, mutable live).
+    /// Default read buffer limit from profile/open. Mutable live.
     max_buffered_bytes_default: AtomicUsize,
-    /// Active profile-session binding. `None` for connections
-    /// inserted directly by low-level tests.
+    /// Active profile-session binding. `None` for connections inserted directly
+    /// by low-level tests.
     active_profile: StdMutex<Option<ActiveProfileBinding>>,
-    /// Serializes durable write-through-learning sequences on this
-    /// connection (live mutation → effective snapshot → CAS persistence →
-    /// binding update). Held across `reconfigure`/`set_flow_control`/
-    /// connection-mode `configure`/clean close so concurrent requests
-    /// cannot snapshot each other's half-applied state.
+    /// Serializes durable write-through learning on this connection. Held
+    /// across live mutation, the effective snapshot, CAS persistence, and the
+    /// binding update. Durable reconfigure, flow-control, connection configure,
+    /// and clean close also hold it across their live mutation and persistence.
     learning_lock: tokio::sync::Mutex<()>,
-    /// Serializes line-control operations: `set_dtr_rts` and the
-    /// `capture_boot` reset pulse both hold this so a concurrent line-control
-    /// request cannot interleave inside an assert/hold/release sequence.
+    /// Serializes line-control operations. `set_dtr_rts` and the
+    /// `capture_boot` reset pulse hold it across the full assert/hold/release
+    /// sequence, preventing interleaving.
     control_lock: tokio::sync::Mutex<()>,
     /// Effective RX ring buffer size from the open config, so profile
     /// snapshots never depend on whichever handler-local `RxSessionManager`
@@ -312,8 +305,7 @@ impl SerialConnection {
         &self.log
     }
 
-    /// Default TX framing stored on the connection (from profile or `open`).
-    /// Returns by value (cloned from interior mutex for live mutation).
+    /// Default TX framing from the profile or `open`, returned by value.
     pub fn tx_framing_default(&self) -> Option<crate::framing::TxFramingConfig> {
         self.tx_framing_default.lock().expect("poisoned").clone()
     }
@@ -328,8 +320,7 @@ impl SerialConnection {
         self.rx_parser_default.lock().expect("poisoned").clone()
     }
 
-    /// Default protocol preset stored on the connection. `Copy`, so returned by value.
-    /// Lock internal mutex for live mutation via `configure`.
+    /// Default protocol preset stored on the connection, returned by value.
     pub fn protocol_default(&self) -> Option<crate::framing::ProtocolPreset> {
         *self
             .protocol_default
@@ -385,9 +376,9 @@ impl SerialConnection {
     /// Snapshot the connection's full effective `ProfileDefaults`: current
     /// serial parameters, framing/parser/protocol defaults, the stored RX
     /// buffer size, read defaults, reconnect policy, log
-    /// configuration, and the connection name. Used by write-through
-    /// learning, close retry, and explicit `save_profile` — never consults
-    /// a handler-local `RxSessionManager`.
+    /// configuration, and the connection name. Used by write-through learning,
+    /// close retry, and explicit `save_profile`; never consults a handler-local
+    /// `RxSessionManager`.
     pub(crate) fn effective_defaults(&self) -> crate::profiles::ProfileDefaults {
         crate::profiles::ProfileDefaults {
             baud_rate: self.baud_rate(),
@@ -413,7 +404,7 @@ impl SerialConnection {
         self.rx_buffer_size
     }
 
-    // ── Live mutators (pub(crate); exposed via `configure` tool) ──────────
+    // Live mutators (`pub(crate)`), exposed through the `configure` tool.
 
     /// Set the default TX framing on a live connection.
     pub(crate) fn set_tx_framing_default(&self, v: Option<crate::framing::TxFramingConfig>) {
@@ -446,14 +437,14 @@ impl SerialConnection {
         *self.state.lock().expect("state mutex poisoned")
     }
 
-    /// Set the connection state and log the transition.
+    /// Set the connection state.
     fn set_state(&self, new_state: ConnectionState) {
         *self.state.lock().expect("state mutex poisoned") = new_state;
     }
 
-    /// Mark the connection as disconnected due to a fatal I/O error.
-    /// Takes the io handle out (sets to None), cancels in-flight operations,
-    /// and clears RX buffers.
+    /// Mark the connection as disconnected after a fatal I/O error.
+    /// Records the error, clears OS input, and removes the I/O handle without
+    /// cancelling `close_token`, so reconnect remains possible.
     pub async fn mark_disconnected(&self, error_message: String) {
         let was_healthy = self.state().is_healthy();
         self.set_state(ConnectionState::Disconnected);
@@ -461,9 +452,9 @@ impl SerialConnection {
             .lock()
             .expect("poisoned")
             .replace((std::time::SystemTime::now(), error_message.clone()));
-        // We do NOT cancel close_token here — that is reserved for explicit
-        // close(). The pump and in-flight reads will time out naturally and
-        // retry when the port is reconnected.
+        // Do not cancel close_token here. Explicit close owns that cancellation.
+        // The pump and in-flight reads time out naturally and retry when the
+        // port is reconnected.
         self.log.rx_data(0); // dummy to trigger log
         self.log.record(
             None,
@@ -474,7 +465,7 @@ impl SerialConnection {
         // Take the io handle out so subsequent I/O calls get ConnectionClosed
         let mut io_lock = self.io.lock().await;
         if let Some(mut io) = io_lock.take() {
-            // Best-effort: clear OS buffers and shutdown
+            // Best effort: clear OS buffers and shut down.
             let _ = io.clear_os_buffers(FlushTarget::Input);
             let _ = io.shutdown().await;
         }
@@ -550,7 +541,7 @@ impl SerialConnection {
             parity: self.parity(),
             flow_control: self.flow_control(),
             port_info: self.port_info.clone(),
-            log_capacity: 1024, // preserve log config
+            log_capacity: 1024,
             log_enabled: self.log.is_enabled(),
             tx_framing: self.tx_framing_default(),
             rx_framing: self.rx_framing_default(),
@@ -672,11 +663,10 @@ impl SerialConnection {
     /// Read up to `dst.len()` bytes. Returns [`SerialError::ReadTimeout`] if
     /// `timeout_ms` is set and elapses before any byte arrives.
     ///
-    /// When a timeout is given, the lock on the underlying IO is held for at
-    /// most `POLL_MS` milliseconds at a time and released between polls.  This
-    /// lets concurrent `write` calls on the same connection proceed without
-    /// waiting for the full read timeout — which is essential for the
-    /// request/response pattern (`transact`) on CDC-ACM devices.
+    /// With a timeout, hold the underlying I/O lock for at most `POLL_MS`
+    /// milliseconds per poll and release it between polls. This lets concurrent
+    /// `write` calls proceed without waiting for the full read timeout, which is
+    /// essential for the `transact` request/response pattern on CDC-ACM devices.
     pub async fn read(&self, dst: &mut [u8], timeout_ms: Option<u64>) -> Result<usize> {
         const POLL_MS: u64 = 50;
         self.ensure_open()?;
@@ -734,8 +724,8 @@ impl SerialConnection {
                             Err(_elapsed) => {}
                         }
                     }
-                    // Yield to allow the I/O driver time to process epoll events
-                    // before re-acquiring the mutex for the next poll.
+                    // Let the I/O driver process events before the next mutex
+                    // acquisition.
                     tokio::time::sleep(Duration::from_millis(5)).await;
                 }
             }
@@ -762,9 +752,7 @@ impl SerialConnection {
             .map_err(SerialError::from)
     }
 
-    /// Drive the DTR and RTS control lines. Common use case: pulse DTR low
-    /// to soft-reset an Arduino, or hold both low to enter the ESP32
-    /// bootloader.
+    /// Drive the DTR and RTS control lines for reset pulses or bootloader entry.
     ///
     /// Takes the per-connection line-control lock so the change cannot
     /// interleave with a `capture_boot` reset pulse.
@@ -915,12 +903,11 @@ fn build_stream(config: &ConnectionConfig) -> Result<SerialStream> {
         .map_err(|e| SerialError::OpenFailed(format!("{}: {}", config.port, e)))
 }
 
-/// Test-only helpers for `SerialConnection`.
+/// Test helpers for `SerialConnection`.
 #[cfg(test)]
 impl SerialConnection {
-    /// Set the connection state directly. Only available in tests so unit
-    /// tests can exercise `disconnect_state` classification without
-    /// driving the full reconnect state machine.
+    /// Set connection state directly for `disconnect_state` classification
+    /// tests without driving the reconnect state machine.
     pub(crate) fn set_state_for_test(&mut self, state: ConnectionState) {
         *self.state.lock().unwrap() = state;
     }
@@ -1020,23 +1007,22 @@ mod tests {
         let (mut conn, _peer) = loopback_connection("test");
         let mut ctrl = RxStopController::new(Instant::now(), Some(5000), 0, None);
 
-        // Open → Active.
+        // Open to Active.
         assert!(matches!(
             disconnect_state(&conn, &mut ctrl),
             DisconnectState::Active
         ));
 
-        // Set state to Closed → Closed.
+        // Closed stays Closed.
         conn.set_state_for_test(ConnectionState::Closed);
         assert!(matches!(
             disconnect_state(&conn, &mut ctrl),
             DisconnectState::Closed
         ));
 
-        // Set state to Reconnecting with reconnect enabled → Reconnecting.
-        // Note: constructing a Reconnecting state requires a real serial port
-        // (the reconnect state machine drives it), so this test directly sets
-        // the internal state and enable flag.
+        // Reconnecting stays Reconnecting when reconnect is enabled.
+        // Constructing this state through the reconnect machine requires a real
+        // serial port, so the test sets the state and enable flag directly.
         conn.set_state_for_test(ConnectionState::Reconnecting);
         conn.reconnect_policy.lock().unwrap().enabled = true;
         assert!(matches!(
@@ -1044,7 +1030,7 @@ mod tests {
             DisconnectState::Reconnecting
         ));
 
-        // Reconnecting with reconnect disabled → Closed.
+        // Reconnecting becomes Closed when reconnect is disabled.
         conn.reconnect_policy.lock().unwrap().enabled = false;
         assert!(matches!(
             disconnect_state(&conn, &mut ctrl),

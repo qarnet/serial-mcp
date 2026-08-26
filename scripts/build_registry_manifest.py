@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """Build the MCP Registry ``server.json`` manifest for a released version.
 
-Pure Python standard library, fully offline, fail-closed. Every input is
-validated before anything is written; the output file only exists after all
-checks pass and is committed atomically (temp file + rename).
-
-Validation failures exit non-zero with a specific message and never leave a
-partial or stale output file behind.
+Use only the Python standard library, with strict deterministic validation and
+no network access. Validate every input, including each release asset, before
+writing, then commit through a same-directory temp file and atomic rename.
+Validation failures fail closed and return non-zero before output is committed,
+so no partial output is published.
 """
 
 import argparse
@@ -32,11 +31,11 @@ BARE_SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 
 
 class BuildError(Exception):
-    """A validation failure that must abort before any output is written."""
+    """Validation failure that aborts before output is written."""
 
 
 def validate_version(version):
-    """Strict SemVer: MAJOR.MINOR.PATCH only (no pre-release/build metadata)."""
+    """Require MAJOR.MINOR.PATCH without pre-release or build metadata."""
     if not isinstance(version, str) or not SEMVER_RE.fullmatch(version):
         raise BuildError(
             f"invalid version {version!r}: expected strict SemVer MAJOR.MINOR.PATCH"
@@ -44,9 +43,10 @@ def validate_version(version):
 
 
 def load_template(template_path):
-    """Load the historical template; it must have no packages array and must
-    carry a version field (checked against the requested version by the
-    caller)."""
+    """Load historical template and require its string version and no packages.
+
+    The caller compares the template version with the requested version.
+    """
     try:
         with open(template_path, encoding="utf-8") as fh:
             doc = json.load(fh)
@@ -67,10 +67,12 @@ def load_template(template_path):
 
 
 def load_metadata(metadata_path, version):
-    """Load release metadata. Shape: {"tag": "vX.Y.Z", "assets":
-    [{"name": ..., "size": int, "digest": "sha256:hex"|"hex"}]}.
-    The asset list must be exactly the four expected platforms with no
-    duplicates or extras, and the tag must match v<version>."""
+    """Load release metadata and validate its tag and asset entries.
+
+    Require tag ``v<version>`` and exactly the four expected platforms, with
+    no duplicates or extras. Asset entries carry name, positive size, and a
+    ``sha256:<64 hex chars>`` digest.
+    """
     try:
         with open(metadata_path, encoding="utf-8") as fh:
             meta = json.load(fh)
@@ -147,7 +149,7 @@ def _local_digest(path):
 
 
 def build(template_path, version, metadata_path, assets_dir):
-    """Validate everything and return the manifest dict (no file writes)."""
+    """Validate template, metadata, and assets, then return the manifest."""
     validate_version(version)
     template = load_template(template_path)
     if template.get("version") != version:
@@ -195,7 +197,7 @@ def build(template_path, version, metadata_path, assets_dir):
 
 
 def write_atomic(manifest, output_path):
-    """Serialize and commit atomically (same-directory temp + rename)."""
+    """Serialize to a same-directory temp file and commit with an atomic rename."""
     output = Path(output_path)
     output.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(
