@@ -218,9 +218,10 @@
 
         # `nix flake check`
         #
-        # Only the package build is checked here. fmt, clippy, and the test
-        # suite are all run by the build/test/clippy matrix in
-        # .github/workflows/ci.yml on 4 OSes (ubuntu-latest,
+        # The package build is checked here. Formatting is owned by the
+        # standalone `format` job; clippy and the broad Rust test suite are run
+        # by the build/test/clippy matrix in .github/workflows/ci.yml on 4 OSes
+        # (ubuntu-latest,
         # ubuntu-24.04-arm, macos-14, windows-latest).
         # Re-running them via Nix duplicated that work (~10 min of redundant
         # crate compilation + test execution) without adding coverage — the

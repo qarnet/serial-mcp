@@ -3,8 +3,9 @@
 **Status:** Implemented
 
 **Current platform scope:** Production-path real-PTY fixture tests run on Linux.
-macOS and Windows run normal Rust fmt/build/test/clippy plus controlled-backend
-coverage. This scope adds no PTY fallback or production serial behavior change.
+macOS and Windows run normal Rust build/test/clippy plus controlled-backend
+coverage; standalone Ubuntu CI runs format once. This scope adds no PTY fallback
+or production serial behavior change.
 
 ## Context
 

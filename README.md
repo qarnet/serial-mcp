@@ -233,8 +233,9 @@ bash scripts/test-mcp-compat.sh
 ## Development
 
 Before pushing or opening a pull request, run `cargo fmt --all`. CI runs
-`cargo fmt --all -- --check` first. Formatting failures block the build, test,
-and clippy jobs.
+`cargo fmt --all -- --check` once in standalone Ubuntu format job first.
+Formatting failures block dependent expensive Nix, build/test/Clippy, and MCP
+conformance jobs.
 
 ```bash
 cargo test --locked
@@ -250,7 +251,7 @@ cargo test --locked --test device_parity_repeat public_boundary_repeat_gate -- -
 ```
 
 Production-path real-PTY fixture tests run on Linux. macOS and Windows run
-normal Rust fmt/build/test/clippy plus controlled-backend coverage.
+normal Rust build/test/clippy plus controlled-backend coverage.
 
 ## Documentation and status
 

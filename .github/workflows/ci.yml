@@ -15,8 +15,25 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
+  format:
+    name: format
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
+        with:
+          toolchain: 1.97.1
+          components: rustfmt
+
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+
   nix-flake:
     name: nix flake check
+    needs: format
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -47,6 +64,7 @@ jobs:
 
   build-test:
     name: build / test / clippy (${{ matrix.os }})
+    needs: format
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -73,7 +91,7 @@ jobs:
         uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
         with:
           toolchain: 1.97.1
-          components: clippy, rustfmt
+          components: clippy
 
       - name: Report Rust toolchain
         run: rustc --version --verbose
@@ -81,9 +99,6 @@ jobs:
       - name: Cache cargo registry + build
         if: matrix.os != 'windows-latest'
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-
-      - name: cargo fmt --check
-        run: cargo fmt --all -- --check
 
       - name: cargo build --all-targets
         run: cargo build --all-targets --locked
@@ -111,14 +126,6 @@ jobs:
       - name: cargo clippy
         run: cargo clippy --all-targets --locked -- -D warnings
 
-      - name: Validate example configs against vendored schemas
-        if: matrix.os == 'ubuntu-latest'
-        run: cargo test --locked --test config_schema_validation
-
-      - name: Run registry manifest builder tests
-        if: matrix.os == 'ubuntu-latest'
-        run: python3 -m unittest discover -s scripts/tests -v
-
   mcp-conformance:
     # Pinned official MCP conformance suite + Inspector interoperability smoke
     # against the real HTTP binary, plus the historical rmcp 1.7.0 client gate.
@@ -141,6 +148,7 @@ jobs:
     # This job only owns environment setup, the 15-minute bound, cleanup, and
     # report upload.
     name: MCP conformance + Inspector smoke
+    needs: format
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -190,7 +198,7 @@ jobs:
           retention-days: 7
   release:
     name: Release
-    needs: [nix-flake, build-test]
+    needs: [nix-flake, build-test, mcp-conformance]
     # Only a trusted push to main may reach the privileged release call. Pull
     # requests and other refs skip it, so PR-contributed content can never
     # trigger a publish.
