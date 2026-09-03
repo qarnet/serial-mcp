@@ -39,7 +39,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libudev-dev pkg-config
 
       - name: Install pinned nightly toolchain
-        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
         with:
           toolchain: nightly-2026-07-15
 
@@ -47,7 +47,7 @@ jobs:
         run: rustc --version --verbose
 
       - name: Cache cargo registry + fuzz build
-        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
           workspaces: fuzz
 
@@ -90,7 +90,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libudev-dev pkg-config
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
         with:
           toolchain: 1.97.1
 
@@ -98,7 +98,7 @@ jobs:
         run: rustc --version --verbose
 
       - name: Cache cargo registry + build
-        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
 
       - name: Install pinned cargo-mutants
         run: cargo install cargo-mutants --locked --version 27.1.0

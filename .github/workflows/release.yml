@@ -166,7 +166,7 @@ jobs:
         run: ${{ matrix.install }}
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
         with:
           toolchain: 1.97.1
           targets: ${{ matrix.target }}
@@ -187,7 +187,7 @@ jobs:
       # trusted release keeps its cache.
       - name: Cache cargo registry + build (release mode only)
         if: inputs.mode == 'release'
-        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
 
       - name: Configure cross-compilation environment
         if: matrix.linker != ''
@@ -319,7 +319,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libudev-dev pkg-config
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
         with:
           toolchain: 1.97.1
 
