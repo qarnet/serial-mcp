@@ -23,7 +23,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
         with:
           toolchain: 1.97.1
           components: rustfmt
@@ -88,7 +88,7 @@ jobs:
         run: ${{ matrix.install }}
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
         with:
           toolchain: 1.97.1
           components: clippy
@@ -98,7 +98,7 @@ jobs:
 
       - name: Cache cargo registry + build
         if: matrix.os != 'windows-latest'
-        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
 
       - name: cargo build --all-targets
         run: cargo build --all-targets --locked
@@ -161,7 +161,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libudev-dev pkg-config
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
         with:
           toolchain: 1.97.1
 
@@ -169,7 +169,7 @@ jobs:
         run: rustc --version --verbose
 
       - name: Cache cargo registry + build
-        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
 
       - name: Setup Node (exact pinned version)
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
