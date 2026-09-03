@@ -391,10 +391,21 @@ fn repeated_fixture_shutdown_returns_file_descriptors_to_baseline() -> Result<()
         // parallel test harness: sibling tests in this binary own sockets,
         // pipes, and epoll descriptors whose teardown completes outside this
         // test's control, so a raw baseline/final comparison of every
-        // descriptor measures their timing, not fixture teardown. The
-        // `FIXTURE_TEST_SERIALIZER` mutex guarantees no other test in this
-        // binary holds a fixture while this one runs, so the fixture-owned
-        // count is exactly zero at both edges when teardown is leak-free.
+        // descriptor measures their timing, not fixture teardown.
+        //
+        // The baseline is taken as-is, without asserting zero: some
+        // environments (notably the Nix build sandbox) attach the test
+        // process's own stdout/stderr to a PTY, so `/dev/pts/*` descriptors
+        // the fixture does not own legitimately exist at both edges. They
+        // persist for the whole test, so the delta assertion still holds.
+        //
+        // The fixture class is close to sibling-independent here: every test
+        // in this binary normally joins its fixture teardown
+        // (`shutdown().await` closes master and slave) before releasing the
+        // `FIXTURE_TEST_SERIALIZER` mutex, so sibling fixture descriptors do
+        // not appear at the baseline. A fixture that leaks either PTY end
+        // across one spawn/shutdown cycle raises the final count above the
+        // baseline.
         fn fixture_fd_count() -> Result<usize> {
             let count = std::fs::read_dir("/proc/self/fd")?
                 .filter_map(|entry| entry.ok())
@@ -409,10 +420,6 @@ fn repeated_fixture_shutdown_returns_file_descriptors_to_baseline() -> Result<()
             Ok(count)
         }
         let baseline = fixture_fd_count()?;
-        assert_eq!(
-            baseline, 0,
-            "fixture PTY descriptors open at test start; the fixture serializer is broken"
-        );
         for _ in 0..100 {
             let fixture =
                 DeviceFixture::spawn(PingPeer::default(), DeviceFixtureConfig::default()).await?;
