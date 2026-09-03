@@ -247,6 +247,27 @@ bounded; a hung or slow run must fail the job, not idle.
 - Conventional commits used here: `feat:`, `fix:`, `docs:`, `test:`, `refactor:`.
 - Never add attribution footers or co-author lines.
 
+### Documentation and backlog lifecycle
+
+- `docs/development/BACKLOG.md` is the product backlog: every plan or research
+  document must have a backlog entry while pending, and every entry links to
+  its plan document.
+- Plans may be committed while pending or in progress, but are working
+  documents, not permanent documentation.
+- When a plan's work ships (or is abandoned), delete the plan document AND its
+  backlog entry AND any interim handoff documents in the same change.
+  `AGENTS.md`, `CHANGELOG.md`, and the guides under `docs/` own shipped
+  behavior; finished plans must not accumulate in `docs/development/` — that
+  folder is an index of active work, not an archive. Exception: decision
+  records whose outcome outlives the plan (ADRs, investigations with a durable
+  verdict such as `windows-serial-e2e-investigation.md`) may stay and must
+  state their status in the first lines.
+- A WIP branch may be deleted once its content is merged to `main` under any
+  SHA, or once its work is deliberately abandoned — verify with
+  `git log --all --grep` / content diff before deleting. Never keep a branch
+  as the only home of unmerged work: park such work in a plan document with a
+  backlog entry, or delete it deliberately.
+
 ## Orchestrator (xtask)
 
 Single entry-point for building test assets + running all tests in order:
