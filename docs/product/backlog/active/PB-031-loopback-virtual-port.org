@@ -1,0 +1,47 @@
+* BACKLOG [#3] PB-031 User-facing loopback / virtual port backend
+  :PROPERTIES:
+  :ID:         PB-031
+  :TYPE:       feature
+  :SIZE:       M
+  :AREA:       platform
+  :DEPENDS_ON:
+
+** Problem
+
+Agents cannot demo or develop flows with no hardware attached.
+
+** Desired outcome
+
+Expose a virtual echo/scripted device as an openable backend.
+
+** Scope
+
+- Loopback/virtual backend openable through the standard surface.
+
+** Non-goals
+
+- Making the Rust PTY fixture (test-only) a production backend.
+
+** Acceptance criteria
+
+- [ ] Virtual device usable through open/transact without special flags.
+
+** Technical context
+
+The Rust PTY fixture stays test-only.
+
+** Open questions
+
+None.
+
+** Implementation plan
+
+Filled when implementation begins.
+
+** Implementation notes
+
+Updated while implementation is active.
+
+** Result
+
+Filled before the item enters REVIEW.

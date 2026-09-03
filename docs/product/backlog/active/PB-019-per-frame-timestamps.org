@@ -1,0 +1,49 @@
+* BACKLOG [#2] PB-019 Per-frame timestamps
+  :PROPERTIES:
+  :ID:         PB-019
+  :TYPE:       feature
+  :SIZE:       M
+  :AREA:       rx
+  :DEPENDS_ON:
+
+** Problem
+
+Frames cannot be correlated against the event log or across
+connections.
+
+** Desired outcome
+
+Timestamps on decoded frames.
+
+** Scope
+
+- Small additive wire-format change for frame timestamps.
+
+** Non-goals
+
+- Absolute time synchronization across machines.
+
+** Acceptance criteria
+
+- [ ] Timestamps present on frames; correlated against the event log in
+      at least one test.
+
+** Technical context
+
+Decide before 1.0 (wire-format change).
+
+** Open questions
+
+None.
+
+** Implementation plan
+
+Filled when implementation begins.
+
+** Implementation notes
+
+Updated while implementation is active.
+
+** Result
+
+Filled before the item enters REVIEW.

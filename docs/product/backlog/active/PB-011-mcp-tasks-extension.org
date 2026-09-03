@@ -1,0 +1,55 @@
+* BACKLOG [#2] PB-011 MCP Tasks extension (SEP-2663) for long-running operations
+  :PROPERTIES:
+  :ID:         PB-011
+  :TYPE:       feature
+  :SIZE:       L
+  :AREA:       mcp
+  :DEPENDS_ON:
+
+** Problem
+
+Long `read`/`transact`/`capture_boot` calls hold a request open with no
+task handle; a client cannot poll or cancel through the standardized
+mechanism.
+
+** Desired outcome
+
+Task handles for long-running operations with
+`tasks/get`/`update`/`cancel`.
+
+** Scope
+
+- Task lifecycle for long-running tool calls.
+- Client-facing task query/cancel surface.
+
+** Non-goals
+
+- Task persistence across server restarts.
+
+** Acceptance criteria
+
+- [ ] A long read can be observed and cancelled through the tasks
+      surface.
+- [ ] Existing cancellation semantics preserved.
+
+** Technical context
+
+Needs ownership/lifecycle design; interacts with PB-001 runtime
+ownership.
+
+** Open questions
+
+How tasks interact with the stateless modern HTTP request model needs
+design.
+
+** Implementation plan
+
+Filled when implementation begins.
+
+** Implementation notes
+
+Updated while implementation is active.
+
+** Result
+
+Filled before the item enters REVIEW.

@@ -1,7 +1,7 @@
 # Stateless server runtime and platform portability plan
 
 Status: in progress — tracked as the server-runtime entry in
-[BACKLOG.md](../../BACKLOG.md); this document is the design.
+backlog item `PB-001` (`docs/product/backlog/active/PB-001-server-runtime-ownership.org`); this document is the design.
 
 Target baseline: `main` at `cbdcf8b61527f0dfced5f0fc0f71704774c72c71`. No
 runtime behavior changes have landed yet; all baseline citations were
@@ -395,7 +395,7 @@ a need to scatter Windows conditionals through tool handlers.
 | --- | --- | --- |
 | ~~`native_sim` is Linux-only, but one wrapper uses `cfg(unix)` and xtask always builds and runs it.~~ Resolved before implementation: `native_sim` and the NCS firmware stack were removed from `main` (`8d8d33c5`, merged PR #71) and replaced by Linux-only Rust PTY device fixtures, already explicitly Linux-gated in CI. No runtime action left. | (historical) | None. |
 | Real PTY suites are Linux-only, although shared comments still say Linux/macOS. | `tests/serial_pty.rs`, `tests/protocol_emulator*.rs`, `tests/common/mod.rs`. | Label PTY coverage Linux-only. Keep controlled-backend public-MCP tests cross-platform. Add macOS real-device evidence only when a supported fixture exists. |
-| Windows real serial E2E is intentionally deferred. | `docs/development/windows-serial-e2e-investigation.md`. | Preserve decision. No unsigned or privileged virtual COM driver on hosted CI. Require a pre-provisioned signed-driver runner or physical loopback device for native COM proof. |
+| Windows real serial E2E is intentionally deferred. | `docs/reports/windows-serial-e2e-investigation.md`. | Preserve decision. No unsigned or privileged virtual COM driver on hosted CI. Require a pre-provisioned signed-driver runner or physical loopback device for native COM proof. |
 | Compatibility and schema-update scripts assume GNU/Linux tools. | `scripts/test-mcp-compat.sh` requires GNU `timeout`; `scripts/update-config-schemas.sh` calls `sha256sum`; `fuzz/run.sh` assumes Linux/Nix paths. | Keep conformance/fuzz Linux-scoped and state it in help/docs. Make schema checksum use `sha256sum` or `shasum -a 256`, or document Linux-only invocation. |
 
 The right fix is sometimes a portable abstraction and sometimes an honest
@@ -800,7 +800,7 @@ versions.
 | `tests/stdio_integration.rs` | Add stdin-EOF child lifecycle, two-child PTY isolation, and modern discovery-without-initialize proofs. |
 | `tests/native_sim_validation.rs`, `tests/native_sim_connection_lifecycle.rs`, `xtask/src/main.rs` | ~~Mark Linux-only native-sim work with exact target gates and skip it explicitly elsewhere.~~ Obsolete: `native_sim` was removed from `main` (`8d8d33c5`); its replacement PTY fixtures are already Linux-gated. No file changes planned. |
 | `scripts/update-config-schemas.sh`, `scripts/test-mcp-compat.sh`, docs | Add portable checksum fallback or clear Linux scope; correct Linux-only PTY/native-sim wording. |
-| `README.md`, `docs/agent-config.md`, `AGENTS.md`, `docs/development/README.md` | State protocol versus runtime versus port ownership, process-local `connection_id` limits, platform test coverage, shutdown behavior, and test-map updates without changing tool wire contracts. |
+| `README.md`, `docs/guides/agent-configuration.md`, `AGENTS.md`, `docs/README.md` | State protocol versus runtime versus port ownership, process-local `connection_id` limits, platform test coverage, shutdown behavior, and test-map updates without changing tool wire contracts. |
 
 ## Implementation order
 
@@ -827,7 +827,7 @@ versions.
 7. Add two-runtime in-process isolation, Linux two-process PTY ownership, and
    stdio EOF/lifecycle tests with bounded graceful child-stop helpers. Correct
    native-sim and test-tool platform gates.
-8. Update README, `docs/agent-config.md`, AGENTS.md, transport/test-map prose,
+8. Update README, `docs/guides/agent-configuration.md`, AGENTS.md, transport/test-map prose,
    and this plan's status. Add an ADR if public embedding ownership or the
    Windows native-open choice becomes a durable API or deployment contract.
 

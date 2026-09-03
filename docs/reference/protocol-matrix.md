@@ -2,7 +2,7 @@
 
 This matrix lists every serial protocol with a specification in the gitignored
 `resources/` symlink. Longer-horizon items are tracked in the
-[product backlog](../BACKLOG.md).
+[product backlog](../product/README.md).
 
 Specs are cited, never committed. See the License column. Source files are
 named relative to `resources/`.

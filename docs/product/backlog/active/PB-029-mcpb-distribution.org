@@ -1,0 +1,53 @@
+* BACKLOG [#2] PB-029 MCP Bundle (MCPB) distribution
+  :PROPERTIES:
+  :ID:         PB-029
+  :TYPE:       feature
+  :SIZE:       M
+  :AREA:       distribution
+  :DEPENDS_ON:
+
+** Problem
+
+One-click stdio installation in supporting desktop clients requires
+bundling native binaries.
+
+** Desired outcome
+
+Package native release binaries as an MCP Bundle for one-click local
+stdio installation.
+
+** Scope
+
+- `server.type = "binary"` bundle packaging.
+- Platform-specific command overrides; optional user configuration.
+
+** Non-goals
+
+- Protocol work; separate release/distribution project.
+
+** Acceptance criteria
+
+- [ ] Decide one cross-platform bundle vs per-platform bundles, manifest
+      version, signing, update flow.
+- [ ] Clean-machine Claude Desktop tests pass.
+- [ ] Validate/pack with a pinned `@anthropic-ai/mcpb` release.
+
+** Technical context
+
+Release workflow owns artifacts (see AGENTS.md release section).
+
+** Open questions
+
+None.
+
+** Implementation plan
+
+Filled when implementation begins.
+
+** Implementation notes
+
+Updated while implementation is active.
+
+** Result
+
+Filled before the item enters REVIEW.

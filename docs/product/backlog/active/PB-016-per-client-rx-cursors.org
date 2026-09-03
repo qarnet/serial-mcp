@@ -1,0 +1,50 @@
+* BACKLOG [#2] PB-016 Per-client RX cursors
+  :PROPERTIES:
+  :ID:         PB-016
+  :TYPE:       feature
+  :SIZE:       M
+  :AREA:       rx
+  :DEPENDS_ON:
+
+** Problem
+
+The shared read cursor means concurrent clients consume each other's
+positions.
+
+** Desired outcome
+
+Named cursor groups if shared multi-agent access becomes a real usage
+pattern.
+
+** Scope
+
+- Named cursor groups.
+
+** Non-goals
+
+- Full multi-client session management.
+
+** Acceptance criteria
+
+- [ ] Two clients can read independently over the same connection.
+
+** Technical context
+
+Overlaps socket sharing / tee (PB-032). Trigger: real multi-agent usage
+evidence.
+
+** Open questions
+
+Is the shared multi-agent usage pattern real yet?
+
+** Implementation plan
+
+Filled when implementation begins.
+
+** Implementation notes
+
+Updated while implementation is active.
+
+** Result
+
+Filled before the item enters REVIEW.

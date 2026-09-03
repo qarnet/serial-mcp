@@ -1,0 +1,48 @@
+* BACKLOG [#3] PB-039 SECURITY.md / vulnerability disclosure policy
+  :PROPERTIES:
+  :ID:         PB-039
+  :TYPE:       docs
+  :SIZE:       S
+  :AREA:       security
+  :DEPENDS_ON:
+
+** Problem
+
+No vulnerability disclosure policy exists; fine at the current project
+size, but a gap if outside contributors arrive.
+
+** Desired outcome
+
+A disclosure policy when the activation condition is met.
+
+** Scope
+
+- SECURITY.md with contact and disclosure process.
+
+** Non-goals
+
+- Process overhead before the project has outside contributors.
+
+** Acceptance criteria
+
+- [ ] Activation condition: outside contributors arrive on the repo.
+
+** Technical context
+
+Explicitly deferred until then.
+
+** Open questions
+
+None.
+
+** Implementation plan
+
+Filled when implementation begins.
+
+** Implementation notes
+
+Updated while implementation is active.
+
+** Result
+
+Filled before the item enters REVIEW.

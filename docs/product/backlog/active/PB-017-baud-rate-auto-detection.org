@@ -1,0 +1,52 @@
+* BACKLOG [#2] PB-017 Baud-rate auto-detection
+  :PROPERTIES:
+  :ID:         PB-017
+  :TYPE:       feature
+  :SIZE:       M
+  :AREA:       serial
+  :DEPENDS_ON:
+
+** Problem
+
+Agents cannot determine an unknown device's baud rate; guessing is
+wrong.
+
+** Desired outcome
+
+Host-side baud detection that returns inconclusive rather than guessing,
+or no detection at all.
+
+** Scope
+
+- Evaluate host-side detection approaches.
+- A built-in tool should return inconclusive rather than guess.
+
+** Non-goals
+
+- Waveform measurement (needs hardware).
+
+** Acceptance criteria
+
+- [ ] Detection approach studied from EXPLIoT `uart.generic.baudscan`.
+- [ ] Decision recorded: implement with honest inconclusive results, or drop
+      this item.
+
+** Technical context
+
+Host-side detection over USB-serial is heuristic, not waveform.
+
+** Open questions
+
+Whether heuristic detection is worth shipping at all.
+
+** Implementation plan
+
+Filled when implementation begins.
+
+** Implementation notes
+
+Updated while implementation is active.
+
+** Result
+
+Filled before the item enters REVIEW.

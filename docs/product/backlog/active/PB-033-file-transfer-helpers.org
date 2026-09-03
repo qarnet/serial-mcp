@@ -1,0 +1,48 @@
+* BACKLOG [#3] PB-033 File transfer protocols
+  :PROPERTIES:
+  :ID:         PB-033
+  :TYPE:       feature
+  :SIZE:       M
+  :AREA:       protocol
+  :DEPENDS_ON:
+
+** Problem
+
+No serial-native transfer helpers exist for the common loader/protocol
+formats.
+
+** Desired outcome
+
+Generic serial-native transfer helpers if ever needed.
+
+** Scope
+
+- Only generic serial-native transfer helpers.
+
+** Non-goals
+
+- A full DFU/flashing suite (explicit non-goal).
+
+** Acceptance criteria
+
+- [ ] Decision recorded on whether any concrete transfer demand exists.
+
+** Technical context
+
+Deliberately speculative (Wish tier).
+
+** Open questions
+
+None.
+
+** Implementation plan
+
+Filled when implementation begins.
+
+** Implementation notes
+
+Updated while implementation is active.
+
+** Result
+
+Filled before the item enters REVIEW.

@@ -1,0 +1,50 @@
+* BACKLOG [#3] PB-032 Socket sharing / tee / shared live access
+  :PROPERTIES:
+  :ID:         PB-032
+  :TYPE:       feature
+  :SIZE:       L
+  :AREA:       runtime
+  :DEPENDS_ON:
+
+** Problem
+
+A live serial stream cannot be exposed to another consumer while the
+server holds it.
+
+** Desired outcome
+
+Expose a live serial stream/session to another consumer.
+
+** Scope
+
+- Tee or shared-access mechanism for live sessions.
+
+** Non-goals
+
+- The HTTP MCP transport; this is a serial-stream consumer, not a
+      protocol replacement.
+
+** Acceptance criteria
+
+- [ ] Second consumer observes the live stream without disturbing the
+      primary's cursor.
+
+** Technical context
+
+Overlaps PB-016 (per-client cursors) and PB-035 (shared session).
+
+** Open questions
+
+None.
+
+** Implementation plan
+
+Filled when implementation begins.
+
+** Implementation notes
+
+Updated while implementation is active.
+
+** Result
+
+Filled before the item enters REVIEW.

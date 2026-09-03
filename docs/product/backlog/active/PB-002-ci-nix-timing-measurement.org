@@ -1,0 +1,59 @@
+* BACKLOG [#1] PB-002 CI Nix timing measurement and cache investigation
+  :PROPERTIES:
+  :ID:         PB-002
+  :TYPE:       tech-debt
+  :SIZE:       S
+  :AREA:       ci
+  :DEPENDS_ON:
+
+** Problem
+
+`nix flake check` CI duration and cache behavior are unmeasured. Any
+future Nix tuning (cache keys, store limits, source filtering) would be
+guesswork.
+
+** Desired outcome
+
+Recorded cold/warm measurements of cache restore/save and `nix flake
+check` durations, plus knowledge of whether the 8 GiB store cache retains
+dependency outputs, before any further Nix tuning is attempted.
+
+** Scope
+
+- Record cache restore/save duration and `nix flake check` duration over
+  several clean runs and runs with only source changes.
+- Inspect whether the 8 GiB Nix-store cache retains dependency outputs or is
+  repeatedly evicted under the repository cache quota.
+- Record cold versus warm time before changing cache keys, store limits, or
+  source filtering.
+
+** Non-goals
+
+- Any Nix configuration change; measurement only.
+
+** Acceptance criteria
+
+- [ ] Cold/warm timings recorded for clean and source-change-only runs.
+- [ ] Store-cache retention behavior documented with evidence.
+- [ ] Findings recorded so tuning decisions can cite them.
+
+** Technical context
+
+Scope preserved verbatim from the implemented-and-removed CI
+runtime-reduction plan (kept so this follow-up is self-contained).
+
+** Open questions
+
+None.
+
+** Implementation plan
+
+Filled when implementation begins.
+
+** Implementation notes
+
+Updated while implementation is active.
+
+** Result
+
+Filled before the item enters REVIEW.

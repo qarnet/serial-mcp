@@ -9,7 +9,7 @@ collection of source documents for offline reference. It is not part of the
 distribution.
 
 For the user-facing protocol guide covering presets, precedence, and checksum
-behavior, see [../protocols.md](../protocols.md).
+behavior, see [the protocol guide](../guides/protocols.md).
 
 ## Framing modes
 
@@ -32,7 +32,7 @@ behavior, see [../protocols.md](../protocols.md).
 - The `cobs` mode implements *Consistent Overhead Byte Stuffing*, Stu Cheshire
   and Mary Baker, IEEE Network, 1999. The implementation uses the plain
   0x00-delimited Cheshire/Baker variant. The PPP-COBS draft variant with 0x7E is
-  not supported and is tracked in the product backlog (`docs/BACKLOG.md`).
+  not supported and is tracked in the product backlog (`docs/product/`).
   <https://stuartcheshire.org/papers/COBSforToN.pdf>. See also
   draft-ietf-pppext-cobs-00, an expired Internet-Draft.
 
@@ -88,9 +88,9 @@ behavior, see [../protocols.md](../protocols.md).
 
 - HDLC follows ISO/IEC 13239 and RFC 1662, *PPP in HDLC Framing*.
   <https://www.rfc-editor.org/rfc/rfc1662>. The product backlog
-  (`docs/BACKLOG.md`) tracks it as a future framing mode with FCS-16 checksum.
+  (`docs/product/`) tracks it as a future framing mode with FCS-16 checksum.
 - Modbus RTU uses Modbus over Serial Line, RTU mode, with binary frames and
-  CRC-16. The product backlog (`docs/BACKLOG.md`) tracks it as a future
+  CRC-16. The product backlog (`docs/product/`) tracks it as a future
   feature. The `checksums.rs` module
   would gain a CRC-16 function. The `Checksum` trait abstraction would return
   when a second checksum width needs abstraction.

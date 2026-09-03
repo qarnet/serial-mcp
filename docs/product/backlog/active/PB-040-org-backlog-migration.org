@@ -1,0 +1,92 @@
+* IN_PROGRESS [#1] PB-040 Org-mode product backlog and documentation lifecycle
+  :PROPERTIES:
+  :ID:         PB-040
+  :TYPE:       docs
+  :SIZE:       L
+  :AREA:       documentation
+  :DEPENDS_ON:
+
+** Problem
+
+The Markdown backlog table mixes workflow state, priority, and work type
+in one Status column; `docs/development/` mixes policies, references, reports,
+plans, and decisions; completed/abandoned history was being deleted instead
+of retained.
+
+** Desired outcome
+
+One Org file per product item with controlled states and metadata; a
+purpose-named docs taxonomy; Neovim Org agenda as the human view and OpenCode
+skills as the agent interface over the same Git files; implementation agents
+stop at REVIEW with human-only DONE acceptance.
+
+** Scope
+
+- Docs taxonomy: guides/ reference/ product/ design/ adr/ reports/
+  maintenance/.
+- Backlog migration with deterministic IDs (document order).
+- Product contract at docs/product/README.md.
+- OpenCode skills: add/refine/implement product-backlog-item.
+- Neovim Orgmode agenda setup (lazy.nvim plugin).
+- documentation-hygiene skill updated for the new marker path.
+
+** Non-goals
+
+- Backlog parser, Kanban app, database, dashboards, generated indexes.
+- CI enforcement, DONE automation, GitHub sync.
+- Any production serial-mcp behavior change.
+
+** Acceptance criteria
+
+- [ ] Generic docs/development/ grouping replaced by purpose-specific
+      categories.
+- [ ] User docs under guides/; normative policy/matrix under reference/.
+- [ ] Product policy under product/; designs under design/; ADRs kept under
+      adr/; reports and baselines under reports/; maintenance procedures and
+      the hygiene marker under maintenance/.
+- [ ] documentation-hygiene skill and marker agree after the restructure.
+- [ ] docs/BACKLOG.md replaced by one Org file per item, divided into
+      active/ completed/ dropped/.
+- [ ] Every item has a unique stable PB-NNN ID; filename, headline, and ID
+      property agree.
+- [ ] Controlled metadata vocabulary documented.
+- [ ] Entries migrated without inventing missing product requirements.
+- [ ] Near-term/Later/Wish/Infrastructure normalized into independent
+      priority/type/status fields.
+- [ ] Design docs link to their PB items.
+- [ ] Completed and dropped history retained.
+- [ ] Neovim Orgmode installed via lazy.nvim (a normal plugin).
+- [ ] Neovim provides a useful active-backlog agenda, a prominent REVIEW
+      view, and filtering by state/priority/type/area/size.
+- [ ] OpenCode add-product-backlog-item skill documents and follows the
+      schema; allocates IDs across lifecycle dirs; defaults incomplete
+      requests to BACKLOG without fabricating.
+- [ ] AGENTS.md states implementation agents stop at REVIEW; no agent
+      autonomously marks DONE; only explicit human acceptance causes
+      REVIEW -> DONE.
+- [ ] Active documentation references use the new paths; historical
+      changelog content untouched.
+- [ ] No second backlog source of truth remains.
+
+** Technical context
+
+Design doc: docs/design/PB-040-org-backlog-migration.md (this migration's
+executable plan).
+
+** Open questions
+
+None.
+
+** Implementation plan
+
+Phases 1-6 per the design document; phase order: taxonomy, migration,
+skills, nvim, verification, commits.
+
+** Implementation notes
+
+Migration in progress on branch
+docs/product-backlog-and-lifecycle.
+
+** Result
+
+Filled before the item enters REVIEW.

@@ -1,0 +1,59 @@
+* BACKLOG [#1] PB-006 TX pacing / throttling
+  :PROPERTIES:
+  :ID:         PB-006
+  :TYPE:       feature
+  :SIZE:       M
+  :AREA:       tx
+  :DEPENDS_ON:
+
+** Problem
+
+Bootloaders, GRBL controllers, and cheap AT modems drop bytes when the
+host writes one large uninterrupted burst. An agent cannot hand-loop small
+writes with sleeps it cannot actually perform.
+
+** Desired outcome
+
+An MCP client can request bounded host-side pacing for transmitted data
+(inter-chunk or inter-line delay) on `write`, with a per-call field and a
+connection default.
+
+** Scope
+
+- Inter-chunk or inter-line delay on TX operations.
+- Per-call field + connection default (profile-learned like other defaults).
+- Preserve current behavior when pacing is not configured.
+
+** Non-goals
+
+- A general-purpose automation language.
+- Device-specific flashing implementations.
+- Replacing hardware flow control.
+
+** Acceptance criteria
+
+- [ ] Pacing configurable through the intended public interface.
+- [ ] Unpaced operations retain current behavior.
+- [ ] Cancellation leaves the connection usable.
+- [ ] Controlled-backend and PTY tests pass.
+
+** Technical context
+
+TX paths route through shared TX preparation in
+`src/tools/io_ops.rs` (`decode_tx_payload` / `apply_tx_framing`).
+
+** Open questions
+
+None.
+
+** Implementation plan
+
+Filled when implementation begins.
+
+** Implementation notes
+
+Updated while implementation is active.
+
+** Result
+
+Filled before the item enters REVIEW.

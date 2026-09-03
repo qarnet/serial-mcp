@@ -1,0 +1,49 @@
+* BACKLOG [#2] PB-026 RS-485 options
+  :PROPERTIES:
+  :ID:         PB-026
+  :TYPE:       feature
+  :SIZE:       M
+  :AREA:       serial
+  :DEPENDS_ON:
+
+** Problem
+
+Half-duplex RS-485 buses need direction-control timing that the current
+backend does not expose.
+
+** Desired outcome
+
+Half-duplex bus semantics: direction control timing, RTS-based send
+control.
+
+** Scope
+
+- RS-485 mode options and RTS direction control.
+
+** Non-goals
+
+- Multi-drop addressing.
+
+** Acceptance criteria
+
+- [ ] Verified against physical half-duplex hardware (not just PTY).
+
+** Technical context
+
+Needs physical half-duplex and direction-control testing.
+
+** Open questions
+
+None.
+
+** Implementation plan
+
+Filled when implementation begins.
+
+** Implementation notes
+
+Updated while implementation is active.
+
+** Result
+
+Filled before the item enters REVIEW.

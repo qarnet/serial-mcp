@@ -1,0 +1,50 @@
+* BACKLOG [#2] PB-018 Modem input lines + UART error counters in get_status
+  :PROPERTIES:
+  :ID:         PB-018
+  :TYPE:       feature
+  :SIZE:       S
+  :AREA:       serial
+  :DEPENDS_ON:
+
+** Problem
+
+CTS/DSR/CD/RI states and parity/framing/overrun counters are invisible.
+
+** Desired outcome
+
+Read modem input lines and UART error counters exposed as cheap additive
+`get_status` fields.
+
+** Scope
+
+- CTS/DSR/CD/RI read.
+- Parity/framing/overrun counters.
+
+** Non-goals
+
+- Changing control-line output behavior.
+
+** Acceptance criteria
+
+- [ ] Fields present on platforms that expose them; absent (not error) on
+      platforms that do not.
+
+** Technical context
+
+Cheap additive wire-format change; get_status result struct.
+
+** Open questions
+
+None.
+
+** Implementation plan
+
+Filled when implementation begins.
+
+** Implementation notes
+
+Updated while implementation is active.
+
+** Result
+
+Filled before the item enters REVIEW.

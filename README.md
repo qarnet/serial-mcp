@@ -21,7 +21,7 @@ use these features with serial bootloaders, resets, and embedded boards.
 ## Quick start
 
 1. Install the server. See [Install](#install) for Cargo, Nix, and prebuilt binary options.
-2. Connect an agent. Follow the [agent configuration guide](docs/agent-config.md), or use the example below.
+2. Connect an agent. Follow the [agent configuration guide](docs/guides/agent-configuration.md), or use the example below.
 3. Discover devices. Call `list_ports()` and inspect `profile_matches`. The result shows what a bare `open` would reuse.
 4. Open a port. Call `open(port=...)` with only the port.
    Baud defaults to 115200/8-N-1. The server reuses the most recently used
@@ -94,7 +94,7 @@ sudo usermod -aG dialout $USER
 
 ## Connect an agent
 
-For client-specific setup, see the [agent configuration guide](docs/agent-config.md).
+For client-specific setup, see the [agent configuration guide](docs/guides/agent-configuration.md).
 It covers Claude Code CLI, Claude Desktop, Cursor, VS Code, Zed, opencode,
 Codex, Hermes, and HTTP transport.
 
@@ -137,8 +137,8 @@ power-cycle banners, and boot prompts.
 The call purges unread OS input. It marks the RX live edge. It can pulse DTR/RTS,
 with guaranteed release. It captures only post-mark bytes on a private cursor.
 The result is bounded in memory and does not write a file. See [RX and
-reading](docs/rx-and-reading.md) for the `from` cursor model. See [Device
-profiles](docs/device-profiles.md) for profile behavior.
+reading](docs/guides/rx-and-reading.md) for the `from` cursor model. See [Device
+profiles](docs/guides/device-profiles.md) for profile behavior.
 
 ## Protocols
 
@@ -156,18 +156,18 @@ NMEA and Modbus ASCII presets validate checksums:
 | Modbus ASCII | `modbus_ascii` | Start/end `:` + Modbus ASCII parser, LRC |
 
 Field precedence is explicit call field, call-time preset, connection default,
-then connection preset. The [Protocol guide](docs/protocols.md) documents this
+then connection preset. The [Protocol guide](docs/guides/protocols.md) documents this
 order, checksum behavior, and the framing and parser reference.
 
 ## Key concepts and guides
 
 | Guide | What it covers |
 |---|---|
-| [RX and reading](docs/rx-and-reading.md) | Ring buffer and shared cursor. Tagged `from` forms. Timeouts, silence, and matching. Ring wrap and `bytes_lost`. Encoding fallback, flow control, `capture_boot`, and subscriptions. |
-| [Device profiles](docs/device-profiles.md) | `profile_matches` outcomes and identity rules. Generated and reused selection. Learning, revision CAS, rollback, and deletion guards. |
-| [Persistent capture](docs/persistent-capture.md) | The `export_log` contract. Quotas, portable filenames, atomicity, and failure semantics. |
-| [Agent configuration](docs/agent-config.md) | Client setup. HTTP transport. Troubleshooting. |
-| [Protocol guide](docs/protocols.md) | Framing and parsers. Presets and precedence. Checksum behavior. |
+| [RX and reading](docs/guides/rx-and-reading.md) | Ring buffer and shared cursor. Tagged `from` forms. Timeouts, silence, and matching. Ring wrap and `bytes_lost`. Encoding fallback, flow control, `capture_boot`, and subscriptions. |
+| [Device profiles](docs/guides/device-profiles.md) | `profile_matches` outcomes and identity rules. Generated and reused selection. Learning, revision CAS, rollback, and deletion guards. |
+| [Persistent capture](docs/guides/persistent-capture.md) | The `export_log` contract. Quotas, portable filenames, atomicity, and failure semantics. |
+| [Agent configuration](docs/guides/agent-configuration.md) | Client setup. HTTP transport. Troubleshooting. |
+| [Protocol guide](docs/guides/protocols.md) | Framing and parsers. Presets and precedence. Checksum behavior. |
 | [Documentation index](docs/README.md) | User and development guides |
 
 ## Transports and options
@@ -202,13 +202,13 @@ serial-mcp [OPTIONS]
 </details>
 
 The profile store is one TOML file shared by every session. Use `--profiles-path`
-for an isolated store. See [Device profiles](docs/device-profiles.md).
+for an isolated store. See [Device profiles](docs/guides/device-profiles.md).
 
 ### Persistent capture
 
 `export_log` writes portable `.jsonl` filenames into the `--capture-dir` root.
 It never accepts arbitrary paths and never overwrites files. See [Persistent
-capture](docs/persistent-capture.md).
+capture](docs/guides/persistent-capture.md).
 
 ## MCP compatibility
 
@@ -255,9 +255,9 @@ normal Rust build/test/clippy plus controlled-backend coverage.
 
 ## Documentation and status
 
-The [product backlog](docs/BACKLOG.md) lists planned and in-progress work. The
-[documentation index](docs/README.md) links user guides, and the
-[development notes](docs/development/README.md) cover project maintenance.
+The [product backlog](docs/product/README.md) tracks planned and in-progress
+work, and the [documentation index](docs/README.md) links user guides,
+reference contracts, and reports.
 Report issues and feature requests on the [tracker](https://github.com/qarnet/serial-mcp/issues).
 
 - [CHANGELOG.md](CHANGELOG.md)

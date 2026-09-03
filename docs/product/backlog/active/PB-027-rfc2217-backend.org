@@ -1,0 +1,50 @@
+* BACKLOG [#2] PB-027 RFC2217 backend support
+  :PROPERTIES:
+  :ID:         PB-027
+  :TYPE:       feature
+  :SIZE:       L
+  :AREA:       platform
+  :DEPENDS_ON:
+
+** Problem
+
+Remote serial devices over the network cannot be opened as if local.
+
+** Desired outcome
+
+Server opens a remote serial device over the network with control
+signals.
+
+** Scope
+
+- RFC2217 backend transport (backend transport, not MCP transport
+  replacement).
+
+** Non-goals
+
+- Replacing the MCP transport.
+
+** Acceptance criteria
+
+- [ ] RFC2217 server connection usable through the standard open/read/
+      write surface.
+
+** Technical context
+
+Backend transport feature.
+
+** Open questions
+
+None.
+
+** Implementation plan
+
+Filled when implementation begins.
+
+** Implementation notes
+
+Updated while implementation is active.
+
+** Result
+
+Filled before the item enters REVIEW.

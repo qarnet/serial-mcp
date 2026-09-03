@@ -1,0 +1,52 @@
+* BACKLOG [#2] PB-012 Positive MCP cache TTL policy
+  :PROPERTIES:
+  :ID:         PB-012
+  :TYPE:       feature
+  :SIZE:       M
+  :AREA:       mcp
+  :DEPENDS_ON:
+
+** Problem
+
+Cache entries use TTL 0; no positive-ttl caching exists.
+
+** Desired outcome
+
+Correct positive TTL support.
+
+** Scope
+
+- Positive TTL policy on cacheable families.
+
+** Non-goals
+
+- Caching before the prerequisites below exist.
+
+** Acceptance criteria
+
+- [ ] List-notification invalidation exists.
+- [ ] Authorization partitioning exists.
+- [ ] Pagination keys are cache-stable.
+- [ ] Stale-on-error behavior is tested.
+
+** Technical context
+
+Only after list-notification invalidation, authorization partitioning,
+pagination keys, and stale-on-error tests exist (see
+`docs/reference/mcp-version-compatibility-policy.md`).
+
+** Open questions
+
+None.
+
+** Implementation plan
+
+Filled when implementation begins.
+
+** Implementation notes
+
+Updated while implementation is active.
+
+** Result
+
+Filled before the item enters REVIEW.
