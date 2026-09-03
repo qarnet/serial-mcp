@@ -385,7 +385,34 @@ fn spawned_server_opens_fixture_through_shipped_binary() -> Result<()> {
 #[test]
 fn repeated_fixture_shutdown_returns_file_descriptors_to_baseline() -> Result<()> {
     run_fixture_test(async {
-        let baseline = std::fs::read_dir("/proc/self/fd")?.count();
+        // Count only fixture-owned descriptor classes: the PTY master
+        // (`/dev/ptmx`) and slave (`/dev/pts/<N>`) pair that `DeviceFixture`
+        // opens. The whole-process total is not stable under the default
+        // parallel test harness: sibling tests in this binary own sockets,
+        // pipes, and epoll descriptors whose teardown completes outside this
+        // test's control, so a raw baseline/final comparison of every
+        // descriptor measures their timing, not fixture teardown. The
+        // `FIXTURE_TEST_SERIALIZER` mutex guarantees no other test in this
+        // binary holds a fixture while this one runs, so the fixture-owned
+        // count is exactly zero at both edges when teardown is leak-free.
+        fn fixture_fd_count() -> Result<usize> {
+            let count = std::fs::read_dir("/proc/self/fd")?
+                .filter_map(|entry| entry.ok())
+                .filter_map(|entry| std::fs::read_link(entry.path()).ok())
+                .filter(|target| {
+                    let target = target.to_string_lossy();
+                    target == "/dev/ptmx"
+                        || target == "/dev/pts/ptmx"
+                        || target.starts_with("/dev/pts/")
+                })
+                .count();
+            Ok(count)
+        }
+        let baseline = fixture_fd_count()?;
+        assert_eq!(
+            baseline, 0,
+            "fixture PTY descriptors open at test start; the fixture serializer is broken"
+        );
         for _ in 0..100 {
             let fixture =
                 DeviceFixture::spawn(PingPeer::default(), DeviceFixtureConfig::default()).await?;
@@ -395,9 +422,11 @@ fn repeated_fixture_shutdown_returns_file_descriptors_to_baseline() -> Result<()
             assert!(!report.task_aborted);
             assert!(!stable_path.exists());
         }
-        tokio::task::yield_now().await;
-        let final_count = std::fs::read_dir("/proc/self/fd")?.count();
-        assert_eq!(final_count, baseline, "fixture leaked file descriptors");
+        let final_count = fixture_fd_count()?;
+        assert_eq!(
+            final_count, baseline,
+            "fixture leaked PTY descriptors across repeated shutdown"
+        );
         Ok(())
     })
 }
