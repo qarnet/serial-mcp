@@ -255,7 +255,7 @@ normal Rust build/test/clippy plus controlled-backend coverage.
 
 ## Documentation and status
 
-The [roadmap](docs/development/FEATURES.md) lists planned work. The
+The [product backlog](docs/BACKLOG.md) lists planned and in-progress work. The
 [documentation index](docs/README.md) links user guides, and the
 [development notes](docs/development/README.md) cover project maintenance.
 Report issues and feature requests on the [tracker](https://github.com/qarnet/serial-mcp/issues).

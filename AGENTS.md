@@ -249,9 +249,9 @@ bounded; a hung or slow run must fail the job, not idle.
 
 ### Documentation and backlog lifecycle
 
-- `docs/development/BACKLOG.md` is the product backlog: every plan or research
-  document must have a backlog entry while pending, and every entry links to
-  its plan document.
+- `docs/BACKLOG.md` is the product backlog: every plan or research document
+  must have a backlog entry while pending, and every entry links to its plan
+  document. Plans live under `docs/development/plans/`.
 - Plans may be committed while pending or in progress, but are working
   documents, not permanent documentation.
 - When a plan's work ships (or is abandoned), delete the plan document AND its
@@ -481,7 +481,7 @@ only the implementation invariants an agent must not break.
   compatibility — its row, fixture, raw-wire tests, conformance set, and
   drift guards must not be removed or weakened by a future protocol or rmcp
   update. Pre-`2025-11-25` revisions stay unsupported (demand-driven feature
-  idea in `FEATURES.md` only).
+  idea in the product backlog only).
 
 ## Discovery & evaluation
 
@@ -509,4 +509,4 @@ only the implementation invariants an agent must not break.
 - **Bounded JSONL snapshot (`src/log_buffer.rs`)** — `jsonl_snapshot(&self, max_bytes)`: single lock for point-in-time consistency, one line per event with trailing newline, checked arithmetic before extending (error = exact snapshot exceeds quota, no partial output), no deque clone / no second full String.
 - **Behavior tests** — HTTP MCP in `tests/http_integration.rs`: disabled error ordering (before path/connection), JSONL content matching `get_log` with exact counts, zero-byte slot consumption, all bad-name classes fail without files, existing target byte-identical, symlink target rejected + outside untouched (Unix), concurrent same-name = exactly one success, per-file/total/count quotas (incl. persistence across fresh store instances and independent servers sharing a root via the advisory lock), failure leaves connection usable, point-in-time snapshot. Spawned binary: valid `--capture-dir` starts HTTP + stdio servers (`tests/http_integration.rs`, `tests/stdio_integration.rs`). CLI in `tests/stdio_integration.rs`: help documents all options, `--capture-dir --version` not mistaken for version flag, quota-without-root / relative / missing / file / symlink roots / zero / bad quota relation all reject startup. Unit (`src/capture_store.rs`, `src/log_buffer.rs`): validator table, quota boundaries, scanner classification, no-clobber, cross-store concurrency, post-commit root-sync failure = `durability_warning` (file kept), exact-limit/one-byte-over snapshot.
 - **Trust boundary** — configured root + ancestors are operator-controlled; no hostile-root capability defense (documented non-goal). Advisory lock protects cooperating serial-mcp processes only.
-- **Future design** — `docs/development/safe-continuous-capture-design.md` specifies the (NOT implemented) continuous-capture lifecycle; recommendation stays "do not implement until concrete task evidence".
+- **Future design** — `docs/development/plans/safe-continuous-capture-design.md` specifies the (NOT implemented) continuous-capture lifecycle; recommendation stays "do not implement until concrete task evidence".

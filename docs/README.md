@@ -18,8 +18,8 @@ points at the focused guides that hold the detailed contracts.
 
 | Doc | What it covers |
 |---|---|
-| [Development Notes](development/README.md) | Index of active development documentation: roadmap, protocol matrix, compatibility policy, evaluator reports. |
-| [Roadmap](development/FEATURES.md) | Active roadmap and tech debt. |
+| [Product Backlog](BACKLOG.md) | Planned and in-progress work; each entry links to its plan document under [development/plans/](development/plans/). |
+| [Development Notes](development/README.md) | Index of durable development documentation: compatibility policy, protocol matrix, evaluator reports, decision records, plans. |
 | [MCP Version Compatibility Policy](development/mcp-version-compatibility-policy.md) | Supported protocol versions, permanent legacy retention, admission checklist, proof layers. |
 | [Architecture Decision Records](adr/README.md) | Proposed and accepted architecture decisions, including test-foundation changes. |
 | [CHANGELOG](../CHANGELOG.md) | Release history. |

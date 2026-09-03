@@ -1,7 +1,7 @@
 # Stateless server runtime and platform portability plan
 
 Status: in progress — tracked as the server-runtime entry in
-[BACKLOG.md](BACKLOG.md); this document is the design.
+[BACKLOG.md](../../BACKLOG.md); this document is the design.
 
 Target baseline: `main` at `cbdcf8b61527f0dfced5f0fc0f71704774c72c71`. No
 runtime behavior changes have landed yet; all baseline citations were
