@@ -45,7 +45,7 @@ None.
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Timestamps present on frames; correlated against the event log in
+- [ ] #1 Timestamps present on frames; correlated against the event log in at least one test.
 <!-- AC:END -->
 
 ## Implementation Plan

@@ -46,7 +46,7 @@ None.
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 RFC2217 server connection usable through the standard open/read/
+- [ ] #1 RFC2217 server connection usable through the standard open/read/ write surface.
 <!-- AC:END -->
 
 ## Implementation Plan

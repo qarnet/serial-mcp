@@ -45,7 +45,7 @@ None.
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Most realistic path documented and decided (proxy/bridge, see
+- [ ] #1 Most realistic path documented and decided (proxy/bridge, see PB-028).
 <!-- AC:END -->
 
 ## Implementation Plan

@@ -261,12 +261,17 @@ bounded; a hung or slow run must fail the job, not idle.
   go through the `backlog` CLI, not hand edits, so IDs, filenames, and
   metadata stay consistent; dropping = rationale in Final Summary, then
   `backlog task archive`.
-- Implementation agents may only begin `Ready` work, must not silently edit
-  product-owned fields (title, priority, status, type, Description product
-  sections, acceptance-criteria text), and **stop at `Review`** — their
-  final state. Only explicit human acceptance permits `Review -> Done`
-  followed by `backlog task complete`; no agent workflow autonomously marks
-  an item Done or moves a file into `completed/`.
+- Implementation agents may only begin `Ready` work and must not silently
+  edit product-owned fields (title, priority, status, type, Description
+  product sections, acceptance-criteria text). An agent MAY take an item
+  to `Done` (status edit + `backlog task complete`) only through the
+  PR gate: acceptance criteria checked from evidence, repository gates
+  green, Final Summary filled, and the item's Done transition committed
+  together with the work in one PR whose title starts with the item ID
+  (e.g. `PB-006: ...`). The PR merge by the human product owner is the
+  official acceptance. If the PR is rejected or changes are requested,
+  move the item back (`tasks/`, In Progress or Review), fix, and re-PR.
+  An agent never merges its own PR.
 - Use the OpenCode product-backlog skills (`add-product-backlog-item`,
   `refine-product-backlog-item`, `implement-product-backlog-item`) when
   available; they encode the CLI workflow. Implementation subtasks stay

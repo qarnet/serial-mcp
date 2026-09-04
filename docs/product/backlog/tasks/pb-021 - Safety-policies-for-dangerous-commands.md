@@ -48,7 +48,7 @@ structured error).
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 A configured pattern blocks its command until explicitly
+- [ ] #1 A configured pattern blocks its command until explicitly confirmed.
 - [ ] #2 Policy lives in the profile, persists, and is visible in status.
 <!-- AC:END -->
 

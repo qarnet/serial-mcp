@@ -67,7 +67,7 @@ Windows lease semantics depend on the mio-serial close/reopen decision
 - [ ] #1 Stateless HTTP requests provably share the runtime-owned state.
 - [ ] #2 TX ordering is deterministic under concurrent stateless requests.
 - [ ] #3 Shutdown completes without leaked tasks or hang; proven by test.
-- [ ] #4 Two server processes coordinate port ownership via leases; proven by
+- [ ] #4 Two server processes coordinate port ownership via leases; proven by test on Linux PTYs.
 - [ ] #5 Existing compatibility gates stay green.
 <!-- AC:END -->
 

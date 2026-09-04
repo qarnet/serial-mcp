@@ -102,11 +102,23 @@ Related-but-independent work is linked in Description text instead.
 ## Lifecycle
 
 - **Implementation agents may only begin `Ready` work.**
-- **Implementation agents stop at `Review`.** It is their final state.
-- **Only the human product owner performs `Review -> Done`** (status edit,
-  then `backlog task complete`), normally as part of or immediately after
-  the accepted merge. `Done` does not imply a published release;
-  `CHANGELOG.md` owns release history.
+- **An agent may take an item to `Done`** (status edit, then
+  `backlog task complete`) through the PR gate:
+  1. acceptance criteria checked from real evidence;
+  2. repository gates green;
+  3. Final Summary filled (outcome, decisions, validation);
+  4. the item's Done transition (status + move to `completed/`) committed
+     together with the work in one PR whose title starts with the item ID
+     (e.g. `PB-006: ...`).
+- **The PR merge by the human product owner is the official acceptance.**
+  A Done item merged into `main` is officially done. If the PR is rejected
+  or changes are requested, move the item back (`tasks/`, status In
+  Progress or Review), fix, and re-PR. An agent never merges its own PR.
+- **`Review` status** remains available for implementation-complete items
+  awaiting direction or bundling, but it is not a required stop — the
+  happy path is `In Progress -> Done` inside the PR.
+- `Done` does not imply a published release; `CHANGELOG.md` owns release
+  history.
 - **Dropped**: the human decides; record the rationale in Final Summary,
   then `backlog task archive`. Archived items are retained permanently.
 - Status changes go through the `backlog` CLI (or MCP), not hand edits,
@@ -127,8 +139,11 @@ implementation, validation commands, and outcomes; required user docs /
 reference docs / ADR updates included; known limitations stay within
 stated non-goals.
 
-**Definition of Done** (human-only) — reviewed implementation, acceptance
-criteria, and evidence; accepted product behavior; accepted integration.
+**Definition of Done** (agent-reachable, PR-gated) — acceptance criteria
+checked from real evidence; repository gates green; Final Summary filled
+with validation commands and outcomes; the Done transition committed
+together with the work in one PR titled with the item ID. Officially done
+when the human product owner merges that PR.
 
 **Blocked** requires a concrete external or technical obstacle recorded
 in Implementation Notes. An underspecified item is not blocked; it stays

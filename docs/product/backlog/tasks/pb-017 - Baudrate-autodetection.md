@@ -48,7 +48,7 @@ Whether heuristic detection is worth shipping at all.
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
 - [ ] #1 Detection approach studied from EXPLIoT `uart.generic.baudscan`.
-- [ ] #2 Decision recorded: implement with honest inconclusive results, or drop
+- [ ] #2 Decision recorded: implement with honest inconclusive results, or drop this item.
 <!-- AC:END -->
 
 ## Implementation Plan

@@ -59,22 +59,22 @@ None.
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [x] #1 Generic docs/development/ grouping replaced by purpose-specific
+- [x] #1 Generic docs/development/ grouping replaced by purpose-specific categories.
 - [x] #2 User docs under guides/; normative policy/matrix under reference/.
-- [x] #3 Product policy under product/; designs under design/; ADRs kept under
+- [x] #3 Product policy under product/; designs under design/; ADRs kept under adr/; reports and baselines under reports/; maintenance procedures and the hygiene marker under maintenance/.
 - [x] #4 documentation-hygiene skill and marker agree after the restructure.
-- [x] #5 docs/BACKLOG.md replaced by one Org file per item, divided into
-- [x] #6 Every item has a unique stable PB-NNN ID; filename, headline, and ID
+- [x] #5 docs/BACKLOG.md replaced by one Org file per item, divided into active/ completed/ dropped/.
+- [x] #6 Every item has a unique stable PB-NNN ID; filename, headline, and ID property agree.
 - [x] #7 Controlled metadata vocabulary documented.
 - [x] #8 Entries migrated without inventing missing product requirements.
-- [x] #9 Near-term/Later/Wish/Infrastructure normalized into independent
+- [x] #9 Near-term/Later/Wish/Infrastructure normalized into independent priority/type/status fields.
 - [x] #10 Design docs link to their PB items.
 - [x] #11 Completed and dropped history retained.
 - [x] #12 Neovim Orgmode installed via lazy.nvim (a normal plugin).
-- [x] #13 Neovim provides a useful active-backlog agenda, a prominent REVIEW
-- [x] #14 OpenCode add-product-backlog-item skill documents and follows the
-- [x] #15 AGENTS.md states implementation agents stop at REVIEW; no agent
-- [x] #16 Active documentation references use the new paths; historical
+- [x] #13 Neovim provides a useful active-backlog agenda, a prominent REVIEW view, and filtering by state/priority/type/area/size.
+- [x] #14 OpenCode add-product-backlog-item skill documents and follows the schema; allocates IDs across lifecycle dirs; defaults incomplete requests to BACKLOG without fabricating.
+- [x] #15 AGENTS.md states implementation agents stop at REVIEW; no agent autonomously marks DONE; only explicit human acceptance causes REVIEW -> DONE.
+- [x] #16 Active documentation references use the new paths; historical changelog content untouched.
 - [x] #17 No second backlog source of truth remains.
 <!-- AC:END -->
 
@@ -114,6 +114,18 @@ Neovim orgmode spec reverted (orgmode pin removed from lazy-lock).
 OpenCode skills rewritten to drive the CLI. Docs taxonomy, product
 contract, and AGENTS.md boundaries from the Org iteration carry over
 unchanged in substance.
+
+Policy evolution after first human review of the Backlog.md migration
+(2026-09-04): the human-only Done gate was relaxed. Agents may take an
+item to Done through the PR gate — acceptance criteria checked from
+evidence, gates green, Final Summary filled, and the Done transition
+committed together with the work in one PR titled with the item ID
+(e.g. PB-006: ...). The human's merge of that PR is the official
+acceptance; rejection moves the item back to In Progress. Review status
+remains for awaiting-direction items but is not a required stop.
+AGENTS.md, docs/product/README.md, the implement-product-backlog-item
+skill, and the repo-wrapup skill (new backlog PR-gate step) were updated
+to the new policy.
 Org iteration completed and human-reviewed at REVIEW: the Neovim Org
 agenda interface did not prove useful in practice. Product decision
 (2026-09-04): pivot the item format from Org to Backlog.md tasks while

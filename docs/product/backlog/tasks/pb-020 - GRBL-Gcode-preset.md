@@ -46,7 +46,7 @@ None.
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Preset usable end-to-end against a PTY fixture emulating GRBL
+- [ ] #1 Preset usable end-to-end against a PTY fixture emulating GRBL responses.
 <!-- AC:END -->
 
 ## Implementation Plan

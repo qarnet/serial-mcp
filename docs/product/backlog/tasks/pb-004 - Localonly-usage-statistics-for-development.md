@@ -55,7 +55,7 @@ implementation.
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
 - [ ] #1 Opt-in recording with zero network transmission.
-- [ ] #2 Recorded data can answer at least one concrete trimming question
+- [ ] #2 Recorded data can answer at least one concrete trimming question (e.g. is `from: {"type":"now"}` used enough to justify keeping it?).
 - [ ] #3 Disabling recording leaves no overhead on the hot path.
 <!-- AC:END -->
 

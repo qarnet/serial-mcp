@@ -47,8 +47,8 @@ Plugin ABI/registration mechanism needs a design before READY.
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 A third-party decoder can be registered and used through the
-- [ ] #2 Declarative checksums (PB-005) remain the lighter alternative for
+- [ ] #1 A third-party decoder can be registered and used through the standard read pipeline.
+- [ ] #2 Declarative checksums (PB-005) remain the lighter alternative for checksum-only needs.
 <!-- AC:END -->
 
 ## Implementation Plan

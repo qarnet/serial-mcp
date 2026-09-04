@@ -52,7 +52,7 @@ surface?
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
 - [ ] #1 A running server's defaults round-trip through export/import.
-- [ ] #2 Exported data is human-readable TOML compatible with the profile
+- [ ] #2 Exported data is human-readable TOML compatible with the profile store.
 <!-- AC:END -->
 
 ## Implementation Plan

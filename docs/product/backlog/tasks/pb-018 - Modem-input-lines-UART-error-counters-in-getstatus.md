@@ -46,7 +46,7 @@ None.
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Fields present on platforms that expose them; absent (not error) on
+- [ ] #1 Fields present on platforms that expose them; absent (not error) on platforms that do not.
 <!-- AC:END -->
 
 ## Implementation Plan

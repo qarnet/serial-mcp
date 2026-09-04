@@ -52,7 +52,7 @@ None.
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Writing a binary PDU through the mode produces a valid Modbus ASCII
+- [ ] #1 Writing a binary PDU through the mode produces a valid Modbus ASCII frame on the wire (verified by PTY fixture).
 - [ ] #2 RX validation behavior unchanged.
 <!-- AC:END -->
 

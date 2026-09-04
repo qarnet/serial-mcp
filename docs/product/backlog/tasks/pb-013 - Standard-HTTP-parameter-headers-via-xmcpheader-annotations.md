@@ -47,7 +47,7 @@ None.
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 `connection_id` usable as an HTTP header on modern stateless
+- [ ] #1 `connection_id` usable as an HTTP header on modern stateless requests.
 - [ ] #2 Conformance/compatibility gates stay green.
 <!-- AC:END -->
 

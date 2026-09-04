@@ -48,7 +48,7 @@ None.
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Concrete user/client demand documented before any version row is
+- [ ] #1 Concrete user/client demand documented before any version row is added.
 - [ ] #2 Permanent `2025-11-25` retention never weakened (policy invariant).
 <!-- AC:END -->
 

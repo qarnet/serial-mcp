@@ -50,7 +50,7 @@ design.
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 A long read can be observed and cancelled through the tasks
+- [ ] #1 A long read can be observed and cancelled through the tasks surface.
 - [ ] #2 Existing cancellation semantics preserved.
 <!-- AC:END -->
 

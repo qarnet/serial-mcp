@@ -45,7 +45,7 @@ None.
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Frames/captures can be handed to an external decoder without
+- [ ] #1 Frames/captures can be handed to an external decoder without manual copy-paste of payloads.
 <!-- AC:END -->
 
 ## Implementation Plan

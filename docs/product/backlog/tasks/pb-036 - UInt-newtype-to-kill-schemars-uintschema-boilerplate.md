@@ -50,8 +50,8 @@ None.
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 No per-field uint annotations remain (or a documented reason they
-- [ ] #2 Schema regression tests (serial::schema check_schema! list) extended to
+- [ ] #1 No per-field uint annotations remain (or a documented reason they must).
+- [ ] #2 Schema regression tests (serial::schema check_schema! list) extended to catch the class.
 - [ ] #3 Validators no longer log uint-format warnings.
 <!-- AC:END -->
 

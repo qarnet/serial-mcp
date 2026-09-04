@@ -46,7 +46,7 @@ None.
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Second consumer observes the live stream without disturbing the
+- [ ] #1 Second consumer observes the live stream without disturbing the primary's cursor.
 <!-- AC:END -->
 
 ## Implementation Plan

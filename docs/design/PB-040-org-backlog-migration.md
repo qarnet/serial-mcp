@@ -1,6 +1,14 @@
 # PB-040 — Org-mode product backlog and documentation lifecycle
 
-Status: pivot implemented, PB-040 in Review. Org iteration rejected at human review; final format Backlog.md (same storage model). History of both iterations lives in the PB-040 item's Implementation Notes. Design for backlog item `PB-040` (this document is the
+Status: pivot implemented, PB-040 in Review. Post-review policy evolution
+(2026-09-04): the human-only Done gate was relaxed to the PR gate — an
+agent may take an item to Done when acceptance criteria are
+evidence-backed, gates are green, the Final Summary is filled, and the
+Done transition is committed together with the work in one PR titled
+with the item ID; the human's PR merge is the official acceptance. This
+document is a point-in-time record of the Org iteration and the pivot
+decision, not the current policy; docs/product/README.md owns the live
+contract. Org iteration rejected at human review; final format Backlog.md (same storage model). History of both iterations lives in the PB-040 item's Implementation Notes. Design for backlog item `PB-040` (this document is the
 design the new product system prescribes: substantial cross-cutting work gets a
 standalone design; the implementation plan lives inside the backlog item).
 
@@ -173,7 +181,7 @@ go in Technical context, not DEPENDS_ON.
    never promotes to READY, never edits history dirs.
 2. `refine-product-backlog-item` — idea→spec transition; may edit
    product-owned sections; READY only when Definition of Ready holds.
-3. `implement-product-backlog-item` — boundary READY→IN_PROGRESS→REVIEW;
+3. `implement-product-backlog-item` — boundary READY→IN_PROGRESS→DONE (PR-gated);
    fills execution-owned sections; never DONE, never moves to completed/.
 4. `audit-product-backlog` + acceptance automation — NOT created (handoff
    §12.4/12.5: later, evidence-driven).

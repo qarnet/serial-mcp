@@ -47,7 +47,7 @@ None.
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Decide one cross-platform bundle vs per-platform bundles, manifest
+- [ ] #1 Decide one cross-platform bundle vs per-platform bundles, manifest version, signing, update flow.
 - [ ] #2 Clean-machine Claude Desktop tests pass.
 - [ ] #3 Validate/pack with a pinned `@anthropic-ai/mcpb` release.
 <!-- AC:END -->

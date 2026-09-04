@@ -53,7 +53,7 @@ Whether a pre-provisioned signed-driver CI runner changes the answer.
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 mio-serial close/reopen behavior on Windows documented with
+- [ ] #1 mio-serial close/reopen behavior on Windows documented with evidence (source references or reproducible observations).
 - [ ] #2 Lease contract decision recorded and linked from PB-001.
 <!-- AC:END -->
 
