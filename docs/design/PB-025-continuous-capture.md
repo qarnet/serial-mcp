@@ -1,7 +1,7 @@
 # Future design: continuous raw capture lifecycle
 
 Status: planned (deferred) — tracked by the recording + replay entry in
-backlog item `PB-025` (`docs/product/backlog/active/PB-025-recording-and-replay.org`). It is not implemented. No
+backlog item `PB-025` (`docs/product/backlog/tasks/`). It is not implemented. No
 `start_capture`/`stop_capture` tool exists. Current code ships only the safe
 persistent capture foundation (`--capture-dir` + `CaptureStore` + hardened
 `export_log`).

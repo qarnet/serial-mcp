@@ -249,25 +249,28 @@ bounded; a hung or slow run must fail the job, not idle.
 
 ### Documentation and product backlog lifecycle
 
-- Product planning lives under `docs/product/`. The canonical item format,
-  allowed states and metadata, and lifecycle contract live in
-  [docs/product/README.md](docs/product/README.md); this section only
+- Product planning lives under `docs/product/`, managed with Backlog.md
+  (one Markdown file per item; `backlog` CLI available via `nix develop`).
+  The canonical configuration, field vocabulary, and lifecycle contract live
+  in [docs/product/README.md](docs/product/README.md); this section only
   states the boundaries agents must respect.
-- One Org file per backlog item under `docs/product/backlog/`:
-  `active/` holds `BACKLOG`, `READY`, `IN_PROGRESS`, `BLOCKED`, `REVIEW`;
-  `completed/` holds accepted `DONE` items; `dropped/` holds rejected items
-  with rationale. Completed and dropped items are retained product history,
-  never deleted.
-- Implementation agents may only begin `READY` work, must not silently edit
-  product-owned sections (headline, priority, Problem, Desired outcome,
-  Scope, Non-goals, acceptance-criteria text), and **stop at `REVIEW`** —
-  their final state. Only explicit human acceptance permits `REVIEW → DONE`;
-  no agent workflow autonomously marks an item `DONE` or moves a file into
-  `completed/`.
+- Items live under `docs/product/backlog/`: `tasks/` holds active items
+  (statuses Backlog / Ready / In Progress / Blocked / Review), `completed/`
+  holds accepted Done items, `archive/` holds dropped items. Completed and
+  dropped items are retained product history, never deleted. Status changes
+  go through the `backlog` CLI, not hand edits, so IDs, filenames, and
+  metadata stay consistent; dropping = rationale in Final Summary, then
+  `backlog task archive`.
+- Implementation agents may only begin `Ready` work, must not silently edit
+  product-owned fields (title, priority, status, type, Description product
+  sections, acceptance-criteria text), and **stop at `Review`** — their
+  final state. Only explicit human acceptance permits `Review -> Done`
+  followed by `backlog task complete`; no agent workflow autonomously marks
+  an item Done or moves a file into `completed/`.
 - Use the OpenCode product-backlog skills (`add-product-backlog-item`,
   `refine-product-backlog-item`, `implement-product-backlog-item`) when
-  available; they encode the schema and ID allocation. Implementation
-  subtasks stay inside the PB item; they are not separate product items.
+  available; they encode the CLI workflow. Implementation subtasks stay
+  inside the PB item; they are not separate product items.
 - Docs are purpose-named: `guides/` (shipped user workflows), `reference/`
   (normative contracts), `design/` (active standalone designs linked to PB
   items), `adr/` (durable decisions), `reports/` (point-in-time evidence),

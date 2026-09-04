@@ -34,8 +34,8 @@ What is planned, in progress, accepted, or dropped?
 
 | Document | What it covers |
 |---|---|
-| [Product contract](product/README.md) | Backlog item format, allowed values, lifecycle states, Definitions of Ready/Review/Done, ownership boundaries. |
-| [Backlog](product/backlog/active/) | One Org file per item. Active items live here; `completed/` and `dropped/` retain product history. The Neovim Org agenda is the derived index; there is no Markdown table duplicate. |
+| [Product contract](product/README.md) | Backlog.md configuration, field vocabulary, lifecycle states, Definitions of Ready/Review/Done, ownership boundaries. |
+| [Backlog](product/backlog/) | One Markdown file per item, managed with the `backlog` CLI (dev-shell). Active items live in `tasks/`; `completed/` and `archive/` retain product history. `backlog board` is the view; there is no Markdown table duplicate. |
 
 ## Design — active technical designs
 
