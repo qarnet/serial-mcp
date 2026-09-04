@@ -1,6 +1,6 @@
 # PB-040 — Org-mode product backlog and documentation lifecycle
 
-Status: IN_PROGRESS · Design for backlog item `PB-040` (this document is the
+Status: implemented, PB-040 in REVIEW · Design for backlog item `PB-040` (this document is the
 design the new product system prescribes: substantial cross-cutting work gets a
 standalone design; the implementation plan lives inside the backlog item).
 

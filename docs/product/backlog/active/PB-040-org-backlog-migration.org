@@ -1,4 +1,4 @@
-* IN_PROGRESS [#1] PB-040 Org-mode product backlog and documentation lifecycle
+* REVIEW [#1] PB-040 Org-mode product backlog and documentation lifecycle
   :PROPERTIES:
   :ID:         PB-040
   :TYPE:       docs
@@ -38,35 +38,35 @@ stop at REVIEW with human-only DONE acceptance.
 
 ** Acceptance criteria
 
-- [ ] Generic docs/development/ grouping replaced by purpose-specific
+- [x] Generic docs/development/ grouping replaced by purpose-specific
       categories.
-- [ ] User docs under guides/; normative policy/matrix under reference/.
-- [ ] Product policy under product/; designs under design/; ADRs kept under
+- [x] User docs under guides/; normative policy/matrix under reference/.
+- [x] Product policy under product/; designs under design/; ADRs kept under
       adr/; reports and baselines under reports/; maintenance procedures and
       the hygiene marker under maintenance/.
-- [ ] documentation-hygiene skill and marker agree after the restructure.
-- [ ] docs/BACKLOG.md replaced by one Org file per item, divided into
+- [x] documentation-hygiene skill and marker agree after the restructure.
+- [x] docs/BACKLOG.md replaced by one Org file per item, divided into
       active/ completed/ dropped/.
-- [ ] Every item has a unique stable PB-NNN ID; filename, headline, and ID
+- [x] Every item has a unique stable PB-NNN ID; filename, headline, and ID
       property agree.
-- [ ] Controlled metadata vocabulary documented.
-- [ ] Entries migrated without inventing missing product requirements.
-- [ ] Near-term/Later/Wish/Infrastructure normalized into independent
+- [x] Controlled metadata vocabulary documented.
+- [x] Entries migrated without inventing missing product requirements.
+- [x] Near-term/Later/Wish/Infrastructure normalized into independent
       priority/type/status fields.
-- [ ] Design docs link to their PB items.
-- [ ] Completed and dropped history retained.
-- [ ] Neovim Orgmode installed via lazy.nvim (a normal plugin).
-- [ ] Neovim provides a useful active-backlog agenda, a prominent REVIEW
+- [x] Design docs link to their PB items.
+- [x] Completed and dropped history retained.
+- [x] Neovim Orgmode installed via lazy.nvim (a normal plugin).
+- [x] Neovim provides a useful active-backlog agenda, a prominent REVIEW
       view, and filtering by state/priority/type/area/size.
-- [ ] OpenCode add-product-backlog-item skill documents and follows the
+- [x] OpenCode add-product-backlog-item skill documents and follows the
       schema; allocates IDs across lifecycle dirs; defaults incomplete
       requests to BACKLOG without fabricating.
-- [ ] AGENTS.md states implementation agents stop at REVIEW; no agent
+- [x] AGENTS.md states implementation agents stop at REVIEW; no agent
       autonomously marks DONE; only explicit human acceptance causes
       REVIEW -> DONE.
-- [ ] Active documentation references use the new paths; historical
+- [x] Active documentation references use the new paths; historical
       changelog content untouched.
-- [ ] No second backlog source of truth remains.
+- [x] No second backlog source of truth remains.
 
 ** Technical context
 
@@ -84,9 +84,38 @@ skills, nvim, verification, commits.
 
 ** Implementation notes
 
-Migration in progress on branch
-docs/product-backlog-and-lifecycle.
+Implemented on branch docs/product-backlog-and-lifecycle across three
+repositories: serial-mcp (taxonomy, 40 Org items, contract, AGENTS.md),
+opencode config (three backlog skills + repo-aware hygiene marker path),
+neovim config (orgmode agenda via lazy.nvim). Validator (one-off, /tmp,
+not committed): 40 items, 40 unique IDs, filename/headline/property
+agreement, vocabulary clean, dependencies resolve. Link sweep over all
+tracked md + org: zero broken. cargo fmt/clippy/build green (comment-only
+src change); nix flake check green (docs invisible to crane source filter).
+nvim-orgmode 0.7.3 keyword matcher limitation found and documented
+in-config: Lua %w+ excludes underscore so IN_PROGRESS cannot be matched
+positively; the overview uses /!-DONE-DROPPED instead.
 
 ** Result
 
-Filled before the item enters REVIEW.
+Org-mode product backlog with 40 migrated items (39 active, 1 dropped
+with rationale; completed/ empty, .gitkeep), deterministic IDs in the
+old BACKLOG.md document order, controlled vocabulary per contract.
+Docs tree purpose-named: guides/ reference/ product/ design/ adr/
+reports/ maintenance/; docs/development/ and docs/BACKLOG.md gone.
+Product contract at docs/product/README.md; AGENTS.md lifecycle section
+points at it and pins the agent boundaries (READY entry, REVIEW stop,
+human-only DONE).
+
+Interfaces: nvim-orgmode agenda (overview o / ready r / needs-attention
+n, numeric priorities, custom keyword faces, active/ glob only) and
+three OpenCode skills (add/refine/implement product-backlog-item) over
+the same Git files; documentation-hygiene marker moved to
+docs/maintenance/ with the skill made repo-aware.
+
+Validation: validator script 40/40 unique IDs + full grammar; link sweep
+zero broken; fmt/clippy/build/nix-flake-check green; headless nvim smoke
+proves agenda discovery of all 39 active items and custom-command
+filtering. Known limitation: nvim-orgmode 0.7.3 %w+ keyword matcher
+cannot express IN_PROGRESS positively (underscore); overview uses
+/!-DONE-DROPPED; recorded in the nvim spec comments.
