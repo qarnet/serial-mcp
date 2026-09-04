@@ -1,4 +1,4 @@
-* REVIEW [#1] PB-040 Org-mode product backlog and documentation lifecycle
+* IN_PROGRESS [#1] PB-040 Org-mode product backlog and documentation lifecycle
   :PROPERTIES:
   :ID:         PB-040
   :TYPE:       docs
@@ -84,17 +84,43 @@ skills, nvim, verification, commits.
 
 ** Implementation notes
 
-Implemented on branch docs/product-backlog-and-lifecycle across three
-repositories: serial-mcp (taxonomy, 40 Org items, contract, AGENTS.md),
-opencode config (three backlog skills + repo-aware hygiene marker path),
-neovim config (orgmode agenda via lazy.nvim). Validator (one-off, /tmp,
-not committed): 40 items, 40 unique IDs, filename/headline/property
-agreement, vocabulary clean, dependencies resolve. Link sweep over all
-tracked md + org: zero broken. cargo fmt/clippy/build green (comment-only
-src change); nix flake check green (docs invisible to crane source filter).
-nvim-orgmode 0.7.3 keyword matcher limitation found and documented
-in-config: Lua %w+ excludes underscore so IN_PROGRESS cannot be matched
-positively; the overview uses /!-DONE-DROPPED instead.
+Org iteration completed and human-reviewed at REVIEW: the Neovim Org
+agenda interface did not prove useful in practice. Product decision
+(2026-09-04): pivot the item format from Org to Backlog.md tasks while
+keeping the same storage model (one file per item, stable IDs, retained
+history, product contract, human-only acceptance).
+
+Backlog.md verified against upstream source before committing:
+- Upstream Nix flake exists (github:MrLesk/Backlog.md, bun2nix build,
+  x86_64-linux/aarch64-linux/aarch64-darwin, MIT, mainProgram=backlog);
+  pin it as a flake input, expose in the devShell -> repo-scoped
+  executable, no global install.
+- Task file = YAML frontmatter (id, title, status, priority, labels,
+  dependencies, created/updated) + Markdown sections (Description,
+  Acceptance Criteria checklists, Implementation Plan, Implementation
+  Notes, Definition of Done, Final Summary).
+- Config knobs (verified in src): `statuses` free-form list but terminal
+  status = LAST entry only; `task_prefix` (PB -> PB-001 style IDs);
+  `zero_padded_ids`; `types` configurable; `priorities` ordered labels;
+  `backlog_directory` chosen at init.
+- Lifecycle mapping: terminal Done -> `backlog task complete` moves file
+  to completed/; dropped -> `backlog task archive` moves to
+  archive/tasks/ (retained, out of views) — archive is our DROPPED
+  equivalent, rationale recorded in Final Summary. Single terminal
+  status means Done must be last in statuses; Dropped is NOT a status.
+- Board columns show statuses in order; `backlog board` terminal Kanban,
+  `backlog browser` web UI on localhost.
+
+Pivot plan: statuses [Backlog, Ready, In Progress, Blocked, Review, Done];
+priorities [P0, P1, P2, P3] (first sorts highest); types [feature, bug,
+research, refactor, tech-debt, docs]; task_prefix PB; zero_padded_ids 3
+digit; backlog_directory docs/product/backlog (replacing the Org files in
+place); SIZE and AREA become labels (size:S/M/L, area:<x>) since
+Backlog.md has no native fields for them; DEPENDS_ON becomes native
+`dependencies`. The 40 Org items convert 1:1 to Backlog.md task files
+with the same PB-NNN IDs; docs/product/README.md contract is rewritten
+for the new format; nvim orgmode spec is reverted; the three OpenCode
+backlog skills are rewritten to drive `backlog` CLI commands.
 
 ** Result
 

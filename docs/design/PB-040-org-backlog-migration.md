@@ -1,6 +1,6 @@
 # PB-040 — Org-mode product backlog and documentation lifecycle
 
-Status: implemented, PB-040 in REVIEW · Design for backlog item `PB-040` (this document is the
+Status: PIVOTED after human review — Org interface rejected; format now Backlog.md. See Implementation notes in the PB-040 item. Design for backlog item `PB-040` (this document is the
 design the new product system prescribes: substantial cross-cutting work gets a
 standalone design; the implementation plan lives inside the backlog item).
 
