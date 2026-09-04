@@ -3,7 +3,7 @@ name: Hardening
 # Scheduled/manual hardening only — NOT a PR-required gate. Runs a short
 # fuzz smoke per existing fuzz target and focused mutation testing on
 # checksums/parsers, with hard wall-clock bounds and failure artifact
-# upload. See docs/development/windows-serial-e2e-investigation.md and
+# upload. See docs/reports/windows-serial-e2e-investigation.md and
 # AGENTS.md "Hardening (scheduled)" for the full contract.
 on:
   schedule:

@@ -1,16 +1,16 @@
 # Protocol support matrix
 
 This matrix lists every serial protocol with a specification in the gitignored
-`resources/` symlink. Longer-horizon items are tracked in
-[FEATURES.md](FEATURES.md).
+`resources/` symlink. Longer-horizon items are tracked in the
+[product backlog](../product/README.md).
 
 Specs are cited, never committed. See the License column. Source files are
 named relative to `resources/`.
 
 ## Legend
 
-- Status values are `shipped`, `deferred` (FEATURES.md), and `reference` (not a
-  serial-framing target).
+- Status values are `shipped`, `deferred` (product backlog), and `reference`
+  (not a serial-framing target).
 - Effort is the relative implementation cost for the current frame pipeline
   (`src/framing/`).
 - License values are `free` for redistributable RFCs, IETF drafts, or explicitly

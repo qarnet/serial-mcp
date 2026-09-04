@@ -102,7 +102,8 @@ For every new MCP protocol version to be supported:
 
 No version is supported merely because rmcp knows it, its date is newer, or a
 current client tolerates it. Pre-`2025-11-25` revisions are not supported.
-They are tracked only as a demand-driven feature idea in `FEATURES.md`.
+They are tracked only as a demand-driven feature idea in the product backlog
+(`docs/product/`).
 
 ## Local verification
 

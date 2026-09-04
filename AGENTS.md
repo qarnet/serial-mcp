@@ -238,7 +238,7 @@ bounded; a hung or slow run must fail the job, not idle.
 - Windows serial E2E is **deferred**: no privileged virtual-port driver
   installation on GitHub-hosted runners (com0com-style drivers are
   kernel-mode, typically test-signed, admin/reboot-sensitive). Decision and
-  sources: `docs/development/windows-serial-e2e-investigation.md`. Revisit
+  sources: `docs/reports/windows-serial-e2e-investigation.md`. Revisit
   only with a pre-provisioned signed-driver runner or an approved design.
 
 ## Repo workflow
@@ -246,6 +246,47 @@ bounded; a hung or slow run must fail the job, not idle.
 - Rust toolchain policy: CI, release, and schema-drift workflows install Rust 1.97.1 (`dtolnay/rust-toolchain@1.97.1`, each followed by a `rustc --version --verbose` report step); Nix derives the same version from `rust-toolchain.toml`. Bump both together.
 - Conventional commits used here: `feat:`, `fix:`, `docs:`, `test:`, `refactor:`.
 - Never add attribution footers or co-author lines.
+
+### Documentation and product backlog lifecycle
+
+- Product planning lives under `docs/product/`, managed with Backlog.md
+  (one Markdown file per item; `backlog` CLI available via `nix develop`).
+  The canonical configuration, field vocabulary, and lifecycle contract live
+  in [docs/product/README.md](docs/product/README.md); this section only
+  states the boundaries agents must respect.
+- Items live under `docs/product/backlog/`: `tasks/` holds active items
+  (statuses Backlog / Ready / In Progress / Blocked / Review), `completed/`
+  holds accepted Done items, `archive/` holds dropped items. Completed and
+  dropped items are retained product history, never deleted. Status changes
+  go through the `backlog` CLI, not hand edits, so IDs, filenames, and
+  metadata stay consistent; dropping = rationale in Final Summary, then
+  `backlog task archive`.
+- Implementation agents may only begin `Ready` work and must not silently
+  edit product-owned fields (title, priority, status, type, Description
+  product sections, acceptance-criteria text). An agent MAY take an item
+  to `Done` (status edit + `backlog task complete`) only through the
+  PR gate: acceptance criteria checked from evidence, repository gates
+  green, Final Summary filled, and the item's Done transition committed
+  together with the work in one PR whose title starts with the item ID
+  (e.g. `PB-006: ...`). The PR merge by the human product owner is the
+  official acceptance. If the PR is rejected or changes are requested,
+  move the item back (`tasks/`, In Progress or Review), fix, and re-PR.
+  An agent never merges its own PR.
+- Use the OpenCode product-backlog skills (`add-product-backlog-item`,
+  `refine-product-backlog-item`, `implement-product-backlog-item`) when
+  available; they encode the CLI workflow. Implementation subtasks stay
+  inside the PB item; they are not separate product items.
+- Docs are purpose-named: `guides/` (shipped user workflows), `reference/`
+  (normative contracts), `design/` (active standalone designs linked to PB
+  items), `adr/` (durable decisions), `reports/` (point-in-time evidence),
+  `maintenance/` (repo procedures, skill-managed state). When design work
+  ships, durable behavior moves into guides/reference/ADR and the design
+  document may be deleted; the completed PB item keeps the summary.
+- A WIP branch may be deleted once its content is merged to `main` under any
+  SHA, or once its work is deliberately abandoned — verify with
+  `git log --all --grep` / content diff before deleting. Never keep a branch
+  as the only home of unmerged work: park such work in a backlog item and
+  design document, or delete it deliberately.
 
 ## Orchestrator (xtask)
 
@@ -377,7 +418,7 @@ cargo run --manifest-path xtask/Cargo.toml -- print-paths
 
 The full scenario/pin matrix (exact per-version conformance scenario sets,
 package pins, report layout) lives in
-`docs/development/mcp-version-compatibility-policy.md`; this section keeps
+`docs/reference/mcp-version-compatibility-policy.md`; this section keeps
 only the implementation invariants an agent must not break.
 
 - **Version-correct SEP-2549 cache fields.** ONLY the explicit `2026-07-28`
@@ -460,14 +501,14 @@ only the implementation invariants an agent must not break.
   compatibility — its row, fixture, raw-wire tests, conformance set, and
   drift guards must not be removed or weakened by a future protocol or rmcp
   update. Pre-`2025-11-25` revisions stay unsupported (demand-driven feature
-  idea in `FEATURES.md` only).
+  idea in the product backlog only).
 
 ## Discovery & evaluation
 
 - **`list_ports` previews profile selection**: `ListPortsResult.profile_matches` parallels `ports` (same length/order, always serialized). Per-port: `confidence` + `outcome` (`selected`/`ambiguous`/`ineligible`/`duplicate`/`none`), `selected_profile`, and ordered `candidates` (name/generated/revision/last_used_at_ms). Preview is read-only — no `mark_used`, no file mutation. Pure computation in `port_ops::compute_profile_matches(ports, profiles)`: one `ProfileStore::list_fresh()` per `list_ports` call (corrupt store = tool error); high identity reuses the identity rules exactly (unique max `last_used_at_ms`, `None` sorts oldest, equal top rank = `Ambiguous`; name is display-only and never breaks a tie); duplicate live fingerprints = `Duplicate` for every such port; weak identity lists explicitly matching non-empty selectors as `Ineligible`. The `serial://ports` resource serves the same map.
 - **Decision-tree teaching**: server `instructions` + the 12 common tool descriptions + README flow + both prompts teach `list_ports` → bare `open` → `transact`/`read`/`write` → inspect `profile`/`profile_persistence` → `open_profile` only for explicit choice/weak identity, `rollback_profile` for recovery → escalate to framing/cursor/reconnect/line-control/log tools only when needed. `from` wire examples stay tagged (`{"type":"now"}` etc.) — no string shorthand.
 - **Tool count: 25** — `server::tool_catalog()` returns the exact 25 `rmcp::model::Tool` attrs served by MCP (the `subscribe`/`unsubscribe` tools were removed with MCP logging in the rmcp 3 migration); schema tests and the xtask evaluator consume it (exact-count test `tool_catalog_has_exactly_twenty_five_tools` guards drift). Update all references when adding/removing tools.
-- **Evaluator**: `cargo run --manifest-path xtask/Cargo.toml -- agent-eval [--output-dir PATH] [--baseline PATH] [--write-baseline PATH]` — deterministic catalog + scenario metrics under `target/agent-interface-eval/` (`report.json`/`report.md`), no network/user config/timestamps. Committed baseline `docs/development/agent-interface-baseline.json` (26 tools / 258964 bytes) is HISTORICAL — it measures the pre-`capture_boot` catalog; the consolidated current report lives in `docs/development/agent-interface-evaluation.md` (25 tools / 267742 bytes). Thresholds and yes/no decisions (automatic profiles + `transact` + atomic `capture_boot` accepted; shorthand/recipes/versioned facade rejected) are computed by the evaluator from fixed rules. Modeled (non-implemented) candidates are marked `modeled` with their expansion into current calls.
+- **Evaluator**: `cargo run --manifest-path xtask/Cargo.toml -- agent-eval [--output-dir PATH] [--baseline PATH] [--write-baseline PATH]` — deterministic catalog + scenario metrics under `target/agent-interface-eval/` (`report.json`/`report.md`), no network/user config/timestamps. Committed baseline `docs/reports/agent-interface-baseline.json` (26 tools / 258964 bytes) is HISTORICAL — it measures the pre-`capture_boot` catalog; the consolidated current report lives in `docs/reports/agent-interface-evaluation.md` (25 tools / 267742 bytes). Thresholds and yes/no decisions (automatic profiles + `transact` + atomic `capture_boot` accepted; shorthand/recipes/versioned facade rejected) are computed by the evaluator from fixed rules. Modeled (non-implemented) candidates are marked `modeled` with their expansion into current calls.
 
 ## Atomic boot capture
 
@@ -488,4 +529,4 @@ only the implementation invariants an agent must not break.
 - **Bounded JSONL snapshot (`src/log_buffer.rs`)** — `jsonl_snapshot(&self, max_bytes)`: single lock for point-in-time consistency, one line per event with trailing newline, checked arithmetic before extending (error = exact snapshot exceeds quota, no partial output), no deque clone / no second full String.
 - **Behavior tests** — HTTP MCP in `tests/http_integration.rs`: disabled error ordering (before path/connection), JSONL content matching `get_log` with exact counts, zero-byte slot consumption, all bad-name classes fail without files, existing target byte-identical, symlink target rejected + outside untouched (Unix), concurrent same-name = exactly one success, per-file/total/count quotas (incl. persistence across fresh store instances and independent servers sharing a root via the advisory lock), failure leaves connection usable, point-in-time snapshot. Spawned binary: valid `--capture-dir` starts HTTP + stdio servers (`tests/http_integration.rs`, `tests/stdio_integration.rs`). CLI in `tests/stdio_integration.rs`: help documents all options, `--capture-dir --version` not mistaken for version flag, quota-without-root / relative / missing / file / symlink roots / zero / bad quota relation all reject startup. Unit (`src/capture_store.rs`, `src/log_buffer.rs`): validator table, quota boundaries, scanner classification, no-clobber, cross-store concurrency, post-commit root-sync failure = `durability_warning` (file kept), exact-limit/one-byte-over snapshot.
 - **Trust boundary** — configured root + ancestors are operator-controlled; no hostile-root capability defense (documented non-goal). Advisory lock protects cooperating serial-mcp processes only.
-- **Future design** — `docs/development/safe-continuous-capture-design.md` specifies the (NOT implemented) continuous-capture lifecycle; recommendation stays "do not implement until concrete task evidence".
+- **Future design** — `docs/design/PB-025-continuous-capture.md` specifies the (NOT implemented) continuous-capture lifecycle; recommendation stays "do not implement until concrete task evidence".
