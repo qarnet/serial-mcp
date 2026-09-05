@@ -1,10 +1,10 @@
 ---
 id: PB-040
-title: "Org-mode product backlog and documentation lifecycle"
-status: Review
+title: Org-mode product backlog and documentation lifecycle
+status: Done
 assignee: []
 created_date: '2026-09-04 17:00'
-updated_date: '2026-09-04 17:00'
+updated_date: '2026-09-05 22:28'
 labels:
   - 'size:L'
   - 'area:documentation'
