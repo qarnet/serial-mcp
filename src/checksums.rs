@@ -8,7 +8,8 @@
 //!   two's complement of the byte sum.
 //!
 //! Multi-byte checksum support will use a trait abstraction. CRC-16 for Modbus
-//! RTU and FCS-16 for HDLC remain future scope, tracked in FEATURES.md.
+//! RTU and FCS-16 for HDLC remain future scope, tracked in the product
+//! backlog (`docs/product/`).
 
 /// NMEA-0183 `*XX` XOR checksum: XOR every byte in the supplied slice.
 pub(crate) fn xor_checksum(bytes: &[u8]) -> u8 {

@@ -1,8 +1,10 @@
 # Future design: continuous raw capture lifecycle
 
-Status: design only. It is not implemented. No `start_capture`/`stop_capture` tool
-exists. Current code ships only the safe persistent capture foundation
-(`--capture-dir` + `CaptureStore` + hardened `export_log`).
+Status: planned (deferred) — tracked by the recording + replay entry in
+backlog item `PB-025` (`docs/product/backlog/tasks/`). It is not implemented. No
+`start_capture`/`stop_capture` tool exists. Current code ships only the safe
+persistent capture foundation (`--capture-dir` + `CaptureStore` + hardened
+`export_log`).
 
 This document describes the lifecycle that a future continuous raw-capture
 feature would need. It must use the existing containment, symlink, quota,

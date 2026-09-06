@@ -280,5 +280,5 @@ convenience bundles, and each layer can be set independently under the
 ## References
 
 Normative citations for each implemented framing mode, parser, and preset are in
-[references.md](protocols/references.md). This repository includes citations
+[protocol specifications](../reference/protocol-specifications.md). This repository includes citations
 only, not specification text.

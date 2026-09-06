@@ -4,7 +4,7 @@
 available as `serial-mcp`.
 
 Configuration formats differ between clients. For clients with a published JSON
-schema, this repository provides an example in [`example-configs/`](../example-configs/).
+schema, this repository provides an example in [`example-configs/`](../../example-configs/).
 A Rust integration test validates that example. For clients without a published
 schema, use the official documentation. If a configuration stops working, check
 those docs. Schemas can change.
@@ -28,7 +28,7 @@ Claude Desktop reads one of these files:
 
 See the [Claude MCP documentation](https://code.claude.com/docs/en/mcp).
 The published schema is `https://json.schemastore.org/claude-code-settings.json`.
-Use [`example-configs/claude_code.json`](../example-configs/claude_code.json) as
+Use [`example-configs/claude_code.json`](../../example-configs/claude_code.json) as
 an example.
 
 ## Cursor
@@ -58,7 +58,7 @@ opencode reads `opencode.json` or `opencode.jsonc` in a project. It reads
 `~/.config/opencode/opencode.json` globally. See the
 [opencode configuration documentation](https://opencode.ai/config.json).
 The schema is `https://opencode.ai/config.json`.
-Use [`example-configs/opencode.json`](../example-configs/opencode.json) as an
+Use [`example-configs/opencode.json`](../../example-configs/opencode.json) as an
 example. Use `"mcp"` as the top-level key, not `"mcpServers"`.
 
 ## OpenAI Codex
@@ -66,7 +66,7 @@ example. Use `"mcp"` as the top-level key, not `"mcpServers"`.
 Codex reads `~/.codex/config.json` globally. It reads `.codex/config.json` in a
 project. See the [Codex documentation](https://developers.openai.com/codex).
 The schema is `https://developers.openai.com/codex/config-schema.json`.
-Use [`example-configs/codex.json`](../example-configs/codex.json) as an example.
+Use [`example-configs/codex.json`](../../example-configs/codex.json) as an example.
 Use `"mcp_servers"` as the top-level key. Do not add a `type` field. Codex
 infers the transport from `command` or `url`.
 
@@ -147,10 +147,10 @@ Run the test locally with:
 cargo test --locked --test config_schema_validation
 ```
 
-Vendored schemas live in [`schemas/`](../schemas/). To refresh them from the
+Vendored schemas live in [`schemas/`](../../schemas/). To refresh them from the
 latest upstream versions, run `./scripts/update-config-schemas.sh`.
 
-A scheduled [GitHub Actions workflow](../.github/workflows/schema-drift.yml)
+A scheduled [GitHub Actions workflow](../../.github/workflows/schema-drift.yml)
 checks daily for upstream schema changes.
 
 Each client also validates configuration at runtime:

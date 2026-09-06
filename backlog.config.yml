@@ -1,0 +1,20 @@
+project_name: "serial-mcp"
+default_status: "Backlog"
+statuses: ["Backlog", "Ready", "In Progress", "Blocked", "Review", "Done"]
+labels: []
+priorities: ["P0", "P1", "P2", "P3"]
+types: ["feature", "bug", "research", "refactor", "tech-debt", "docs"]
+date_format: yyyy-mm-dd
+max_column_width: 20
+default_editor: "nano"
+auto_open_browser: true
+default_port: 6420
+remote_operations: false
+auto_commit: false
+filesystem_only: false
+zero_padded_ids: 3
+bypass_git_hooks: false
+check_active_branches: true
+active_branch_days: 30
+task_prefix: "PB"
+backlog_directory: "docs/product/backlog"

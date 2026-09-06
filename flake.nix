@@ -9,6 +9,14 @@
     };
     crane.url = "github:ipetkov/crane";
     flake-utils.url = "github:numtide/flake-utils";
+    # Product-backlog CLI (docs/product/README.md contract). Dev-shell
+    # only: the tool version that understands this backlog ships with
+    # the repository instead of a global install. nixpkgs intentionally
+    # NOT followed from ours: upstream pins the nixpkgs its qemu-based
+    # install-check was tested against; sharing our (newer) unstable
+    # pulls qemu-user 11.1.0, whose AVX2-under-IvyBridge emulation breaks
+    # that installCheck (expects exit 132, gets 1).
+    backlog-md.url = "github:MrLesk/Backlog.md";
   };
 
   outputs =
@@ -18,6 +26,7 @@
       rust-overlay,
       crane,
       flake-utils,
+      backlog-md,
       ...
     }:
     flake-utils.lib.eachDefaultSystem (
@@ -207,7 +216,17 @@
               jsonschema-cli
               mcp-publisher
             ])
-            ++ [ serial-mcp-dev ];
+            ++ [ serial-mcp-dev ]
+            ++
+              pkgs.lib.optionals
+                (builtins.elem system [
+                  "x86_64-linux"
+                  "aarch64-linux"
+                  "aarch64-darwin"
+                ])
+                [
+                  backlog-md.packages.${system}.backlog-md
+                ];
 
           shellHook = ''
             export PATH="$PWD/scripts:$PATH"

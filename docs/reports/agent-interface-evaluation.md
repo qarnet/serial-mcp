@@ -7,7 +7,7 @@ paths).
 
 ```bash
 cargo run --manifest-path xtask/Cargo.toml -- agent-eval \
-  --baseline docs/development/agent-interface-baseline.json
+  --baseline docs/reports/agent-interface-baseline.json
 ```
 
 Byte metric: compact `serde_json` serialization of the tool list and of each
@@ -17,7 +17,7 @@ placeholders (`/dev/ttyACM0`, fixed UUID).
 
 ## Baseline (historical)
 
-`docs/development/agent-interface-baseline.json` is the committed **historical
+`docs/reports/agent-interface-baseline.json` is the committed **historical
 baseline**: it measures the 26-tool catalog (aggregate
 compact `tools/list` payload **258964 bytes**) and the then-modeled,
 hypothetical `capture_boot`. Its five native_sim completion references are
