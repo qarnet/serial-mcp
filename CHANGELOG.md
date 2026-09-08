@@ -134,6 +134,9 @@
 - `compat/mcp-validation` lockfile: `nanoid` 3.3.17 → 3.3.18 (fixes the
   dependabot high-severity alert "custom generators can loop indefinitely
   when size is zero"; `npm ci --ignore-scripts` + `npm ls` verified clean).
+- `compat/mcp-validation` lockfile: `fast-uri` 3.1.5 → 3.1.6 and `qs`
+  6.15.3 → 6.16.0 (exact `overrides` pins; closes dependabot alerts #3–#8,
+  four high + two medium; `npm audit` and the compat gate verified clean).
 - `release.yml` build job scopes the cargo cache to release mode only
   (CodeQL `actions/cache-poisoning/poisonable-step`, alert #15): the cache
   step now runs only when `inputs.mode == 'release'` — the trusted path

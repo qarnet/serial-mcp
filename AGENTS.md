@@ -245,6 +245,7 @@ bounded; a hung or slow run must fail the job, not idle.
 
 - Rust toolchain policy: CI, release, and schema-drift workflows install Rust 1.97.1 (`dtolnay/rust-toolchain@1.97.1`, each followed by a `rustc --version --verbose` report step); Nix derives the same version from `rust-toolchain.toml`. Bump both together.
 - Conventional commits used here: `feat:`, `fix:`, `docs:`, `test:`, `refactor:`.
+- CHANGELOG entries are brief. One bullet per change, a few lines max: what moved and why. No verification transcripts, no dependency-tree walkthroughs, no commit-message duplication — those live in the commit message. Entries record user-relevant deltas for the next release, not full narratives.
 - Never add attribution footers or co-author lines.
 
 ### Documentation and product backlog lifecycle
