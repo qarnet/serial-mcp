@@ -1,3 +1,5 @@
+use std::io::Write;
+
 use rmcp::transport::streamable_http_server::{
     session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
 };
@@ -44,6 +46,15 @@ fn version_string() -> String {
         option_env!("GIT_HASH").unwrap_or("unknown"),
         option_env!("BUILD_TARGET").unwrap_or("unknown"),
     )
+}
+
+/// Whether a `--bind` value requests a kernel-assigned ephemeral port
+/// (`...:0`), which selects the stdout bind announcement in HTTP mode.
+/// A parse failure counts as non-ephemeral: the later `TcpListener::bind`
+/// surfaces the same malformed address as a proper startup error.
+fn wants_ephemeral_port(bind: &str) -> bool {
+    bind.rsplit_once(':')
+        .is_some_and(|(_, port)| port.parse::<u16>() == Ok(0))
 }
 
 fn print_version_and_exit() {
@@ -413,6 +424,33 @@ async fn run_http(
         error!("Failed to bind {}: {}", bind, e);
         e
     })?;
+
+    // Machine-readable bind announcement for orchestrators that request an
+    // ephemeral port (`--bind ...:0`). The kernel assigns the port
+    // atomically at bind time, so the announcement happens after the
+    // listener exists — there is no free-port window to race. Printed only
+    // for `:0` binds: a fixed-port bind is already known to the caller, and
+    // HTTP-mode stdout otherwise stays silent. `println!` is avoided per the
+    // production convention; write + explicit flush, and a failed write is
+    // logged, never fatal — the server is already bound and healthy.
+    if wants_ephemeral_port(&bind) {
+        let addr = listener
+            .local_addr()
+            .map(|a| a.to_string())
+            .unwrap_or_else(|e| {
+                error!("failed to read bound local address: {e}");
+                String::new()
+            });
+        if !addr.is_empty() {
+            let mut stdout = std::io::stdout().lock();
+            if let Err(e) = writeln!(stdout, "SERIAL_MCP_BOUND={addr}") {
+                error!("failed to announce bound address to stdout: {e}");
+            }
+            if let Err(e) = stdout.flush() {
+                error!("failed to flush bind announcement: {e}");
+            }
+        }
+    }
 
     let server_shutdown = shutdown.clone();
     axum::serve(listener, router)
