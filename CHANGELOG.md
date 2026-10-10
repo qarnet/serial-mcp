@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- Upgrade rmcp to 3.5, migrate deprecated configuration aliases, and preserve
+  policy-owned stateless HTTP rejection without weakening legacy compatibility.
+- Patch MCP validation-tool transitive dependencies, retaining exact Inspector,
+  conformance, and historical rmcp client pins.
+- Update rustls to 0.23.45 to reject TLS 1.3 handshake messages crossing
+  encryption-level boundaries (GHSA-2mjx-qc3c-rqvc).
+
 | Version | Date | Highlights |
 |---|---|---|
 | [0.9.3](#093) | 2026-08-15 | `list_ports` schema fix: optional `PortInfo` USB fields (`vid`/`pid`/`interface`) no longer required in the tool output schema (schemars 1.2.2 `schema_with` + `skip_serializing_if` mismatch), same fix + regression guard for `DiagnosePortArgs.baud_rate`; schema-drift fixes (isolated/transitive ref resolution, stateless HTTP protocol metadata required); read-loop decomposition into named control-flow units + `ReadDriver` state machine, async-trait `ConnectionOpener`; CI hardening (immutable-SHA action pins, versioned nrfutil provisioning with checksum verification, locked MCP validation npm deps); docs cleanup; rmcp 3.1.0, actions/setup-node 7 |

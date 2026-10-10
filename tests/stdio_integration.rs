@@ -21,7 +21,7 @@ use common::{TestProtocol, EXPECTED_TOOLS};
 /// Returns the running client plus the tempdir that must stay alive for
 /// the client's lifetime.
 async fn start_stdio_client() -> (
-    rmcp::service::RunningService<rmcp::service::RoleClient, ()>,
+    rmcp::service::RunningService<rmcp::service::RoleClient, common::TestClientHandler>,
     TempDir,
 ) {
     common::binaries::ensure_serial_mcp_built()
@@ -37,7 +37,10 @@ async fn start_stdio_client() -> (
 
     let transport = TokioChildProcess::new(cmd).expect("spawn stdio server");
 
-    let client = ().serve(transport).await.expect("initialize client");
+    let client = common::TestClientHandler
+        .serve(transport)
+        .await
+        .expect("initialize client");
     (client, profiles_dir)
 }
 
@@ -612,7 +615,10 @@ async fn stdio_server_starts_with_capture_dir() {
         cmd.arg("--capture-dir").arg(capture_dir.path());
     });
     let transport = TokioChildProcess::new(cmd).expect("spawn stdio server");
-    let client = ().serve(transport).await.expect("initialize client");
+    let client = common::TestClientHandler
+        .serve(transport)
+        .await
+        .expect("initialize client");
     let info = client.peer_info().expect("peer info");
     assert_eq!(
         info.server_info.as_ref().expect("server_info present").name,

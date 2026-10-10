@@ -12,7 +12,7 @@
     "ink-form": {
       "ink-select-input": "6.2.0"
     },
-    "fast-uri": "3.1.6",
+    "fast-uri": "3.1.8",
     "qs": "6.16.0"
   }
 }

@@ -790,8 +790,8 @@ fn capabilities_for(policy: &ProtocolPolicy) -> ServerCapabilities {
 /// Build server info from one policy row. Identity, instructions, capabilities,
 /// protocol version, and version/feature decisions all come from the policy
 /// table.
-fn server_info_for(policy: &ProtocolPolicy) -> ServerInfo {
-    ServerInfo::new(capabilities_for(policy))
+fn server_info_for(policy: &ProtocolPolicy) -> ServerConfig {
+    ServerConfig::new(capabilities_for(policy))
         .with_server_info(Implementation::new(
             env!("CARGO_PKG_NAME"),
             env!("CARGO_PKG_VERSION"),
@@ -908,7 +908,7 @@ impl SerialHandler {
 // `Self::prompt_router()` explicitly.
 #[tool_handler]
 impl ServerHandler for SerialHandler {
-    fn get_info(&self) -> ServerInfo {
+    fn get_info(&self) -> ServerConfig {
         // rmcp intersects `subscriptions/listen` filters with
         // `get_info().capabilities`, so this view advertises the preferred
         // `2026-07-28` resource-subscription capability. `initialize()` still

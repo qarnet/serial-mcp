@@ -27,7 +27,10 @@ async fn blob_resource_template_is_advertised() {
     let (cmd, _profiles_dir) = isolated_stdio_command();
 
     let transport = TokioChildProcess::new(cmd).expect("spawn stdio server");
-    let client = ().serve(transport).await.expect("initialize client");
+    let client = common::TestClientHandler
+        .serve(transport)
+        .await
+        .expect("initialize client");
 
     let templates = client
         .list_resource_templates(None)
@@ -56,7 +59,10 @@ async fn resource_uri_parsing_includes_raw_suffix() {
     let (cmd, _profiles_dir) = isolated_stdio_command();
 
     let transport = TokioChildProcess::new(cmd).expect("spawn stdio server");
-    let client = ().serve(transport).await.expect("initialize client");
+    let client = common::TestClientHandler
+        .serve(transport)
+        .await
+        .expect("initialize client");
 
     // With no connection, a /raw URI may return either "connection_not_found"
     // or "resource_not_found".
