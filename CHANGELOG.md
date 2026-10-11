@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Upgrade rmcp to 3.5.1: missing-resource errors with valid modern metadata
+  stay in HTTP 200/SSE, avoiding false legacy fallback; malformed metadata
+  still returns HTTP 400. Update Tokio, uuid, and arbitrary dependencies.
+
 - Upgrade rmcp to 3.5, migrate deprecated configuration aliases, and preserve
   policy-owned stateless HTTP rejection without weakening legacy compatibility.
 - Patch MCP validation-tool transitive dependencies, retaining exact Inspector,

@@ -37,6 +37,24 @@ request only. This preserves HTTP 404 / JSON-RPC -32601 with no session header
 for a rejected modern initialize, including with rmcp 3.5's otherwise
 legacy-only initialize routing. Header/body validation remains SDK-owned.
 
+### Application errors and transport errors
+
+With valid modern protocol metadata, a missing resource returns JSON-RPC
+`-32602` with the requested URI inside an HTTP 200 SSE response. This is an
+application error, not a malformed protocol request. rmcp 3.5.1 corrects the
+older blanket `-32602` to HTTP 400 mapping, which could make a client fall back
+to the legacy lifecycle after a normal resource error.
+
+Missing required protocol metadata and header validation failures still return
+HTTP 400; removed or unknown RPC methods still return HTTP 404 / `-32601`.
+The legacy resource-not-found response remains HTTP 200 / `-32002`.
+
+Sources: [MCP resource errors](https://modelcontextprotocol.io/specification/2026-07-28/server/resources#error-handling),
+[Streamable HTTP](https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/streamable-http),
+and [rmcp correction #1322](https://github.com/modelcontextprotocol/rust-sdk/pull/1322).
+Raw-wire and typed-client tests in `tests/protocol_compatibility.rs` check the
+error payload and a successful modern request after the resource error.
+
 ## Compatibility directions
 
 - Required in the product gate: the current server works with old clients.

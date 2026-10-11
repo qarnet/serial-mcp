@@ -922,10 +922,12 @@ async fn raw_2026_07_28_unknown_resource_is_invalid_params_with_uri() {
         Some("serial://does-not-exist"),
     )
     .await;
-    assert_eq!(raw.status, 400, "2026-07-28 unknown resource -> HTTP 400");
+    // Valid protocol metadata makes this an application error, not a malformed
+    // request. HTTP 400 here could trigger an incorrect legacy fallback.
+    assert_eq!(raw.status, 200, "2026-07-28 unknown resource stays in-band");
     assert!(
-        raw.content_type.starts_with("application/json"),
-        "2026-07-28 errors are direct JSON: {}",
+        raw.content_type.starts_with("text/event-stream"),
+        "application error uses the configured SSE response: {}",
         raw.content_type
     );
     let json = raw.json.unwrap();
@@ -938,6 +940,35 @@ async fn raw_2026_07_28_unknown_resource_is_invalid_params_with_uri() {
         json["error"]["data"]["uri"], "serial://does-not-exist",
         "error data carries the requested URI"
     );
+}
+
+#[tokio::test]
+async fn typed_2026_07_28_resource_error_keeps_client_modern_and_usable() {
+    typed_protocol(TestProtocol::V2026_07_28, |client| async move {
+        let error = client
+            .peer()
+            .read_resource(ReadResourceRequestParams::new("serial://does-not-exist"))
+            .await
+            .expect_err("missing resource must fail");
+        match error {
+            rmcp::service::ServiceError::McpError(error) => {
+                assert_eq!(error.code.0, -32602);
+                assert_eq!(error.data.unwrap()["uri"], "serial://does-not-exist");
+            }
+            other => panic!("expected resource JSON-RPC error, got {other:?}"),
+        }
+        let tools = client.peer().list_tools(None).await?;
+        assert_eq!(tools.tools.len(), common::EXPECTED_TOOLS.len());
+        assert_eq!(tools.ttl_ms, Some(0), "modern cache hints remain present");
+        assert_eq!(
+            client.peer_info().expect("peer info").protocol_version,
+            rmcp::model::ProtocolVersion::V_2026_07_28
+        );
+        client.cancel().await?;
+        Ok(())
+    })
+    .await
+    .unwrap();
 }
 
 #[tokio::test]
