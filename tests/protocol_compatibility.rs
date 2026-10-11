@@ -1159,8 +1159,8 @@ async fn raw_2026_07_28_initialize_is_rejected_with_method_not_found() {
     let server = common::spawned::SpawnedServer::start().await;
     // The server allows `initialize` only for the legacy `2025-11-25`
     // lifecycle. `SerialHandler::initialize` rejects a modern `2026-07-28`
-    // initialize with `-32601` before peer bookkeeping. rmcp routes this
-    // stateless request through `serve_negotiated_request_directly` and maps
+    // initialize with `-32601` before peer bookkeeping. The HTTP adapter
+    // selects stateless transport from the exact product policy; rmcp maps
     // the error to HTTP 404 with a direct JSON body, matching modern routing
     // for ping, logging/setLevel, and resource subscription methods. No
     // session is established, so no `Mcp-Session-Id` header appears.
@@ -1198,6 +1198,13 @@ async fn raw_2026_07_28_initialize_is_rejected_with_method_not_found() {
         "2026-07-28 initialize -> METHOD_NOT_FOUND"
     );
     assert_eq!(json["error"]["message"], "initialize");
+
+    // Transport selection is per request: rejecting a modern initialize must
+    // not disable legacy sessions on this same server.
+    let (session, _) = raw_2025_11_25_session(&server.url).await;
+    let ping = raw_2025_11_25(&server.url, &session, 23, "ping", json!({})).await;
+    assert_eq!(ping.status, 200);
+    assert_eq!(ping.json.unwrap()["result"], json!({}));
 }
 
 #[tokio::test]

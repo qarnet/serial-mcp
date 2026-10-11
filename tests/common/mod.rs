@@ -293,7 +293,7 @@ impl TestServer {
             LocalSessionManager::default().into(),
             StreamableHttpServerConfig::default().with_cancellation_token(shutdown_for_service),
         );
-        let router = axum::Router::new().nest_service("/mcp", service);
+        let router = serial_mcp::http_transport::router("/mcp", service);
 
         // Optional proactive port watcher sharing the injected provider and
         // the SAME hub as every handler instance (short interval in tests).
@@ -440,7 +440,14 @@ impl TestServerBuilder {
 #[derive(Clone, Default)]
 pub struct TestClientHandler;
 
-impl ClientHandler for TestClientHandler {}
+impl ClientHandler for TestClientHandler {
+    fn get_info(&self) -> rmcp::model::ClientConfig {
+        // These helpers exercise initialized sessions. SDK LATEST is modern
+        // from rmcp 3.5 onward and cannot select this lifecycle implicitly.
+        rmcp::model::ClientConfig::default()
+            .with_protocol_version(TestProtocol::V2025_11_25.version())
+    }
+}
 
 /// One cloneable client handler that explicitly advertises one exact MCP
 /// protocol version (instead of relying on rmcp's default,
@@ -460,8 +467,8 @@ impl VersionedClientHandler {
 }
 
 impl ClientHandler for VersionedClientHandler {
-    fn get_info(&self) -> rmcp::model::ClientInfo {
-        rmcp::model::ClientInfo::default().with_protocol_version(self.protocol.version())
+    fn get_info(&self) -> rmcp::model::ClientConfig {
+        rmcp::model::ClientConfig::default().with_protocol_version(self.protocol.version())
     }
 }
 
@@ -569,7 +576,7 @@ pub async fn connect_2026_07_28_to_url(
 }
 
 /// Connect an `rmcp` HTTP client using the exact `2025-11-25` initialize
-/// lifecycle. The handler's `ClientInfo.protocol_version` is exactly
+/// lifecycle. The handler's `ClientConfig.protocol_version` is exactly
 /// `2025-11-25`.
 pub async fn connect_2025_11_25_client(
     server: &TestServer,
@@ -591,6 +598,11 @@ pub struct ProgressNotificationCollector {
 }
 
 impl ClientHandler for ProgressNotificationCollector {
+    fn get_info(&self) -> rmcp::model::ClientConfig {
+        rmcp::model::ClientConfig::default()
+            .with_protocol_version(TestProtocol::V2025_11_25.version())
+    }
+
     fn on_progress(
         &self,
         params: ProgressNotificationParam,

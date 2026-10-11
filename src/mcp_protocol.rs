@@ -61,7 +61,14 @@ const SUPPORTED_PROTOCOLS: [ProtocolPolicy; 2] = [
 /// Exact policy lookup. A version with no row (unknown, custom future, or
 /// unsupported older) gets no policy, with no lexical/date/range comparison.
 pub(crate) fn policy_for(version: &ProtocolVersion) -> Option<&'static ProtocolPolicy> {
-    SUPPORTED_PROTOCOLS.iter().find(|p| &p.version == version)
+    policy_for_str(version.as_str())
+}
+
+/// Exact policy lookup for an HTTP protocol-version header, without allocation.
+pub(crate) fn policy_for_str(version: &str) -> Option<&'static ProtocolPolicy> {
+    SUPPORTED_PROTOCOLS
+        .iter()
+        .find(|p| p.version.as_str() == version)
 }
 
 /// The preferred (first-row) policy. Total by construction: the table always

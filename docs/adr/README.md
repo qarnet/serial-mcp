@@ -7,3 +7,6 @@ supersede rather than rewrite accepted records.
 
 Each record contains status, context and forces, considered options, decision,
 rationale, consequences, and any superseding link.
+
+- [Preserve policy-owned HTTP lifecycle routing](preserve-policy-owned-http-lifecycle-routing.md)
+  is proposed. The rmcp 3.5 migration preserves stateless initialize rejection.
