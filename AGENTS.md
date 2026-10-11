@@ -363,7 +363,9 @@ cargo run --manifest-path xtask/Cargo.toml -- print-paths
   `resources/subscribe`/`resources/unsubscribe`/`subscriptions/listen`
   at `-32601` inside SSE 200 responses (modern `subscriptions/listen` is
   implemented). Modern unknown resources are
-  remapped to `-32602` (SEP-2164); legacy keeps `-32002`. Cache policy
+  remapped to `-32602` (SEP-2164) inside HTTP 200/SSE with valid metadata
+  (rmcp 3.5.1); malformed metadata/header rejections remain HTTP 400. Legacy
+  keeps `-32002`. Cache policy
   (`ttlMs`/`cacheScope`) follows the exact protocol policy row.
 - **Resource subscriptions:** one process-wide
   `ResourceEventHub` (`src/resource_events.rs`, `ResourceEvent::Updated`,
