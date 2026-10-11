@@ -419,7 +419,7 @@ async fn run_http(
         PORT_WATCHER_INTERVAL,
     );
 
-    let router = axum::Router::new().nest_service(MOUNT_PATH, service);
+    let router = serial_mcp::http_transport::router(MOUNT_PATH, service);
     let listener = tokio::net::TcpListener::bind(&bind).await.map_err(|e| {
         error!("Failed to bind {}: {}", bind, e);
         e

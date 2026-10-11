@@ -31,6 +31,12 @@ product-owned policy table in `src/mcp_protocol.rs`
 Unknown, custom, and future protocol versions receive no policy, no
 capability view, and no version-specific response fields.
 
+HTTP mounting uses `src/http_transport.rs::router`: a header naming an exact
+discovery/stateless policy row disables rmcp's legacy session mode for that
+request only. This preserves HTTP 404 / JSON-RPC -32601 with no session header
+for a rejected modern initialize, including with rmcp 3.5's otherwise
+legacy-only initialize routing. Header/body validation remains SDK-owned.
+
 ## Compatibility directions
 
 - Required in the product gate: the current server works with old clients.

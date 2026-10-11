@@ -4,6 +4,32 @@ This directory contains two different kinds of compatibility assets. They have
 different dependency-update rules and must not be treated as one dependency
 tree.
 
+## Security-alert triage rule
+
+Prefer a patched dependency when it preserves the test's purpose. Dismiss an
+alert as **Vulnerable code is not used** only after checking the advisory's
+required feature, code path, input, and deployment conditions against the
+actual build and runner. Record that evidence and what change would invalidate
+it. A dependency's location under `compat/`, a development-only label, or a
+passing test suite does not prove that vulnerable code is unreachable.
+
+Keep the historical fixture's exact rmcp pin. Its purpose is to test the old
+SDK, so upgrading rmcp removes the proof rather than fixing it. Other fixture
+dependencies may receive compatible security patches if rmcp's exact version,
+checksum, and enabled features remain unchanged and the full compatibility
+gate passes. Their versions and behavior can still affect the proof; do not
+refresh the whole historical lockfile without reviewing those changes.
+
+For current validation tooling, keep the two direct MCP-tool pins unless their
+upgrade is deliberate. Patch vulnerable transitives, review the lockfile diff,
+install with `npm ci --ignore-scripts`, run npm audit, and run the full
+compatibility gate. Patch and minor updates can still break behavior. Tests
+reduce that risk; they do not guarantee that every dependency update is safe.
+
+If a vulnerable path runs or its reachability is uncertain, leave the alert
+open and fix or investigate it. Use **Tolerable risk** only for an explicit
+owner-approved risk acceptance, not as a substitute for an available patch.
+
 ## Directory roles
 
 ### `mcp-validation/`
@@ -75,8 +101,8 @@ These updates did not weaken the historical-client guarantee:
 ## September 2026 rmcp alert assessment
 
 Three Dependabot alerts point only to
-`compat/rmcp-1-client/Cargo.lock`. Production serial-mcp resolves rmcp 3.1.4,
-which is newer than every first patched version below.
+`compat/rmcp-1-client/Cargo.lock`. At the September assessment, production
+serial-mcp resolved rmcp 3.1.4, newer than every first patched version below.
 
 | Advisory | Severity | First patched | Fixture assessment |
 |---|---:|---:|---|
@@ -95,6 +121,45 @@ Reassess immediately if the historical fixture gains any of these behaviors:
 - custom authentication headers or other secrets;
 - connections to untrusted remote endpoints instead of the bounded local
   compatibility server.
+
+## October 2026 security review
+
+The October 10 review retained Dependabot dismissals #12–14 with the individual
+feature/path reasons above. Alerts #15 (`fast-uri`, GHSA-58mr-gqgx-xq4g) and #16
+(`undici`, GHSA-3wwx-pv8p-q78v) concern paths not exercised by the current
+validation gate: there is no fast-uri-based host authorization followed by
+fetching the original URL, and no WebSocket permessage-deflate client. These
+packages are used; their vulnerable paths, not the packages themselves, are
+outside the current gate. All five dismissals now carry explanatory comments.
+
+Unlike the historical rmcp fixture, these npm transitives need not stay frozen.
+The security patch set updates both undici branches, ip-address, fast-uri,
+proxy-addr, source-map-js, and the conformance tool's transitive TypeScript SDK:
+
+| Package | Patched lockfile version |
+|---|---|
+| Inspector's undici | 8.11.2 |
+| Conformance's undici | 7.30.0 |
+| ip-address | 10.7.3 |
+| fast-uri override | 3.1.8 |
+| proxy-addr | 2.0.8 |
+| source-map-js | 1.2.2 |
+| `@modelcontextprotocol/sdk` | 1.32.1 |
+
+`npm audit --package-lock-only --ignore-scripts` reports zero vulnerabilities
+for this patch set. The full shared compatibility runner passes with the
+unchanged direct conformance/Inspector pins and historical rmcp fixture,
+including the existing four expected fixture-dependent conformance failures.
+This is point-in-time evidence, not a guarantee against future advisories.
+Open GitHub alerts remain open until fixes reach the default branch; they are
+not dismissed merely because the dependencies are validation tooling.
+
+The refreshed alert list also includes historical rmcp OAuth SSRF
+([GHSA-c9xm-49cp-xcr9](https://github.com/advisories/GHSA-c9xm-49cp-xcr9),
+alert #29). Its metadata-fetch path lives in the excluded `auth` feature,
+so it is dismissed with that evidence rather than changing the historical pin.
+Root-lockfile alert #30 (GHSA-2mjx-qc3c-rqvc) is addressed by upgrading rustls
+to 0.23.45; it does not require any historical-fixture change.
 
 ## Retaining `2025-11-25` compatibility
 

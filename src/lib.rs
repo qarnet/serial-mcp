@@ -18,6 +18,7 @@ pub(crate) mod checksums;
 pub mod codec;
 pub mod error;
 pub mod framing;
+pub mod http_transport;
 pub(crate) mod learning;
 pub mod limits;
 pub mod log_buffer;
