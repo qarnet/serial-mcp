@@ -4,9 +4,11 @@ This page lists normative references for the framing modes, parsers, and
 presets implemented in `serial-mcp`. These are citations only. No specification
 content is committed to this repository.
 
-The local `resources/` symlink is ignored by Git. It points to a private
-collection of source documents for offline reference. It is not part of the
-distribution.
+Offline copies may be kept in an external, private reference collection. On
+workstations using the shared-storage layout, this collection is at
+`/mnt/cloud/general/Development-Resources/Serial-Protocols/`; other installations
+may use a different location. No repository-local symlink is required, and the
+collection is not part of the distribution.
 
 For the user-facing protocol guide covering presets, precedence, and checksum
 behavior, see [the protocol guide](../guides/protocols.md).

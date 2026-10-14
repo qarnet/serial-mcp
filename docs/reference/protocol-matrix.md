@@ -1,11 +1,12 @@
 # Protocol support matrix
 
-This matrix lists every serial protocol with a specification in the gitignored
-`resources/` symlink. Longer-horizon items are tracked in the
+This matrix lists every serial protocol with a specification in the external
+reference collection described in [protocol references](protocol-specifications.md).
+Longer-horizon items are tracked in the
 [product backlog](../product/README.md).
 
 Specs are cited, never committed. See the License column. Source files are
-named relative to `resources/`.
+named relative to that optional external collection, not a repository symlink.
 
 ## Legend
 
@@ -18,7 +19,7 @@ named relative to `resources/`.
 
 ## Serial protocols
 
-| Protocol | Spec source (`resources/`) | Standard | What it is | Implementation approach | New primitive | Checksum | Status | Effort | License |
+| Protocol | Library filename | Standard | What it is | Implementation approach | New primitive | Checksum | Status | Effort | License |
 |---|---|---|---|---|---|---|---|---|---|
 | **SLIP** | `rfc1055.txt` | RFC 1055 | Byte-stuffed IP-over-serial framing | `Slip` framing mode + `slip` preset | `Slip` preset (wiring) | none | shipped (0.7.0; preset `2e89343`) | trivial | free |
 | **AT commands** | `AT-Command-Specification-v2.0.0.pdf` | 3GPP/V.250 family | Modem command/response + URCs | `at_command` preset (Line CR + AT parser) | — (exists) | none | shipped (0.7.0) | — | © |
@@ -37,7 +38,7 @@ named relative to `resources/`.
 These specifications are present in the local library for context. They are
 not protocol-preset candidates. They are listed so the matrix is complete.
 
-| Spec | Source (`resources/`) | Standard | Why it's here, not a target |
+| Spec | Library filename | Standard | Why it's here, not a target |
 |---|---|---|---|
 | **WebSocket** | `rfc6455.txt` | RFC 6455 | Network transport; relevant to the HTTP MCP transport, not serial framing. |
 | **Media types** | `rfc6838.txt` | RFC 6838 | Reference for content-type / MIME handling (e.g. resource blobs), not a wire protocol. |
