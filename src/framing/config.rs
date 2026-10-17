@@ -339,6 +339,9 @@ pub enum TxFramingMode {
     /// prepended.
     #[serde(rename_all = "snake_case")]
     Nmea,
+    /// Hex-encode binary address, function and data bytes, append their LRC,
+    /// and wrap as `:<HEX><LRC>\r\n`. Input excludes markers and LRC.
+    ModbusAscii,
 }
 
 /// Line ending for TX framing. No `auto` mode; callers must select `lf`, `cr`,

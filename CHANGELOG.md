@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Add explicit Modbus ASCII TX framing with binary-to-hex encoding and automatic
+  LRC, sharing checksum append with NMEA. Existing preset TX behavior is preserved.
+
 - Upgrade rmcp to 3.5.1: missing-resource errors with valid modern metadata
   stay in HTTP 200/SSE, avoiding false legacy fallback; malformed metadata
   still returns HTTP 400. Update Tokio, uuid, and arbitrary dependencies.

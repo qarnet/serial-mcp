@@ -106,7 +106,10 @@ python3 -m unittest discover -s scripts/tests -v
   `ParserConfig`/`ParserType`/`ParsedFrame`. TX: `TxFramingConfig` +
   `TxFramingMode` (mirrors RX minus `parser`/`max_frames`/
   `include_terminators`; SLIP + COBS; no `auto` line ending; adds `Nmea`
-  for auto-checksum TX).
+  and `ModbusAscii` for auto-checksum TX). `ModbusAscii` accepts binary address,
+  function and data bytes; explicit `tx_framing: {"type":"modbus_ascii"}`
+  hex-encodes and appends LRC. The existing `modbus_ascii` protocol preset keeps
+  StartEnd TX for callers supplying hex plus LRC.
 - `FrameDecoder::new(&RxFramingConfig, Option<&ParserConfig>)` — 2-arg; parser
   is a sibling, NOT nested in `RxFramingConfig`. `ReadArgs`/`TransactArgs`/
   `CaptureBootArgs` carry `rx_framing` + `rx_parser` + `protocol` as
@@ -181,7 +184,7 @@ python3 -m unittest discover -s scripts/tests -v
 - `tests/proptest.rs` — property-based and boundary-value tests.
 - `tests/protocol_compatibility.rs` — version-indexed compatibility matrix indexed by exact `TestProtocol::{V2026_07_28,V2025_11_25}` (a table-driven coverage lock compares `TestProtocol::ALL` against the raw `server/discover` `supportedVersions` wire output) plus cache wire proofs: typed modern `ttlMs: Some(0)` / `cacheScope: Private` on every cacheable family and typed legacy absence; raw modern `ttlMs: 0` / `cacheScope: "private"` presence and raw legacy absence; `resultType` modern-present/legacy-absent; cursor-page behavior of the manual `tools/list`/`prompts/list` handlers. Raw expectations are fixture-local, never derived from production `src/mcp_protocol.rs`.
 - `tests/config_schema_validation.rs` validates all three vendored example configs (Claude Code, Codex, opencode) hermetically and offline — the vendored `models.dev` document is registered in memory under its original URI, a no-network retriever fails on anything else, and missing/malformed schema or instance fixtures fail the run (no skip path). Only the ignored case fetches latest upstream schemas.
-- Required Linux real-PTY fixture targets are `tests/device_fixture.rs` (7), `tests/device_command_parity.rs` (19), `tests/device_framing_parity.rs` (8), and Linux-only `tests/device_protocol_parity.rs` (15). Linux x86_64 CI runs all four explicitly after ordinary `cargo test`. macOS arm64 runs normal Rust build/test/clippy; these Linux-only targets compile as zero tests there, while controlled-backend coverage remains active. Windows runs normal Rust build/test/clippy plus controlled-backend coverage. Linux x86_64 also runs ignored `device_parity_repeat::public_boundary_repeat_gate` explicitly: 100 fixed-order public MCP lifecycles, seed `0x50484153455f4545`, with bounded real fixture/server/client teardown.
+- Required Linux real-PTY fixture targets are `tests/device_fixture.rs` (7), `tests/device_command_parity.rs` (19), `tests/device_framing_parity.rs` (8), and Linux-only `tests/device_protocol_parity.rs` (16). Linux x86_64 CI runs all four explicitly after ordinary `cargo test`. macOS arm64 runs normal Rust build/test/clippy; these Linux-only targets compile as zero tests there, while controlled-backend coverage remains active. Windows runs normal Rust build/test/clippy plus controlled-backend coverage. Linux x86_64 also runs ignored `device_parity_repeat::public_boundary_repeat_gate` explicitly: 100 fixed-order public MCP lifecycles, seed `0x50484153455f4545`, with bounded real fixture/server/client teardown.
 - There are no hardware-required tests in this repo. All test coverage is runnable on a normal Linux host.
 
 ## Release workflow

@@ -4,7 +4,7 @@
 //! length-prefix/delimiter/blank-frame helpers used by the decoder, and
 //! `hex_upper`.
 
-use crate::checksums::xor_checksum;
+use crate::checksums::{lrc, xor_checksum};
 use crate::codec;
 use crate::util::find_subsequence;
 
@@ -170,20 +170,52 @@ impl TxFramingMode {
                         ));
                     }
                 }
-                let cs_hex = format!("{computed:02X}");
-                let additional = if existing_val.is_some() { 0 } else { 3 };
-                let mut framed = Vec::with_capacity(1 + body.len() + additional + 2);
-                framed.push(lead_byte);
-                framed.extend_from_slice(body);
-                if existing_val.is_none() {
-                    framed.push(b'*');
-                    framed.extend_from_slice(cs_hex.as_bytes());
-                }
-                framed.extend_from_slice(b"\r\n");
-                Ok(framed)
+                // Preserve a supplied checksum's original spelling after validation.
+                let checksum_bytes = [computed];
+                Ok(checksum_frame(
+                    &[lead_byte],
+                    body,
+                    b"*",
+                    if existing_val.is_none() {
+                        &checksum_bytes
+                    } else {
+                        &[]
+                    },
+                    b"\r\n",
+                ))
             }
+            TxFramingMode::ModbusAscii => Ok(checksum_frame(
+                b":",
+                hex_upper(payload).as_bytes(),
+                b"",
+                &[lrc(payload)],
+                b"\r\n",
+            )),
         }
     }
+}
+
+/// Assemble a TX envelope with an optional uppercase hexadecimal checksum.
+/// Checksum bytes are in wire order, allowing wider checksums without changing
+/// the append layer. An empty slice means the body already carries its checksum.
+/// Protocol-specific validation, checksum input and payload encoding stay with
+/// the caller; this layer owns checksum append and envelope construction.
+fn checksum_frame(
+    start: &[u8],
+    body: &[u8],
+    checksum_marker: &[u8],
+    checksum: &[u8],
+    end: &[u8],
+) -> Vec<u8> {
+    let mut framed = Vec::new();
+    framed.extend_from_slice(start);
+    framed.extend_from_slice(body);
+    if !checksum.is_empty() {
+        framed.extend_from_slice(checksum_marker);
+        framed.extend_from_slice(hex_upper(checksum).as_bytes());
+    }
+    framed.extend_from_slice(end);
+    framed
 }
 
 /// Return whether frame data is empty or contains only ASCII whitespace
@@ -331,6 +363,52 @@ mod tests {
     };
     use crate::framing::decoder::{FrameDecoder, ParsedFrame};
     use crate::match_config::PatternEncoding;
+
+    #[test]
+    fn tx_modbus_ascii_binary_vectors() {
+        for (payload, expected) in [
+            (vec![1, 3, 0, 0, 0, 1], ":010300000001FB\r\n"),
+            (vec![1, 6, 0, 1, 0, 42], ":01060001002ACE\r\n"),
+            (vec![], ":00\r\n"),
+            (vec![0], ":0000\r\n"),
+            (vec![255, 2], ":FF02FF\r\n"),
+            (vec![b':', b'\r', b'\n', 0, 255], ":3A0D0A00FFB0\r\n"),
+        ] {
+            assert_eq!(
+                TxFramingMode::ModbusAscii.encode(&payload).unwrap(),
+                expected.as_bytes()
+            );
+        }
+    }
+
+    #[test]
+    fn tx_modbus_ascii_roundtrips_all_byte_values_through_validated_rx() {
+        let payload: Vec<u8> = (0..=255).collect();
+        let encoded = TxFramingMode::ModbusAscii.encode(&payload).unwrap();
+        let mut decoder = FrameDecoder::new(
+            &preset_rx_framing(ProtocolPreset::ModbusAscii),
+            Some(&preset_rx_parser(ProtocolPreset::ModbusAscii)),
+        )
+        .unwrap();
+        let outcome = decoder.push(&encoded);
+        assert!(outcome.error.is_none());
+        assert_eq!(outcome.frames_dropped, 0);
+        assert_eq!(outcome.frames.len(), 1);
+        match &outcome.frames[0].parsed {
+            Some(ParsedFrame::ModbusAscii {
+                address,
+                function_code,
+                data,
+                checksum_valid,
+            }) => {
+                assert_eq!(*address, 0);
+                assert_eq!(*function_code, 1);
+                assert_eq!(data, &payload[2..]);
+                assert_eq!(*checksum_valid, Some(true));
+            }
+            other => panic!("expected validated Modbus ASCII, got {other:?}"),
+        }
+    }
 
     // SLIP (RFC 1055) tests.
 

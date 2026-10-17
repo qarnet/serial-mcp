@@ -666,6 +666,41 @@ async fn modbus_ascii_preset_transact_parses_lrc_and_proves_peer_state_mutation(
     Ok(())
 }
 
+#[tokio::test]
+async fn modbus_ascii_auto_lrc_writes_binary_payload_over_pty() -> Result<()> {
+    let mut fixture = DeviceFixture::spawn(
+        DelayedPeer::new(ModbusAsciiPeer::new(1), PEER_RESPONSE_DELAY),
+        DeviceFixtureConfig::default(),
+    )
+    .await?;
+    let server = TestServer::start().await;
+    let (client, _) = connect_client(&server).await?;
+    let id = open_fixture(&client, &fixture, json!({})).await?;
+    let result = call_tool(
+        &client,
+        "write",
+        json!({
+            "connection_id": id,
+            "data": "01 06 00 01 00 2a",
+            "encoding": "hex",
+            "protocol": { "type": "modbus_ascii" },
+            "tx_framing": { "type": "modbus_ascii" }
+        }),
+    )
+    .await?;
+    assert_success(&result, "Modbus ASCII binary write")?;
+    let expected = b":01060001002ACE\r\n";
+    assert_eq!(
+        collect_raw_input(&mut fixture, expected.len()).await?,
+        expected
+    );
+    assert_eq!(structured(&result)?["bytes_written"], json!(expected.len()));
+    close(&client, &id).await?;
+    client.cancel().await.ok();
+    fixture.shutdown().await?;
+    Ok(())
+}
+
 async fn open_fixture(
     client: &rmcp::service::RunningService<rmcp::service::RoleClient, common::TestClientHandler>,
     fixture: &DeviceFixture,

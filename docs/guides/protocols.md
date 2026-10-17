@@ -16,8 +16,8 @@ apply to `write` and the `transact` write half. The fields are siblings.
 
 - `rx_framing` and `tx_framing` split the byte stream into frames. RX modes are
   `line`, `delimiter`, `length_prefixed`, `start_end`, `slip`, and `cobs`. TX
-  modes mirror these modes except for the `auto` line ending and
-  `max_frames`, `include_terminators`, and `parser`.
+  modes also include `nmea` and `modbus_ascii` checksum framing, and omit
+  the `auto` line ending, `max_frames`, `include_terminators`, and `parser`.
 - `rx_parser` interprets each frame's bytes. Parsers are `at_command`,
   `json_lines`, `shell_prompt`, `raw`, `nmea`, and `modbus_ascii`. `rx_parser` is
   a sibling of `rx_framing`, not a nested field. `write` has no parser because
@@ -165,6 +165,23 @@ code, and data bytes. It validates the trailing LRC. The preset defaults to
   "read": { "protocol": {"type": "modbus_ascii"} }
 }
 ```
+
+For automatic TX LRC, pass binary address, function and data bytes (without
+markers or LRC) using explicit `tx_framing`. Hex or base64 input is decoded
+before framing. For example, call `write` with:
+
+```json
+{"connection_id":"plc0","data":"01 03 00 00 00 01","encoding":"hex",
+ "tx_framing":{"type":"modbus_ascii"}}
+```
+
+This writes exactly `:010300000001FB\r\n`, with uppercase hex and an LRC
+computed over the binary bytes. Every input byte is payload; preformatted ASCII
+is hex-encoded again. The existing `protocol: {"type":"modbus_ascii"}` TX
+preset keeps its start/end behavior for callers supplying hex plus LRC. Add
+explicit `tx_framing` to that preset to use binary auto-LRC with validated RX,
+including in `transact`. Empty input encodes as `:00\r\n`; framing does not
+validate Modbus address, function or PDU length. RX validation is unchanged.
 
 Sample input `:010300000001FB\r\n` represents a read of holding registers at
 address 1, function 3, start 0, quantity 1, with LRC 0xFB. It decodes to:
