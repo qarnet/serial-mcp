@@ -213,7 +213,7 @@ jobs:
       - name: Upload artifact
         # Name artifacts per platform. publish-release downloads these exact
         # names in release mode, and dry-run users see the same artifacts.
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: serial-mcp-${{ matrix.artifact_name_suffix }}
           path: serial-mcp-${{ matrix.artifact_name_suffix }}*
@@ -254,25 +254,25 @@ jobs:
       contents: write
     steps:
       - name: Download x86_64-linux artifact
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: serial-mcp-x86_64-linux
           path: artifacts/x86_64-linux
 
       - name: Download aarch64-linux artifact
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: serial-mcp-aarch64-linux
           path: artifacts/aarch64-linux
 
       - name: Download aarch64-macos artifact
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: serial-mcp-aarch64-macos
           path: artifacts/aarch64-macos
 
       - name: Download x86_64-windows artifact
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: serial-mcp-x86_64-windows
           path: artifacts/x86_64-windows
