@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Patch rustls to 0.23.46 and MCP validation-tool dependencies for November
+  security advisories, preserving both MCP lifecycles and historical-client pins.
+
 - Upgrade rmcp to 3.5.1: missing-resource errors with valid modern metadata
   stay in HTTP 200/SSE, avoiding false legacy fallback; malformed metadata
   still returns HTTP 400. Update Tokio, uuid, and arbitrary dependencies.
