@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Synchronize PTY repeat tests with server-side live-read admission so fixture
+  output cannot race ahead of the read being tested.
+
 - Lock GitHub Actions dependencies in a generated workflow lockfile for readable
   version references and verified dependency updates, preserving existing commits.
 
