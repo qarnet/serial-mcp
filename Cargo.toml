@@ -52,7 +52,7 @@ rmcp = { version = "3.5.1", features = ["client", "transport-streamable-http-cli
 tokio = { version = "1.41", features = ["process", "fs"] }
 anyhow = "1.0"
 proptest = "1.6"
-proptest-derive = "0.8"
+proptest-derive = "0.9"
 libfuzzer-sys = "0.4"
 arbitrary = { version = "1", features = ["derive"] }
 jsonschema = { version = "0.58", default-features = false }
