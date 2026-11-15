@@ -4,8 +4,10 @@ Every workflow is onboarded to `.github/workflows/actions.lock`. The lockfile
 records the exact commits and repository identities for direct and transitive
 actions. Workflow `uses:` references show release tags where available; the
 runner executes the locked commits. The migration preserves the previous direct
-action commits. `dtolnay/rust-toolchain` and `Swatinem/rust-cache` retain bare SHA
-references because those commits have no matching release tag.
+action commits. For actions without a matching release tag, the generator may
+use a branch reference while retaining the intended commit in the lockfile.
+If a readable reference would change the intended commit, retain the bare SHA.
+A branch name never authorizes advancing its locked commit automatically.
 
 ## Updating actions
 
