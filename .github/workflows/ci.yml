@@ -15,15 +15,33 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
+  actions-lock:
+    name: verify actions lockfile
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install lockfile verifier
+        run: gh extension install github/gh-actions-lock --pin v0.4.1
+
+      - name: Verify action dependencies
+        run: gh actions-lock --verify
+
   format:
     name: format
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        uses: actions/checkout@v7.0.1
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        uses: dtolnay/rust-toolchain@v1
         with:
           toolchain: 1.97.1
           components: rustfmt
@@ -33,17 +51,17 @@ jobs:
 
   nix-flake:
     name: nix flake check
-    needs: format
+    needs: [format, actions-lock]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        uses: actions/checkout@v7.0.1
 
       - name: Install Nix
-        uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # v23
+        uses: DeterminateSystems/nix-installer-action@v23
 
       - name: Cache Nix store
-        uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569 # v7
+        uses: nix-community/cache-nix-action@v7.0.2
         with:
           primary-key: nix-${{ runner.os }}-${{ hashFiles('**/flake.lock', '**/Cargo.lock') }}
           restore-prefixes-first-match: nix-${{ runner.os }}-
@@ -64,7 +82,7 @@ jobs:
 
   build-test:
     name: build / test / clippy (${{ matrix.os }})
-    needs: format
+    needs: [format, actions-lock]
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -81,14 +99,14 @@ jobs:
             install: ""
     steps:
       - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        uses: actions/checkout@v7.0.1
 
       - name: Install system dependencies
         if: matrix.install != ''
         run: ${{ matrix.install }}
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        uses: dtolnay/rust-toolchain@v1
         with:
           toolchain: 1.97.1
           components: clippy
@@ -98,7 +116,7 @@ jobs:
 
       - name: Cache cargo registry + build
         if: matrix.os != 'windows-latest'
-        uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+        uses: Swatinem/rust-cache@master
 
       - name: cargo build --all-targets
         run: cargo build --all-targets --locked
@@ -148,20 +166,20 @@ jobs:
     # This job only owns environment setup, the 15-minute bound, cleanup, and
     # report upload.
     name: MCP conformance + Inspector smoke
-    needs: format
+    needs: [format, actions-lock]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
       contents: read
     steps:
       - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        uses: actions/checkout@v7.0.1
 
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y libudev-dev pkg-config
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        uses: dtolnay/rust-toolchain@v1
         with:
           toolchain: 1.97.1
 
@@ -169,10 +187,10 @@ jobs:
         run: rustc --version --verbose
 
       - name: Cache cargo registry + build
-        uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+        uses: Swatinem/rust-cache@master
 
       - name: Setup Node (exact pinned version)
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        uses: actions/setup-node@v7.1.0
         with:
           node-version: "22.19.0"
 
@@ -190,7 +208,7 @@ jobs:
 
       - name: Upload conformance reports
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@v7.0.2
         with:
           name: conformance-results
           path: target/conformance-results/
