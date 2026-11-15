@@ -1,3 +1,12 @@
+## Server orchestration workflow
+
+Read `/srv/org/home/AGENTS.md` for the shared server workflow. In this repository,
+you are the executor by default; the home-folder agent is the main orchestrator.
+Use this project's Backlog.md workflow, report genuine blockers and completion
+back to the assigning orchestrator, and respond to review feedback. Preserve the
+repository-specific instructions and acceptance gates below. Explicit user or
+live Orca assignments take precedence over the default role.
+
 # AGENTS.md — serial-mcp
 
 ## Fast truth
