@@ -26,6 +26,7 @@ What exactly is supported, guaranteed, configured, or standardized?
 |---|---|
 | [MCP Version Compatibility Policy](reference/mcp-version-compatibility-policy.md) | Supported protocol versions, permanent legacy retention, admission checklist, proof layers. |
 | [Protocol Matrix](reference/protocol-matrix.md) | Support/status matrix for every protocol with a cited spec. |
+| [Unsafe Code Rationale](reference/unsafe-code.md) | Test-only PTY registration boundary: scope, alternatives, ownership proof, risks, verification, and review triggers. |
 | [Protocol Specifications](reference/protocol-specifications.md) | Normative spec citations for the implemented protocols. |
 
 ## Product — intent and lifecycle
@@ -65,6 +66,7 @@ implementation. Superseded decisions are marked, not erased.
 
 | Document | What it covers |
 |---|---|
+| [GitHub Actions Dependencies](maintenance/actions-dependencies.md) | Generated workflow lockfile, dependency updates, verification, and release gating. |
 | [Documentation Hygiene marker](maintenance/documentation-hygiene.md) | Managed by the OpenCode `documentation-hygiene` skill; records the last full-repository audit. Do not edit manually. |
 
 ## Also

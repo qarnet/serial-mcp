@@ -1,3 +1,12 @@
+## Server orchestration workflow
+
+Read `/srv/org/home/AGENTS.md` for the shared server workflow. In this repository,
+you are the executor by default; the home-folder agent is the main orchestrator.
+Use this project's Backlog.md workflow, report genuine blockers and completion
+back to the assigning orchestrator, and respond to review feedback. Preserve the
+repository-specific instructions and acceptance gates below. Explicit user or
+live Orca assignments take precedence over the default role.
+
 # AGENTS.md — serial-mcp
 
 ## Fast truth
@@ -93,6 +102,7 @@ python3 -m unittest discover -s scripts/tests -v
 - `from` parameter on `read` uses the `ReadFrom` enum: `{"type":"cursor"}` (default, shared read cursor), `{"type":"now"}` (live edge), `{"type":"buffer_start"}` (oldest retained byte), or `{"type":"offset","offset":N}` (absolute). Replayed history flows through the same framing/match pipeline as live data. `read`'s `from` parameter resolves the start position and writes the shared cursor BEFORE reading (atomic seek+read).
 - `read` hard-fails framing construction errors (`FrameDecoder::new`).
 - Production code convention here: no `unwrap`/`expect`, no `println!`, no committed `todo!()` / `unimplemented!()`.
+- Explicit unsafe Rust requires an adjacent `SAFETY` comment and a linked rationale covering scope, alternatives, safety invariants, risks, verification limits, and review triggers. The test-only PTY registration rationale is `docs/reference/unsafe-code.md`; it does not authorize other unsafe sites.
 - `.lock().expect("X mutex poisoned")` for std Mutex; `unwrap` in tests.
 
 ## Frame pipeline (TX + RX framing, parsers, presets, profile defaults)
