@@ -45,6 +45,8 @@
 
 - Preserve modern MCP resource errors as HTTP 200/SSE application errors,
   avoiding false legacy fallback while retaining protocol validation errors.
+- Update the yanked chacha20 0.10.0 dependency to 0.10.2 to fix SSE2 RNG
+  compatibility on older x86 CPUs.
 - Remove an unreachable shell-prompt parser branch and strengthen parser
   regression coverage.
 - Fix spawned HTTP port allocation and PTY test scheduling races, including
