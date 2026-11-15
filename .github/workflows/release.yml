@@ -166,7 +166,7 @@ jobs:
         run: ${{ matrix.install }}
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        uses: dtolnay/rust-toolchain@v1
         with:
           toolchain: 1.97.1
           targets: ${{ matrix.target }}
@@ -213,7 +213,7 @@ jobs:
       - name: Upload artifact
         # Name artifacts per platform. publish-release downloads these exact
         # names in release mode, and dry-run users see the same artifacts.
-        uses: actions/upload-artifact@v7.0.1
+        uses: actions/upload-artifact@v7.0.2
         with:
           name: serial-mcp-${{ matrix.artifact_name_suffix }}
           path: serial-mcp-${{ matrix.artifact_name_suffix }}*
@@ -254,25 +254,25 @@ jobs:
       contents: write
     steps:
       - name: Download x86_64-linux artifact
-        uses: actions/download-artifact@v8.0.1
+        uses: actions/download-artifact@v8.0.2
         with:
           name: serial-mcp-x86_64-linux
           path: artifacts/x86_64-linux
 
       - name: Download aarch64-linux artifact
-        uses: actions/download-artifact@v8.0.1
+        uses: actions/download-artifact@v8.0.2
         with:
           name: serial-mcp-aarch64-linux
           path: artifacts/aarch64-linux
 
       - name: Download aarch64-macos artifact
-        uses: actions/download-artifact@v8.0.1
+        uses: actions/download-artifact@v8.0.2
         with:
           name: serial-mcp-aarch64-macos
           path: artifacts/aarch64-macos
 
       - name: Download x86_64-windows artifact
-        uses: actions/download-artifact@v8.0.1
+        uses: actions/download-artifact@v8.0.2
         with:
           name: serial-mcp-x86_64-windows
           path: artifacts/x86_64-windows
@@ -319,7 +319,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libudev-dev pkg-config
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        uses: dtolnay/rust-toolchain@v1
         with:
           toolchain: 1.97.1
 
