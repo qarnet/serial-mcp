@@ -10,12 +10,12 @@ workflows:
         - 'determinatesystems/nix-installer-action@v23'
         - 'dtolnay/rust-toolchain@v1'
         - 'nix-community/cache-nix-action@v7.0.2'
-        - 'swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16'
+        - 'swatinem/rust-cache@master'
     '.github/workflows/hardening.yml':
         - 'actions/checkout@v7.0.1'
         - 'actions/upload-artifact@v7.0.2'
         - 'dtolnay/rust-toolchain@v1'
-        - 'swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16'
+        - 'swatinem/rust-cache@master'
     '.github/workflows/publish-mcp-registry-backfill.yml': []
     '.github/workflows/publish-mcp-registry.yml':
         - 'actions/checkout@v7.0.1'
@@ -26,11 +26,11 @@ workflows:
         - 'actions/download-artifact@v8.0.2'
         - 'actions/upload-artifact@v7.0.2'
         - 'dtolnay/rust-toolchain@v1'
-        - 'swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16'
+        - 'swatinem/rust-cache@master'
     '.github/workflows/schema-drift.yml':
         - 'actions/checkout@v7.0.1'
         - 'dtolnay/rust-toolchain@v1'
-        - 'swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16'
+        - 'swatinem/rust-cache@master'
 dependencies:
     'actions/checkout@v7.0.1':
         ref: 'v7.0.1'
@@ -67,8 +67,8 @@ dependencies:
         commit: 'sha1-7df957e333c1e5da7721f60227dbba6d06080569'
         owner_id: 33221035
         repo_id: 660071037
-    'swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16':
+    'swatinem/rust-cache@master':
         ref: 'master'
-        commit: 'sha1-f0d9c3887740aee45f6153b24b3a6b815192ec16'
+        commit: 'sha1-eedcf2fb1c22f010a0eb66b92f378c110977f266'
         owner_id: 580492
         repo_id: 298565987
