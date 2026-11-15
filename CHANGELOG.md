@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Migrate PTY fixture registration to Tokio’s explicit I/O safety API while
+  preserving descriptor ownership, readiness and teardown behavior.
+
 - Patch rustls to 0.23.46 and MCP validation-tool dependencies for November
   security advisories, preserving both MCP lifecycles and historical-client pins.
 

@@ -49,7 +49,8 @@ path = "src/lib.rs"
 
 [dev-dependencies]
 rmcp = { version = "3.5.1", features = ["client", "transport-streamable-http-client", "transport-streamable-http-client-reqwest", "transport-child-process"] }
-tokio = { version = "1.41", features = ["process", "fs"] }
+# The Linux PTY fixture uses AsyncFd::register and its I/O safety contract.
+tokio = { version = "1.54.1", features = ["process", "fs"] }
 anyhow = "1.0"
 proptest = "1.6"
 proptest-derive = "0.8"

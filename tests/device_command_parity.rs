@@ -338,7 +338,13 @@ async fn reconfigure_updates_status_and_connection_remains_functional() -> Resul
 
 #[tokio::test]
 async fn ack_peer_orders_ack_before_response_and_stops_after_disable() -> Result<()> {
-    let fixture = DeviceFixture::spawn(AckPeer::default(), DeviceFixtureConfig::default()).await?;
+    // Exercise readiness across fragmented lines; a raw read must match the
+    // complete response before assertions can require its trailing CRLF.
+    let config = DeviceFixtureConfig {
+        output_chunk_size: 1,
+        ..DeviceFixtureConfig::default()
+    };
+    let fixture = DeviceFixture::spawn(AckPeer::default(), config).await?;
     let server = TestServer::start().await;
     let (client, _) = connect_client(&server).await?;
     let id = open_fixture(&client, &fixture).await?;
@@ -347,7 +353,8 @@ async fn ack_peer_orders_ack_before_response_and_stops_after_disable() -> Result
     read_match(&client, &id, "ack on", None).await?;
     for (sequence, pong_sequence) in [(0, 1), (1, 2)] {
         write(&client, &id, "ping\r\n").await?;
-        let response = read_match(&client, &id, &format!("pong seq={pong_sequence}"), None).await?;
+        let response =
+            read_match(&client, &id, &format!("pong seq={pong_sequence}\r\n"), None).await?;
         let data = structured(&response)?["data"]
             .as_str()
             .context("ack response data")?;

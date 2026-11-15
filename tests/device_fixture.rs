@@ -434,6 +434,31 @@ fn repeated_fixture_shutdown_returns_file_descriptors_to_baseline() -> Result<()
             final_count, baseline,
             "fixture leaked PTY descriptors across repeated shutdown"
         );
+
+        // Drop aborts the device task instead of joining it. Its registered
+        // master must still be deregistered and closed once cancellation runs,
+        // before another fixture can reuse the descriptor number.
+        for _ in 0..100 {
+            let mut fixture =
+                DeviceFixture::spawn(PingPeer::default(), DeviceFixtureConfig::default()).await?;
+            fixture
+                .run_script(vec![Action::Emit(b"ready".to_vec())])
+                .await?;
+            fixture
+                .wait_for(WAIT, |snapshot| snapshot.output_drained == 5)
+                .await?;
+            let stable_path = fixture.port_path().to_owned();
+            drop(fixture);
+            assert!(!stable_path.exists());
+            tokio::time::timeout(WAIT, async {
+                while fixture_fd_count()? != baseline {
+                    tokio::task::yield_now().await;
+                }
+                Ok::<_, anyhow::Error>(())
+            })
+            .await
+            .context("dropped fixture retained PTY descriptors after task cancellation")??;
+        }
         Ok(())
     })
 }
