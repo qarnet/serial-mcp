@@ -161,6 +161,37 @@ so it is dismissed with that evidence rather than changing the historical pin.
 Root-lockfile alert #30 (GHSA-2mjx-qc3c-rqvc) is addressed by upgrading rustls
 to 0.23.45; it does not require any historical-fixture change.
 
+## November 2026 security maintenance
+
+The November 10 inventory found 26 open Dependabot alerts: 22 in the npm
+validation lockfile and four against root-lockfile rustls. The npm audit also
+identified affected dependencies beyond that alert inventory. The updates patch the
+validation graph while keeping conformance 0.2.0-alpha.10 and Inspector 2.0.0:
+
+| Package | Patched lockfile version |
+|---|---|
+| Inspector / conformance undici | 8.12.4 / 7.30.2 |
+| fast-uri override | 3.1.9 |
+| qs override | 6.16.1 |
+| ip-address | 10.7.6 |
+| body-parser | 2.4.0 |
+| hono / @hono/node-server | 4.13.17 / 2.1.6 |
+| vite | 8.3.7 |
+| zod | 4.6.7 |
+
+The Vite update also refreshes its locked build dependencies. Root rustls
+moves from 0.23.45 to 0.23.46 for GHSA-h2v8-394m-p7vv,
+GHSA-w44r-93j7-qv28, GHSA-c8m5-c952-6cm4, and GHSA-vp88-798v-h67f.
+The historical fixture lockfile, rmcp checksum and feature set remain unchanged;
+no open alert in this inventory targets that fixture. Its four existing rmcp
+alert dismissals remain subject to the feature/path reassessment rules above.
+
+`npm audit --package-lock-only --ignore-scripts` reports zero vulnerabilities
+with this lockfile. The full shared compatibility gate passes, including both
+historical-client transports, both conformance sets and Inspector. GitHub
+alerts for patched dependencies remain open until
+the fixes reach the default branch; they are not dismissed to clear the list.
+
 ## Retaining `2025-11-25` compatibility
 
 There are two separate decisions:
