@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Migrate PTY fixture registration to Tokio’s explicit I/O safety API while
+  preserving descriptor ownership, readiness and teardown behavior.
 - Synchronize PTY repeat tests with server-side live-read admission so fixture
   output cannot race ahead of the read being tested.
 
