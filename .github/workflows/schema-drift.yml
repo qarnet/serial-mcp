@@ -33,7 +33,7 @@ jobs:
         run: rustc --version --verbose
 
       - name: Cache cargo registry + build
-        uses: Swatinem/rust-cache@eedcf2fb1c22f010a0eb66b92f378c110977f266 # v2
+        uses: Swatinem/rust-cache@master
 
       - name: Validate example configs against latest upstream schemas
         run: cargo test --locked --test config_schema_validation -- --ignored

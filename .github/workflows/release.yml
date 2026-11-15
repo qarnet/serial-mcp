@@ -187,7 +187,7 @@ jobs:
       # trusted release keeps its cache.
       - name: Cache cargo registry + build (release mode only)
         if: inputs.mode == 'release'
-        uses: Swatinem/rust-cache@eedcf2fb1c22f010a0eb66b92f378c110977f266 # v2
+        uses: Swatinem/rust-cache@master
 
       - name: Configure cross-compilation environment
         if: matrix.linker != ''

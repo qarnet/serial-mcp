@@ -116,7 +116,7 @@ jobs:
 
       - name: Cache cargo registry + build
         if: matrix.os != 'windows-latest'
-        uses: Swatinem/rust-cache@eedcf2fb1c22f010a0eb66b92f378c110977f266 # v2
+        uses: Swatinem/rust-cache@master
 
       - name: cargo build --all-targets
         run: cargo build --all-targets --locked
@@ -187,7 +187,7 @@ jobs:
         run: rustc --version --verbose
 
       - name: Cache cargo registry + build
-        uses: Swatinem/rust-cache@eedcf2fb1c22f010a0eb66b92f378c110977f266 # v2
+        uses: Swatinem/rust-cache@master
 
       - name: Setup Node (exact pinned version)
         uses: actions/setup-node@v7.0.0
