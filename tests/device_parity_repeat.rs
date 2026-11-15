@@ -84,12 +84,11 @@ async fn run_iteration(iteration: usize) -> Result<()> {
             json!(FLOOD_BOUND)
         );
 
+        let flood_pattern = format!("repeat-flood-miss-{tag}");
+        let flood_reader = start_live_read_ready(&client, &fixture, &id, flood_pattern).await?;
         let drained_before_flood = fixture.snapshot().output_drained;
         set_hold(&fixture, true).await?;
         fixture.wait_for(WAIT, |snapshot| snapshot.held).await?;
-        let flood_pattern = format!("repeat-flood-miss-{tag}");
-        let flood_reader = start_live_read(&client, &id, flood_pattern);
-        tokio::task::yield_now().await;
         anyhow::ensure!(
             !flood_reader.is_finished(),
             "flood read completed before fixture emitted iteration {iteration}"
@@ -126,13 +125,13 @@ async fn run_iteration(iteration: usize) -> Result<()> {
         let post_flush_ping = transact_ping(&client, &id, "pong seq=2").await?;
         assert_transact_match(&post_flush_ping, "pong seq=2")?;
 
+        let disconnect_pattern = format!("repeat-disconnect-miss-{tag}");
+        let disconnect_reader =
+            start_live_read_ready(&client, &fixture, &id, disconnect_pattern).await?;
         let before_disconnect_rx = status(&client, &id).await?["rx_bytes"]
             .as_u64()
             .context("status before peer disconnect missing rx_bytes")?;
         let drained_before_readiness = fixture.snapshot().output_drained;
-        let disconnect_pattern = format!("repeat-disconnect-miss-{tag}");
-        let disconnect_reader = start_live_read(&client, &id, disconnect_pattern);
-        tokio::task::yield_now().await;
         anyhow::ensure!(
             !disconnect_reader.is_finished(),
             "disconnect read completed before readiness output at iteration {iteration}"
@@ -275,6 +274,53 @@ async fn transact_ping(
     .await?;
     assert_success(&result, "ping transact")?;
     Ok(result)
+}
+
+// A spawned HTTP request is not necessarily admitted when its task first yields.
+// Put unread bytes in the ring, then observe from=now advance the shared cursor
+// past them before releasing the data whose stop reason this gate asserts.
+async fn start_live_read_ready(
+    client: &TestClient,
+    fixture: &DeviceFixture,
+    connection_id: &str,
+    pattern: String,
+) -> Result<tokio::task::JoinHandle<Result<CallToolResult>>> {
+    let before = status(client, connection_id).await?["rx_bytes"]
+        .as_u64()
+        .context("read barrier missing rx_bytes")?;
+    let barrier = b"REPEAT-LIVE-READ-BARRIER\r\n";
+    run_script(fixture, vec![Action::Emit(barrier.to_vec())]).await?;
+    wait_for_rx_bytes(client, connection_id, before + barrier.len() as u64).await?;
+    let state = status(client, connection_id).await?;
+    anyhow::ensure!(
+        state["rx_cursor"].as_u64().context("read barrier cursor")?
+            < state["rx_end_offset"]
+                .as_u64()
+                .context("read barrier end")?,
+        "live-read admission barrier must be unread: {state:?}"
+    );
+
+    let reader = start_live_read(client, connection_id, pattern);
+    let admitted = tokio::time::timeout(WAIT, async {
+        loop {
+            let state = status(client, connection_id).await?;
+            let cursor = state["rx_cursor"].as_u64().context("admission cursor")?;
+            let end = state["rx_end_offset"].as_u64().context("admission end")?;
+            if cursor == end {
+                return Ok::<_, anyhow::Error>(());
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .context("timed out waiting for live-read admission")
+    .and_then(|result| result);
+    if let Err(error) = admitted {
+        reader.abort();
+        let _ = reader.await;
+        return Err(error);
+    }
+    Ok(reader)
 }
 
 fn start_live_read(

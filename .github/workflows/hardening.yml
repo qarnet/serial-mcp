@@ -33,13 +33,13 @@ jobs:
         target: [tool_call_json, codec_roundtrip, clamp_bounds]
     steps:
       - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        uses: actions/checkout@v7.0.1
 
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y libudev-dev pkg-config
 
       - name: Install pinned nightly toolchain
-        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        uses: dtolnay/rust-toolchain@v1
         with:
           toolchain: nightly-2026-07-15
 
@@ -47,7 +47,7 @@ jobs:
         run: rustc --version --verbose
 
       - name: Cache cargo registry + fuzz build
-        uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+        uses: Swatinem/rust-cache@master
         with:
           workspaces: fuzz
 
@@ -67,7 +67,7 @@ jobs:
 
       - name: Upload fuzz artifacts and corpus
         if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@v7.0.2
         with:
           name: fuzz-artifacts-${{ matrix.target }}
           path: |
@@ -84,13 +84,13 @@ jobs:
     timeout-minutes: 45
     steps:
       - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        uses: actions/checkout@v7.0.1
 
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y libudev-dev pkg-config
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        uses: dtolnay/rust-toolchain@v1
         with:
           toolchain: 1.97.1
 
@@ -98,7 +98,7 @@ jobs:
         run: rustc --version --verbose
 
       - name: Cache cargo registry + build
-        uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+        uses: Swatinem/rust-cache@master
 
       - name: Install pinned cargo-mutants
         run: cargo install cargo-mutants --locked --version 27.1.0
@@ -129,7 +129,7 @@ jobs:
 
       - name: Upload mutants.out
         if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@v7.0.2
         with:
           name: mutants-out
           path: mutants.out
