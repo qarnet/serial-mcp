@@ -1,31 +1,8 @@
 # Changelog
 
-## Unreleased
-
-- Migrate PTY fixture registration to Tokio’s explicit I/O safety API while
-  preserving descriptor ownership, readiness and teardown behavior.
-- Synchronize PTY repeat tests with server-side live-read admission so fixture
-  output cannot race ahead of the read being tested.
-
-- Lock GitHub Actions dependencies in a generated workflow lockfile for readable
-  version references and verified dependency updates, preserving existing commits.
-
-- Patch rustls to 0.23.46 and MCP validation-tool dependencies for November
-  security advisories, preserving both MCP lifecycles and historical-client pins.
-
-- Upgrade rmcp to 3.5.1: missing-resource errors with valid modern metadata
-  stay in HTTP 200/SSE, avoiding false legacy fallback; malformed metadata
-  still returns HTTP 400. Update Tokio, uuid, and arbitrary dependencies.
-
-- Upgrade rmcp to 3.5, migrate deprecated configuration aliases, and preserve
-  policy-owned stateless HTTP rejection without weakening legacy compatibility.
-- Patch MCP validation-tool transitive dependencies, retaining exact Inspector,
-  conformance, and historical rmcp client pins.
-- Update rustls to 0.23.45 to reject TLS 1.3 handshake messages crossing
-  encryption-level boundaries (GHSA-2mjx-qc3c-rqvc).
-
 | Version | Date | Highlights |
 |---|---|---|
+| [0.9.4](#094) | Pending | Security and dependency updates; modern MCP error handling; Rust PTY fixtures and test synchronization; verified Actions lockfile and macOS runner refresh |
 | [0.9.3](#093) | 2026-08-15 | `list_ports` schema fix: optional `PortInfo` USB fields (`vid`/`pid`/`interface`) no longer required in the tool output schema (schemars 1.2.2 `schema_with` + `skip_serializing_if` mismatch), same fix + regression guard for `DiagnosePortArgs.baud_rate`; schema-drift fixes (isolated/transitive ref resolution, stateless HTTP protocol metadata required); read-loop decomposition into named control-flow units + `ReadDriver` state machine, async-trait `ConnectionOpener`; CI hardening (immutable-SHA action pins, versioned nrfutil provisioning with checksum verification, locked MCP validation npm deps); docs cleanup; rmcp 3.1.0, actions/setup-node 7 |
 | [0.9.2](#092) | 2026-08-04 | rmcp 1.7 → 3.0 migration (breaking pre-1.0 surface: MCP logging + `subscribe`/`unsubscribe` tools removed, `poll_interval_ms` dropped, tool count 27 → 25; `read`/`capture_boot` retained); dual exact MCP lifecycle (preferred `2026-07-28` discovery/stateless + permanent `2025-11-25` initialize/session, exact policy table); modern resource subscriptions (process-wide event hub, port watcher, post-success hints, stateless state sharing; legacy subscriptions disabled); version-correct SEP-2549 cache compliance (`ttlMs: 0`/private on cacheable families, manual paginated list handlers); compatibility proof (version-indexed matrix, real rmcp 1.7.0 client, pinned conformance 0.2.0-alpha.10 + Inspector 2.0.0, expected-failure baseline, policy doc); release/registry security hardening (CI-trusted reusable workflows, fail-closed registry publication); fixes, refactors, dependency/toolchain updates (Rust 1.97.1) |
 | [0.9.1](#091) | 2026-08-01 | lossless RX byte preservation via shared encoding fallback (exact spaced hex, effective encoding reported, no drop accounting on success) across `read`/`subscribe`/`transact`/`capture_boot` raw/frame/partial/match-context paths; unified matcher-owned bounded window for raw read/subscribe with global indexes; framing/serial/RX-tool module splits (public surface unchanged); hermetic mandatory config-schema validation + release/drift guards; pinned `quinn-proto` 0.11.15 (RUSTSEC-2026-0185 / CVE-2026-25800); Rust 1.88.0 workflow/Nix alignment; weekly fuzz + mutation hardening; Windows serial E2E deferred |
@@ -55,121 +32,38 @@
 
 ---
 
-## [0.8.0]
+## [0.9.4]
 
-**Breaking (pre-1.0) — RX ring buffer redesign, seek folded into read, peek dropped:**
-- The RX side is now an always-on ring buffer with absolute stream offsets.
-  Every byte from `open` to `close` is captured to a per-connection ring
-  (`rx_buffer_size`, default 256 KiB, configurable at open), whether or not
-  any tool call is active. The pump runs from `open` to `close` and pauses
-  on disconnect (resumes on reconnect, same ring, monotonic offsets).
-- `read` behaves like `cat`: returns buffered-but-unread bytes immediately
-  (`stop_reason: "drained"`), consuming by default. Pattern matching checks
-  buffered history first, then waits for new bytes. Results carry
-  `from_offset`/`next_offset`/`bytes_lost`/`buffered_remaining`/
-  `start_offset`/`end_offset`.
-- `read` gains a `from` parameter (`now`/`cursor`/`buffer_start`/
-  `{"offset": N}`) for atomic seek+read. The `seek` tool is removed — `read`
-  with `from` covers every seek use case except `Delta`, which is dropped
-  (agents track absolute offsets via `next_offset`/`from_offset`).
-  Re-passing the same `from` offset re-reads the same bytes non-destructively
-  (replaces the deleted `peek` option). `max_buffered_bytes` default 2048 →
-  32768 (32 KiB) so a default read captures a full boot log.
-- `subscribe` is a cursor follower (`tail -f`) with a new `from` parameter
-  (`"now"`/`"cursor"`/`"buffer_start"`/`{"offset": N}`) for history replay.
-  `SubscribeFrom` renamed `ReadFrom` (shared with `read`), wire format
-  unchanged. Slow consumers get `bytes_lost` gap notifications and continue —
-  no silent drops. Subscriptions do NOT move the shared read cursor; `read`
-  and `subscribe` coexist without stealing.
-- `flush(input)` now clears the ring + clamps the cursor to the live edge
-  (strictly more destructive than before). Use `read` with `from: "now"`
-  as the non-destructive alternative.
-- `get_status` gains `rx_buffer_size`/`rx_start_offset`/`rx_end_offset`/
-  `rx_cursor`/`rx_buffered_unread`/`rx_bytes_wrapped_total`.
-- `open`/`open_profile`/profiles gain `rx_buffer_size` (default 256 KiB,
-  max 16 MiB; validated against the buffer budget pool).
-- `ConsumerRegistry`/`RxEvent` fanout, `register_blocking`/
-  `register_streaming`/`prune_consumers` deleted — both tools read from the
-  ring now.
-- Construction errors hard-fail both tools (subscribe stops degrading to
-  raw mode — the old rationale is void now that the ring keeps buffering
-  while the agent fixes its config).
-- Hardware flow control loses its throttling side effect: the always-on
-  pump drains continuously, so RTS never drops and the device streams
-  freely. A setup that relied on flow control to pause a device until the
-  host reads will behave differently.
-- `bytes_returned` definition unified (one definition for read + subscribe:
-  bytes emitted up to and including the match).
-- Framing-error cursor contract: on `stop_reason: framing_error`, the
-  cursor advances past all consumed bytes including the malformed
-  sequence, so a plain retry always makes progress.
-- `get_status`: `rx_bytes_lost_total` renamed `rx_bytes_wrapped_total`
-  to disambiguate lifetime wrap-loss from per-read cursor-gap
-  (`bytes_lost` on read/subscribe results).
+### Security
 
-**Internal:**
-- `src/rx_ring.rs` (new): `RxRing` sliding-window buffer with absolute u64
-  offsets, wrap+gap accounting, `Notify`-based wakeups, `bytes_wrapped_total`
-  lifetime counter. Exhaustive unit tests + proptest.
-- `src/rx_session.rs` reworked: ring ownership, always-on pump,
-  pause/resume across disconnect, budget charge at open (RAII release at
-  close), `RxSession::new` fallible.
-- `src/tools/helpers.rs`: `read_bytes_from_ring` replaces
-  `read_bytes_via_session` (deleted). 0.7.3 partial-result + `error` field
-  + hex fallback contract preserved on framing errors.
-- `StreamHandle` `unsafe` block replaced with `Option<JoinHandle>::take()`.
-- `advance_cursor` helper extracts the 16× cursor-clamp duplication.
-- Tool count drops from 23 → 22 (`seek` removed, folded into `read`).
-
-## [Unreleased]
+- Patch rustls to 0.23.46 and MCP validation-tool dependencies for security
+  advisories, retaining exact Inspector, conformance, and historical-client pins.
+- Restrict release Cargo caching to trusted release builds so manual dry runs
+  cannot write to the release cache.
 
 ### Fixes
-- `ShellPromptParser` drops the unreachable `user@host:path$` branch: every
-  prompt suffix it could classify (`$ `, `$`, `# `, `#`) is already handled by
-  the earlier `ends_with` checks, so the branch was dead code. Removing it
-  eliminates 12 mutation-testing misses on arithmetic/boolean mutants that no
-  test could ever catch.
-- `AtCommandParser` and `ShellPromptParser` gain regression tests that kill
-  the surviving `+`/`*`/`-` and `||`/`&&` mutants in the `+CME ERROR` /
-  `+CMS ERROR` and bare `>` prompt branches, and `strip_trailing_newline`
-  gains direct tests for its `\r\n` / bare `\n` / no-op branches (previously
-  missed by the mutation gate).
 
-### CI / maintenance
-- Hardening workflow fixed after three consecutive weekly failures:
-  - fuzz smoke: the repo `rust-toolchain.toml` (1.97.1) overrode `rustup
-    default nightly-2026-07-15`, so `cargo fuzz` ran the stable toolchain and
-    rejected `-Zsanitizer=address`. Fixed declaratively: a nested
-    `fuzz/rust-toolchain.toml` pins the nightly for every command run from
-    `fuzz/` (rustup resolves the nearest toolchain file) — replacing the
-    `RUSTUP_TOOLCHAIN` env hack, mirroring how the nix-nrf-dev shell scopes
-    its toolchain. The GNU timeout also rises 360s → 600s (job 12 → 15 min):
-    the cap must cover the cold nightly build (~140s on a fresh runner) or
-    the run dies with exit 124 before the 300s fuzz budget elapses;
-  - mutation: `--jobs 4` restored explicitly (cargo-mutants' default is ONE
-    job at a time — dropping the flag made the run serial) and the GNU
-    timeout raised 1500s → 2400s (job 30 → 45 min) — the old bounds were
-    unreachable at ~90s per-mutant build (81 mutants × ~90s / 2 jobs ≈
-    61 min) and the run died with exit 124 before finishing. The step also
-    sets `CARGO_INCREMENTAL=1` to override the dtolnay action's global
-    `CARGO_INCREMENTAL=0`: cargo-mutants reuses one scratch tree across all
-    mutants to benefit from incremental builds, and without it every mutant
-    is a full ~50s rebuild (66 mutants never finished in 2400s);
-- `compat/mcp-validation` lockfile: `nanoid` 3.3.17 → 3.3.18 (fixes the
-  dependabot high-severity alert "custom generators can loop indefinitely
-  when size is zero"; `npm ci --ignore-scripts` + `npm ls` verified clean).
-- `compat/mcp-validation` lockfile: `fast-uri` 3.1.5 → 3.1.6 and `qs`
-  6.15.3 → 6.16.0 (exact `overrides` pins; closes dependabot alerts #3–#8,
-  four high + two medium; `npm audit` and the compat gate verified clean).
-- `release.yml` build job scopes the cargo cache to release mode only
-  (CodeQL `actions/cache-poisoning/poisonable-step`, alert #15): the cache
-  step now runs only when `inputs.mode == 'release'` — the trusted path
-  invoked by the CI gate with the immutable `github.sha`. The untrusted
-  path is dry-run (`workflow_dispatch` `ref` input, attacker-influenceable
-  code); it gets NO cache step, so its build can neither restore nor save
-  under the deterministic rust-cache key — nothing to poison, and the
-  release cache namespace is only ever written by trusted runs. The
-  trusted release keeps its cache; dry-run pays the uncached build time.
+- Preserve modern MCP resource errors as HTTP 200/SSE application errors,
+  avoiding false legacy fallback while retaining protocol validation errors.
+- Remove an unreachable shell-prompt parser branch and strengthen parser
+  regression coverage.
+- Fix spawned HTTP port allocation and PTY test scheduling races, including
+  live-read admission and fragmented ACK responses.
+
+### Maintenance
+
+- Update runtime and validation dependencies, including rmcp 3.9.0, Tokio
+  1.54.1, jsonschema 0.61.1, and proptest-derive 0.9.0.
+- Replace the native_sim/NCS test stack with Rust PTY fixtures on Linux and
+  controlled serial backends across all supported platforms.
+- Migrate PTY fixture registration to Tokio's explicit I/O safety API with a
+  documented ownership rationale and shutdown/cancellation coverage.
+- Lock GitHub Actions dependencies in a generated, verified workflow lockfile,
+  update actions, and replace the retired macOS 14 runner with macOS 15.
+- Repair scheduled fuzz and mutation jobs with isolated nightly tooling,
+  bounded execution, and incremental parallel mutation builds.
+- Reorganize documentation and product planning, document shared server
+  orchestration, and index the Actions maintenance and unsafe-code references.
 
 ## [0.9.3]
 
@@ -625,6 +519,72 @@
 
 ### Fixed
 - `save_profile` now snapshots `rx_buffer_size` from the live `RxSession` ring capacity instead of hardcoding `DEFAULT_RX_BUFFER_SIZE`.
+
+## [0.8.0]
+
+**Breaking (pre-1.0) — RX ring buffer redesign, seek folded into read, peek dropped:**
+- The RX side is now an always-on ring buffer with absolute stream offsets.
+  Every byte from `open` to `close` is captured to a per-connection ring
+  (`rx_buffer_size`, default 256 KiB, configurable at open), whether or not
+  any tool call is active. The pump runs from `open` to `close` and pauses
+  on disconnect (resumes on reconnect, same ring, monotonic offsets).
+- `read` behaves like `cat`: returns buffered-but-unread bytes immediately
+  (`stop_reason: "drained"`), consuming by default. Pattern matching checks
+  buffered history first, then waits for new bytes. Results carry
+  `from_offset`/`next_offset`/`bytes_lost`/`buffered_remaining`/
+  `start_offset`/`end_offset`.
+- `read` gains a `from` parameter (`now`/`cursor`/`buffer_start`/
+  `{"offset": N}`) for atomic seek+read. The `seek` tool is removed — `read`
+  with `from` covers every seek use case except `Delta`, which is dropped
+  (agents track absolute offsets via `next_offset`/`from_offset`).
+  Re-passing the same `from` offset re-reads the same bytes non-destructively
+  (replaces the deleted `peek` option). `max_buffered_bytes` default 2048 →
+  32768 (32 KiB) so a default read captures a full boot log.
+- `subscribe` is a cursor follower (`tail -f`) with a new `from` parameter
+  (`"now"`/`"cursor"`/`"buffer_start"`/`{"offset": N}`) for history replay.
+  `SubscribeFrom` renamed `ReadFrom` (shared with `read`), wire format
+  unchanged. Slow consumers get `bytes_lost` gap notifications and continue —
+  no silent drops. Subscriptions do NOT move the shared read cursor; `read`
+  and `subscribe` coexist without stealing.
+- `flush(input)` now clears the ring + clamps the cursor to the live edge
+  (strictly more destructive than before). Use `read` with `from: "now"`
+  as the non-destructive alternative.
+- `get_status` gains `rx_buffer_size`/`rx_start_offset`/`rx_end_offset`/
+  `rx_cursor`/`rx_buffered_unread`/`rx_bytes_wrapped_total`.
+- `open`/`open_profile`/profiles gain `rx_buffer_size` (default 256 KiB,
+  max 16 MiB; validated against the buffer budget pool).
+- `ConsumerRegistry`/`RxEvent` fanout, `register_blocking`/
+  `register_streaming`/`prune_consumers` deleted — both tools read from the
+  ring now.
+- Construction errors hard-fail both tools (subscribe stops degrading to
+  raw mode — the old rationale is void now that the ring keeps buffering
+  while the agent fixes its config).
+- Hardware flow control loses its throttling side effect: the always-on
+  pump drains continuously, so RTS never drops and the device streams
+  freely. A setup that relied on flow control to pause a device until the
+  host reads will behave differently.
+- `bytes_returned` definition unified (one definition for read + subscribe:
+  bytes emitted up to and including the match).
+- Framing-error cursor contract: on `stop_reason: framing_error`, the
+  cursor advances past all consumed bytes including the malformed
+  sequence, so a plain retry always makes progress.
+- `get_status`: `rx_bytes_lost_total` renamed `rx_bytes_wrapped_total`
+  to disambiguate lifetime wrap-loss from per-read cursor-gap
+  (`bytes_lost` on read/subscribe results).
+
+**Internal:**
+- `src/rx_ring.rs` (new): `RxRing` sliding-window buffer with absolute u64
+  offsets, wrap+gap accounting, `Notify`-based wakeups, `bytes_wrapped_total`
+  lifetime counter. Exhaustive unit tests + proptest.
+- `src/rx_session.rs` reworked: ring ownership, always-on pump,
+  pause/resume across disconnect, budget charge at open (RAII release at
+  close), `RxSession::new` fallible.
+- `src/tools/helpers.rs`: `read_bytes_from_ring` replaces
+  `read_bytes_via_session` (deleted). 0.7.3 partial-result + `error` field
+  + hex fallback contract preserved on framing errors.
+- `StreamHandle` `unsafe` block replaced with `Option<JoinHandle>::take()`.
+- `advance_cursor` helper extracts the 16× cursor-clamp duplication.
+- Tool count drops from 23 → 22 (`seek` removed, folded into `read`).
 
 ## [0.7.4]
 
