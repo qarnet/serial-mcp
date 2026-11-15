@@ -4,6 +4,11 @@
 
 - Migrate PTY fixture registration to Tokio’s explicit I/O safety API while
   preserving descriptor ownership, readiness and teardown behavior.
+- Synchronize PTY repeat tests with server-side live-read admission so fixture
+  output cannot race ahead of the read being tested.
+
+- Lock GitHub Actions dependencies in a generated workflow lockfile for readable
+  version references and verified dependency updates, preserving existing commits.
 
 - Patch rustls to 0.23.46 and MCP validation-tool dependencies for November
   security advisories, preserving both MCP lifecycles and historical-client pins.

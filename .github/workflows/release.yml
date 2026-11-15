@@ -46,7 +46,7 @@ jobs:
           fi
 
       - name: Checkout target ref
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        uses: actions/checkout@v7.0.1
         with:
           ref: ${{ inputs.ref }}
           fetch-depth: 0
@@ -157,7 +157,7 @@ jobs:
             pkg_config_path: ""
     steps:
       - name: Checkout resolved ref
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        uses: actions/checkout@v7.0.1
         with:
           ref: ${{ needs.prepare.outputs.sha }}
 
@@ -166,7 +166,7 @@ jobs:
         run: ${{ matrix.install }}
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        uses: dtolnay/rust-toolchain@v1
         with:
           toolchain: 1.97.1
           targets: ${{ matrix.target }}
@@ -187,7 +187,7 @@ jobs:
       # trusted release keeps its cache.
       - name: Cache cargo registry + build (release mode only)
         if: inputs.mode == 'release'
-        uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+        uses: Swatinem/rust-cache@master
 
       - name: Configure cross-compilation environment
         if: matrix.linker != ''
@@ -213,7 +213,7 @@ jobs:
       - name: Upload artifact
         # Name artifacts per platform. publish-release downloads these exact
         # names in release mode, and dry-run users see the same artifacts.
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@v7.0.2
         with:
           name: serial-mcp-${{ matrix.artifact_name_suffix }}
           path: serial-mcp-${{ matrix.artifact_name_suffix }}*
@@ -254,25 +254,25 @@ jobs:
       contents: write
     steps:
       - name: Download x86_64-linux artifact
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@v8.0.2
         with:
           name: serial-mcp-x86_64-linux
           path: artifacts/x86_64-linux
 
       - name: Download aarch64-linux artifact
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@v8.0.2
         with:
           name: serial-mcp-aarch64-linux
           path: artifacts/aarch64-linux
 
       - name: Download aarch64-macos artifact
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@v8.0.2
         with:
           name: serial-mcp-aarch64-macos
           path: artifacts/aarch64-macos
 
       - name: Download x86_64-windows artifact
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@v8.0.2
         with:
           name: serial-mcp-x86_64-windows
           path: artifacts/x86_64-windows
@@ -311,7 +311,7 @@ jobs:
       contents: read
     steps:
       - name: Checkout resolved ref
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        uses: actions/checkout@v7.0.1
         with:
           ref: ${{ needs.prepare.outputs.sha }}
 
@@ -319,7 +319,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libudev-dev pkg-config
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        uses: dtolnay/rust-toolchain@v1
         with:
           toolchain: 1.97.1
 
