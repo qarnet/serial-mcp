@@ -74,8 +74,8 @@ jobs:
             install: sudo apt-get update && sudo apt-get install -y libudev-dev pkg-config
           - os: ubuntu-24.04-arm
             install: sudo apt-get update && sudo apt-get install -y libudev-dev pkg-config
-          # GitHub Actions uses macOS version labels here; macos-14 is Apple Silicon.
-          - os: macos-14
+          # GitHub Actions uses macOS version labels here; macos-15 is Apple Silicon.
+          - os: macos-15
             install: ""
           - os: windows-latest
             install: ""
