@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Lock GitHub Actions dependencies in a generated workflow lockfile for readable
+  version references and verified dependency updates, preserving existing commits.
+
 - Patch rustls to 0.23.46 and MCP validation-tool dependencies for November
   security advisories, preserving both MCP lifecycles and historical-client pins.
 
