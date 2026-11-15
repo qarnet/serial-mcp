@@ -430,9 +430,21 @@ impl PtyBoundary {
         let flags = OFlag::from_bits_truncate(fcntl(&master, FcntlArg::F_GETFL)?);
         fcntl(&master, FcntlArg::F_SETFL(flags | OFlag::O_NONBLOCK))
             .context("set PTY master nonblocking")?;
+        // SAFETY: See docs/reference/unsafe-code.md#pty-master-registration for
+        // the scoped rationale, risk assessment, alternatives, and review triggers.
+        // openpty returns a live OwnedFd, moved exclusively into AsyncFd.
+        // OwnedFd always reports the same descriptor. The fixture only borrows it
+        // for read/write; it never closes, replaces, or extracts the registered
+        // descriptor. AsyncFd deregisters before dropping its OwnedFd, including
+        // when the device task exits or is aborted during fixture teardown.
+        let master = unsafe { AsyncFd::register(master) }
+            // Registration errors retain the OwnedFd. Convert to io::Error so
+            // failure closes it here instead of retaining it in anyhow's chain.
+            .map_err(std::io::Error::from)
+            .context("register PTY master")?;
         Ok(Self {
             slave_path,
-            master: AsyncFd::new(master).context("register PTY master")?,
+            master,
             slave,
         })
     }
